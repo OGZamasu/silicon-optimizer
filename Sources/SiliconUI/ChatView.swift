@@ -256,6 +256,16 @@ struct ChatView: View {
                             MessageBubble(message: message)
                                 .id(message.id)
                         }
+                        // Offered only on a finished answer: regenerating mid-stream would
+                        // discard the tokens still arriving.
+                        if canRegenerate {
+                            Button { model.regenerate() } label: {
+                                Label("Regenerate", systemImage: "arrow.clockwise")
+                                    .font(.callout)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
                         // Anchor so the view can follow streaming output.
                         Color.clear.frame(height: 1).id("bottom")
                     }
@@ -272,6 +282,15 @@ struct ChatView: View {
             composer
         }
         .background(.background)
+    }
+
+    /// Whether there is a completed answer worth asking for again.
+    private var canRegenerate: Bool {
+        guard !model.isGenerating, model.runtimeState.isRunning,
+              let messages = model.selectedConversation?.messages,
+              let last = messages.last
+        else { return false }
+        return last.role == .assistant && !last.content.isEmpty
     }
 
     /// Shown in place of a transcript before the first message. An empty pane reads as broken;

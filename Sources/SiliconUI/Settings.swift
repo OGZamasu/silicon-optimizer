@@ -18,6 +18,15 @@ public struct Settings: Codable, Sendable, Equatable {
     public var idleUnloadMinutes = 30
     public var showAdvancedControls = false
 
+    /// Sequential read throughput of the volume holding the model library, in MB/s.
+    ///
+    /// Cached because measuring it writes and reads a few hundred megabytes; re-measured only
+    /// on request, or when the library moves to a different volume.
+    public var measuredSSDReadMBps: Double?
+    /// Volume the measurement was taken on, so moving the library to an external disk
+    /// invalidates a figure that no longer describes it.
+    public var measuredSSDVolumeID: String?
+
     /// Speed-estimate corrections learned from benchmarks, keyed by catalog model id.
     ///
     /// Deliberately per-model rather than one number for the machine. Architectures differ in

@@ -192,6 +192,8 @@ private struct InstalledModelRow: View {
     @Environment(AppModel.self) private var model
     var installed: InstalledModel
 
+    @State private var isShowingAdvanced = false
+
     private var isLoaded: Bool { model.loadedModel?.id == installed.id }
 
     var body: some View {
@@ -230,6 +232,7 @@ private struct InstalledModelRow: View {
                 }
 
                 Menu {
+                    Button("Load with advanced settings…") { isShowingAdvanced = true }
                     Button("Reveal in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([installed.primaryFile])
                     }
@@ -240,6 +243,14 @@ private struct InstalledModelRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .sheet(isPresented: $isShowingAdvanced) {
+                    AdvancedView(
+                        installed: installed,
+                        configuration: model.defaultConfiguration(for: installed),
+                        extraArguments: model.extraArguments.joined(separator: " ")
+                    )
+                    .environment(model)
+                }
             }
         }
     }

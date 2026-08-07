@@ -51,7 +51,8 @@ public actor LlamaCppRuntime: InferenceRuntime {
         let port = request.port > 0 ? request.port : PortAllocator.free()
         let arguments = LlamaArguments(
             model: request.model, configuration: request.configuration,
-            port: port, installation: installation
+            port: port, installation: installation,
+            extraArguments: request.extraArguments
         )
 
         let problems = arguments.validate()

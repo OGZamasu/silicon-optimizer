@@ -58,11 +58,17 @@ public struct LoadRequest: Sendable {
     public var model: InstalledModel
     public var configuration: LoadConfiguration
     public var port: Int
+    /// Flags from Advanced mode, appended after everything the app generates.
+    public var extraArguments: [String]
 
-    public init(model: InstalledModel, configuration: LoadConfiguration, port: Int = 0) {
+    public init(
+        model: InstalledModel, configuration: LoadConfiguration,
+        port: Int = 0, extraArguments: [String] = []
+    ) {
         self.model = model
         self.configuration = configuration
         self.port = port
+        self.extraArguments = extraArguments
     }
 }
 

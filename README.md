@@ -256,6 +256,17 @@ changes.
 
 ---
 
+## Advanced mode
+
+Every setting the planner derives can be overridden by hand, from the installed model's menu.
+Context length, KV cache precision, batch and micro-batch, GPU layers, threads, expert slot
+count, and a free-text field for any llama.cpp flag this app does not model yet.
+
+The point is that nothing becomes guesswork when you take over: the same memory plan updates
+live as you change things, the launch command is shown verbatim, and constraints the runtime
+enforces — the `ubatch x n_expert_used <= n_slots` rule, a micro-batch larger than the batch,
+a flag the app already sets — are reported before the load rather than after it fails.
+
 ## Development
 
 ```bash

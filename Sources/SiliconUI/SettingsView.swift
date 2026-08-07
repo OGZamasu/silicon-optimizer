@@ -105,6 +105,30 @@ struct SettingsView: View {
                 }
 
                 Section("Storage") {
+                    LabeledContent("Read speed") {
+                        HStack(spacing: 8) {
+                            if model.isMeasuringStorage {
+                                ProgressView().controlSize(.small)
+                                Text("Measuring…").foregroundStyle(.secondary)
+                            } else if let speed = model.profile.ssdReadMBps {
+                                Text("\(Int(speed)) MB/s").monospacedDigit()
+                                if speed < 1500 {
+                                    Badge(text: "Too slow to stream experts",
+                                          systemImage: "exclamationmark.triangle.fill",
+                                          tint: .orange)
+                                }
+                            } else {
+                                Text("Not measured").foregroundStyle(.secondary)
+                            }
+                            Button("Measure") { model.measureStorageIfNeeded(force: true) }
+                                .controlSize(.small)
+                                .disabled(model.isMeasuringStorage)
+                        }
+                    }
+                    Text("Decides whether expert streaming is worth offering, and how fast a "
+                         + "streamed model will run.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     LabeledContent("Library", value: ModelLibrary.defaultRoot.path)
                     LabeledContent("Installed models", value: "\(model.installedModels.count)")
                     LabeledContent(

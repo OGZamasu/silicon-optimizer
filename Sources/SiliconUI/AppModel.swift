@@ -19,7 +19,7 @@ public final class AppModel {
 
     // MARK: - Hardware
 
-    public private(set) var profile: SystemProfile
+    public internal(set) var profile: SystemProfile
     public private(set) var metrics = SystemMetrics()
     /// Rolling window for the dashboard graphs, newest last.
     public private(set) var history: [SystemMetrics] = []
@@ -55,6 +55,13 @@ public final class AppModel {
     }
 
     private var runtime: (any InferenceRuntime)?
+
+    /// User-supplied llama.cpp flags from Advanced mode, applied to the next load.
+    public private(set) var extraArguments: [String] = []
+
+    public func setExtraArguments(_ line: String) {
+        extraArguments = LlamaArguments.split(line)
+    }
 
     /// The live runtime, for the control API to send prompts through.
     var activeRuntime: (any InferenceRuntime)? { runtime }
@@ -132,6 +139,7 @@ public final class AppModel {
 
         beginSampling()
         startControlServer()
+        measureStorageIfNeeded()
 
         Task {
             await refreshLibrary()
@@ -236,6 +244,59 @@ public final class AppModel {
                 )
             }
         }
+    }
+
+    // MARK: - Storage speed
+
+    public private(set) var isMeasuringStorage = false
+
+    /// Measures the library volume's read throughput, once, and caches it.
+    ///
+    /// This is not cosmetic. Three separate decisions read `ssdReadMBps`: whether to offer
+    /// expert streaming at all, how fast a streamed model will generate, and whether to warn
+    /// that the volume is too slow for it. With no measurement they all fall back to assuming
+    /// a fast internal SSD, so a model library on a slow external disk would be told expert
+    /// streaming is a good idea when it is not.
+    func measureStorageIfNeeded(force: Bool = false) {
+        let volume = Self.volumeIdentifier(for: ModelLibrary.defaultRoot)
+
+        if !force,
+           let cached = settings.measuredSSDReadMBps,
+           settings.measuredSSDVolumeID == volume {
+            profile.ssdReadMBps = cached
+            return
+        }
+        guard !isMeasuringStorage else { return }
+        isMeasuringStorage = true
+
+        Task { [weak self] in
+            defer { Task { @MainActor in self?.isMeasuringStorage = false } }
+            let directory = ModelLibrary.defaultRoot
+            try? FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true
+            )
+            // Deliberately small. This runs unprompted on first launch, and a quarter of a
+            // gigabyte is enough to separate an internal SSD from a USB enclosure.
+            guard let result = try? await StorageBenchmark().run(in: directory, sizeMB: 128)
+            else { return }
+
+            guard let self else { return }
+            self.profile.ssdReadMBps = result.readMBps
+            self.settings.measuredSSDReadMBps = result.readMBps
+            self.settings.measuredSSDVolumeID = volume
+            self.settings.save()
+        }
+    }
+
+    /// Identifies the volume a path lives on, so a library moved to another disk is re-measured.
+    private static func volumeIdentifier(for url: URL) -> String? {
+        var probe = url
+        while !FileManager.default.fileExists(atPath: probe.path),
+              probe.pathComponents.count > 1 {
+            probe = probe.deletingLastPathComponent()
+        }
+        let values = try? probe.resourceValues(forKeys: [.volumeUUIDStringKey, .volumeNameKey])
+        return values?.volumeUUIDString ?? values?.volumeName
     }
 
     // MARK: - Conversation persistence
@@ -491,7 +552,9 @@ public final class AppModel {
                 }
             }
 
-            try await runtime.start(LoadRequest(model: model, configuration: resolved))
+            try await runtime.start(LoadRequest(
+                model: model, configuration: resolved, extraArguments: extraArguments
+            ))
             loadedModel = model
             activeConfiguration = resolved
         } catch {
@@ -561,7 +624,8 @@ public final class AppModel {
               let installation = selector.available[.llamaCpp], model.format == .gguf
         else { return nil }
         return LlamaArguments(
-            model: model, configuration: configuration, port: 8080, installation: installation
+            model: model, configuration: configuration, port: 8080,
+            installation: installation, extraArguments: extraArguments
         ).displayCommand(executable: installation.executable)
     }
 

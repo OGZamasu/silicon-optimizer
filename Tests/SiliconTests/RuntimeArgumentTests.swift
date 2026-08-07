@@ -316,3 +316,55 @@ struct BenchmarkTests {
         #expect(Set(short.split(separator: ".")).count > 1)
     }
 }
+
+@Suite("Custom launch arguments")
+struct ExtraArgumentTests {
+
+    @Test(arguments: [
+        ("--verbose", ["--verbose"]),
+        ("-t 8 --mlock", ["-t", "8", "--mlock"]),
+        ("  --a   --b  ", ["--a", "--b"]),
+        ("", []),
+    ])
+    func splitsOnWhitespace(line: String, expected: [String]) {
+        #expect(LlamaArguments.split(line) == expected)
+    }
+
+    /// A path or template with a space must survive as one argument, or the flag is mangled
+    /// into several and llama.cpp rejects the launch.
+    @Test func honoursQuotes() {
+        #expect(LlamaArguments.split(#"--chat-template "a b c""#)
+                == ["--chat-template", "a b c"])
+        #expect(LlamaArguments.split(#"--grammar 'x y'"#) == ["--grammar", "x y"])
+        #expect(LlamaArguments.split(#"--model "/Volumes/My Disk/m.gguf""#)
+                == ["--model", "/Volumes/My Disk/m.gguf"])
+    }
+
+    /// Appended last so a repeated flag takes the user's value — llama.cpp uses the final one.
+    @Test func extrasComeAfterEverythingGenerated() {
+        let arguments = LlamaArguments(
+            model: makeModel(), configuration: LoadConfiguration(), port: 1,
+            extraArguments: ["--mlock"]
+        ).build()
+        #expect(arguments.last == "--mlock")
+    }
+
+    /// Setting a flag the app already manages would apply twice, with the user's value winning
+    /// in a way they probably did not intend. Say so rather than launching something confusing.
+    @Test(arguments: ["--model", "--ctx-size", "-ngl", "--moe-n-slots", "--port"])
+    func rejectsFlagsTheAppAlreadyOwns(flag: String) {
+        let problems = LlamaArguments(
+            model: makeModel(), configuration: LoadConfiguration(), port: 1,
+            extraArguments: [flag, "value"]
+        ).validate()
+        #expect(problems.contains { $0.contains(flag) })
+    }
+
+    @Test func allowsFlagsTheAppDoesNotManage() {
+        let problems = LlamaArguments(
+            model: makeModel(), configuration: LoadConfiguration(), port: 1,
+            extraArguments: ["--mlock", "--numa", "distribute"]
+        ).validate()
+        #expect(problems.isEmpty)
+    }
+}

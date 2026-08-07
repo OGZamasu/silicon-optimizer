@@ -15,15 +15,41 @@ public struct LlamaArguments: Sendable {
     public var configuration: LoadConfiguration
     public var port: Int
     public var installation: RuntimeInstallation?
+    /// Flags supplied by the user in Advanced mode, appended verbatim.
+    public var extraArguments: [String]
 
     public init(
         model: InstalledModel, configuration: LoadConfiguration,
-        port: Int, installation: RuntimeInstallation? = nil
+        port: Int, installation: RuntimeInstallation? = nil,
+        extraArguments: [String] = []
     ) {
         self.model = model
         self.configuration = configuration
         self.port = port
         self.installation = installation
+        self.extraArguments = extraArguments
+    }
+
+    /// Splits a command-line string into arguments, honouring quotes so a path with a space
+    /// survives. Typing `--chat-template "a b"` should not become three flags.
+    public static func split(_ line: String) -> [String] {
+        var arguments: [String] = []
+        var current = ""
+        var quote: Character?
+
+        for character in line {
+            if let active = quote {
+                if character == active { quote = nil } else { current.append(character) }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character.isWhitespace {
+                if !current.isEmpty { arguments.append(current); current = "" }
+            } else {
+                current.append(character)
+            }
+        }
+        if !current.isEmpty { arguments.append(current) }
+        return arguments
     }
 
     public func build() -> [String] {
@@ -68,6 +94,10 @@ public struct LlamaArguments: Sendable {
         arguments += ["--jinja"]
 
         arguments += expertStreamingArguments()
+
+        // Last, so a user can override anything above it — llama.cpp takes the final value
+        // when a flag is repeated.
+        arguments += extraArguments
 
         return arguments
     }
@@ -145,6 +175,19 @@ public struct LlamaArguments: Sendable {
 
         if configuration.microBatchSize > configuration.batchSize {
             problems.append("Micro-batch cannot exceed batch size.")
+        }
+        // Flags the app already owns would be set twice, and the user's value would win in a
+        // way they probably did not intend.
+        let managed: Set<String> = [
+            "--model", "-m", "--port", "--host", "--ctx-size", "-c",
+            "--n-gpu-layers", "-ngl", "--moe-n-slots", "--moe-n-layers",
+        ]
+        let conflicts = extraArguments.filter { managed.contains($0) }
+        if !conflicts.isEmpty {
+            problems.append(
+                "\(conflicts.joined(separator: ", ")) is already set by the settings above. "
+                + "Remove it from the extra arguments."
+            )
         }
         if let shape = model.shape, configuration.contextLength > shape.trainingContextLength * 4 {
             problems.append(
