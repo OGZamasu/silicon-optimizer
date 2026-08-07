@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    # Apple Silicon runner: the app is arm64-only and the hardware probes read real
+    # Apple Silicon sysctls, so an Intel runner would fail the detection tests.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build --configuration release
+
+      - name: Test
+        run: swift test --configuration debug
+
+      - name: Validate catalog against Hugging Face
+        # Opt-in because it depends on repositories the project does not control. Run on CI so
+        # a renamed or withdrawn model surfaces here rather than as a user's failed download.
+        continue-on-error: true
+        env:
+          SILICON_NETWORK_TESTS: "1"
+        run: swift test --filter CatalogIntegration
+
+      - name: Assemble app bundle
+        run: Scripts/build-app.sh --release
+
+      - name: Verify bundle launches
+        run: |
+          # A bundle that cannot be signed or loaded is a broken release; catch it here
+          # rather than in a user's Downloads folder.
+          codesign --verify --deep --strict "build/Silicon Optimizer.app"
+          test -x "build/Silicon Optimizer.app/Contents/MacOS/SiliconOptimizer"
+
+      - name: Verify MCP bridge speaks the protocol
+        run: |
+          BIN="$(swift build --configuration release --show-bin-path)/silicon-mcp"
+          # tools/list must succeed without the app running; the bridge only needs the
+          # app for tools that actually touch a model.
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | "$BIN" | tee /tmp/mcp.jsonl
+          python3 -c "
+import json
+lines = [json.loads(l) for l in open('/tmp/mcp.jsonl') if l.strip()]
+tools = next(l for l in lines if l.get('id') == 2)['result']['tools']
+assert len(tools) >= 10, f'expected the full tool set, got {len(tools)}'
+print(f'{len(tools)} tools advertised')
+"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Silicon-Optimizer-app
+          path: build/Silicon Optimizer.app

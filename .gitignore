@@ -1,0 +1,14 @@
+.build/
+build/
+.swiftpm/
+.DS_Store
+Vendor/
+*.xcuserstate
+
+# Web
+web/node_modules/
+web/.wrangler/
+web/package-lock.json
+
+# Local scratch
+*.log

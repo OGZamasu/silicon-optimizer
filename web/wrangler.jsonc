@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "silicon-optimizer-site",
+  "compatibility_date": "2026-08-01",
+
+  // Static assets only — no Worker script. Serving through Workers rather than Pages is what
+  // keeps this on the apex-managed custom domain instead of a *.pages.dev hostname.
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  },
+
+  // A custom domain (rather than a route) provisions the DNS record and certificate for
+  // optimize.zamasu.dev automatically.
+  "routes": [
+    { "pattern": "optimize.zamasu.dev", "custom_domain": true }
+  ]
+}

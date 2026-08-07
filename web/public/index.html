@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silicon Optimizer — local models on Apple Silicon, measured</title>
+<meta name="description" content="A native macOS menu bar app that predicts what a local model will cost in memory before you download it, then proves the prediction. Expert streaming runs a 30B model in 5.3 GB.">
+<link rel="icon" href="/favicon.png" type="image/png">
+<meta property="og:title" content="Silicon Optimizer">
+<meta property="og:description" content="Predicts what a local model costs in memory, then proves it. 0.31% error on a 30B mixture-of-experts.">
+<meta property="og:type" content="website">
+<style>
+/* ---------------------------------------------------------------------------
+   Silicon Optimizer — datasheet.
+
+   The palette carries meaning rather than decoration: indigo is always a
+   predicted value, teal is always a measured one, amber is always something
+   not finished. Nothing else is coloured.
+   --------------------------------------------------------------------------- */
+:root {
+  --substrate:  #0B0E14;
+  --substrate-2:#11151E;
+  --rule:       #1E2531;
+  --rule-bright:#2C3646;
+  --wafer:      #C9CFDA;
+  --wafer-dim:  #78828F;
+  --wafer-faint:#4C5563;
+  --predict:    #6E8BC8;
+  --measure:    #4DE0C0;
+  --flag:       #E0A44D;
+
+  --display: "SF Compact Display", "SF Pro Display", -apple-system,
+             BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --body:    "SF Pro Text", -apple-system, BlinkMacSystemFont,
+             "Helvetica Neue", sans-serif;
+  --mono:    "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --gutter: clamp(20px, 5vw, 64px);
+  --measure-width: 1080px;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--substrate);
+  color: var(--wafer);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  /* A faint die grid. Static, so it reads as substrate rather than effect. */
+  background-image:
+    linear-gradient(var(--rule) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rule) 1px, transparent 1px);
+  background-size: 64px 64px, 64px 64px;
+  background-position: -1px -1px;
+}
+
+.shell {
+  max-width: var(--measure-width);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+/* --- Shared type ------------------------------------------------------- */
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--wafer-faint);
+  margin: 0 0 14px;
+}
+
+h1, h2, h3 { font-family: var(--display); font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+
+h1 { font-size: clamp(38px, 6.4vw, 68px); line-height: 1.02; letter-spacing: -0.035em; }
+h2 { font-size: clamp(25px, 3.4vw, 36px); line-height: 1.1; }
+h1 + .lede, h2 + .lede, h2 + p { margin-top: 22px; }
+h3 { font-size: 18px; line-height: 1.3; }
+
+p { margin: 0 0 18px; }
+p.lede { font-size: clamp(17px, 2.1vw, 20px); color: var(--wafer-dim); max-width: 60ch; }
+
+a { color: var(--measure); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible {
+  outline: 2px solid var(--measure);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* --- Masthead ---------------------------------------------------------- */
+
+.masthead {
+  display: flex; align-items: center; gap: 14px;
+  padding: 26px 0 0;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 20px;
+}
+.masthead img { width: 34px; height: 34px; border-radius: 8px; }
+.wordmark {
+  font-family: var(--display); font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
+}
+.masthead .spacer { flex: 1; }
+
+.chip {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+  text-transform: uppercase; padding: 4px 9px; border-radius: 100px;
+  border: 1px solid var(--rule-bright); color: var(--wafer-dim);
+  white-space: nowrap;
+}
+.chip.warn { border-color: rgba(224,164,77,.42); color: var(--flag); }
+
+/* --- Hero -------------------------------------------------------------- */
+
+.hero { padding: clamp(56px, 9vw, 104px) 0 clamp(40px, 6vw, 72px); }
+.hero h1 { max-width: 15ch; }
+.hero h1 em {
+  font-style: normal;
+  color: var(--wafer-faint);
+}
+
+/* --- The reconciliation: the page's signature --------------------------- */
+
+.ledger {
+  margin-top: clamp(34px, 5vw, 52px);
+  border: 1px solid var(--rule-bright);
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--substrate-2), var(--substrate));
+  overflow: hidden;
+}
+.ledger-head {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 11.5px; color: var(--wafer-faint);
+  letter-spacing: 0.04em;
+}
+.ledger-head strong { color: var(--wafer-dim); font-weight: 500; }
+
+.ledger-body { padding: 24px 20px 20px; display: grid; gap: 20px; }
+
+.row { display: grid; gap: 8px; }
+.row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.row-label {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+.row-value { font-family: var(--mono); font-size: clamp(20px, 3vw, 27px); font-weight: 500; }
+.row.predicted .row-label, .row.predicted .row-value { color: var(--predict); }
+.row.measured  .row-label, .row.measured  .row-value { color: var(--measure); }
+
+/* Bars are drawn to the same scale so the two lengths can be compared by eye. */
+.bar { height: 7px; border-radius: 100px; background: var(--rule); overflow: hidden; }
+.bar span {
+  display: block; height: 100%; border-radius: 100px;
+  transform-origin: left center;
+  animation: extend 1100ms cubic-bezier(.16,.8,.28,1) both;
+}
+.row.predicted .bar span { background: var(--predict); }
+.row.measured  .bar span { background: var(--measure); animation-delay: 160ms; }
+
+@keyframes extend { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+.delta {
+  border-top: 1px solid var(--rule);
+  margin-top: 4px; padding-top: 16px;
+  display: flex; align-items: baseline; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px 18px;
+}
+.delta dt {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em;
+  text-transform: uppercase; color: var(--wafer-faint);
+}
+.delta dd { margin: 0; font-family: var(--mono); font-size: 22px; color: var(--wafer); }
+
+/* --- Sections ---------------------------------------------------------- */
+
+section { padding: clamp(56px, 8vw, 96px) 0; border-top: 1px solid var(--rule); }
+.section-head { max-width: 62ch; margin-bottom: clamp(28px, 4vw, 44px); }
+
+/* --- Measurement tables ------------------------------------------------ */
+
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13.5px; }
+caption {
+  text-align: left; color: var(--wafer-faint); font-size: 11.5px;
+  letter-spacing: 0.13em; text-transform: uppercase; padding-bottom: 12px;
+}
+th, td { text-align: right; padding: 11px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+th {
+  color: var(--wafer-faint); font-weight: 500; font-size: 11px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+}
+td { color: var(--wafer-dim); }
+td.p { color: var(--predict); }
+td.m { color: var(--measure); }
+td.subject { color: var(--wafer); }
+tbody tr:last-child td { border-bottom: none; }
+/* The summary row is the whole point of the table, so it is ruled off like one. */
+tbody tr.total td { border-top: 1px solid var(--rule-bright); padding-top: 14px; font-size: 15px; }
+tbody tr.total td.subject { color: var(--wafer); }
+
+/* --- The collapse ------------------------------------------------------ */
+
+.collapse { display: grid; gap: 18px; margin-top: 8px; }
+.collapse-row { display: grid; grid-template-columns: 132px 1fr; gap: 16px; align-items: center; }
+.collapse-key {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; line-height: 1.4;
+  text-transform: uppercase; color: var(--wafer-faint);
+}
+.collapse-bar { position: relative; height: 40px; border-radius: 6px; background: var(--rule); overflow: hidden; }
+.collapse-bar span {
+  position: absolute; inset: 0 auto 0 0; border-radius: 6px;
+  display: flex; align-items: center; padding-left: 14px;
+  font-family: var(--mono); font-size: 13.5px; color: var(--substrate); font-weight: 600;
+  animation: extend 1200ms cubic-bezier(.16,.8,.28,1) both;
+}
+.collapse-bar .full { width: 100%; background: var(--rule-bright); color: var(--wafer); }
+.collapse-bar .streamed { width: 28%; background: var(--measure); animation-delay: 220ms; }
+
+/* --- Feature grid ------------------------------------------------------ */
+
+.grid { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+@media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+.cell { background: var(--substrate); padding: 26px 24px; }
+.cell h3 { margin-bottom: 8px; }
+.cell p { color: var(--wafer-dim); font-size: 15px; margin: 0; }
+
+/* --- Tool list --------------------------------------------------------- */
+
+.tools { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.tools li {
+  display: grid; grid-template-columns: minmax(0, 190px) 1fr; gap: 8px 18px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--rule); align-items: baseline;
+}
+.tools li:last-child { border-bottom: none; }
+.tools code { color: var(--measure); font-size: 13px; }
+.tools span { color: var(--wafer-dim); font-size: 15px; }
+@media (max-width: 560px) { .tools li { grid-template-columns: 1fr; } }
+
+/* --- Status ------------------------------------------------------------ */
+
+.status { border: 1px solid rgba(224,164,77,.28); border-radius: 10px; padding: 26px 24px; background: rgba(224,164,77,.035); }
+.status h2 { color: var(--flag); }
+.status ul { margin: 18px 0 0; padding-left: 0; list-style: none; display: grid; gap: 12px; }
+.status li { display: grid; grid-template-columns: 18px 1fr; gap: 12px; color: var(--wafer-dim); font-size: 15px; line-height: 1.55; }
+.status li::before { content: "—"; color: var(--flag); font-family: var(--mono); }
+.status strong { color: var(--wafer); font-weight: 600; }
+
+/* --- Install ----------------------------------------------------------- */
+
+pre {
+  margin: 0; padding: 20px; overflow-x: auto;
+  background: var(--substrate-2); border: 1px solid var(--rule);
+  border-radius: 10px; font-family: var(--mono); font-size: 13px; line-height: 1.75;
+  color: var(--wafer);
+}
+pre .c { color: var(--wafer-faint); }
+.steps { display: grid; gap: 22px; }
+.step-label {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em;
+  text-transform: uppercase; color: var(--wafer-faint); margin-bottom: 10px;
+}
+
+/* --- Footnotes / colophon ---------------------------------------------- */
+
+.notes { font-size: 13.5px; color: var(--wafer-faint); max-width: 74ch; }
+.notes p { margin-bottom: 10px; }
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding: 32px 0 56px;
+  display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: center;
+  font-family: var(--mono); font-size: 11.5px; color: var(--wafer-faint);
+  letter-spacing: 0.05em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar span, .collapse-bar span { animation: none; }
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <header class="masthead">
+    <img src="/icon.png" alt="" width="34" height="34">
+    <span class="wordmark">Silicon Optimizer</span>
+    <span class="spacer"></span>
+    <span class="chip warn">Beta</span>
+    <span class="chip">macOS 14+ · Apple Silicon</span>
+  </header>
+
+  <div class="hero">
+    <p class="eyebrow">Local model runner · memory planner</p>
+    <h1>Stop guessing whether a model will fit. <em>Know before you download it.</em></h1>
+    <p class="lede">
+      Silicon Optimizer works out what a model will cost in unified memory from its actual
+      architecture — weights, expert pool, KV cache, compute buffers — then tells you whether
+      your Mac can run it and how fast. Here is that prediction checked against reality.
+    </p>
+
+    <!-- Signature: the reconciliation. Predicted in indigo, measured in teal, everywhere. -->
+    <div class="ledger">
+      <div class="ledger-head">
+        <strong>Qwen3-Coder 30B-A3B</strong>
+        <span>Q4_K_M</span><span>16K context</span>
+        <span>M3 Max · 38.7 GB</span><span>llama.cpp b10280</span>
+      </div>
+      <div class="ledger-body">
+        <div class="row predicted">
+          <div class="row-top">
+            <span class="row-label">Predicted</span>
+            <span class="row-value">20.30 GB</span>
+          </div>
+          <div class="bar"><span style="width:72.5%"></span></div>
+        </div>
+        <div class="row measured">
+          <div class="row-top">
+            <span class="row-label">Measured</span>
+            <span class="row-value">20.24 GB</span>
+          </div>
+          <div class="bar"><span style="width:72.3%"></span></div>
+        </div>
+        <dl class="delta">
+          <dt>Error</dt>
+          <dd class="num">0.31%</dd>
+          <dt>Generation, predicted vs measured</dt>
+          <dd class="num">89 → 89 tok/s</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section>
+  <div class="shell">
+    <div class="section-head">
+      <p class="eyebrow">Measurement</p>
+      <h2>Every number the app shows you is derived, then checked.</h2>
+      <p class="lede">
+        Most tools estimate model memory as file size plus a bit. That is wrong in ways that
+        matter at 30B. These figures come from llama.cpp's own buffer accounting and from
+        <code>footprint(1)</code>, against predictions made before the model was loaded.
+      </p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Memory — Qwen3-Coder 30B-A3B, Q4_K_M, 16K context</caption>
+        <thead>
+          <tr><th>Component</th><th>Predicted</th><th>Measured</th><th>Error</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="subject">Non-expert weights</td><td class="p">924 MB</td><td class="m">—</td><td>—</td></tr>
+          <tr><td class="subject">Routed experts</td><td class="p">17.6 GB</td><td class="m">—</td><td>—</td></tr>
+          <tr><td class="subject">Weights total</td><td class="p">18.50 GB</td><td class="m">18.56 GB</td><td>−0.3%</td></tr>
+          <tr><td class="subject">KV cache + compute</td><td class="p">1.81 GB</td><td class="m">1.68 GB</td><td>+7.7%</td></tr>
+          <tr class="total"><td class="subject">Resident total</td><td class="p">20.30 GB</td><td class="m">20.24 GB</td><td>0.31%</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="table-wrap" style="margin-top:40px">
+      <table>
+        <caption>Throughput — same machine</caption>
+        <thead>
+          <tr><th>Model</th><th>Measure</th><th>Predicted</th><th>Measured</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="subject">Qwen3-Coder 30B-A3B</td><td>generation</td><td class="p">89 tok/s</td><td class="m">89 tok/s</td></tr>
+          <tr><td class="subject">Qwen3-Coder 30B-A3B</td><td>prompt</td><td class="p">896 tok/s</td><td class="m">895 tok/s</td></tr>
+          <tr><td class="subject">Qwen3 1.7B</td><td>prompt</td><td class="p">2344 tok/s</td><td class="m">2374 tok/s</td></tr>
+          <tr><td class="subject">Qwen2.5-VL 7B</td><td>generation</td><td class="p">39 tok/s</td><td class="m">57 tok/s</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="notes" style="margin-top:28px">
+      <p>
+        The KV cache figure is exact because it is arithmetic, not estimation:
+        <code>2 × layers × kv_heads × head_dim × context × bytes</code>. Head dimension is read
+        from the model file rather than derived — Qwen3 keeps a 128-wide head on a 2048-wide
+        residual stream, and deriving it as <code>d_model / n_heads</code> puts that whole family
+        out by a factor of two.
+      </p>
+      <p>
+        The 7B row is the outlier, and it is why the app ships a benchmark. Running it measures
+        the model on your machine and corrects later estimates for that model only — architectures
+        differ enough that one global correction makes other predictions worse.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="section-head">
+      <p class="eyebrow">Mixture-of-experts streaming</p>
+      <h2>A 30B model in 5.3 GB.</h2>
+      <p class="lede">
+        With llama.cpp's on-demand expert paging, only a pool of experts stays resident and the
+        rest are read from the GGUF as the router asks for them. Output is numerically identical —
+        only residency changes.
+      </p>
+    </div>
+
+    <div class="collapse">
+      <div class="collapse-row">
+        <span class="collapse-key">All resident</span>
+        <div class="collapse-bar"><span class="full">19.0 GB</span></div>
+      </div>
+      <div class="collapse-row">
+        <span class="collapse-key">24 of 128 experts</span>
+        <div class="collapse-bar"><span class="streamed">5.32 GB</span></div>
+      </div>
+    </div>
+
+    <div class="notes" style="margin-top:30px">
+      <p>
+        Predicted 5.2 GB, measured 5.32 GB. The cost is prompt processing: the expert pool has to
+        hold every expert the in-flight batch could pick, so the micro-batch collapses to 3 tokens
+        and ingestion falls from 895 tok/s to roughly 11. Generation drops from 89 tok/s to 26.
+        The app states this before you turn it on, rather than after.
+      </p>
+      <p>
+        Expert paging is not in any llama.cpp release yet. Silicon Optimizer probes the binary for
+        the flags and disables the option when they are missing, instead of letting the load fail.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="section-head">
+      <p class="eyebrow">What it does</p>
+      <h2>No Terminal, no flags, no arithmetic.</h2>
+    </div>
+    <div class="grid">
+      <div class="cell">
+        <h3>Reads your actual hardware</h3>
+        <p>Chip generation, performance and efficiency core split, GPU cores, memory bandwidth,
+           disk headroom — probed from sysctl and the IORegistry, no elevated privileges.</p>
+      </div>
+      <div class="cell">
+        <h3>Picks the model for you</h3>
+        <p>One button. The best model your Mac can actually run, at a context length that is
+           useful, with a tokens-per-second figure you can check.</p>
+      </div>
+      <div class="cell">
+        <h3>Explains a bad fit</h3>
+        <p>When something will not fit you get a ranked list of what to change — context length,
+           KV cache precision, quantization, expert streaming — each with the exact saving.</p>
+      </div>
+      <div class="cell">
+        <h3>Lives in the menu bar</h3>
+        <p>Current model, memory, GPU load and tokens per second at a glance. Downloads resume
+           after interruption and are verified by checksum.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="section-head">
+      <p class="eyebrow">Model Context Protocol</p>
+      <h2>Let Claude or ChatGPT drive the model you already have loaded.</h2>
+      <p class="lede">
+        A bundled MCP server bridges to the running app, so an assistant uses your loaded model
+        rather than starting a second copy and doubling the memory bill. The chat tool runs
+        entirely on your machine — nothing leaves it.
+      </p>
+    </div>
+    <ul class="tools">
+      <li><code>get_hardware_profile</code><span>What is this Mac, and what can it hold?</span></li>
+      <li><code>recommend_model</code><span>What should I run?</span></li>
+      <li><code>plan_memory</code><span>Will this fit at that context length, and what would I change?</span></li>
+      <li><code>install_model</code><span>Download it, with a disk-space check first</span></li>
+      <li><code>load_model</code> <span>Load it, optionally with expert streaming</span></li>
+      <li><code>chat</code><span>Ask the local model — text or images</span></li>
+      <li><code>run_benchmark</code><span>Measure it here, and recalibrate its estimates</span></li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="status">
+      <p class="eyebrow" style="color:rgba(224,164,77,.7)">Status</p>
+      <h2>This is a beta. Here is exactly what that means.</h2>
+      <p style="color:var(--wafer-dim); max-width:64ch; margin-top:14px">
+        The core is well tested — 88 unit tests plus network and runtime integration suites — and
+        every number above was measured rather than estimated. These are the parts that are not
+        finished, stated plainly so you can decide.
+      </p>
+      <ul>
+        <li><div><strong>Measured on one machine.</strong> An M3 Max with 38.7 GB. The speed constants are calibrated against it; other chips are predicted from published bandwidth figures, not verified.</div></li>
+        <li><div><strong>Not notarized.</strong> Builds are ad-hoc signed, so macOS will warn on first launch. Build from source and you avoid the question entirely.</div></li>
+        <li><div><strong>Expert streaming needs a patched llama.cpp.</strong> The flags are not in a release build yet. The app detects this and disables the feature rather than failing at load.</div></li>
+        <li><div><strong>MLX is detected and drivable, but has no catalog entries.</strong> The runtime is verified against a real <code>mlx_lm.server</code>; you have to supply the model directory yourself for now.</div></li>
+        <li><div><strong>Split-file models resolve but have not been transferred.</strong> Shard ordering and totals are checked against Hugging Face; the multi-part download itself is unexercised.</div></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="shell">
+    <div class="section-head">
+      <p class="eyebrow">Install</p>
+      <h2>Build it, then point it at a runtime.</h2>
+    </div>
+    <div class="steps">
+      <div>
+        <p class="step-label">1 · Build the app</p>
+<pre><span class="c"># Requires Xcode 16+ and macOS 14 or later on Apple Silicon</span>
+Scripts/build-app.sh --release
+cp -R "build/Silicon Optimizer.app" /Applications/</pre>
+      </div>
+      <div>
+        <p class="step-label">2 · Install a runtime</p>
+<pre>brew install llama.cpp                              <span class="c"># GGUF models</span>
+python3 -m venv ~/.silicon-mlx
+~/.silicon-mlx/bin/pip install mlx-lm               <span class="c"># optional, MLX</span></pre>
+      </div>
+      <div>
+        <p class="step-label">3 · Connect Claude or ChatGPT</p>
+<pre>Scripts/install-mcp.sh --configure-claude</pre>
+      </div>
+    </div>
+    <div class="notes" style="margin-top:26px">
+      <p>
+        The app finds runtimes automatically, including inside a Python virtual environment —
+        which is where <code>mlx-lm</code> has to live on modern macOS. Settings shows what it
+        found and whether that build supports expert streaming.
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="shell">
+  <footer>
+    <span>Silicon Optimizer · MIT</span>
+    <span>Measurements: llama.cpp b10280 · macOS 26.6 · M3 Max 38.7 GB</span>
+    <span class="spacer" style="flex:1"></span>
+    <span>Models carry their own licences</span>
+  </footer>
+</div>
+
+</body>
+</html>
