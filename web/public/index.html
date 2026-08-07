@@ -116,6 +116,11 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   white-space: nowrap;
 }
 .chip.warn { border-color: rgba(224,164,77,.42); color: var(--flag); }
+.chip.link {
+  text-decoration: none; color: var(--measure); border-color: rgba(77,224,192,.35);
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.chip.link:hover { background: rgba(77,224,192,.1); border-color: rgba(77,224,192,.6); }
 
 /* --- Hero -------------------------------------------------------------- */
 
@@ -298,6 +303,7 @@ footer {
     <span class="spacer"></span>
     <span class="chip warn">Beta</span>
     <span class="chip">macOS 14+ · Apple Silicon</span>
+    <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
   </header>
 
   <div class="hero">
@@ -525,6 +531,8 @@ footer {
       <div>
         <p class="step-label">1 · Build the app</p>
 <pre><span class="c"># Requires Xcode 16+ and macOS 14 or later on Apple Silicon</span>
+git clone https://github.com/OGZamasu/silicon-optimizer
+cd silicon-optimizer
 Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/</pre>
       </div>
@@ -551,7 +559,7 @@ python3 -m venv ~/.silicon-mlx
 
 <div class="shell">
   <footer>
-    <span>Silicon Optimizer · MIT</span>
+    <span><a href="https://github.com/OGZamasu/silicon-optimizer">github.com/OGZamasu/silicon-optimizer</a> · MIT</span>
     <span>Measurements: llama.cpp b10280 · macOS 26.6 · M3 Max 38.7 GB</span>
     <span class="spacer" style="flex:1"></span>
     <span>Models carry their own licences</span>

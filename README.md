@@ -1,5 +1,7 @@
 # Silicon Optimizer
 
+[optimize.zamasu.dev](https://optimize.zamasu.dev)
+
 A native macOS menu bar app that makes running local LLMs on Apple Silicon effortless — and
 exposes the whole thing to Claude and ChatGPT over MCP.
 
@@ -46,7 +48,7 @@ the catalog and the loaded model as tools. See [MCP setup](#use-from-claude-or-c
 Requires macOS 14 or later on Apple Silicon.
 
 ```bash
-git clone https://github.com/yourname/silicon-optimizer
+git clone https://github.com/OGZamasu/silicon-optimizer
 cd silicon-optimizer
 Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/
