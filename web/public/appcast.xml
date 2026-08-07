@@ -7,14 +7,14 @@
     <language>en</language>
     <item>
       <title>Version 0.1.0</title>
-      <pubDate>Fri, 07 Aug 2026 22:19:32 +0000</pubDate>
-      <sparkle:version>6</sparkle:version>
+      <pubDate>Fri, 07 Aug 2026 22:21:23 +0000</pubDate>
+      <sparkle:version>7</sparkle:version>
       <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[First public build. Memory planning, expert streaming, an MCP bridge for Claude and ChatGPT, Hugging Face search, and advanced mode.]]></description>
+      <description><![CDATA[First public build. Memory planning validated to 0.31% on a 30B MoE, expert streaming, an MCP bridge for Claude and ChatGPT, Hugging Face search with remote header reading, and advanced mode.]]></description>
       <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.1.0/Silicon.Optimizer.dmg"
                  type="application/octet-stream"
-                 sparkle:edSignature="JUtAUhoJ5ozu93Wn7pkWmHKLkEq1UrulIYQa+EyIkoe7Y47VCanCpSrI4wzeeWju5MSJms5oTDF2TVhaptnUCw==" length="3506264" />
+                 sparkle:edSignature="QRBs67DFjZ5SOhZzFGwp2A4IdwYOjbUyfQCe6SPBViBhiEsm0BKEz5SGHGBJUbqM/Fl5LIkfMumZ5+nhtNOrBA==" length="3505857" />
     </item>
   </channel>
 </rss>
