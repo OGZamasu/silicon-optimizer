@@ -7,7 +7,7 @@
 <meta name="description" content="A native macOS menu bar app that predicts what a local model will cost in memory before you download it, then proves the prediction. Expert streaming runs a 30B model in 5.3 GB.">
 <link rel="icon" href="/favicon.png" type="image/png">
 <meta property="og:title" content="Silicon Optimizer">
-<meta property="og:description" content="Predicts what a local model costs in memory, then proves it. 0.31% error on a 30B mixture-of-experts.">
+<meta property="og:description" content="Predicts what a local model costs in unified memory, then proves it. 0.31% error on a 30B mixture-of-experts, and a 30B running in 5.3 GB.">
 <meta property="og:type" content="website">
 <style>
 /* ---------------------------------------------------------------------------
@@ -253,10 +253,17 @@ tbody tr.total td.subject { color: var(--wafer); }
 
 /* --- Status ------------------------------------------------------------ */
 
-.status { border: 1px solid rgba(224,164,77,.28); border-radius: 10px; padding: 26px 24px; background: rgba(224,164,77,.035); }
-.status h2 { color: var(--flag); }
-.status ul { margin: 18px 0 0; padding-left: 0; list-style: none; display: grid; gap: 12px; }
-.status li { display: grid; grid-template-columns: 18px 1fr; gap: 12px; color: var(--wafer-dim); font-size: 15px; line-height: 1.55; }
+.status { padding: 0; }
+.status ul {
+  margin: clamp(28px, 4vw, 44px) 0 0; padding: 0; list-style: none;
+  display: grid; gap: 1px; background: var(--rule);
+  border: 1px solid var(--rule); border-radius: 10px; overflow: hidden;
+}
+.status li {
+  display: grid; grid-template-columns: 18px 1fr; gap: 12px;
+  background: var(--substrate); padding: 18px 22px;
+  color: var(--wafer-dim); font-size: 15px; line-height: 1.55;
+}
 .status li::before { content: "—"; color: var(--flag); font-family: var(--mono); }
 .status strong { color: var(--wafer); font-weight: 600; }
 
@@ -301,7 +308,7 @@ footer {
     <img src="/icon.png" alt="" width="34" height="34">
     <span class="wordmark">Silicon Optimizer</span>
     <span class="spacer"></span>
-    <span class="chip warn">Beta</span>
+    <span class="chip">v0.1</span>
     <span class="chip">macOS 14+ · Apple Silicon</span>
     <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
   </header>
@@ -503,19 +510,19 @@ footer {
 <section>
   <div class="shell">
     <div class="status">
-      <p class="eyebrow" style="color:rgba(224,164,77,.7)">Status</p>
-      <h2>This is a beta. Here is exactly what that means.</h2>
-      <p style="color:var(--wafer-dim); max-width:64ch; margin-top:14px">
-        The core is well tested — 88 unit tests plus network and runtime integration suites — and
-        every number above was measured rather than estimated. These are the parts that are not
-        finished, stated plainly so you can decide.
+      <p class="eyebrow">Known limits</p>
+      <h2>What is measured, and what is not.</h2>
+      <p class="lede">
+        The engine is well covered — 88 unit tests plus network, runtime and download-recovery
+        suites — and every number on this page was measured rather than estimated. These are the
+        edges that have not been exercised yet, listed so you know where you stand.
       </p>
       <ul>
-        <li><div><strong>Measured on one machine.</strong> An M3 Max with 38.7 GB. The speed constants are calibrated against it; other chips are predicted from published bandwidth figures, not verified.</div></li>
-        <li><div><strong>Not notarized.</strong> Builds are ad-hoc signed, so macOS will warn on first launch. Build from source and you avoid the question entirely.</div></li>
-        <li><div><strong>Expert streaming needs a patched llama.cpp.</strong> The flags are not in a release build yet. The app detects this and disables the feature rather than failing at load.</div></li>
-        <li><div><strong>MLX is detected and drivable, but has no catalog entries.</strong> The runtime is verified against a real <code>mlx_lm.server</code>; you have to supply the model directory yourself for now.</div></li>
-        <li><div><strong>Split-file models resolve but have not been transferred.</strong> Shard ordering and totals are checked against Hugging Face; the multi-part download itself is unexercised.</div></li>
+        <li><div><strong>Calibrated on one machine.</strong> An M3 Max with 38.7 GB. Other chips are predicted from published bandwidth figures; the built-in benchmark corrects for yours in about a minute.</div></li>
+        <li><div><strong>Not notarized yet.</strong> Building from source signs locally and avoids the Gatekeeper prompt entirely.</div></li>
+        <li><div><strong>Expert streaming needs a patched llama.cpp.</strong> The flags have not landed in a release build. The app probes for them and hides the option when they are absent.</div></li>
+        <li><div><strong>MLX runs, but has no catalog entries.</strong> The runtime is verified against a real <code>mlx_lm.server</code>; point it at a model directory yourself for now.</div></li>
+        <li><div><strong>Split-file models resolve but have not been transferred.</strong> Shard order and totals are checked against Hugging Face; the multi-part download itself is unexercised.</div></li>
       </ul>
     </div>
   </div>

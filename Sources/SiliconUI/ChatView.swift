@@ -13,22 +13,37 @@ struct ChatView: View {
     var body: some View {
         @Bindable var model = model
 
-        NavigationSplitView {
+        // A plain split rather than a nested NavigationSplitView. Nesting one inside the
+        // window's own split view produced two sidebars side by side, each too narrow to show
+        // a conversation title or the search field without truncating it.
+        HStack(spacing: 0) {
             conversationList
-        } detail: {
-            if model.selectedConversation != nil {
-                transcript
-            } else {
-                EmptyStateView(
-                    systemImage: "bubble.left.and.bubble.right",
-                    title: "No conversation selected",
-                    message: "Start a new conversation to begin.",
-                    actionTitle: "New Conversation",
-                    action: { model.newConversation() }
-                )
+                .frame(width: 248)
+            Divider()
+            Group {
+                if model.selectedConversation != nil {
+                    transcript
+                } else {
+                    EmptyStateView(
+                        systemImage: "bubble.left.and.bubble.right",
+                        title: "No conversation selected",
+                        message: "Pick one on the left, or start a new conversation.",
+                        actionTitle: "New Conversation",
+                        action: { model.newConversation() }
+                    )
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Chat")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.newConversation() } label: {
+                    Label("New Conversation", systemImage: "square.and.pencil")
+                }
+                .help("New conversation")
+            }
+        }
     }
 
     // MARK: - Sidebar
@@ -60,20 +75,29 @@ struct ChatView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
+        .scrollContentBackground(.hidden)
         // Searches message bodies, not just titles — a title is only ever the first line of
         // the opening prompt, which is rarely what you remember a conversation by.
-        .searchable(
-            text: $model.conversationSearch,
-            placement: .sidebar,
-            prompt: "Search conversations"
-        )
-        .toolbar {
-            ToolbarItem {
-                Button { model.newConversation() } label: {
-                    Label("New Conversation", systemImage: "square.and.pencil")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .imageScale(.small)
+                TextField("Search conversations", text: $model.conversationSearch)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                if !model.conversationSearch.isEmpty {
+                    Button { model.conversationSearch = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.background.secondary, in: .rect(cornerRadius: 7))
+            .padding(10)
         }
     }
 
@@ -109,6 +133,9 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
+                        if model.selectedConversation?.messages.isEmpty ?? true {
+                            emptyTranscript
+                        }
                         ForEach(model.selectedConversation?.messages ?? []) { message in
                             MessageBubble(message: message)
                                 .id(message.id)
@@ -129,6 +156,34 @@ struct ChatView: View {
             composer
         }
         .background(.background)
+    }
+
+    /// Shown in place of a transcript before the first message. An empty pane reads as broken;
+    /// this says what to do next and adapts to whether a model is actually loaded.
+    private var emptyTranscript: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: model.runtimeState.isRunning ? "text.bubble" : "cpu")
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(.tertiary)
+            if let loaded = model.loadedModel {
+                Text("Ask \(loaded.name) something.")
+                    .font(.headline)
+                Text("Everything runs on this Mac. Nothing is sent anywhere.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No model is loaded yet.")
+                    .font(.headline)
+                Text("Choose one from the Models tab and it will appear here.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button("Browse models") { model.selectedTab = .models }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 40)
     }
 
     private var statusBar: some View {
