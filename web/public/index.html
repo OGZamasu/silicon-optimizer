@@ -575,13 +575,18 @@ footer {
     </div>
     <div class="steps">
       <div>
-        <p class="step-label">1 · Or download the build</p>
+        <p class="step-label">1 · Or install with Homebrew</p>
+<pre>brew tap OGZamasu/tap
+brew install --cask silicon-optimizer</pre>
+      </div>
+      <div>
+        <p class="step-label">2 · Or download the build</p>
 <pre><span class="c"># Signed locally rather than notarized, so macOS blocks it once.</span>
 <span class="c"># Clear the quarantine flag after dragging it to Applications:</span>
 xattr -d com.apple.quarantine "/Applications/Silicon Optimizer.app"</pre>
       </div>
       <div>
-        <p class="step-label">2 · Or build from source</p>
+        <p class="step-label">3 · Or build from source</p>
 <pre><span class="c"># Requires Xcode 16+ and macOS 14 or later on Apple Silicon</span>
 git clone https://github.com/OGZamasu/silicon-optimizer
 cd silicon-optimizer
@@ -589,13 +594,13 @@ Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/</pre>
       </div>
       <div>
-        <p class="step-label">3 · Install a runtime</p>
+        <p class="step-label">4 · Install a runtime</p>
 <pre>brew install llama.cpp                              <span class="c"># GGUF models</span>
 python3 -m venv ~/.silicon-mlx
 ~/.silicon-mlx/bin/pip install mlx-lm               <span class="c"># optional, MLX</span></pre>
       </div>
       <div>
-        <p class="step-label">4 · Connect Claude or ChatGPT</p>
+        <p class="step-label">5 · Connect Claude or ChatGPT</p>
 <pre>Scripts/install-mcp.sh --configure-claude</pre>
       </div>
     </div>

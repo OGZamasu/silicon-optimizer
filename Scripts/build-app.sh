@@ -90,7 +90,32 @@ if [[ -x Vendor/llama-server ]]; then
     fi
 fi
 
+# Sparkle ships as a framework with its own XPC services and updater app inside. SwiftPM
+# leaves it in the build directory, where a copied bundle cannot find it — the binary links
+# it as @rpath/Sparkle.framework, so it has to live in Contents/Frameworks.
+SPARKLE="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+    echo "==> Embedding Sparkle"
+    mkdir -p "$BUNDLE/Contents/Frameworks"
+    # -R preserves the version symlinks the framework needs to resolve.
+    cp -R "$SPARKLE" "$BUNDLE/Contents/Frameworks/"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" \
+        "$BUNDLE/Contents/MacOS/SiliconOptimizer" 2>/dev/null || true
+fi
+
 echo "==> Signing"
+# Nested code must be signed from the inside out.
+if [[ -d "$BUNDLE/Contents/Frameworks/Sparkle.framework" ]]; then
+    SPARKLE_ID="${SIGN_IDENTITY:--}"
+    find "$BUNDLE/Contents/Frameworks/Sparkle.framework" \
+        \( -name "*.xpc" -o -name "*.app" \) -maxdepth 4 -print0 2>/dev/null \
+        | while IFS= read -r -d '' nested; do
+            codesign --force --options runtime --sign "$SPARKLE_ID" "$nested" 2>/dev/null || true
+        done
+    codesign --force --options runtime --sign "$SPARKLE_ID" \
+        "$BUNDLE/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
+fi
+
 if [[ -n "$SIGN_IDENTITY" ]]; then
     # Hardened runtime is required for notarization. The JIT entitlement is not needed —
     # inference runs in a child process that is signed separately.

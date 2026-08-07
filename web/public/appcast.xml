@@ -1,0 +1,20 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>Silicon Optimizer</title>
+    <link>https://optimize.zamasu.dev/appcast.xml</link>
+    <description>Updates for Silicon Optimizer</description>
+    <language>en</language>
+    <item>
+      <title>Version 0.1.0</title>
+      <pubDate>Fri, 07 Aug 2026 22:19:32 +0000</pubDate>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[First public build. Memory planning, expert streaming, an MCP bridge for Claude and ChatGPT, Hugging Face search, and advanced mode.]]></description>
+      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.1.0/Silicon.Optimizer.dmg"
+                 type="application/octet-stream"
+                 sparkle:edSignature="JUtAUhoJ5ozu93Wn7pkWmHKLkEq1UrulIYQa+EyIkoe7Y47VCanCpSrI4wzeeWju5MSJms5oTDF2TVhaptnUCw==" length="3506264" />
+    </item>
+  </channel>
+</rss>

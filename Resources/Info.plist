@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Silicon Optimizer</string>
 	<key>CFBundleExecutable</key>
 	<string>SiliconOptimizer</string>
 	<key>CFBundleIdentifier</key>
@@ -11,8 +13,6 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Silicon Optimizer</string>
-	<key>CFBundleDisplayName</key>
 	<string>Silicon Optimizer</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
@@ -22,14 +22,21 @@
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<!-- Menu bar app: no Dock icon, no default window on launch. -->
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSSupportsAutomaticTermination</key>
-	<false/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT Licensed</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://optimize.zamasu.dev/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>30DR6iydV3mzNa+VCJ7a0aNyFGvF+2NkZ+2YxojvtOc=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

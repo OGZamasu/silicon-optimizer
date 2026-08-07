@@ -111,6 +111,9 @@ public final class AppModel {
         public var message: String
     }
 
+    /// Automatic updates. Created lazily because instantiating Sparkle starts its scheduler.
+    public let updates = UpdateController()
+
     private var sampler = MetricsSampler()
     private var samplingTask: Task<Void, Never>?
     private var controlServer: ControlServer?

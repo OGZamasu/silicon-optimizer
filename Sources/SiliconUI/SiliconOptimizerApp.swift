@@ -28,6 +28,10 @@ public struct SiliconOptimizerApp: App {
         .defaultSize(width: 1080, height: 700)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { model.updates.checkForUpdates() }
+                    .disabled(!model.updates.canCheckForUpdates)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Conversation") {
                     model.newConversation()

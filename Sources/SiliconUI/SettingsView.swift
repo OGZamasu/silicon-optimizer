@@ -72,6 +72,34 @@ struct SettingsView: View {
                 Toggle("Show advanced controls", isOn: $model.settings.showAdvancedControls)
             }
 
+            Section("Updates") {
+                LabeledContent("Version", value: model.updates.currentVersion)
+                if model.updates.feedURL != nil {
+                    Toggle("Check automatically", isOn: Binding(
+                        get: { model.updates.automaticallyChecks },
+                        set: { model.updates.automaticallyChecks = $0 }
+                    ))
+                    HStack {
+                        Button("Check now") { model.updates.checkForUpdates() }
+                            .disabled(!model.updates.canCheckForUpdates)
+                        if let last = model.updates.lastCheck {
+                            Text("Last checked \(last.formatted(.relative(presentation: .named)))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("Updates are signed with the project's own key and refused if they do "
+                         + "not verify, which is what makes them safe without Apple notarization.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("This build has no update feed configured, which is normal for a local "
+                         + "build from source.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Hugging Face") {
                 SecureField("Access token", text: $model.settings.huggingFaceToken)
                     .textFieldStyle(.roundedBorder)

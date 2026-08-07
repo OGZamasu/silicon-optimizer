@@ -48,11 +48,22 @@ the catalog and the loaded model as tools. See [MCP setup](#use-from-claude-or-c
 Requires macOS 14 or later on Apple Silicon.
 
 ```bash
+brew tap OGZamasu/tap
+brew install --cask silicon-optimizer
+```
+
+Or build it yourself:
+
+```bash
 git clone https://github.com/OGZamasu/silicon-optimizer
 cd silicon-optimizer
 Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/
 ```
+
+The app updates itself after that. Builds are signed with the project's own key and an update
+that does not verify is refused, which is what makes automatic updates safe without Apple
+notarization.
 
 You also need a runtime. Either is fine; llama.cpp is recommended because it is the only one that
 can page experts from disk:

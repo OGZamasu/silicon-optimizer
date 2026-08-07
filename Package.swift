@@ -12,6 +12,11 @@ let package = Package(
             "SiliconCore", "SiliconHardware", "SiliconRuntime", "SiliconCatalog", "SiliconPlanner",
         ]),
     ],
+    dependencies: [
+        // Sparkle is the standard macOS updater. It reads a signed appcast feed, so users get
+        // verified updates even though this build is not Apple-notarized.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+    ],
     targets: [
         .target(name: "SiliconCore"),
         .target(name: "SiliconHardware", dependencies: ["SiliconCore"]),
@@ -24,6 +29,7 @@ let package = Package(
         .target(name: "SiliconUI", dependencies: [
             "SiliconCore", "SiliconHardware", "SiliconRuntime", "SiliconCatalog", "SiliconPlanner",
             "SiliconControl",
+            .product(name: "Sparkle", package: "Sparkle"),
         ]),
         .executableTarget(name: "SiliconMCP", dependencies: ["SiliconControl"]),
         .executableTarget(
