@@ -445,6 +445,84 @@ public final class AppModel {
         }
     }
 
+    // MARK: - Hugging Face search
+
+    public private(set) var remoteResults: [HuggingFaceClient.SearchResult] = []
+    public private(set) var isSearchingRemote = false
+    public private(set) var remoteSearchError: String?
+    /// The query the current results belong to. Nil means nothing has been searched yet, which
+    /// is not the same as a search that came back empty — saying "nothing found" before asking
+    /// is just wrong.
+    public private(set) var completedRemoteQuery: String?
+
+    private var remoteSearchTask: Task<Void, Never>?
+
+    /// Searches Hugging Face for GGUF repositories.
+    ///
+    /// The bundled catalog is 17 models chosen for Apple Silicon; this is the escape hatch for
+    /// everything else. Debounced, because it fires from a text field.
+    public func searchHuggingFace(_ query: String) {
+        remoteSearchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else {
+            remoteResults = []
+            isSearchingRemote = false
+            remoteSearchError = nil
+            completedRemoteQuery = nil
+            return
+        }
+
+        isSearchingRemote = true
+        remoteSearchTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, let self else { return }
+            defer { isSearchingRemote = false }
+            do {
+                let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
+                let results = try await HuggingFaceClient(token: token).search(query: trimmed)
+                guard !Task.isCancelled else { return }
+                remoteResults = results
+                remoteSearchError = nil
+                completedRemoteQuery = trimmed
+            } catch {
+                guard !Task.isCancelled else { return }
+                remoteResults = []
+                remoteSearchError = error.localizedDescription
+                completedRemoteQuery = trimmed
+            }
+        }
+    }
+
+    /// Builds a catalog entry for a repository the bundled catalog has never seen, so an
+    /// arbitrary Hugging Face model flows through exactly the same install, planning and
+    /// loading machinery as a curated one.
+    public func makeEntry(
+        repository: String,
+        file: String,
+        quantization: Quantization,
+        size: Bytes,
+        shape: ModelShape
+    ) -> ModelEntry {
+        let name = (repository.split(separator: "/").last).map(String.init) ?? repository
+        return ModelEntry(
+            id: "hf:\(repository)",
+            name: name,
+            author: repository.split(separator: "/").first.map(String.init) ?? "",
+            license: "See the model card",
+            summary: "From Hugging Face. Architecture read from the file itself.",
+            category: shape.isMoE ? .general : .general,
+            capabilities: [],
+            format: .gguf,
+            shape: shape,
+            variants: [ModelVariant(
+                quantization: quantization, repository: repository,
+                filename: file, downloadSize: size
+            )],
+            rating: 0,
+            maxContext: shape.trainingContextLength
+        )
+    }
+
     // MARK: - Downloads
 
     @MainActor

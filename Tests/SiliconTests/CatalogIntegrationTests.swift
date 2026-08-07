@@ -86,3 +86,50 @@ struct CatalogIntegrationTests {
         #expect(head.size > .gib(9), "resolved \(head.path) at \(head.size.formatted)")
     }
 }
+
+/// Reads model architecture over HTTP without downloading the weights.
+@Suite("Remote GGUF headers", .enabled(if: ProcessInfo.processInfo.environment["SILICON_NETWORK_TESTS"] == "1"))
+struct RemoteGGUFTests {
+
+    /// The payoff: a full memory plan for an 18 GB model, from a few hundred kilobytes.
+    @Test func readsArchitectureWithoutDownloadingTheModel() async throws {
+        let shape = try #require(
+            await RemoteGGUFReader().readShape(
+                repository: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+                file: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+            )
+        )
+        // Matches what the same file reports once on disk.
+        #expect(shape.blockCount == 48)
+        #expect(shape.embeddingLength == 2048)
+        #expect(shape.headCountKV == 4)
+        #expect(shape.headDimension == 128)
+        #expect(shape.moe?.expertCount == 128)
+        #expect(shape.moe?.expertsUsedPerToken == 8)
+        #expect(shape.moe?.expertFeedForwardLength == 768)
+        #expect(shape.totalParameters > 30_000_000_000)
+    }
+
+    /// A dense model, and one with a large vocabulary that pushes the metadata past the first
+    /// fetch — proving the window actually grows rather than giving up.
+    @Test(arguments: [
+        ("unsloth/Qwen3-1.7B-GGUF", "Qwen3-1.7B-Q4_K_M.gguf", 28),
+        ("unsloth/gemma-3-12b-it-GGUF", "gemma-3-12b-it-Q4_K_M.gguf", 48),
+    ])
+    func readsDenseModels(repository: String, file: String, layers: Int) async throws {
+        let shape = try #require(
+            await RemoteGGUFReader().readShape(repository: repository, file: file)
+        )
+        #expect(shape.blockCount == layers)
+        #expect(shape.moe == nil)
+    }
+
+    /// Hugging Face must honour Range, or this whole approach silently downloads the model.
+    @Test func rangeRequestsAreHonoured() async throws {
+        let metadata = try await RemoteGGUFReader().readHeader(
+            repository: "unsloth/Qwen3-1.7B-GGUF", file: "Qwen3-1.7B-Q4_K_M.gguf"
+        )
+        #expect(metadata.architecture == "qwen3")
+        #expect(metadata.parameterCount > 1_000_000_000)
+    }
+}

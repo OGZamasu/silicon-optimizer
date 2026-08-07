@@ -64,7 +64,14 @@ public struct GGUFReader: Sendable {
     public init() {}
 
     public func read(at url: URL) throws -> Metadata {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        try read(data: try Data(contentsOf: url, options: .mappedIfSafe))
+    }
+
+    /// Parses a header out of bytes already in hand.
+    ///
+    /// Split from `read(at:)` so the same parser can work on a range fetched over HTTP — which
+    /// is how a model's real architecture is known before any of it is downloaded.
+    public func read(data: Data) throws -> Metadata {
         var cursor = Cursor(data: data)
 
         guard try cursor.uint32() == 0x4655_4747 else { throw ReadError.notGGUF }  // "GGUF"

@@ -114,6 +114,26 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         }
     }
 
+    /// The quantization token exactly as the publisher wrote it, for display.
+    ///
+    /// Community repositories ship many variants this enum deliberately does not model —
+    /// `Q2_K_L`, `UD-Q4_K_XL`, `IQ4_XS`. Mapping those onto the nearest known case is right for
+    /// *planning*, but labelling a list with it puts two different files under the same name and
+    /// makes them look like duplicates. Showing the real token keeps them distinguishable.
+    public static func label(fromFilename filename: String) -> String? {
+        let stem = (filename as NSString).lastPathComponent
+            .replacingOccurrences(of: ".gguf", with: "", options: .caseInsensitive)
+        // Trailing shard suffix is not part of the quantization.
+        let withoutShard = stem.replacingOccurrences(
+            of: #"-\d{5}-of-\d{5}$"#, with: "", options: .regularExpression
+        )
+        guard let range = withoutShard.range(
+            of: #"(UD-)?I?Q\d+(_[A-Z0-9]+)*|BF16|F16|F32|MXFP4"#,
+            options: [.regularExpression, .backwards]
+        ) else { return nil }
+        return String(withoutShard[range])
+    }
+
     /// Parses a quantization out of a GGUF filename such as
     /// `Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf`.
     public static func inferred(fromFilename filename: String) -> Quantization? {

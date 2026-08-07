@@ -256,6 +256,16 @@ changes.
 
 ---
 
+## Beyond the catalog
+
+The bundled list is 17 models chosen for Apple Silicon. Searching also queries Hugging Face for
+anything else with GGUF weights, and picking a result does not mean losing the memory plan: the
+GGUF header is fetched with a range request — a few hundred kilobytes, no download — so an
+unknown repository gets the same weights/KV/compute breakdown, the same verdict, and its real
+architecture read from the file rather than guessed from its name.
+
+Reading a 30B model's full architecture this way takes under two seconds.
+
 ## Advanced mode
 
 Every setting the planner derives can be overridden by hand, from the installed model's menu.

@@ -10,6 +10,7 @@ struct ModelBrowserView: View {
     @State private var category: ModelCategory?
     @State private var showsOnlyRunnable = true
     @State private var inspecting: ModelEntry?
+    @State private var inspectingRemote: HuggingFaceClient.SearchResult?
 
     var body: some View {
         ScrollView {
@@ -19,12 +20,15 @@ struct ModelBrowserView: View {
                     installedSection
                 }
                 catalogSection
+                remoteSection
             }
             .padding(20)
         }
         .background(.background)
         .navigationTitle("Models")
-        .searchable(text: $search, placement: .toolbar, prompt: "Search models")
+        .searchable(text: $search, placement: .toolbar, prompt: "Search models and Hugging Face")
+        .onChange(of: search) { model.searchHuggingFace(search) }
+        .task { if !search.isEmpty { model.searchHuggingFace(search) } }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Picker("Category", selection: $category) {
@@ -44,6 +48,10 @@ struct ModelBrowserView: View {
         }
         .sheet(item: $inspecting) { entry in
             ModelDetailSheet(entry: entry)
+                .environment(model)
+        }
+        .sheet(item: $inspectingRemote) { result in
+            RemoteModelSheet(result: result)
                 .environment(model)
         }
     }
@@ -155,6 +163,70 @@ struct ModelBrowserView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Hugging Face
+
+    @ViewBuilder
+    private var remoteSection: some View {
+        if !search.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text("On Hugging Face").font(.title3.weight(.semibold))
+                    if model.isSearchingRemote {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                Text("Anything else with GGUF weights. The architecture is read from the file "
+                     + "itself, so you still get a memory plan before downloading.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                if let error = model.remoteSearchError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                } else if model.remoteResults.isEmpty,
+                          !model.isSearchingRemote,
+                          let searched = model.completedRemoteQuery {
+                    Text("Nothing on Hugging Face matches “\(searched)”.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach(model.remoteResults) { result in
+                    Button { inspectingRemote = result } label: {
+                        Card {
+                            HStack(spacing: 12) {
+                                Image(systemName: "shippingbox")
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 22)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(result.name).font(.callout.weight(.medium))
+                                    Text(result.author)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Label(compact(result.downloads), systemImage: "arrow.down.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func compact(_ value: Int) -> String {
+        value >= 1_000_000 ? String(format: "%.1fM", Double(value) / 1e6)
+            : value >= 1000 ? String(format: "%.0fk", Double(value) / 1000)
+            : String(value)
     }
 
     private struct Row {

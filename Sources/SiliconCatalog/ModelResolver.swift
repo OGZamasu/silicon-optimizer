@@ -55,7 +55,7 @@ public struct ModelResolver: Sendable {
     /// the largest match, a repository whose draft happened to be bigger than the main file
     /// would hand the user the wrong model entirely. Projectors are excluded for the same
     /// reason: `mmproj-F16.gguf` matches a search for the F16 quantization.
-    static func isCompanionFile(_ path: String) -> Bool {
+    public static func isCompanionFile(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent.lowercased()
         return name.contains("mmproj")
             || name.hasPrefix("eagle")

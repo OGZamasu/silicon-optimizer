@@ -368,3 +368,36 @@ struct ExtraArgumentTests {
         #expect(problems.isEmpty)
     }
 }
+
+@Suite("Quantization labels")
+struct QuantizationLabelTests {
+
+    /// Regression: `Q2_K` and `Q2_K_L` both mapped to the same enum case, so a repository
+    /// listing showed two different files under one identical label.
+    @Test(arguments: [
+        ("model-Q2_K.gguf", "Q2_K"),
+        ("model-Q2_K_L.gguf", "Q2_K_L"),
+        ("model-Q4_K_M.gguf", "Q4_K_M"),
+        ("model-UD-Q4_K_XL.gguf", "UD-Q4_K_XL"),
+        ("model-IQ4_XS.gguf", "IQ4_XS"),
+        ("model-BF16.gguf", "BF16"),
+        ("gpt-oss-20b-MXFP4.gguf", "MXFP4"),
+        ("GLM-4.5-Air-Q3_K_M-00001-of-00002.gguf", "Q3_K_M"),
+    ])
+    func showsThePublishersOwnToken(filename: String, expected: String) {
+        #expect(Quantization.label(fromFilename: filename) == expected)
+    }
+
+    /// Distinct files must never share a display label.
+    @Test func variantsRemainDistinguishable() {
+        let names = ["m-Q2_K.gguf", "m-Q2_K_L.gguf", "m-Q3_K_M.gguf", "m-UD-Q3_K_XL.gguf"]
+        let labels = names.compactMap { Quantization.label(fromFilename: $0) }
+        #expect(Set(labels).count == names.count, "labels collided: \(labels)")
+    }
+
+    /// Planning still maps unknown variants onto the nearest modelled case.
+    @Test func planningStillResolvesToAKnownCase() {
+        #expect(Quantization.inferred(fromFilename: "m-Q2_K_L.gguf") == .q2_K)
+        #expect(Quantization.inferred(fromFilename: "m-Q4_K_M.gguf") == .q4_K_M)
+    }
+}
