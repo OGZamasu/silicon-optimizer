@@ -10,6 +10,11 @@ struct ChatView: View {
     @State private var attachments: [String] = []
     @State private var isShowingImporter = false
 
+    @State private var isNamingFolder = false
+    @State private var renamingFolder: ConversationFolder?
+    @State private var movingConversation: Conversation.ID?
+    @State private var folderName = ""
+
     var body: some View {
         @Bindable var model = model
 
@@ -53,7 +58,7 @@ struct ChatView: View {
 
         let matches = model.filteredConversations()
         let pinned = matches.filter(\.isPinned)
-        let recent = matches.filter { !$0.isPinned }
+        let unfiled = model.conversations(in: nil)
 
         return List(selection: $model.selectedConversationID) {
             if !pinned.isEmpty {
@@ -63,8 +68,31 @@ struct ChatView: View {
                     }
                 }
             }
-            Section(model.conversationSearch.isEmpty ? "Recent" : "Results") {
-                ForEach(recent) { conversation in
+
+            ForEach(model.visibleFolders()) { folder in
+                Section {
+                    ForEach(model.conversations(in: folder.id)) { conversation in
+                        conversationRow(conversation)
+                    }
+                } header: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "folder").imageScale(.small)
+                        Text(folder.name)
+                    }
+                    .contextMenu {
+                        Button("Rename…") { renamingFolder = folder; folderName = folder.name }
+                        Button("Delete Folder", role: .destructive) {
+                            // Conversations survive; only the grouping goes.
+                            model.deleteFolder(folder.id)
+                        }
+                    }
+                }
+            }
+
+            Section(model.conversationSearch.isEmpty
+                    ? (model.folders.isEmpty ? "Recent" : "Unfiled")
+                    : "Results") {
+                ForEach(unfiled) { conversation in
                     conversationRow(conversation)
                 }
                 if matches.isEmpty {
@@ -99,6 +127,76 @@ struct ChatView: View {
             .background(.background.secondary, in: .rect(cornerRadius: 7))
             .padding(10)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Button {
+                movingConversation = nil
+                folderName = ""
+                isNamingFolder = true
+            } label: {
+                Label("New Folder", systemImage: "folder.badge.plus")
+                    .font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .sheet(isPresented: $isNamingFolder) { folderSheet }
+        .sheet(item: $renamingFolder) { folder in folderSheet(renaming: folder) }
+    }
+
+    // MARK: - Folder naming
+
+    @ViewBuilder
+    private var folderSheet: some View {
+        folderForm(title: "New Folder", confirm: "Create") {
+            let folder = model.createFolder(named: folderName)
+            // Created from a conversation's "Move to" menu: file it immediately, which is
+            // what the user was actually asking for.
+            if let moving = movingConversation { model.move(moving, to: folder.id) }
+        }
+    }
+
+    private func folderSheet(renaming folder: ConversationFolder) -> some View {
+        folderForm(title: "Rename Folder", confirm: "Rename") {
+            model.renameFolder(folder.id, to: folderName)
+        }
+    }
+
+    private func folderForm(
+        title: String, confirm: String, action: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title).font(.headline)
+            TextField("Folder name", text: $folderName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { commitFolder(action) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismissFolderSheet() }
+                    .keyboardShortcut(.cancelAction)
+                Button(confirm) { commitFolder(action) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(folderName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 320)
+    }
+
+    private func commitFolder(_ action: () -> Void) {
+        action()
+        dismissFolderSheet()
+    }
+
+    private func dismissFolderSheet() {
+        isNamingFolder = false
+        renamingFolder = nil
+        movingConversation = nil
+        folderName = ""
     }
 
     private func conversationRow(_ conversation: Conversation) -> some View {
@@ -115,6 +213,24 @@ struct ChatView: View {
         .tag(conversation.id)
         .contextMenu {
             Button(conversation.isPinned ? "Unpin" : "Pin") { togglePin(conversation) }
+
+            Menu("Move to") {
+                Button("New Folder…") {
+                    movingConversation = conversation.id
+                    folderName = ""
+                    isNamingFolder = true
+                }
+                if !model.folders.isEmpty { Divider() }
+                ForEach(model.folders) { folder in
+                    Button(folder.name) { model.move(conversation.id, to: folder.id) }
+                        .disabled(conversation.folderID == folder.id)
+                }
+                if conversation.folderID != nil {
+                    Divider()
+                    Button("Remove from Folder") { model.move(conversation.id, to: nil) }
+                }
+            }
+
             Button("Export as Markdown…") { export(conversation) }
             Divider()
             Button("Delete", role: .destructive) {

@@ -4,6 +4,7 @@ import Testing
 @testable import SiliconCore
 @testable import SiliconHardware
 @testable import SiliconPlanner
+@testable import SiliconUI
 
 /// Builds a syntactically valid GGUF header in memory, so the parser can be tested without
 /// keeping a multi-gigabyte fixture in the repository.
@@ -315,5 +316,84 @@ struct CompanionFileTests {
         let usable = files.filter { !ModelResolver.isCompanionFile($0.path) }
         #expect(usable.count == 1)
         #expect(usable[0].path == "model-Q8_0.gguf")
+    }
+}
+
+@Suite("Conversation folders")
+@MainActor
+struct ConversationFolderTests {
+
+    private func modelWithConversations(_ count: Int) -> AppModel {
+        let model = AppModel()
+        for _ in 0..<count { model.newConversation() }
+        return model
+    }
+
+    @Test func newConversationsStartUnfiled() {
+        let model = modelWithConversations(2)
+        #expect(model.conversations(in: nil).count == 2)
+        #expect(model.folders.isEmpty)
+    }
+
+    @Test func movingAConversationFilesIt() {
+        let model = modelWithConversations(2)
+        let folder = model.createFolder(named: "Work")
+        let first = model.conversations[0].id
+
+        model.move(first, to: folder.id)
+        #expect(model.conversations(in: folder.id).map(\.id) == [first])
+        #expect(model.conversations(in: nil).count == 1)
+    }
+
+    /// Deleting a container must never destroy what is inside it. The conversations become
+    /// unfiled instead.
+    @Test func deletingAFolderKeepsItsConversations() {
+        let model = modelWithConversations(3)
+        let folder = model.createFolder(named: "Research")
+        for conversation in model.conversations { model.move(conversation.id, to: folder.id) }
+        #expect(model.conversations(in: folder.id).count == 3)
+
+        model.deleteFolder(folder.id)
+        #expect(model.folders.isEmpty)
+        #expect(model.conversations.count == 3, "conversations were destroyed with the folder")
+        #expect(model.conversations(in: nil).count == 3)
+    }
+
+    @Test func pinnedConversationsAreListedOnceAtTheTop() {
+        let model = modelWithConversations(2)
+        let folder = model.createFolder(named: "Work")
+        let first = model.conversations[0].id
+        model.move(first, to: folder.id)
+        model.conversations[0].isPinned = true
+
+        // Pinned items get their own section, so they must not also appear inside the folder.
+        #expect(!model.conversations(in: folder.id).contains { $0.id == first })
+    }
+
+    @Test func renameRejectsBlankNames() {
+        let model = AppModel()
+        let folder = model.createFolder(named: "Keep")
+        model.renameFolder(folder.id, to: "   ")
+        #expect(model.folders[0].name == "Keep")
+    }
+
+    @Test func unnamedFoldersStillGetALabel() {
+        let model = AppModel()
+        let folder = model.createFolder(named: "  ")
+        #expect(!folder.name.isEmpty)
+    }
+
+    /// Searching should hide folders with no matches rather than leave empty headings.
+    @Test func searchHidesEmptyFolders() {
+        let model = modelWithConversations(2)
+        let folder = model.createFolder(named: "Work")
+        model.move(model.conversations[0].id, to: folder.id)
+        model.conversations[0].title = "Metal shader debugging"
+
+        model.conversationSearch = "metal"
+        #expect(model.visibleFolders().map(\.id) == [folder.id])
+
+        model.conversationSearch = "nothing matches this"
+        #expect(model.visibleFolders().isEmpty)
     }
 }

@@ -64,6 +64,9 @@ public final class AppModel {
     public var conversations: [Conversation] = [] {
         didSet { scheduleConversationSave() }
     }
+    public var folders: [ConversationFolder] = [] {
+        didSet { scheduleConversationSave() }
+    }
     public var selectedConversationID: Conversation.ID?
     /// Filter applied to the conversation list.
     public var conversationSearch = ""
@@ -251,7 +254,15 @@ public final class AppModel {
         guard let data = try? Data(contentsOf: Self.conversationsURL) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        conversations = (try? decoder.decode([Conversation].self, from: data)) ?? []
+
+        if let archive = try? decoder.decode(ChatArchive.self, from: data) {
+            folders = archive.folders
+            conversations = archive.conversations
+        } else if let legacy = try? decoder.decode([Conversation].self, from: data) {
+            // Histories written before folders existed were a bare array. Read them rather
+            // than silently starting someone over with an empty sidebar.
+            conversations = legacy
+        }
         selectedConversationID = conversations.first?.id
     }
 
@@ -260,7 +271,7 @@ public final class AppModel {
     private func scheduleConversationSave() {
         guard !isLoadingConversations else { return }
         conversationSaveTask?.cancel()
-        let snapshot = conversations
+        let snapshot = ChatArchive(folders: folders, conversations: conversations)
         conversationSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, self != nil else { return }
@@ -268,13 +279,13 @@ public final class AppModel {
         }
     }
 
-    private static func writeConversations(_ conversations: [Conversation]) async {
+    private static func writeConversations(_ archive: ChatArchive) async {
         // Resolved on the main actor before hopping off it.
         let url = conversationsURL
         await Task.detached(priority: .background) {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            guard let data = try? encoder.encode(conversations) else { return }
+            guard let data = try? encoder.encode(archive) else { return }
             try? FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true
             )
@@ -571,6 +582,50 @@ public final class AppModel {
         selectedConversationID = conversation.id
     }
 
+    // MARK: - Folders
+
+    @discardableResult
+    public func createFolder(named name: String) -> ConversationFolder {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folder = ConversationFolder(name: trimmed.isEmpty ? "New Folder" : trimmed)
+        folders.append(folder)
+        return folder
+    }
+
+    public func renameFolder(_ id: ConversationFolder.ID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = folders.firstIndex(where: { $0.id == id })
+        else { return }
+        folders[index].name = trimmed
+    }
+
+    /// Removes a folder without removing what is in it — the conversations become unfiled.
+    /// Deleting a container should never destroy the contents the user actually cares about.
+    public func deleteFolder(_ id: ConversationFolder.ID) {
+        for index in conversations.indices where conversations[index].folderID == id {
+            conversations[index].folderID = nil
+        }
+        folders.removeAll { $0.id == id }
+    }
+
+    public func move(_ conversation: Conversation.ID, to folder: ConversationFolder.ID?) {
+        guard let index = conversations.firstIndex(where: { $0.id == conversation }) else { return }
+        conversations[index].folderID = folder
+    }
+
+    /// Conversations in a folder, or unfiled ones when `folder` is nil. Pinned conversations are
+    /// excluded because they are listed separately at the top.
+    public func conversations(in folder: ConversationFolder.ID?) -> [Conversation] {
+        filteredConversations().filter { !$0.isPinned && $0.folderID == folder }
+    }
+
+    /// Folders worth drawing. While searching, a folder with no matches is hidden rather than
+    /// left as an empty heading.
+    public func visibleFolders() -> [ConversationFolder] {
+        guard !conversationSearch.trimmingCharacters(in: .whitespaces).isEmpty else { return folders }
+        return folders.filter { !conversations(in: $0.id).isEmpty }
+    }
+
     public func deleteConversation(_ id: Conversation.ID) {
         conversations.removeAll { $0.id == id }
         if selectedConversationID == id { selectedConversationID = conversations.first?.id }
@@ -680,6 +735,26 @@ public struct Conversation: Identifiable, Hashable, Codable, Sendable {
     public var messages: [ChatMessage] = []
     public var isPinned = false
     public var createdAt = Date()
+    /// Folder this belongs to, or nil for unfiled.
+    public var folderID: ConversationFolder.ID?
 
     public init() {}
+}
+
+/// A user-created group of conversations.
+public struct ConversationFolder: Identifiable, Hashable, Codable, Sendable {
+    public var id = UUID()
+    public var name: String
+    public var createdAt = Date()
+
+    public init(name: String) { self.name = name }
+}
+
+/// What gets written to disk.
+///
+/// Versioned as a record rather than a bare array so folders could be added without orphaning
+/// anyone's existing history — see `loadConversations` for the migration.
+struct ChatArchive: Codable {
+    var folders: [ConversationFolder] = []
+    var conversations: [Conversation] = []
 }

@@ -34,7 +34,7 @@ let package = Package(
         ),
         .testTarget(name: "SiliconTests", dependencies: [
             "SiliconCore", "SiliconHardware", "SiliconPlanner", "SiliconCatalog", "SiliconRuntime",
-            "SiliconControl",
+            "SiliconControl", "SiliconUI",
         ]),
     ],
     swiftLanguageModes: [.v6]

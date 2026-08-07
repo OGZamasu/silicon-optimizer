@@ -131,6 +131,31 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   color: var(--wafer-faint);
 }
 
+/* --- Primary action ----------------------------------------------------- */
+
+.actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px 20px;
+  margin-top: clamp(28px, 4vw, 40px);
+}
+.download {
+  display: inline-flex; flex-direction: column; gap: 3px;
+  padding: 14px 24px; border-radius: 10px; text-decoration: none;
+  background: var(--measure); color: #05231D;
+  font-family: var(--display); font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
+  transition: transform 140ms ease, box-shadow 140ms ease;
+  box-shadow: 0 0 0 0 rgba(77,224,192,0);
+}
+.download span {
+  font-family: var(--mono); font-size: 11px; font-weight: 400;
+  letter-spacing: 0.06em; opacity: .68;
+}
+.download:hover { transform: translateY(-1px); box-shadow: 0 8px 26px -12px rgba(77,224,192,.7); }
+.secondary {
+  font-family: var(--body); font-size: 15px; color: var(--wafer-dim);
+  text-decoration: none; border-bottom: 1px solid var(--rule-bright); padding-bottom: 2px;
+}
+.secondary:hover { color: var(--wafer); border-color: var(--wafer-faint); }
+
 /* --- The reconciliation: the page's signature --------------------------- */
 
 .ledger {
@@ -323,6 +348,14 @@ footer {
     </p>
 
     <!-- Signature: the reconciliation. Predicted in indigo, measured in teal, everywhere. -->
+    <div class="actions">
+      <a class="download" href="https://github.com/OGZamasu/silicon-optimizer/releases/latest/download/Silicon.Optimizer.dmg">
+        Download for Apple Silicon
+        <span>v0.1.0 · 2.5 MB · macOS 14+</span>
+      </a>
+      <a class="secondary" href="https://github.com/OGZamasu/silicon-optimizer">Build from source</a>
+    </div>
+
     <div class="ledger">
       <div class="ledger-head">
         <strong>Qwen3-Coder 30B-A3B</strong>
@@ -532,11 +565,17 @@ footer {
   <div class="shell">
     <div class="section-head">
       <p class="eyebrow">Install</p>
-      <h2>Build it, then point it at a runtime.</h2>
+      <h2>Install it, then point it at a runtime.</h2>
     </div>
     <div class="steps">
       <div>
-        <p class="step-label">1 · Build the app</p>
+        <p class="step-label">1 · Or download the build</p>
+<pre><span class="c"># Signed locally rather than notarized, so macOS blocks it once.</span>
+<span class="c"># Clear the quarantine flag after dragging it to Applications:</span>
+xattr -d com.apple.quarantine "/Applications/Silicon Optimizer.app"</pre>
+      </div>
+      <div>
+        <p class="step-label">2 · Or build from source</p>
 <pre><span class="c"># Requires Xcode 16+ and macOS 14 or later on Apple Silicon</span>
 git clone https://github.com/OGZamasu/silicon-optimizer
 cd silicon-optimizer
@@ -544,13 +583,13 @@ Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/</pre>
       </div>
       <div>
-        <p class="step-label">2 · Install a runtime</p>
+        <p class="step-label">3 · Install a runtime</p>
 <pre>brew install llama.cpp                              <span class="c"># GGUF models</span>
 python3 -m venv ~/.silicon-mlx
 ~/.silicon-mlx/bin/pip install mlx-lm               <span class="c"># optional, MLX</span></pre>
       </div>
       <div>
-        <p class="step-label">3 · Connect Claude or ChatGPT</p>
+        <p class="step-label">4 · Connect Claude or ChatGPT</p>
 <pre>Scripts/install-mcp.sh --configure-claude</pre>
       </div>
     </div>
