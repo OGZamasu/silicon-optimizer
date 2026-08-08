@@ -130,19 +130,25 @@ struct LoadProgressTests {
 @Suite("MLX discovery")
 struct MLXDiscoveryTests {
 
-    private var venvServer: URL {
+    static var venvServer: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".silicon-mlx/bin/mlx_lm.server")
+    }
+
+    static var hasVenvMLX: Bool {
+        FileManager.default.isExecutableFile(atPath: venvServer.path)
     }
 
     /// Regression: macOS ships an externally-managed Python, so `pip install mlx-lm` fails under
     /// PEP 668 and users install into a virtual environment. Those are not on the PATH an app
     /// inherits from Finder, and MLX was reported as missing on machines where it worked fine.
-    @Test func findsMLXInstalledInAVirtualEnvironment() throws {
-        try #require(
-            FileManager.default.isExecutableFile(atPath: venvServer.path),
-            "no venv mlx-lm on this machine"
-        )
+    ///
+    /// Gated on the venv existing rather than `#require`d inside the body: a missing venv means
+    /// the regression cannot be exercised here, not that anything is broken. `#require` records
+    /// an issue and fails the run, so machines without mlx-lm — every contributor who has not
+    /// installed it — saw a red suite. `.enabled(if:)` skips instead, matching `MLXIntegrationTests`.
+    @Test(.enabled(if: MLXDiscoveryTests.hasVenvMLX))
+    func findsMLXInstalledInAVirtualEnvironment() throws {
         let installation = try #require(MLXRuntime.locate())
         #expect(installation.kind == .mlx)
         #expect(FileManager.default.isExecutableFile(atPath: installation.executable.path))
