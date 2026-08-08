@@ -64,7 +64,7 @@ jobs:
           SILICON_NETWORK_TESTS: "1"
         run: swift test --filter CatalogIntegration
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Silicon-Optimizer-app
-          path: build/Silicon Optimizer.app
+      # No artifact upload. Artifact storage is billed separately from self-hosted compute and
+      # this account is at its quota — and it would be redundant anyway, since a build worth
+      # keeping is published to Releases by Scripts/release.sh, which the DMG link on the site
+      # points at.
