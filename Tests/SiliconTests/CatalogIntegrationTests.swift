@@ -133,3 +133,37 @@ struct RemoteGGUFTests {
         #expect(metadata.parameterCount > 1_000_000_000)
     }
 }
+
+/// Probes architectures the planner was not designed for, to find out whether it degrades
+/// gracefully or produces a confident wrong answer.
+@Suite("Architecture coverage", .enabled(if: ProcessInfo.processInfo.environment["SILICON_NETWORK_TESTS"] == "1"))
+struct ArchitectureCoverageTests {
+
+    /// Hybrid models interleave attention layers with recurrent (Mamba-style) ones. The KV
+    /// cache formula assumes every block has attention, so it would over-count — and unlike a
+    /// pure SSM, the header still carries `attention.head_count`, so nothing stops it.
+    @Test(arguments: [
+        ("unsloth/granite-4.0-h-small-GGUF", "granite-4.0-h-small-Q4_K_M.gguf"),
+        ("unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF", "Qwen3-Next-80B-A3B-Instruct-Q4_K_M.gguf"),
+    ])
+    func reportsWhatItSeesForHybridModels(repository: String, file: String) async throws {
+        let metadata = try await RemoteGGUFReader().readHeader(
+            repository: repository, file: file
+        )
+        // Recorded rather than asserted: the point is to learn what these headers actually
+        // publish, so the planner's limits can be stated honestly rather than guessed at.
+        let recurrentKeys = metadata.values.keys.filter {
+            $0.contains("ssm") || $0.contains("recurrent") || $0.contains("mamba")
+        }.sorted()
+        print("""
+
+            \(repository)
+              architecture   : \(metadata.architecture)
+              block_count    : \(metadata.integer("block_count").map(String.init) ?? "-")
+              head_count     : \(metadata.integer("attention.head_count").map(String.init) ?? "-")
+              head_count_kv  : \(metadata.integer("attention.head_count_kv").map(String.init) ?? "-")
+              recurrent keys : \(recurrentKeys.isEmpty ? "none" : recurrentKeys.joined(separator: ", "))
+            """)
+        #expect(!metadata.architecture.isEmpty)
+    }
+}

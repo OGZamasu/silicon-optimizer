@@ -38,6 +38,13 @@ global factor makes other predictions worse.
 the slot-pool sizing and the micro-batch constraint it imposes. This is what lets a 117B model run
 on a 36 GB Mac.
 
+**Generates images, and plans those too.** FLUX.1 and FLUX.2 run locally through MFLUX. A
+diffusion model's cost is *phased* rather than one number — load, encode, denoise, decode, each
+releasing the last — so the app shows a bar per phase and names the one that decides whether it
+fits. On a first run that phase is usually the load, because the runtime fetches full-precision
+weights and quantizes them in memory: asking for 4-bit does not spare you the 16 GB spike on the
+way there.
+
 **Talks to Claude and ChatGPT.** A bundled MCP server exposes the hardware profile, the planner,
 the catalog and the loaded model as tools. See [MCP setup](#use-from-claude-or-chatgpt).
 
@@ -125,6 +132,9 @@ pointing at `/usr/local/bin/silicon-mcp`.
 | `install_model` | Download it |
 | `load_model` / `unload_model` | Load it into memory, or free it |
 | `chat` | Ask the local model — text or images, nothing leaves the machine |
+| `list_image_models` | Which image models are available, and what each would peak at |
+| `plan_image` | Phase-by-phase memory for a given size, steps and precision |
+| `generate_image` | Draw it locally — refuses rather than starting a run that will not fit |
 | `run_benchmark` | Measure this model here, and recalibrate its estimates |
 | `get_status` | What is loaded, at what settings, how fast |
 
@@ -206,8 +216,28 @@ because MoE routing turns one large GEMM per layer into a gather plus many small
 matmuls that never reach the same utilization. Generation is within 10% for the models above
 except the dense 7B, which the benchmark's per-model calibration corrects.
 
-KV figures are exact because they are pure arithmetic. Compute buffers are deliberately
-over-reserved — predicting *more* memory than is used is the safe direction.
+**FLUX.2-klein-4B, 1024x1024, 8 steps, 4-bit** — diffusion, where the phases matter:
+
+| Phase | Predicted | Note |
+|---|---|---|
+| Load | 19.1 GB | fp16 weights, quantized in memory — the peak |
+| Encode | 2.7 GB | text encoders, freed afterwards |
+| Denoise | 2.7 GB | 8 steps through the transformer |
+| Decode | 921 MB | VAE |
+| **Peak** | **19.1 GB** | against **17.9 GB** measured — +6.5% |
+
+Measured three times (17.94, 17.9, 17.9 GB) via MFLUX's own `Peak MLX memory` figure. Summing the
+phases instead of taking the tallest would have said 25.4 GB; assuming the weights arrive already
+quantized — the first version of this planner — said 2.7 GB, a 6.6x under-estimate that would
+have promised a comfortable fit and then swapped.
+
+The component parameter counts behind that come from the safetensors headers of the downloaded
+weights, not from model cards: klein-4B's text encoder is 4.15B, larger than its 4.0B transformer,
+and it is what sets the peak.
+
+KV figures are exact because they are pure arithmetic. Compute buffers and the diffusion load
+phase are deliberately over-reserved — predicting *more* memory than is used is the safe
+direction.
 
 ---
 
