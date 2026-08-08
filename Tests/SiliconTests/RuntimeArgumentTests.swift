@@ -238,6 +238,22 @@ struct QuantizationTests {
     @Test func returnsNilWhenThereIsNoQuantizationInTheName() {
         #expect(Quantization.inferred(fromFilename: "model.gguf") == nil)
     }
+
+    /// Regression: IQ formats used to fall through to nil (and every call site then defaulted
+    /// to Q4_K_M), which understated how much memory a low-bit IQ model actually needs to plan
+    /// against — the opposite of the mistake that matters, since it makes an oversized model
+    /// look like it fits.
+    @Test(arguments: [
+        ("model-IQ1_S.gguf", Quantization.iq1_S),
+        ("Llama-3.3-70B-Instruct-IQ2_XXS.gguf", .iq2_XXS),
+        ("model-IQ3_M.gguf", .iq3_M),
+        ("model-IQ4_XS.gguf", .iq4_XS),
+        ("model-IQ4_NL.gguf", .iq4_NL),
+    ])
+    func recognizesIQFormats(filename: String, expected: Quantization) {
+        #expect(Quantization.inferred(fromFilename: filename) != .q4_K_M)
+        #expect(Quantization.inferred(fromFilename: filename) == expected)
+    }
 }
 
 @Suite("Benchmark scoring")
