@@ -15,6 +15,14 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
     case q5_K_M = "Q5_K_M"
     case q6_K = "Q6_K"
     case q8_0 = "Q8_0"
+    // IQ formats use an importance-matrix codebook rather than plain per-block scale/min, which
+    // is what lets them reach sub-4-bit rates competitively — a plain Q3_K/Q2_K at the same size
+    // loses noticeably more. bitsPerWeight values are llama.cpp's published effective rates.
+    case iq1_S = "IQ1_S"
+    case iq2_XXS = "IQ2_XXS"
+    case iq3_M = "IQ3_M"
+    case iq4_XS = "IQ4_XS"
+    case iq4_NL = "IQ4_NL"
     case f16 = "F16"
     case bf16 = "BF16"
     /// Microscaling FP4. Unlike the Q* formats this is not a post-training compression — some
@@ -41,6 +49,11 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .q5_K_M: 5.69
         case .q6_K: 6.56
         case .q8_0: 8.50
+        case .iq1_S: 1.56
+        case .iq2_XXS: 2.06
+        case .iq3_M: 3.70
+        case .iq4_XS: 4.25
+        case .iq4_NL: 4.50
         case .f16, .bf16: 16.0
         case .mxfp4: 4.25
         case .mlx4: 4.50
@@ -64,6 +77,11 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .q5_K_M: 0.6
         case .q6_K: 0.2
         case .q8_0: 0.05
+        case .iq1_S: 35.0
+        case .iq2_XXS: 20.0
+        case .iq3_M: 6.0
+        case .iq4_XS: 2.3
+        case .iq4_NL: 2.0
         case .f16, .bf16: 0.0
         case .mxfp4: 0.3
         case .mlx4: 2.5
@@ -106,6 +124,11 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .q5_K_S, .q5_K_M: "Higher fidelity when you have memory to spare."
         case .q6_K: "Near-lossless. Worth it on 64 GB+ machines."
         case .q8_0: "Essentially lossless. Large."
+        case .iq1_S: "Extreme compression via an importance matrix. Only for models Q2_K can't fit."
+        case .iq2_XXS: "Sub-3-bit with an importance matrix. Better than Q2_K at a similar size."
+        case .iq3_M: "Importance-matrix 3-bit. A stronger alternative to Q3_K at similar size."
+        case .iq4_XS: "Importance-matrix 4-bit, smaller than Q4_K_S at comparable quality."
+        case .iq4_NL: "Importance-matrix 4-bit, non-linear codebook. Close to Q4_K_M quality."
         case .f16, .bf16: "Unquantized. Only for small models or very large machines."
         case .mxfp4: "Native 4-bit release format. Lossless for models trained in it."
         case .mlx4: "MLX 4-bit. Fast on Apple Silicon."
