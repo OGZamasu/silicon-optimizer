@@ -225,6 +225,11 @@ enum Tools {
                 "steps": property("number", "Denoising steps. Distilled models need very few."),
                 "quantization": property("string", "MLX-4bit, MLX-6bit or MLX-8bit."),
                 "seed": property("number", "Optional seed for a reproducible image."),
+                "allow_over_budget": property(
+                    "boolean",
+                    "Generate even when the plan says it will not fit. Only for a configuration "
+                    + "already measured to work — the estimate is pessimistic on some models."
+                ),
             ],
             required: ["prompt"]
         ),
@@ -541,7 +546,8 @@ enum Tools {
             height: arguments["height"]?.intValue,
             steps: arguments["steps"]?.intValue,
             quantization: arguments["quantization"]?.stringValue,
-            seed: arguments["seed"]?.intValue
+            seed: arguments["seed"]?.intValue,
+            allowOverBudget: arguments["allow_over_budget"]?.boolValue
         )
     }
 

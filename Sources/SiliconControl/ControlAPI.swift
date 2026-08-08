@@ -454,10 +454,23 @@ public enum ControlAPI {
         public var steps: Int?
         public var quantization: String?
         public var seed: Int?
+        /// Proceed even when the plan says the run will not fit.
+        ///
+        /// The planner is deliberately pessimistic, and on some model families it is pessimistic
+        /// enough to refuse a configuration that runs comfortably. On FLUX.2-klein-4B it predicts
+        /// 19.1 GB for every resolution, while measured peak on a 24 GB M5 Pro runs from 10.52 GB
+        /// at 512x512 to 17.94 GB at 1024x1024 — so a 512px render is refused with 7.5 GB of
+        /// headroom to spare. Someone who has measured their own case should be able to say so
+        /// rather than be locked out by an estimate.
+        ///
+        /// Off by default: the estimate is right more often than not, and the failure it guards
+        /// against is an opaque allocation death minutes into a run.
+        public var allowOverBudget: Bool?
 
         public init(
             prompt: String, modelID: String? = nil, width: Int? = nil, height: Int? = nil,
-            steps: Int? = nil, quantization: String? = nil, seed: Int? = nil
+            steps: Int? = nil, quantization: String? = nil, seed: Int? = nil,
+            allowOverBudget: Bool? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -466,6 +479,7 @@ public enum ControlAPI {
             self.steps = steps
             self.quantization = quantization
             self.seed = seed
+            self.allowOverBudget = allowOverBudget
         }
     }
 
