@@ -1,9 +1,18 @@
 name: CI
 
+# Push to main only, deliberately.
+#
+# This runs on a self-hosted runner — a real Mac. Adding `pull_request` to a public repository
+# would let anyone on the internet execute arbitrary code on that machine simply by opening a
+# pull request, with access to whatever the runner's user can reach. Only people with write
+# access can push, so this trigger is the safe one.
+#
+# To validate pull requests, use a GitHub-hosted runner for that job, or turn on
+# "Require approval for all external contributors" and accept that every PR needs a click.
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,21 +20,22 @@ concurrency:
 
 jobs:
   build-and-test:
-    # Apple Silicon runner. The hardware probes read real Apple Silicon sysctls and the
-    # IORegistry, so the detection tests would fail on an Intel runner.
-    runs-on: macos-15
+    # Self-hosted, on real Apple Silicon. The hardware probes read actual sysctls and the
+    # IORegistry, so the detection tests are meaningful here in a way they would not be on a
+    # generic cloud runner — and GitHub-hosted minutes are not consumed at all.
+    runs-on: [self-hosted, macOS, ARM64]
 
     steps:
       - uses: actions/checkout@v4
 
-      # Pick the newest Xcode the image has rather than pinning an exact version — the
-      # runner images rename these regularly, and a stale path fails the whole job.
-      - name: Select the newest Xcode
+      # A self-hosted runner uses whatever toolchain the machine already has, so there is
+      # nothing to select — just record it, because "works on my Mac" is exactly the failure
+      # mode this job exists to catch.
+      - name: Record the toolchain
         run: |
-          NEWEST="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
-          echo "Using $NEWEST"
-          sudo xcode-select -s "$NEWEST"
           swift --version
+          xcodebuild -version
+          sysctl -n machdep.cpu.brand_string
 
       - name: Build
         run: swift build --configuration release
