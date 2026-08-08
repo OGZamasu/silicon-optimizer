@@ -51,6 +51,13 @@ struct HardwareTests {
         #expect(HardwareProbe.memoryBandwidth(generation: .m3, variant: .max, gpuCores: 40) == 400)
     }
 
+    /// Unlike the rest of the M5 family, Pro is a real measurement (see HardwareProbe.swift),
+    /// not a ratio scaled from the M4 family. Pinned so a future "refine the estimate" pass
+    /// doesn't silently regress it back to a guess.
+    @Test func m5ProBandwidthIsMeasuredNotEstimated() {
+        #expect(HardwareProbe.memoryBandwidth(generation: .m5, variant: .pro, gpuCores: 20) == 385)
+    }
+
     /// The safe budget must always leave the system something to work with.
     @Test(arguments: [8.0, 16.0, 24.0, 36.0, 64.0, 128.0, 512.0])
     func budgetLeavesHeadroom(memoryGiB: Double) {

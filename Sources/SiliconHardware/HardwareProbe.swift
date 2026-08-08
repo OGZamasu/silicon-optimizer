@@ -123,8 +123,14 @@ public enum HardwareProbe {
 
         // M5 moved to LPDDR5X. Higher-tier parts are estimated by scaling the base part on
         // the same ratios the M4 family used; they are refined once real silicon reports in.
+        //
+        // M5 Pro is measured, not scaled: a 24 GB M5 Pro (20 GPU cores) running llama.cpp
+        // 10310 decoding Qwen3 8B Q4_K_M reported 46.5 tok/s averaged over three /benchmark
+        // runs against a 41.7 tok/s prediction at the old 345 estimate — a 1.116x calibration,
+        // i.e. ~385 GB/s of effective bandwidth at the same 0.60 bandwidthEfficiency the
+        // estimator already assumes. Measured 2026-08-08.
         case (.m5, .base): 153
-        case (.m5, .pro): 345
+        case (.m5, .pro): 385
         case (.m5, .max): gpuCores <= 32 ? 520 : 690
         case (.m5, .ultra): 1380
 
