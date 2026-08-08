@@ -365,3 +365,153 @@ public enum ControlHostError: Error, LocalizedError {
         }
     }
 }
+
+// MARK: - Image generation over the control API
+
+extension AppModel {
+
+    public func imageModels() async -> [ControlAPI.ImageModel] {
+        DiffusionCatalog.all.map { entry in
+            let configuration = recommendedImageConfiguration(for: entry)
+            return ControlAPI.ImageModel(
+                id: entry.id,
+                name: entry.name,
+                author: entry.author,
+                license: entry.license,
+                summary: entry.summary,
+                parameters: entry.parameterLabel,
+                blocks: entry.shape.blockCount,
+                defaultSteps: entry.shape.defaultSteps,
+                isGated: entry.isGated,
+                recommendation: describe(
+                    diffusionPlan(for: entry, configuration: configuration),
+                    configuration: configuration
+                )
+            )
+        }
+    }
+
+    public func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
+        let (entry, configuration) = try resolveImage(request)
+        return describe(
+            diffusionPlan(for: entry, configuration: configuration),
+            configuration: configuration
+        )
+    }
+
+    public func generateImage(
+        _ request: ControlAPI.ImageRequest
+    ) async throws -> ControlAPI.ImageResponse {
+        guard let installation = imageRuntime ?? MFluxRuntime.locate() else {
+            throw ImageRuntimeError.notInstalled
+        }
+        let (entry, configuration) = try resolveImage(request)
+        let predicted = diffusionPlan(for: entry, configuration: configuration)
+
+        // Refuse rather than let the runtime die minutes in with an opaque allocation failure.
+        guard predicted.verdict.isUsable else {
+            throw ControlHostError.loadFailed(
+                "\(entry.name) would peak at \(predicted.peak.formatted) during "
+                + "\(predicted.peakPhase?.name.lowercased() ?? "generation"), against a "
+                + "\(predicted.budget.formatted) budget. "
+                + (predicted.remediations.first.map { "Try: \($0.title)." } ?? "")
+            )
+        }
+
+        noteActivity()
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-image-\(UUID().uuidString).png")
+        let carrier = InstalledModel(
+            id: entry.id, name: entry.name, catalogID: entry.id,
+            quantization: configuration.quantization, format: .mlx,
+            primaryFile: output, allFiles: [], projectorFile: nil,
+            sizeOnDisk: .zero, installedAt: Date(), shape: nil, capabilities: []
+        )
+
+        imageState = .starting(stage: "Starting MFLUX…")
+        defer { imageState = .idle; imageProgress = nil }
+
+        var result: ImageResult?
+        for try await event in try await MFluxRuntime(installation: installation).generate(
+            ImageRequest(
+                prompt: request.prompt, configuration: configuration,
+                seed: request.seed, output: output
+            ),
+            model: carrier
+        ) {
+            switch event {
+            case .stage(let stage): imageState = .starting(stage: stage)
+            case .step(let index, let total):
+                imageProgress = (index, total)
+                imageState = .starting(stage: "Denoising \(index)/\(total)…")
+            case .finished(let finished):
+                result = finished
+                lastImage = finished
+            }
+        }
+
+        guard let result else { throw ImageRuntimeError.noImageProduced }
+        return ControlAPI.ImageResponse(
+            path: result.image.path,
+            elapsedSeconds: result.elapsed,
+            peakMemoryBytes: result.peakMemory?.rawValue,
+            predictedPeakBytes: predicted.peak.rawValue,
+            model: entry.name
+        )
+    }
+
+    // MARK: - Mapping
+
+    private func resolveImage(
+        _ request: ControlAPI.ImageRequest
+    ) throws -> (DiffusionEntry, ImageConfiguration) {
+        let entry: DiffusionEntry
+        if let id = request.modelID {
+            guard let match = DiffusionCatalog.entry(id: id) else {
+                throw ControlHostError.unknownModel(id)
+            }
+            entry = match
+        } else {
+            // Default to the best thing this Mac can comfortably run.
+            entry = DiffusionCatalog.all.first {
+                diffusionPlan(
+                    for: $0, configuration: recommendedImageConfiguration(for: $0)
+                ).verdict == .comfortable && !$0.isGated
+            } ?? DiffusionCatalog.fluxSchnell
+        }
+
+        var configuration = recommendedImageConfiguration(for: entry)
+        if let width = request.width { configuration.width = width }
+        if let height = request.height { configuration.height = height }
+        if let steps = request.steps { configuration.steps = steps }
+        if let raw = request.quantization, let quantization = Quantization(rawValue: raw) {
+            configuration.quantization = quantization
+        }
+        return (entry, configuration)
+    }
+
+    private func describe(
+        _ plan: DiffusionPlan, configuration: ImageConfiguration
+    ) -> ControlAPI.ImagePlan {
+        ControlAPI.ImagePlan(
+            width: configuration.width,
+            height: configuration.height,
+            steps: configuration.steps,
+            quantization: configuration.quantization.rawValue,
+            peakBytes: plan.peak.rawValue,
+            peakPhase: plan.peakPhase?.name ?? "",
+            budgetBytes: plan.budget.rawValue,
+            verdict: plan.verdict.label,
+            phases: plan.phases.map {
+                .init(name: $0.name, detail: $0.detail, residentBytes: $0.resident.rawValue)
+            },
+            suggestions: plan.remediations.map {
+                ControlAPI.Suggestion(
+                    title: $0.title, detail: $0.detail,
+                    savingBytes: $0.saving.rawValue, cost: $0.cost
+                )
+            },
+            notes: plan.notes
+        )
+    }
+}

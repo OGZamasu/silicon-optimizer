@@ -85,6 +85,34 @@ public enum RuntimeLocator {
         return results.compactMap { $0 }
     }
 
+    /// Finds `mflux-generate`.
+    ///
+    /// Same problem as mlx-lm: PEP 668 pushes everyone into a virtual environment, and an app
+    /// launched from Finder does not inherit the shell PATH that would find it.
+    public static func locateMFlux() -> RuntimeInstallation? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        var candidates: [URL?] = [customPaths[.mlx].map {
+            $0.deletingLastPathComponent().appendingPathComponent("mflux-generate")
+        }]
+        for directory in [
+            ".silicon-mlx/bin", ".local/bin", ".venv/bin", "venv/bin",
+            "miniconda3/bin", "anaconda3/bin",
+        ] {
+            candidates.append(home.appendingPathComponent("\(directory)/mflux-generate"))
+        }
+        candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/mflux-generate"))
+        candidates.append(which("mflux-generate"))
+
+        for url in candidates.compactMap({ $0 }) where isExecutable(url) {
+            return RuntimeInstallation(
+                kind: .mlx, executable: url, version: nil,
+                hasExpertStreaming: false,
+                source: url.path.hasPrefix("/opt/homebrew") ? .homebrew : .systemPath
+            )
+        }
+        return nil
+    }
+
     // MARK: - Candidates
 
     private static func llamaCandidates() -> [(URL, RuntimeInstallation.Source)] {

@@ -183,6 +183,52 @@ enum Tools {
             properties: [:], required: []
         ),
         Tool(
+            name: "list_image_models",
+            description: """
+                Image generation models this Mac can run, each with a memory plan. Diffusion \
+                memory is phased — encode, denoise, decode — and the phases release each \
+                other's memory, so what matters is the tallest one rather than the total.
+                """,
+            properties: [:], required: []
+        ),
+        Tool(
+            name: "plan_image",
+            description: """
+                Predict what generating an image will cost before running it: the three phases, \
+                which one peaks, and whether it fits. Cost scales with image *area*, so \
+                doubling the width roughly quadruples the memory. Use this to answer "can I \
+                render 2048x2048?" without waiting for a failure.
+                """,
+            properties: [
+                "prompt": property("string", "Not used for planning, but accepted so the same "
+                    + "arguments work for generate_image."),
+                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b."),
+                "width": property("number", "Image width in pixels."),
+                "height": property("number", "Image height in pixels."),
+                "steps": property("number", "Denoising steps."),
+                "quantization": property("string", "MLX-4bit, MLX-6bit or MLX-8bit."),
+            ],
+            required: []
+        ),
+        Tool(
+            name: "generate_image",
+            description: """
+                Generate an image on this Mac and return the path to it. Runs entirely locally. \
+                Refuses rather than starting a run the memory plan says will not fit. The first \
+                use of a model downloads its weights, which can take several minutes.
+                """,
+            properties: [
+                "prompt": property("string", "What to draw."),
+                "model_id": property("string", "Optional. Defaults to the best model that fits."),
+                "width": property("number", "Image width in pixels."),
+                "height": property("number", "Image height in pixels."),
+                "steps": property("number", "Denoising steps. Distilled models need very few."),
+                "quantization": property("string", "MLX-4bit, MLX-6bit or MLX-8bit."),
+                "seed": property("number", "Optional seed for a reproducible image."),
+            ],
+            required: ["prompt"]
+        ),
+        Tool(
             name: "get_status",
             description: "What is loaded right now, at what settings, and its last measured speed.",
             properties: [:], required: []
@@ -271,6 +317,47 @@ enum Tools {
                 expertSlots: arguments["expert_slots"]?.intValue
             )
             return describe(try await client.post("/load", request) as ControlAPI.Status)
+
+        case "list_image_models":
+            let models: [ControlAPI.ImageModel] = try await client.get("/image/models")
+            return models.map { model in
+                var line = "- \(model.name) [\(model.id)] — \(model.parameters), "
+                    + "\(model.blocks) blocks, \(model.defaultSteps) steps"
+                if model.isGated { line += " (gated)" }
+                if let plan = model.recommendation {
+                    line += "\n  \(plan.width)x\(plan.height) peaks at "
+                        + "\(bytes(plan.peakBytes)) during \(plan.peakPhase.lowercased()) "
+                        + "— \(plan.verdict)"
+                } else {
+                    line += "\n  too large for this Mac"
+                }
+                return line
+            }.joined(separator: "\n")
+
+        case "plan_image":
+            let plan: ControlAPI.ImagePlan = try await client.post("/image/plan", imageRequest(arguments))
+            return describe(plan)
+
+        case "generate_image":
+            guard arguments["prompt"]?.stringValue != nil else {
+                throw ToolError.missing("prompt")
+            }
+            let response: ControlAPI.ImageResponse = try await client.post(
+                "/image/generate", imageRequest(arguments)
+            )
+            var lines = [
+                "Generated with \(response.model).",
+                "  path    : \(response.path)",
+                String(format: "  time    : %.1fs", response.elapsedSeconds),
+                "  predicted peak: \(bytes(response.predictedPeakBytes))",
+            ]
+            if let measured = response.peakMemoryBytes {
+                let error = abs(Double(measured - response.predictedPeakBytes))
+                    / Double(max(1, response.predictedPeakBytes)) * 100
+                lines.append("  measured peak : \(bytes(measured)) "
+                    + String(format: "(%.0f%% from prediction)", error))
+            }
+            return lines.joined(separator: "\n")
 
         case "run_benchmark":
             let result: ControlAPI.BenchmarkResult = try await client.postEmpty("/benchmark")
@@ -441,6 +528,44 @@ enum Tools {
                     "- \(suggestion.title) (saves \(bytes(suggestion.savingBytes)))"
                     + "\n  \(suggestion.detail)\n  Cost: \(suggestion.cost)"
                 )
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func imageRequest(_ arguments: [String: JSONValue]) -> ControlAPI.ImageRequest {
+        ControlAPI.ImageRequest(
+            prompt: arguments["prompt"]?.stringValue ?? "",
+            modelID: arguments["model_id"]?.stringValue,
+            width: arguments["width"]?.intValue,
+            height: arguments["height"]?.intValue,
+            steps: arguments["steps"]?.intValue,
+            quantization: arguments["quantization"]?.stringValue,
+            seed: arguments["seed"]?.intValue
+        )
+    }
+
+    static func describe(_ plan: ControlAPI.ImagePlan) -> String {
+        var lines = [
+            "\(plan.width)x\(plan.height) · \(plan.steps) steps · \(plan.quantization)",
+            "Verdict: \(plan.verdict)",
+            "Peak: \(bytes(plan.peakBytes)) during \(plan.peakPhase.lowercased()), "
+                + "against a \(bytes(plan.budgetBytes)) budget",
+            "",
+            "Phases (they do not overlap — only the tallest matters):",
+        ]
+        for phase in plan.phases {
+            let marker = phase.name == plan.peakPhase ? " <- peak" : ""
+            lines.append("  \(phase.name.padding(toLength: 8, withPad: " ", startingAt: 0)) "
+                + "\(bytes(phase.residentBytes))\(marker)")
+            lines.append("           \(phase.detail)")
+        }
+        for note in plan.notes { lines.append("\nNote: \(note)") }
+        if !plan.suggestions.isEmpty {
+            lines.append("\nSuggestions:")
+            for suggestion in plan.suggestions {
+                lines.append("- \(suggestion.title) (saves \(bytes(suggestion.savingBytes)))"
+                    + "\n  \(suggestion.detail)\n  Cost: \(suggestion.cost)")
             }
         }
         return lines.joined(separator: "\n")

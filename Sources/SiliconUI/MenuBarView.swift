@@ -195,6 +195,10 @@ struct MenuBarView: View {
                 model.selectedTab = .models
                 openMainWindow()
             }
+            menuButton("Images", systemImage: "photo.on.rectangle.angled") {
+                model.selectedTab = .images
+                openMainWindow()
+            }
             Divider().padding(.vertical, 4)
             menuButton("Settings…", systemImage: "gearshape") {
                 model.selectedTab = .settings

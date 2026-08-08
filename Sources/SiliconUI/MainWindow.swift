@@ -28,6 +28,7 @@ public struct MainWindow: View {
             case .dashboard: DashboardView()
             case .models: ModelBrowserView()
             case .chat: ChatView()
+            case .images: ImageView()
             case .settings: SettingsView()
             }
         }

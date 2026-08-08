@@ -127,6 +127,16 @@ public actor ControlServer {
             case ("POST", "/unload"):
                 await host.unload()
                 return .json(["status": "unloaded"])
+            case ("GET", "/image/models"):
+                return try .encode(await host.imageModels())
+            case ("POST", "/image/plan"):
+                return try .encode(await host.planImage(
+                    try request.decode(ControlAPI.ImageRequest.self)
+                ))
+            case ("POST", "/image/generate"):
+                return try .encode(await host.generateImage(
+                    try request.decode(ControlAPI.ImageRequest.self)
+                ))
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):

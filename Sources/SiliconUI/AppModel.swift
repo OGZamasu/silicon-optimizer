@@ -91,6 +91,7 @@ public final class AppModel {
         case dashboard = "Dashboard"
         case models = "Models"
         case chat = "Chat"
+        case images = "Images"
         case settings = "Settings"
 
         public var id: String { rawValue }
@@ -100,6 +101,7 @@ public final class AppModel {
             case .dashboard: "gauge.with.dots.needle.67percent"
             case .models: "square.stack.3d.up"
             case .chat: "bubble.left.and.bubble.right"
+            case .images: "photo.on.rectangle.angled"
             case .settings: "gearshape"
             }
         }
@@ -109,6 +111,133 @@ public final class AppModel {
         public let id = UUID()
         public var title: String
         public var message: String
+    }
+
+    // MARK: - Image generation
+
+    public internal(set) var imageRuntime: RuntimeInstallation?
+    public internal(set) var imageState: RuntimeState = .idle
+    public internal(set) var lastImage: ImageResult?
+    public internal(set) var imageProgress: (step: Int, total: Int)?
+    public var imagePrompt = ""
+    public var imageConfiguration = ImageConfiguration()
+    /// Switching model adopts that model's step count.
+    ///
+    /// These are not interchangeable numbers: schnell is distilled to finish in 4 steps and klein
+    /// expects 8, so carrying a step count across a model switch quietly produces a worse image
+    /// than the model is capable of. An explicit change to the stepper still stands until the
+    /// next switch.
+    public var selectedDiffusionModel: String = DiffusionCatalog.fluxSchnell.id {
+        didSet {
+            guard selectedDiffusionModel != oldValue,
+                  let entry = DiffusionCatalog.entry(id: selectedDiffusionModel) else { return }
+            imageConfiguration.steps = entry.shape.defaultSteps
+        }
+    }
+
+    private var imageTask: Task<Void, Never>?
+
+    public var isGeneratingImage: Bool { imageTask != nil }
+
+    public func diffusionPlanner() -> DiffusionPlanner { DiffusionPlanner(profile: profile) }
+
+    public func diffusionPlan(
+        for entry: DiffusionEntry, configuration: ImageConfiguration
+    ) -> DiffusionPlan {
+        // Whether a quantized copy can be read back is a fact about the model family, not
+        // something the caller should have to remember to set, so it is filled in here — every
+        // plan in the app goes through this method.
+        var configuration = configuration
+        configuration.canReuseQuantizedSave = entry.supportsQuantizedReuse
+        return diffusionPlanner().plan(
+            shape: entry.shape, configuration: configuration,
+            otherAppsInUse: memoryUsedByOtherApps
+        )
+    }
+
+    /// The best image configuration this Mac can run for a given model — same idea as the
+    /// language recommendation, walking down resolution and precision until it fits.
+    public func recommendedImageConfiguration(for entry: DiffusionEntry) -> ImageConfiguration {
+        let planner = diffusionPlanner()
+        for quantization in entry.quantizations.reversed() {
+            for side in [entry.shape.nativeResolution, 768, 512] {
+                let candidate = ImageConfiguration(
+                    width: side, height: side,
+                    steps: entry.shape.defaultSteps, quantization: quantization
+                )
+                if planner.plan(
+                    shape: entry.shape, configuration: candidate,
+                    otherAppsInUse: memoryUsedByOtherApps
+                ).verdict == .comfortable {
+                    return candidate
+                }
+            }
+        }
+        // Nothing fit outright; fall back to the cheapest thing that runs at all.
+        return ImageConfiguration(
+            width: 512, height: 512, steps: entry.shape.defaultSteps,
+            quantization: .mlx4, tiledDecode: true
+        )
+    }
+
+    public func generateImage() {
+        guard !isGeneratingImage,
+              let entry = DiffusionCatalog.entry(id: selectedDiffusionModel),
+              !imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+
+        noteActivity()
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-image-\(UUID().uuidString).png")
+        // Diffusion runs as a standalone process, so an InstalledModel is only a carrier for
+        // the catalog id the runtime maps to its own alias.
+        let carrier = InstalledModel(
+            id: entry.id, name: entry.name, catalogID: entry.id,
+            quantization: imageConfiguration.quantization, format: .mlx,
+            primaryFile: output, allFiles: [], projectorFile: nil,
+            sizeOnDisk: .zero, installedAt: Date(), shape: nil, capabilities: []
+        )
+        let request = ImageRequest(
+            prompt: imagePrompt, configuration: imageConfiguration,
+            seed: nil, output: output
+        )
+
+        imageState = .starting(stage: "Starting MFLUX…")
+        imageProgress = nil
+        let runtime = MFluxRuntime(installation: imageRuntime)
+
+        imageTask = Task { [weak self] in
+            defer { Task { @MainActor in self?.imageTask = nil } }
+            do {
+                for try await event in try await runtime.generate(request, model: carrier) {
+                    guard let self else { return }
+                    switch event {
+                    case .stage(let stage):
+                        imageState = .starting(stage: stage)
+                    case .step(let index, let total):
+                        imageProgress = (index, total)
+                        imageState = .starting(stage: "Denoising \(index)/\(total)…")
+                    case .finished(let result):
+                        lastImage = result
+                        imageProgress = nil
+                        imageState = .idle
+                    }
+                }
+            } catch {
+                guard let self else { return }
+                imageState = .failed(message: error.localizedDescription)
+                alert = AlertContent(
+                    title: "Could not generate the image", message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    public func cancelImage() {
+        imageTask?.cancel()
+        imageTask = nil
+        imageState = .idle
+        imageProgress = nil
     }
 
     /// Automatic updates. Created lazily because instantiating Sparkle starts its scheduler.
@@ -138,6 +267,7 @@ public final class AppModel {
         guard !hasStarted else { return }
         hasStarted = true
         selector = RuntimeSelector.discover()
+        imageRuntime = MFluxRuntime.locate()
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
         beginSampling()
@@ -696,6 +826,7 @@ public final class AppModel {
     public func rediscoverRuntimes() {
         RuntimeLocator.customPaths = settings.customRuntimePaths
         selector = RuntimeSelector.discover()
+        imageRuntime = MFluxRuntime.locate()
     }
 
     /// The exact command the app would run for the current model, shown in Advanced mode so a

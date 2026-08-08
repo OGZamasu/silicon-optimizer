@@ -371,6 +371,123 @@ public enum ControlAPI {
         }
     }
 
+    public struct ImageModel: Codable, Sendable {
+        public var id: String
+        public var name: String
+        public var author: String
+        public var license: String
+        public var summary: String
+        public var parameters: String
+        public var blocks: Int
+        public var defaultSteps: Int
+        public var isGated: Bool
+        public var recommendation: ImagePlan?
+
+        public init(
+            id: String, name: String, author: String, license: String, summary: String,
+            parameters: String, blocks: Int, defaultSteps: Int, isGated: Bool,
+            recommendation: ImagePlan?
+        ) {
+            self.id = id
+            self.name = name
+            self.author = author
+            self.license = license
+            self.summary = summary
+            self.parameters = parameters
+            self.blocks = blocks
+            self.defaultSteps = defaultSteps
+            self.isGated = isGated
+            self.recommendation = recommendation
+        }
+    }
+
+    /// A diffusion memory plan. Phased rather than a single total, because the stages release
+    /// each other's memory and only the tallest one decides whether generation succeeds.
+    public struct ImagePlan: Codable, Sendable {
+        public var width: Int
+        public var height: Int
+        public var steps: Int
+        public var quantization: String
+        public var peakBytes: Int64
+        public var peakPhase: String
+        public var budgetBytes: Int64
+        public var verdict: String
+        public var phases: [Phase]
+        public var suggestions: [Suggestion]
+        public var notes: [String]
+
+        public struct Phase: Codable, Sendable {
+            public var name: String
+            public var detail: String
+            public var residentBytes: Int64
+            public init(name: String, detail: String, residentBytes: Int64) {
+                self.name = name
+                self.detail = detail
+                self.residentBytes = residentBytes
+            }
+        }
+
+        public init(
+            width: Int, height: Int, steps: Int, quantization: String,
+            peakBytes: Int64, peakPhase: String, budgetBytes: Int64, verdict: String,
+            phases: [Phase], suggestions: [Suggestion], notes: [String]
+        ) {
+            self.width = width
+            self.height = height
+            self.steps = steps
+            self.quantization = quantization
+            self.peakBytes = peakBytes
+            self.peakPhase = peakPhase
+            self.budgetBytes = budgetBytes
+            self.verdict = verdict
+            self.phases = phases
+            self.suggestions = suggestions
+            self.notes = notes
+        }
+    }
+
+    public struct ImageRequest: Codable, Sendable {
+        public var prompt: String
+        public var modelID: String?
+        public var width: Int?
+        public var height: Int?
+        public var steps: Int?
+        public var quantization: String?
+        public var seed: Int?
+
+        public init(
+            prompt: String, modelID: String? = nil, width: Int? = nil, height: Int? = nil,
+            steps: Int? = nil, quantization: String? = nil, seed: Int? = nil
+        ) {
+            self.prompt = prompt
+            self.modelID = modelID
+            self.width = width
+            self.height = height
+            self.steps = steps
+            self.quantization = quantization
+            self.seed = seed
+        }
+    }
+
+    public struct ImageResponse: Codable, Sendable {
+        public var path: String
+        public var elapsedSeconds: Double
+        public var peakMemoryBytes: Int64?
+        public var predictedPeakBytes: Int64
+        public var model: String
+
+        public init(
+            path: String, elapsedSeconds: Double, peakMemoryBytes: Int64?,
+            predictedPeakBytes: Int64, model: String
+        ) {
+            self.path = path
+            self.elapsedSeconds = elapsedSeconds
+            self.peakMemoryBytes = peakMemoryBytes
+            self.predictedPeakBytes = predictedPeakBytes
+            self.model = model
+        }
+    }
+
     public struct ErrorResponse: Codable, Sendable {
         public var error: String
         public init(error: String) { self.error = error }
@@ -391,4 +508,7 @@ public protocol ControlHost: AnyObject, Sendable {
     func unload() async
     func chat(_ request: ControlAPI.ChatRequest) async throws -> ControlAPI.ChatResponse
     func benchmark() async throws -> ControlAPI.BenchmarkResult
+    func imageModels() async -> [ControlAPI.ImageModel]
+    func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan
+    func generateImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImageResponse
 }
