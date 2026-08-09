@@ -409,12 +409,16 @@ extension AppModel {
         let predicted = diffusionPlan(for: entry, configuration: configuration)
 
         // Refuse rather than let the runtime die minutes in with an opaque allocation failure.
-        guard predicted.verdict.isUsable else {
+        // An explicit override exists because the estimate is not always right and being wrong
+        // in the pessimistic direction still leaves someone unable to run a model that works.
+        guard predicted.verdict.isUsable || request.allowOverBudget == true else {
             throw ControlHostError.loadFailed(
                 "\(entry.name) would peak at \(predicted.peak.formatted) during "
                 + "\(predicted.peakPhase?.name.lowercased() ?? "generation"), against a "
                 + "\(predicted.budget.formatted) budget. "
-                + (predicted.remediations.first.map { "Try: \($0.title)." } ?? "")
+                + (predicted.remediations.first.map { "Try: \($0.title). " } ?? "")
+                + "If you have measured this configuration and know it fits, set "
+                + "allowOverBudget to proceed anyway."
             )
         }
 
