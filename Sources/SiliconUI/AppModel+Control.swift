@@ -432,7 +432,9 @@ extension AppModel {
         defer { imageState = .idle; imageProgress = nil }
 
         var result: ImageResult?
-        for try await event in try await MFluxRuntime(installation: installation).generate(
+        for try await event in try await MFluxRuntime(
+            installation: installation, huggingFaceToken: settings.huggingFaceToken
+        ).generate(
             ImageRequest(
                 prompt: request.prompt, configuration: configuration,
                 seed: request.seed, output: output
