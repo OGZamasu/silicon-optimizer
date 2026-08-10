@@ -204,7 +204,9 @@ public final class AppModel {
 
         imageState = .starting(stage: "Starting MFLUX…")
         imageProgress = nil
-        let runtime = MFluxRuntime(installation: imageRuntime)
+        let runtime = MFluxRuntime(
+            installation: imageRuntime, huggingFaceToken: settings.huggingFaceToken
+        )
 
         imageTask = Task { [weak self] in
             defer { Task { @MainActor in self?.imageTask = nil } }
