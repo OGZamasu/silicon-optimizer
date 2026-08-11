@@ -118,6 +118,8 @@ public final class AppModel {
     public internal(set) var imageRuntime: RuntimeInstallation?
     public internal(set) var imageState: RuntimeState = .idle
     public internal(set) var lastImage: ImageResult?
+    /// Set when an image had to be written somewhere other than the configured directory.
+    public internal(set) var imageOutputWarning: String?
     public internal(set) var imageProgress: (step: Int, total: Int)?
     public var imagePrompt = ""
     public var imageConfiguration = ImageConfiguration()
@@ -140,6 +142,29 @@ public final class AppModel {
     public var isGeneratingImage: Bool { imageTask != nil }
 
     public func diffusionPlanner() -> DiffusionPlanner { DiffusionPlanner(profile: profile) }
+
+    /// A path for the next generated image, inside the user's configured output directory.
+    ///
+    /// Falls back to the temporary directory if that directory cannot be created — an external
+    /// volume that is no longer mounted, say. Throwing away an image that has already cost
+    /// minutes of compute because a folder is missing would be the worse failure, so the run
+    /// proceeds and `imageOutputWarning` explains where the file actually went.
+    func nextImageOutputURL() -> URL {
+        let directory = settings.resolvedImageOutputDirectory
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true
+            )
+            imageOutputWarning = nil
+            return directory.appendingPathComponent(Settings.imageFilename())
+        } catch {
+            imageOutputWarning =
+                "Could not write to \(directory.path) — saving to the temporary folder instead. "
+                + "Check the output directory in Settings."
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent(Settings.imageFilename())
+        }
+    }
 
     public func diffusionPlan(
         for entry: DiffusionEntry, configuration: ImageConfiguration
@@ -187,8 +212,7 @@ public final class AppModel {
         else { return }
 
         noteActivity()
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silicon-image-\(UUID().uuidString).png")
+        let output = nextImageOutputURL()
         // Diffusion runs as a standalone process, so an InstalledModel is only a carrier for
         // the catalog id the runtime maps to its own alias.
         let carrier = InstalledModel(

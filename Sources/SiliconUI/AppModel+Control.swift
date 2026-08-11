@@ -423,8 +423,7 @@ extension AppModel {
         }
 
         noteActivity()
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silicon-image-\(UUID().uuidString).png")
+        let output = nextImageOutputURL()
         let carrier = InstalledModel(
             id: entry.id, name: entry.name, catalogID: entry.id,
             quantization: configuration.quantization, format: .mlx,
