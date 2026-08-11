@@ -111,6 +111,36 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section("Generated images") {
+                LabeledContent("Save to") {
+                    HStack {
+                        TextField(
+                            Settings.defaultImageOutputDirectory.path,
+                            text: $model.settings.imageOutputDirectory
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        Button("Choose…") { chooseImageOutputDirectory() }
+                        if !model.settings.imageOutputDirectory.isEmpty {
+                            Button("Reset") { model.settings.imageOutputDirectory = "" }
+                        }
+                    }
+                }
+                HStack {
+                    Text("Images are written here as `silicon-<date>-<id>.png`.")
+                    Spacer()
+                    Button("Reveal in Finder") {
+                        let directory = model.settings.resolvedImageOutputDirectory
+                        try? FileManager.default.createDirectory(
+                            at: directory, withIntermediateDirectories: true
+                        )
+                        NSWorkspace.shared.activateFileViewerSelecting([directory])
+                    }
+                    .buttonStyle(.link)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             if model.settings.showAdvancedControls {
                 Section("Advanced") {
                     LabeledContent("llama-server path") {
@@ -205,5 +235,23 @@ struct SettingsView: View {
             }
         }
         .help(kind.summary)
+    }
+
+    /// Folder picker for the image output directory.
+    ///
+    /// Stored as a plain path rather than a security-scoped bookmark: this app is not sandboxed,
+    /// so a path is sufficient and survives being edited by hand in the field beside the button.
+    private func chooseImageOutputDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Where should generated images be saved?"
+        panel.directoryURL = model.settings.resolvedImageOutputDirectory
+        if panel.runModal() == .OK, let url = panel.url {
+            model.settings.imageOutputDirectory = url.path
+        }
     }
 }
