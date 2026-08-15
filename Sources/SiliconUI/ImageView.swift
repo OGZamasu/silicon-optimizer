@@ -121,10 +121,24 @@ struct ImageView: View {
                 Toggle("Decode in tiles", isOn: $model.imageConfiguration.tiledDecode)
                     .help("Caps the final VAE step, which is often the tallest moment of a run.")
 
+                installBanner
+                loadedModelBanner
+
                 HStack {
                     if model.isGeneratingImage {
                         Button("Stop") { model.cancelImage() }
                             .buttonStyle(.bordered)
+                    } else if unloadingWouldHelp {
+                        // One button, because it is one intention. Offering a disabled Generate
+                        // next to an explanation puts the work of connecting them on the reader.
+                        Button {
+                            model.unloadAndGenerateImage()
+                        } label: {
+                            Label("Unload and generate", systemImage: "eject")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canGenerate)
                     } else {
                         Button {
                             model.generateImage()
@@ -133,7 +147,7 @@ struct ImageView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!canGenerate)
+                        .disabled(!canGenerate || currentPlan?.verdict.isUsable == false)
                     }
                 }
 
@@ -147,6 +161,88 @@ struct ImageView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    /// Shown when the selected model's weights are not on disk yet.
+    ///
+    /// Generating without them still works — MFLUX fetches on demand — but it turns the first run
+    /// into a silent multi-gigabyte download behind a spinner that says "Fetching weights…". This
+    /// makes the cost visible and lets it happen deliberately instead.
+    @ViewBuilder
+    private var installBanner: some View {
+        if let entry = currentEntry, !model.isImageModelInstalled(entry) {
+            let download = model.imageDownloads[entry.id]
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "arrow.down.circle")
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Weights are not downloaded yet")
+                            .font(.caption.weight(.medium))
+                        Text("The first run fetches them, which takes a while. Downloading now "
+                             + "keeps that out of the middle of a generation.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
+                    if download == nil {
+                        Button("Download") { model.installImageModel(entry) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
+                }
+                if let download, let progress = download.progress,
+                   progress.bytesExpected > .zero {
+                    ProgressView(value: progress.fraction)
+                        .progressViewStyle(.linear)
+                    Text("\(progress.bytesReceived.formatted) of \(progress.bytesExpected.formatted)")
+                        .font(.caption2).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                } else if let download, download.error == nil {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Working out what to fetch…")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                if let error = download?.error {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(9)
+            .background(.background.secondary, in: .rect(cornerRadius: 7))
+        }
+    }
+
+    /// Shown whenever a language model is resident, because an image run does not replace it —
+    /// the two compete for the same memory at the same time.
+    @ViewBuilder
+    private var loadedModelBanner: some View {
+        if let loaded = model.loadedModel, model.memoryReclaimableByUnloading > .zero {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "cpu")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(loaded.name) is loaded")
+                        .font(.caption.weight(.medium))
+                    Text("Holding \(model.memoryReclaimableByUnloading.formatted) that this run "
+                         + "cannot use. It stays resident while the image generates.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                Button("Unload") { Task { await model.unload() } }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(9)
+            .background(.background.secondary, in: .rect(cornerRadius: 7))
         }
     }
 
@@ -315,6 +411,26 @@ struct ImageView: View {
 
     private var currentEntry: DiffusionEntry? {
         DiffusionCatalog.entry(id: model.selectedDiffusionModel)
+    }
+
+    private var currentPlan: DiffusionPlan? {
+        currentEntry.map { model.diffusionPlan(for: $0, configuration: model.imageConfiguration) }
+    }
+
+    /// True when the run does not fit now but would with the language model out of the way.
+    private var unloadingWouldHelp: Bool {
+        guard let entry = currentEntry, let plan = currentPlan, !plan.verdict.isUsable,
+              model.loadedModel != nil, model.memoryReclaimableByUnloading > .zero
+        else { return false }
+        let freed = model.diffusionPlanner().plan(
+            shape: entry.shape, configuration: model.imageConfiguration,
+            otherAppsInUse: Bytes(max(
+                0,
+                model.memoryUnavailableDuringImage.rawValue
+                    - model.memoryReclaimableByUnloading.rawValue
+            ))
+        )
+        return freed.verdict.isUsable
     }
 
     private var canGenerate: Bool {

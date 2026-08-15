@@ -20,6 +20,7 @@ struct ModelBrowserView: View {
                     installedSection
                 }
                 catalogSection
+                imageSection
                 remoteSection
             }
             .padding(20)
@@ -160,6 +161,33 @@ struct ModelBrowserView: View {
             ForEach(filteredEntries, id: \.entry.id) { row in
                 CatalogRow(entry: row.entry, recommendation: row.recommendation) {
                     inspecting = row.entry
+                }
+            }
+        }
+    }
+
+    // MARK: - Image models
+
+    /// Image models live in their own section rather than the main catalog.
+    ///
+    /// They are not interchangeable with language models anywhere that matters: a different
+    /// runtime, a phased memory plan instead of one number, and no quantization choice at install
+    /// time because the precision is decided per run. Filing them under the same list would imply
+    /// a sameness that breaks the moment you click anything.
+    @ViewBuilder
+    private var imageSection: some View {
+        if search.isEmpty, category == nil {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Image models")
+                        .font(.title3.weight(.semibold))
+                    Text("run through MFLUX")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach(DiffusionCatalog.all) { entry in
+                    DiffusionCatalogRow(entry: entry)
                 }
             }
         }
@@ -479,6 +507,138 @@ struct DownloadProgressView: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Resolving files on Hugging Face…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel", action: onCancel)
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+}
+
+/// One image model in the browser, with its phased peak and install state.
+private struct DiffusionCatalogRow: View {
+    @Environment(AppModel.self) private var model
+    var entry: DiffusionEntry
+
+    var body: some View {
+        let plan = model.diffusionPlan(
+            for: entry, configuration: model.recommendedImageConfiguration(for: entry)
+        )
+        let isInstalled = model.isImageModelInstalled(entry)
+        let download = model.imageDownloads[entry.id]
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(entry.name).font(.headline)
+                        if entry.isGated {
+                            Image(systemName: "lock")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .help("Gated — accept the licence on Hugging Face first")
+                        }
+                        if isInstalled {
+                            Badge(
+                                text: "Installed", systemImage: "checkmark.circle.fill",
+                                tint: .green
+                            )
+                        }
+                    }
+                    Text(entry.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 10) {
+                        Label(entry.parameterLabel, systemImage: "number")
+                        Label("\(entry.shape.defaultSteps) steps", systemImage: "arrow.trianglehead.2.clockwise")
+                        // The peak, not the download size: it is what decides whether this is
+                        // worth the disk in the first place.
+                        Label(
+                            "peaks at \(plan.peak.formatted)",
+                            systemImage: "memorychip"
+                        )
+                        .foregroundStyle(Palette.verdict(plan.verdict))
+                        if isInstalled {
+                            Label(model.installedImageModelSize(entry).formatted, systemImage: "internaldrive")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                if download == nil {
+                    if isInstalled {
+                        Button("Remove") { model.uninstallImageModel(entry) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    } else {
+                        Button("Install") { model.installImageModel(entry) }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                }
+            }
+
+            if let download {
+                ImageDownloadProgressView(download: download) {
+                    model.cancelImageInstall(entry.id)
+                }
+            }
+        }
+        .padding(12)
+        .background(.background.secondary, in: .rect(cornerRadius: 10))
+    }
+}
+
+/// Progress for an image-model install.
+///
+/// Separate from `DownloadProgressView` only because the underlying task type differs; the
+/// readout is deliberately identical, since to the reader it is the same activity.
+private struct ImageDownloadProgressView: View {
+    var download: AppModel.ImageDownloadTask
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let error = download.error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let progress = download.progress, progress.bytesExpected > .zero {
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                HStack {
+                    Text("\(progress.bytesReceived.formatted) of \(progress.bytesExpected.formatted)")
+                    Spacer()
+                    if progress.bytesPerSecond > 0 {
+                        Text("\(Bytes(Int64(progress.bytesPerSecond)).formatted)/s")
+                    }
+                    if let remaining = progress.estimatedTimeRemaining, remaining > 1 {
+                        Text("· \(remaining.durationLabel) left")
+                    }
+                    Button("Cancel", action: onCancel)
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Working out what to fetch…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()

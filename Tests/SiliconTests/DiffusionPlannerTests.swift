@@ -296,4 +296,68 @@ struct DiffusionMeasurementTests {
         let error = abs(predicted - measured) / measured
         #expect(error < 0.05, "predicted \(predicted / 1e9) GB against 4.61 GB measured")
     }
+
+    /// A resident language model has to be charged against an image run, because generating an
+    /// image does not replace it — llama-server keeps its weights the whole time.
+    ///
+    /// The app used to exclude the loaded model from the image budget (correct for planning
+    /// another *language* load, which would swap it out) and so called a 19 GB image run
+    /// comfortable while 20 GB of Qwen was resident on a 38 GB machine. It ran out of memory.
+    @Test func aResidentLanguageModelCountsAgainstAnImageRun() {
+        let planner = DiffusionPlanner(profile: m3Max)
+        let configuration = ImageConfiguration(
+            width: 1024, height: 1024, steps: 8, quantization: .mlx4
+        )
+        let shape = DiffusionCatalog.flux2Klein4B.shape
+
+        let alone = planner.plan(shape: shape, configuration: configuration, otherAppsInUse: .gib(3))
+        let alongsideAnLLM = planner.plan(
+            shape: shape, configuration: configuration, otherAppsInUse: .gib(23)
+        )
+
+        #expect(alone.verdict == .comfortable)
+        #expect(!alongsideAnLLM.verdict.isUsable)
+        // The run costs the same either way — it is the budget that moved.
+        #expect(alone.peak == alongsideAnLLM.peak)
+        #expect(alongsideAnLLM.budget < alone.budget)
+    }
+}
+
+@Suite("Image model installation")
+struct DiffusionInstallerTests {
+
+    /// The CLI reports human sizes, and a bare number means bytes.
+    @Test func parsesTheSizesTheCLIPrints() {
+        #expect(DiffusionInstaller.parseSize("7.8G") == 7_800_000_000)
+        #expect(DiffusionInstaller.parseSize("1.6K") == 1_600)
+        #expect(DiffusionInstaller.parseSize("2.5M") == 2_500_000)
+        #expect(DiffusionInstaller.parseSize("446.0") == 446)
+        #expect(DiffusionInstaller.parseSize("-") == 0)
+    }
+
+    /// Only the four directories MFLUX actually reads. Fetching the whole repository would pull
+    /// FLUX.2-klein-4B's 7.8 GB single-file variant, which it never opens.
+    @Test func fetchesOnlyTheComponentsTheRuntimeLoads() {
+        #expect(DiffusionInstaller.componentPatterns.sorted() == [
+            "text_encoder/*", "tokenizer/*", "transformer/*", "vae/*",
+        ])
+    }
+
+    /// Hugging Face's cache flattens `org/name` into `models--org--name`.
+    @Test func mapsRepositoriesOntoTheHubCacheLayout() {
+        let directory = DiffusionInstaller.cacheDirectory(
+            for: "black-forest-labs/FLUX.2-klein-4B"
+        )
+        #expect(directory.lastPathComponent == "models--black-forest-labs--FLUX.2-klein-4B")
+    }
+
+    /// Checked against the Hub API rather than inferred from the licence: schnell is Apache-2.0
+    /// but its repository is still gated, and klein-9B is gated too. Getting this wrong sends
+    /// someone into a download that fails with "access denied".
+    @Test func recordsWhichModelsAreGated() {
+        #expect(DiffusionCatalog.fluxSchnell.isGated)
+        #expect(DiffusionCatalog.fluxDev.isGated)
+        #expect(DiffusionCatalog.flux2Klein9B.isGated)
+        #expect(!DiffusionCatalog.flux2Klein4B.isGated)
+    }
 }

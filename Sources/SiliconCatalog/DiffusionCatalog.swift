@@ -93,7 +93,11 @@ public enum DiffusionCatalog {
         ),
         repository: "black-forest-labs/FLUX.1-schnell",
         quantizations: [.mlx4, .mlx6, .mlx8],
-        rating: 5
+        rating: 5,
+        // Apache-2.0, but the repository itself is still gated (`gated: auto` on the Hub API):
+        // the licence is permissive once you have the weights, and you accept terms to get them.
+        // Checked against the API rather than inferred from the licence.
+        isGated: true
     )
 
     /// FLUX.2-klein-4B — 5 double-stream plus 20 single-stream blocks, 2560 wide, 24 heads,
@@ -154,6 +158,7 @@ public enum DiffusionCatalog {
         repository: "black-forest-labs/FLUX.2-klein-9B",
         quantizations: [.mlx4, .mlx6, .mlx8],
         rating: 4,
+        isGated: true,
         supportsQuantizedReuse: false
     )
 

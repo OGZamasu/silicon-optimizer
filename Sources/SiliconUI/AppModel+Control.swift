@@ -410,12 +410,9 @@ extension AppModel {
 
         // Refuse rather than let the runtime die minutes in with an opaque allocation failure.
         guard predicted.verdict.isUsable else {
-            throw ControlHostError.loadFailed(
-                "\(entry.name) would peak at \(predicted.peak.formatted) during "
-                + "\(predicted.peakPhase?.name.lowercased() ?? "generation"), against a "
-                + "\(predicted.budget.formatted) budget. "
-                + (predicted.remediations.first.map { "Try: \($0.title)." } ?? "")
-            )
+            // Names the loaded language model when that is what is in the way, so a caller with
+            // an unload_model tool can act on the answer instead of just reporting it.
+            throw ControlHostError.loadFailed(refusalMessage(for: entry, plan: predicted))
         }
 
         noteActivity()
