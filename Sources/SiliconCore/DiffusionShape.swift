@@ -58,6 +58,13 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
     /// Denoising steps a good result normally needs. Distilled models need very few.
     public var defaultSteps: Int
 
+    /// Whether this model's family has been measured against the planner's memory model.
+    ///
+    /// The coefficients in `DiffusionPlanner` were fitted to FLUX.2 klein runs. Applying them to
+    /// a family nobody has measured is a guess, and the honest thing is to say which is which
+    /// rather than print both to two decimal places and let them look alike.
+    public var peakIsCalibrated: Bool
+
     public var totalParameters: Int64 {
         transformerParameters + vaeParameters + textEncoderParameters
     }
@@ -74,7 +81,8 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         patchSize: Int = 2,
         maxTextTokens: Int = 512,
         nativeResolution: Int = 1024,
-        defaultSteps: Int = 20
+        defaultSteps: Int = 20,
+        peakIsCalibrated: Bool = false
     ) {
         self.blockCount = blockCount
         self.hiddenSize = hiddenSize
@@ -88,6 +96,7 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         self.maxTextTokens = maxTextTokens
         self.nativeResolution = nativeResolution
         self.defaultSteps = defaultSteps
+        self.peakIsCalibrated = peakIsCalibrated
     }
 
     /// Parameters held in one transformer block, which is what a streaming slot costs.

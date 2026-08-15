@@ -118,8 +118,9 @@ struct ImageView: View {
                     .frame(width: 100)
                 }
 
-                Toggle("Decode in tiles", isOn: $model.imageConfiguration.tiledDecode)
-                    .help("Caps the final VAE step, which is often the tallest moment of a run.")
+                Toggle("Low-memory mode", isOn: $model.imageConfiguration.lowRAM)
+                    .help("Frees the transformer between images. Does not lower the peak of a "
+                          + "single image — measured identical with and without.")
 
                 installBanner
                 loadedModelBanner

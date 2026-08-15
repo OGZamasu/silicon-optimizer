@@ -237,10 +237,11 @@ public struct MFluxArguments: Sendable {
             arguments += ["--guidance", String(guidance)]
         }
 
-        // `--low-ram` frees the transformer between images and caps the MLX buffer cache. The
-        // text encoders are freed after encoding either way, so this is only worth paying for
-        // when the denoiser itself is the tall phase.
-        if configuration.residentBlocks != nil || configuration.tiledDecode {
+        // `--low-ram` frees the transformer between images and caps the MLX buffer cache. It
+        // does not lower the peak of a single image — measured byte-identical with and without
+        // on FLUX.2-klein-4B (issue #3) — so it is passed when asked for and never as a
+        // memory remedy.
+        if configuration.lowRAM || configuration.residentBlocks != nil {
             arguments.append("--low-ram")
         }
 

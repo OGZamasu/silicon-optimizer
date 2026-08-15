@@ -13,15 +13,6 @@ import SiliconCore
 /// only says "Fetching weights…".
 public struct DiffusionInstaller: Sendable {
 
-    /// The parts of a repository the runtime actually loads.
-    ///
-    /// Not the whole repo: FLUX.2-klein-4B also carries a 7.8 GB single-file variant and a few
-    /// megabytes of sample JPEGs that MFLUX never opens. Verified against a snapshot MFLUX
-    /// populated itself — these four directories are exactly what it left behind.
-    public static let componentPatterns = [
-        "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*",
-    ]
-
     public struct Plan: Sendable {
         public var bytesToDownload: Bytes
         public var fileCount: Int
@@ -72,11 +63,14 @@ public struct DiffusionInstaller: Sendable {
 
     /// Whether the weights the runtime needs are already on disk.
     ///
-    /// Checks for the three weight-bearing components rather than the directory merely existing —
-    /// an interrupted download leaves the folder behind with only blobs in it.
-    public static func isInstalled(_ repository: String) -> Bool {
-        guard let snapshot = latestSnapshot(for: repository) else { return false }
-        return ["transformer", "text_encoder", "vae"].allSatisfy { component in
+    /// Checks every weight-bearing component rather than the directory merely existing — an
+    /// interrupted download leaves the folder behind with only blobs in it. The component list
+    /// comes from the catalog entry because it is not the same across families: FLUX.1 keeps its
+    /// T5-XXL in `text_encoder_2`, and a check that did not look for it would call a repository
+    /// missing 9.5 GB of weights complete.
+    public static func isInstalled(_ entry: DiffusionEntry) -> Bool {
+        guard let snapshot = latestSnapshot(for: entry.repository) else { return false }
+        return entry.componentDirectories.allSatisfy { component in
             let directory = snapshot.appendingPathComponent(component)
             let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
             return (contents ?? []).contains { $0.hasSuffix(".safetensors") }
@@ -116,10 +110,10 @@ public struct DiffusionInstaller: Sendable {
     /// `--dry-run` lists every file with a size, or `-` when it is already cached, so the sum of
     /// the sizes is exactly what is left to fetch. That is also how "already installed" is
     /// distinguished from "partly installed" without guessing.
-    public func plan(repository: String) async throws -> Plan {
+    public func plan(_ entry: DiffusionEntry) async throws -> Plan {
+        let repository = entry.repository
         let output = try await run(
-            arguments: downloadArguments(repository: repository)
-                + ["--dry-run", "--format", "json"],
+            arguments: downloadArguments(entry) + ["--dry-run", "--format", "json"],
             collectingOutput: true
         )
         guard let start = output.firstIndex(of: "["),
@@ -167,10 +161,11 @@ public struct DiffusionInstaller: Sendable {
     /// instead — and it stays honest across the parallel, resumed and deduplicated transfers the
     /// hub client does internally, which a per-file parser would not.
     public func download(
-        repository: String,
+        _ entry: DiffusionEntry,
         onProgress: @Sendable @escaping (ModelDownloader.Progress) -> Void
     ) async throws {
-        let sizing = try await plan(repository: repository)
+        let repository = entry.repository
+        let sizing = try await plan(entry)
         guard !sizing.isComplete else { return }
 
         let already = Self.installedSize(repository)
@@ -195,26 +190,24 @@ public struct DiffusionInstaller: Sendable {
         }
         defer { watcher.cancel() }
 
-        let output = try await run(
-            arguments: downloadArguments(repository: repository), collectingOutput: true
-        )
+        let output = try await run(arguments: downloadArguments(entry), collectingOutput: true)
         let lowered = output.lowercased()
         if lowered.contains("access denied") || lowered.contains("requires approval") {
             throw InstallError.accessDenied(repository: repository)
         }
-        guard Self.isInstalled(repository) else {
+        guard Self.isInstalled(entry) else {
             throw InstallError.failed(
                 output.split(separator: "\n").suffix(4).joined(separator: "\n")
             )
         }
     }
 
-    private func downloadArguments(repository: String) -> [String] {
-        var arguments = ["download", repository]
+    private func downloadArguments(_ entry: DiffusionEntry) -> [String] {
+        var arguments = ["download", entry.repository]
         // One `--include` per pattern: passing several values to a single flag makes the CLI
         // read the extras as positional filenames and drop the flag entirely, with only a
-        // warning — which quietly fetches the whole repository instead of four directories.
-        for pattern in Self.componentPatterns {
+        // warning — which quietly fetches the whole repository instead of the parts wanted.
+        for pattern in entry.downloadPatterns {
             arguments += ["--include", pattern]
         }
         if let token, !token.isEmpty {

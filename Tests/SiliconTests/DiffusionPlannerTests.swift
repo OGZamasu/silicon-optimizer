@@ -49,54 +49,50 @@ struct DiffusionPlannerTests {
         #expect((keptDenoise - freedDenoise) > .gib(2))
     }
 
-    /// Cost scales with area, so doubling each side roughly quadruples latents and activations.
+    /// Cost scales with area, so doubling each side roughly quadruples what resolution drives.
+    ///
+    /// Regression for the first half of issue #3: the peak used to barely move with resolution
+    /// at all, because the resolution-dependent terms summed to under a gigabyte at 1024x1024
+    /// where measurement needs nearly ten. A flat load spike made up the difference at one
+    /// resolution and nowhere else.
     @Test func costScalesWithAreaNotSideLength() {
         let planner = DiffusionPlanner(profile: m3Max)
-        // Prequantized, because otherwise the one-off load spike dominates both and the
-        // resolution effect this test is about is invisible.
+        let klein = DiffusionCatalog.flux2Klein4B.shape
         let small = planner.plan(
-            shape: schnell,
-            configuration: ImageConfiguration(
-                width: 512, height: 512, weightsArePrequantized: true
-            )
+            shape: klein, configuration: ImageConfiguration(width: 512, height: 512)
         )
         let large = planner.plan(
-            shape: schnell,
-            configuration: ImageConfiguration(
-                width: 2048, height: 2048, weightsArePrequantized: true
-            )
+            shape: klein, configuration: ImageConfiguration(width: 1024, height: 1024)
         )
-        let smallActivations = DiffusionPlanner.denoiseActivationBytes(
-            schnell, ImageConfiguration(width: 512, height: 512)
-        )
-        let largeActivations = DiffusionPlanner.denoiseActivationBytes(
-            schnell, ImageConfiguration(width: 2048, height: 2048)
-        )
-        let ratio = Double(largeActivations.rawValue) / Double(smallActivations.rawValue)
-        // 512 -> 2048 is 16x the area.
-        #expect(abs(ratio - 16.0) < 0.5, "expected roughly 16x, got \(ratio)")
 
-        // Compared per phase rather than on the peak: for a model this large the weights
-        // dominate at every resolution, so the peak is flat while the phases that actually
-        // scale with area are not. That is the model being right, not the test being lenient.
-        #expect(large.phases.first { $0.name == "Denoise" }!.resident
-                > small.phases.first { $0.name == "Denoise" }!.resident)
-        #expect(large.phases.first { $0.name == "Decode" }!.resident
-                > small.phases.first { $0.name == "Decode" }!.resident)
+        // Four times the area, and the decode term is what carries it.
+        let ratio = Double(DiffusionPlanner.decodeActivationBytes(
+            klein, ImageConfiguration(width: 1024, height: 1024)
+        ).rawValue) / Double(DiffusionPlanner.decodeActivationBytes(
+            klein, ImageConfiguration(width: 512, height: 512)
+        ).rawValue)
+        #expect(abs(ratio - 4.0) < 0.05, "expected 4x the area, got \(ratio)")
+
+        // The peak itself has to move too — that is the part that was broken. Measurement puts
+        // the gap between these two resolutions at 7.4 GB.
+        #expect(Double((large.peak - small.peak).rawValue) / 1e9 > 6.0)
     }
 
-    @Test func tiledDecodeCapsTheDecodePhase() {
+    /// `--low-ram` is the only memory flag mflux has, and it was measured to change the peak of
+    /// a single image by nothing at all. The planner must not pretend otherwise: it once offered
+    /// "decode the image in tiles" for a runtime with no tiling flag, which passed `--low-ram`
+    /// and then reported a saving that never materialised.
+    @Test func lowRAMModeIsNotChargedAsAMemorySaving() {
         let planner = DiffusionPlanner(profile: m3Max)
-        let whole = planner.plan(
+        let plain = planner.plan(
             shape: schnell, configuration: ImageConfiguration(width: 2048, height: 2048)
         )
-        let tiled = planner.plan(
+        let low = planner.plan(
             shape: schnell,
-            configuration: ImageConfiguration(width: 2048, height: 2048, tiledDecode: true)
+            configuration: ImageConfiguration(width: 2048, height: 2048, lowRAM: true)
         )
-        let wholeDecode = whole.phases.first { $0.name == "Decode" }!.resident
-        let tiledDecode = tiled.phases.first { $0.name == "Decode" }!.resident
-        #expect(tiledDecode < wholeDecode)
+        #expect(plain.peak == low.peak)
+        #expect(!plain.remediations.contains { $0.title.lowercased().contains("tile") })
     }
 
     /// Layer streaming is the same idea as expert streaming, applied to DiT blocks.
@@ -158,21 +154,28 @@ struct DiffusionPredictionRecord {
     /// ones this build actually produces rather than something remembered.
     @Test func printsPredictionsForTheModelsUnderTest() {
         let planner = DiffusionPlanner(profile: m3Max)
-        for entry in [DiffusionCatalog.flux2Klein4B, DiffusionCatalog.fluxSchnell] {
-            for quantization in [Quantization.mlx4] {
+        for entry in DiffusionCatalog.all {
+            for side in [512, 640, 768, 896, 1024] {
                 let configuration = ImageConfiguration(
-                    width: 1024, height: 1024,
-                    steps: entry.shape.defaultSteps, quantization: quantization,
+                    width: side, height: side,
+                    steps: entry.shape.defaultSteps, quantization: .mlx4,
                     weightsArePrequantized: false
                 )
                 let plan = planner.plan(shape: entry.shape, configuration: configuration)
-                print("\n\(entry.name) · \(quantization.rawValue) · 1024x1024")
+                print("\n\(entry.name) · 4-bit · \(side)x\(side)")
                 for phase in plan.phases {
                     print(String(format: "  %-8s %@", (phase.name as NSString).utf8String!,
                                  phase.resident.formatted))
                 }
                 print("  PEAK     \(plan.peak.formatted)  (\(plan.peakPhase?.name ?? "-"))")
                 print("  verdict  \(plan.verdict.label)")
+                if let measured = DiffusionMeasurementTests.measuredPeaks.first(where: {
+                    $0.model == entry.id && $0.side == side
+                }) {
+                    let predicted = Double(plan.peak.rawValue) / 1e9
+                    print(String(format: "  measured %.2f GB  (%+.1f%%)", measured.peakGB,
+                                 (predicted - measured.peakGB) / measured.peakGB * 100))
+                }
             }
         }
         #expect(Bool(true))
@@ -182,83 +185,149 @@ struct DiffusionPredictionRecord {
 @Suite("Diffusion prediction against measurement")
 struct DiffusionMeasurementTests {
 
-    /// Measured on this machine: FLUX.2-klein-4B, 1024x1024, 8 steps, 4-bit, weights fetched at
-    /// full precision and quantized at load. MFLUX reported `Peak MLX memory: 17.94 GB`.
+    /// Every peak this planner has been checked against, at the resolution it was measured at.
     ///
-    /// The first version of this planner predicted 2.7 GB, because it assumed the weights
-    /// arrived already quantized. They do not — which is exactly the kind of confidently wrong
-    /// number this project exists to avoid.
+    /// Seven runs, two models, two machines, all mflux 0.18.1 at 4-bit with 8 steps. The
+    /// 1024x1024 klein-4B figure was measured here on an M3 Max and independently on an M5 Pro,
+    /// which agreed to the second decimal; the rest of the sweep is from the M5 Pro (issue #3).
+    /// Peak memory is a property of the graph, not of the machine, which is why figures from a
+    /// 24 GB machine calibrate a planner running on a 36 GB one.
     ///
-    /// Reproduced twice: 17.94 GB, then 17.9 GB on a second run driven through the app itself.
-    /// The prediction sits ~6% above that, because the model charges a full-precision copy of
-    /// every component at once while mflux quantizes them one at a time and frees as it goes.
-    /// Left deliberately on the high side: a planner that promises a fit and then OOMs is worse
-    /// than one that warns slightly early, so the error is bounded in both directions but the
-    /// band is not centred.
-    @Test func matchesTheMeasuredPeakForAnUnquantizedFirstRun() {
+    ///     model       resolution   Mpx     measured peak
+    ///     klein-4B    512x512      0.262   10.52 GB
+    ///     klein-4B    640x640      0.410   11.81 GB
+    ///     klein-4B    768x768      0.590   13.53 GB
+    ///     klein-4B    896x896      0.803   15.60 GB
+    ///     klein-4B    1024x1024    1.049   17.94 GB
+    ///     klein-9B    512x512      0.262   20.93 GB
+    ///     klein-9B    768x768      0.590   23.94 GB
+    static let measuredPeaks: [(model: String, side: Int, peakGB: Double)] = [
+        ("flux2-klein-4b", 512, 10.52),
+        ("flux2-klein-4b", 640, 11.81),
+        ("flux2-klein-4b", 768, 13.53),
+        ("flux2-klein-4b", 896, 15.60),
+        ("flux2-klein-4b", 1024, 17.94),
+        ("flux2-klein-9b", 512, 20.93),
+        ("flux2-klein-9b", 768, 23.94),
+    ]
+
+    /// The band is deliberately not centred. A planner that promises a fit and then runs the
+    /// machine out of memory is worse than one that warns a little early, so the error must stay
+    /// positive; 10% caps how much caution is allowed before it becomes its own bug.
+    ///
+    /// The version this replaced satisfied both bounds at 1024x1024 and nowhere else — 82% high
+    /// at 512x512 on klein-4B, 37% high on klein-9B, which is what issue #3 reported. Two errors
+    /// of opposite sign happened to cancel at the single resolution it had been checked at.
+    @Test(arguments: DiffusionMeasurementTests.measuredPeaks)
+    func staysWithinTenPercentAboveEveryMeasuredPeak(
+        model: String, side: Int, peakGB: Double
+    ) {
+        let shape = DiffusionCatalog.entry(id: model)!.shape
         let plan = DiffusionPlanner(profile: m3Max).plan(
-            shape: DiffusionCatalog.flux2Klein4B.shape,
+            shape: shape,
             configuration: ImageConfiguration(
-                width: 1024, height: 1024, steps: 8,
+                width: side, height: side, steps: 8,
                 quantization: .mlx4, weightsArePrequantized: false
             )
         )
-        let measured = 17.94       // GB, reported by MFLUX
         let predicted = Double(plan.peak.rawValue) / 1e9
-        #expect(predicted >= measured,
-                "predicted \(String(format: "%.2f", predicted)) GB — must not under-promise")
-        #expect((predicted - measured) / measured < 0.10,
-                "predicted \(String(format: "%.2f", predicted)) GB against \(measured) GB measured")
-        #expect(plan.peakPhase?.name == "Load", "the load spike should dominate a first run")
+        let error = (predicted - peakGB) / peakGB
+        let report = String(
+            format: "%@ at %dx%d: predicted %.2f GB against %.2f GB measured (%+.1f%%)",
+            model, side, side, predicted, peakGB, error * 100
+        )
+        #expect(predicted >= peakGB, "under-promises — \(report)")
+        #expect(error < 0.10, "over-cautious — \(report)")
     }
 
-    /// Once a quantized copy exists the load spike disappears and denoising takes over.
-    @Test func prequantizedWeightsRemoveTheLoadSpike() {
+    /// Which phase peaks changes with resolution, and getting that wrong is what made the old
+    /// model insensitive to it. Loading is the tall phase only below about a quarter of a
+    /// megapixel; above that the VAE decode overtakes it and keeps climbing.
+    ///
+    /// The crossover is that low because both phases scale with the same thing. Loading charges
+    /// the largest component at two bytes a parameter, and the decode charges the transformer at
+    /// two bytes a parameter — so which one wins is decided by the resolution term alone, and
+    /// the resolution term passes the gap between them at roughly 480x480.
+    @Test func theDecodeOvertakesTheLoadAsResolutionRises() {
         let planner = DiffusionPlanner(profile: m3Max)
         let shape = DiffusionCatalog.flux2Klein4B.shape
-        let first = planner.plan(
-            shape: shape,
-            configuration: ImageConfiguration(steps: 8, weightsArePrequantized: false)
+        let tiny = planner.plan(
+            shape: shape, configuration: ImageConfiguration(width: 384, height: 384, steps: 8)
         )
-        let later = planner.plan(
-            shape: shape,
-            configuration: ImageConfiguration(steps: 8, weightsArePrequantized: true)
+        let large = planner.plan(
+            shape: shape, configuration: ImageConfiguration(width: 1024, height: 1024, steps: 8)
         )
-        #expect(later.peak < first.peak / 2)
-        #expect(first.peakPhase?.name == "Load")
-        // Load still peaks even prequantized — every component is resident before the text
-        // encoders are freed — but it drops from a full-precision spike to the settled size.
-        #expect(later.peak < .gib(6))
+        #expect(tiny.peakPhase?.name == "Load")
+        #expect(large.peakPhase?.name == "Decode")
     }
 
-    /// The consequence that matters: FLUX.1-schnell cannot be quantized on the fly on a 36 GB
-    /// machine, because the full-precision weights alone are over 33 GB. Telling someone it
-    /// "fits at 4-bit" would strand them minutes into a download.
-    @Test func schnellDoesNotFitWhenQuantizingOnTheFly() {
-        let planner = DiffusionPlanner(profile: m3Max)
-        let shape = DiffusionCatalog.fluxSchnell.shape
-
-        let onTheFly = planner.plan(
-            shape: shape,
-            configuration: ImageConfiguration(steps: 4, weightsArePrequantized: false)
+    /// Loading reads one component at a time, so only the largest is ever at full precision.
+    ///
+    /// klein-4B: 8.30 GB for the text encoder at fp16 plus 2.30 GB for the transformer and VAE
+    /// already reduced, against 10.52 GB measured at the resolution where this phase is the peak.
+    /// The old model charged every component at full precision simultaneously — 19.1 GB, 8 GB of
+    /// memory that is never all live at once.
+    @Test func theLoadPhaseChargesOneComponentAtFullPrecisionNotAll() {
+        let plan = DiffusionPlanner(profile: m3Max).plan(
+            shape: DiffusionCatalog.flux2Klein4B.shape,
+            configuration: ImageConfiguration(width: 512, height: 512, steps: 8)
         )
-        #expect(!onTheFly.verdict.isUsable)
-        #expect(onTheFly.remediations.contains { $0.title.contains("quantized copy") })
+        let load = Double(plan.phases.first { $0.name == "Load" }!.resident.rawValue) / 1e9
+        #expect(abs(load - 10.59 - 0.335) < 0.2, "load phase predicted \(load) GB")
 
-        let prepared = planner.plan(
-            shape: shape,
-            configuration: ImageConfiguration(steps: 4, weightsArePrequantized: true)
+        let everythingAtOnce = Double(
+            DiffusionPlanner.weightBytes(
+                DiffusionCatalog.flux2Klein4B.shape.totalParameters, .f16
+            ).rawValue
+        ) / 1e9
+        #expect(load < everythingAtOnce, "\(load) GB should be well under \(everythingAtOnce) GB")
+    }
+
+    /// The consequence issue #3 was actually about: klein-9B runs on a 24 GB machine at 512x512,
+    /// and the app refused it outright. "Won't fit" and "will swap" are different claims, and
+    /// only one of them was true — it produced a correct image, slowly, at 20.93 GB measured.
+    @Test func kleinNineBIsCalledSlowRatherThanImpossibleOnATwentyFourGigMachine() {
+        var m5Pro = m3Max
+        m5Pro.chipName = "Apple M5 Pro"
+        m5Pro.totalMemory = .gib(24)
+
+        let planner = DiffusionPlanner(profile: m5Pro)
+        let shape = DiffusionCatalog.flux2Klein9B.shape
+
+        let small = planner.plan(
+            shape: shape, configuration: ImageConfiguration(width: 512, height: 512, steps: 8)
         )
-        #expect(prepared.verdict.isUsable, "with a quantized copy it should fit comfortably")
+        // Measured 20.93 GB on a 25.77 GB machine — tight, not impossible. It took 390s, and it
+        // finished, and it produced a better image than klein-4B did.
+        #expect(small.verdict == .willSwap)
+        #expect(small.verdict != .impossible)
+
+        // And klein-4B, which the same machine was told would swap, is comfortable.
+        let klein4B = planner.plan(
+            shape: DiffusionCatalog.flux2Klein4B.shape,
+            configuration: ImageConfiguration(width: 512, height: 512, steps: 8)
+        )
+        #expect(klein4B.verdict == .comfortable, "measured 10.52 GB, generated in 13 seconds")
+
+        // At 1024x1024 klein-9B genuinely does not fit on this machine, and should still say so.
+        let large = planner.plan(
+            shape: shape, configuration: ImageConfiguration(width: 1024, height: 1024, steps: 8)
+        )
+        #expect(large.verdict == .impossible)
     }
 
     /// mflux 0.18.1 can write a quantized FLUX.2 copy but not read one back, so the app must not
     /// offer "save a quantized copy" for that family — the advice ends in an error message.
+    ///
+    /// Tested at 384x384 because that is now the only place the advice can appear at all: saving
+    /// a quantized copy shortens the load phase, and the load phase stops being the peak above
+    /// about a quarter of a megapixel. Below that window the suggestion is real; above it, it
+    /// would be offering to fix something that is not what is tall.
     @Test func doesNotSuggestSavingAQuantizedCopyWhenItCannotBeLoadedBack() {
         let planner = DiffusionPlanner(profile: m3Max)
         let shape = DiffusionCatalog.flux2Klein4B.shape
 
-        var reusable = ImageConfiguration(width: 1024, height: 1024, steps: 8, quantization: .mlx4)
+        var reusable = ImageConfiguration(width: 384, height: 384, steps: 8, quantization: .mlx4)
         reusable.canReuseQuantizedSave = true
         var notReusable = reusable
         notReusable.canReuseQuantizedSave = false
@@ -335,12 +404,33 @@ struct DiffusionInstallerTests {
         #expect(DiffusionInstaller.parseSize("-") == 0)
     }
 
-    /// Only the four directories MFLUX actually reads. Fetching the whole repository would pull
+    /// Only what MFLUX actually reads. Fetching the whole repository would pull
     /// FLUX.2-klein-4B's 7.8 GB single-file variant, which it never opens.
     @Test func fetchesOnlyTheComponentsTheRuntimeLoads() {
-        #expect(DiffusionInstaller.componentPatterns.sorted() == [
-            "text_encoder/*", "tokenizer/*", "transformer/*", "vae/*",
-        ])
+        for entry in DiffusionCatalog.all {
+            #expect(!entry.downloadPatterns.contains("*"))
+            #expect(entry.downloadPatterns.contains { $0.hasPrefix("transformer/") })
+            #expect(entry.downloadPatterns.contains { $0.hasPrefix("vae/") })
+        }
+    }
+
+    /// The families do not have the same layout, and assuming they do loses most of a model.
+    ///
+    /// FLUX.1 keeps its T5-XXL — 9.5 GB, the largest file in the repository — in
+    /// `text_encoder_2`. A pattern list written from FLUX.2's four directories omits it, and
+    /// because `hf download` exits cleanly having fetched what it was asked for, the install
+    /// reports success and the first generation is what discovers the model is incomplete.
+    @Test func fluxOneFetchesTheSecondTextEncoder() {
+        for entry in [DiffusionCatalog.fluxSchnell, DiffusionCatalog.fluxDev] {
+            #expect(entry.downloadPatterns.contains { $0.hasPrefix("text_encoder_2/") })
+            #expect(entry.componentDirectories.contains("text_encoder_2"))
+        }
+        for entry in [DiffusionCatalog.flux2Klein4B, DiffusionCatalog.flux2Klein9B] {
+            #expect(!entry.componentDirectories.contains("text_encoder_2"))
+            // FLUX.2 keeps a chat template at the repository root, which a list of directories
+            // silently drops.
+            #expect(entry.downloadPatterns.contains("chat_template.jinja"))
+        }
     }
 
     /// Hugging Face's cache flattens `org/name` into `models--org--name`.

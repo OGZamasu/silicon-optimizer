@@ -128,8 +128,8 @@ public final class AppModel {
     /// than the model is capable of. An explicit change to the stepper still stands until the
     /// next switch.
     ///
-    /// Defaults to klein-4B rather than schnell: schnell is gated on Hugging Face and needs
-    /// 40.8 GB to load unquantized, so it is the wrong thing to greet anyone with.
+    /// Defaults to klein-4B rather than schnell: schnell is gated on Hugging Face and peaks at
+    /// around 35 GB at 1024x1024, so it is the wrong thing to greet anyone with.
     public var selectedDiffusionModel: String = DiffusionCatalog.flux2Klein4B.id {
         didSet {
             guard selectedDiffusionModel != oldValue,
@@ -164,7 +164,7 @@ public final class AppModel {
 
     public func isImageModelInstalled(_ entry: DiffusionEntry) -> Bool {
         _ = imageLibraryVersion
-        return DiffusionInstaller.isInstalled(entry.repository)
+        return DiffusionInstaller.isInstalled(entry)
     }
 
     public func installedImageModelSize(_ entry: DiffusionEntry) -> Bytes {
@@ -194,7 +194,7 @@ public final class AppModel {
 
         download.task = Task { [weak self] in
             do {
-                try await installer.download(repository: entry.repository) { progress in
+                try await installer.download(entry) { progress in
                     Task { @MainActor in self?.imageDownloads[entry.id]?.progress = progress }
                 }
                 guard let self else { return }
@@ -253,10 +253,12 @@ public final class AppModel {
                 }
             }
         }
-        // Nothing fit outright; fall back to the cheapest thing that runs at all.
+        // Nothing fit outright; fall back to the cheapest thing that runs at all. Low-memory
+        // mode is on here not because it lowers the peak — it does not — but because at this
+        // point the machine is tight enough that freeing between images is worth having.
         return ImageConfiguration(
             width: 512, height: 512, steps: entry.shape.defaultSteps,
-            quantization: .mlx4, tiledDecode: true
+            quantization: .mlx4, lowRAM: true
         )
     }
 
