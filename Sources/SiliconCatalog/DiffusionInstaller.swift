@@ -170,17 +170,19 @@ public struct DiffusionInstaller: Sendable {
 
         let already = Self.installedSize(repository)
         let expected = already + sizing.bytesToDownload
-        let started = Date()
+        // Same moving window as the GGUF downloader. This path polls the cache directory rather
+        // than counting bytes off a stream, which is chunkier still — a file appears all at once
+        // when the hub client renames it into place — so smoothing matters more here, not less.
+        let meter = RateMeter()
 
         let watcher = Task {
             while !Task.isCancelled {
                 let current = Self.installedSize(repository)
-                let elapsed = Date().timeIntervalSince(started)
-                let gained = Double((current - already).rawValue)
+                let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
                 onProgress(ModelDownloader.Progress(
                     bytesReceived: current,
                     bytesExpected: expected,
-                    bytesPerSecond: elapsed > 0.5 ? gained / elapsed : 0,
+                    bytesPerSecond: meter.record(totalBytes: current.rawValue, at: now),
                     currentFile: repository,
                     fileIndex: 0,
                     fileCount: sizing.fileCount

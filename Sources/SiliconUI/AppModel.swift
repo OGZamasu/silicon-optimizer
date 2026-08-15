@@ -863,6 +863,57 @@ public final class AppModel {
         downloads[key] = nil
     }
 
+    // MARK: - Transfers
+
+    /// Every download in flight, language models and image models alike.
+    ///
+    /// The places a download *starts* are not the places it can be watched. A catalog row shows
+    /// progress underneath itself, which works until the model came from a Hugging Face search:
+    /// there is no row for it, the sheet dismisses on tap, and several gigabytes then move with
+    /// nothing on screen to say so. The sidebar reads this instead, so a transfer is visible
+    /// wherever it was started from and whichever tab you are on.
+    public struct ActiveTransfer: Identifiable, Sendable {
+        public enum Kind: Sendable { case language, image }
+
+        public var id: String
+        public var name: String
+        public var detail: String
+        public var progress: ModelDownloader.Progress?
+        public var error: String?
+        public var kind: Kind
+    }
+
+    /// Sorted by name rather than by start time: the list is read at a glance while the numbers
+    /// inside it are changing, and rows that reorder under the cursor are worse than rows that
+    /// appear in an arbitrary but stable order.
+    public var activeTransfers: [ActiveTransfer] {
+        let language = downloads.values.map {
+            ActiveTransfer(
+                id: $0.id, name: $0.entry.name, detail: $0.quantization.rawValue,
+                progress: $0.progress, error: $0.error, kind: .language
+            )
+        }
+        let images = imageDownloads.values.map {
+            ActiveTransfer(
+                id: $0.id, name: $0.entry.name, detail: "Image model",
+                progress: $0.progress, error: $0.error, kind: .image
+            )
+        }
+        return (language + images).sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+    }
+
+    /// Combined throughput across every transfer, which is what the machine is actually doing.
+    public var transferBytesPerSecond: Double {
+        activeTransfers.compactMap(\.progress?.bytesPerSecond).reduce(0, +)
+    }
+
+    public func cancelTransfer(_ transfer: ActiveTransfer) {
+        switch transfer.kind {
+        case .language: cancelInstall(transfer.id)
+        case .image: cancelImageInstall(transfer.id)
+        }
+    }
+
     public func uninstall(_ model: InstalledModel) {
         Task {
             if loadedModel?.id == model.id { await unload() }

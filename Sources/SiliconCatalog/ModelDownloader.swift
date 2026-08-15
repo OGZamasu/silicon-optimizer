@@ -87,6 +87,10 @@ public actor ModelDownloader {
 
         var written: [URL] = []
         var completedBytes = Bytes.zero
+        // One meter for the whole download rather than one per file: a sharded GGUF finishes a
+        // part every few seconds, and a meter that restarted at each boundary would spend most
+        // of its life refilling.
+        let meter = RateMeter()
 
         for (index, file) in queue.enumerated() {
             let destination = directory.appendingPathComponent(
@@ -104,7 +108,7 @@ public actor ModelDownloader {
             try await downloadFile(
                 file, from: resolution.repository, to: destination,
                 alreadyCompleted: completedBytes, grandTotal: totalBytes,
-                fileIndex: index, fileCount: queue.count, onProgress: onProgress
+                fileIndex: index, fileCount: queue.count, meter: meter, onProgress: onProgress
             )
             completedBytes += file.size
             written.append(destination)
@@ -123,6 +127,7 @@ public actor ModelDownloader {
         grandTotal: Bytes,
         fileIndex: Int,
         fileCount: Int,
+        meter: RateMeter,
         onProgress: @Sendable @escaping (Progress) -> Void
     ) async throws {
         let partial = destination.appendingPathExtension("part")
@@ -157,7 +162,6 @@ public actor ModelDownloader {
 
         var received = existingBytes
         var lastReport = DispatchTime.now()
-        var lastReportedBytes = received
         var sawResponse = false
 
         do {
@@ -175,7 +179,7 @@ public actor ModelDownloader {
                         try handle.truncate(atOffset: 0)
                         existingBytes = 0
                         received = 0
-                        lastReportedBytes = 0
+                        meter.reset()
                     }
 
                 case .chunk(let data):
@@ -185,15 +189,18 @@ public actor ModelDownloader {
                     let now = DispatchTime.now()
                     let elapsed = Double(now.uptimeNanoseconds - lastReport.uptimeNanoseconds) / 1e9
                     if elapsed >= 0.25 {
+                        let total = alreadyCompleted + Bytes(received)
                         onProgress(Progress(
-                            bytesReceived: alreadyCompleted + Bytes(received),
+                            bytesReceived: total,
                             bytesExpected: grandTotal,
-                            bytesPerSecond: Double(received - lastReportedBytes) / elapsed,
+                            bytesPerSecond: meter.record(
+                                totalBytes: total.rawValue,
+                                at: Double(now.uptimeNanoseconds) / 1e9
+                            ),
                             currentFile: (file.path as NSString).lastPathComponent,
                             fileIndex: fileIndex, fileCount: fileCount
                         ))
                         lastReport = now
-                        lastReportedBytes = received
                     }
                     if Task.isCancelled {
                         streamer.cancel()
