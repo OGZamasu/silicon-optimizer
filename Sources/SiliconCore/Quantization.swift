@@ -51,7 +51,7 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .q8_0: 8.50
         case .iq1_S: 1.56
         case .iq2_XXS: 2.06
-        case .iq3_M: 3.70
+        case .iq3_M: 3.66
         case .iq4_XS: 4.25
         case .iq4_NL: 4.50
         case .f16, .bf16: 16.0

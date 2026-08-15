@@ -12,6 +12,18 @@ public struct SpeedEstimator: Sendable {
 
     /// Fraction of peak memory bandwidth llama.cpp's Metal backend sustains during decode.
     /// Measured llama.cpp numbers on M-series parts cluster around 55–65% of the published peak.
+    ///
+    /// One constant for both architectures is known to be wrong, and the direction of the error
+    /// flips. Measured on a 24 GB M5 Pro, llama.cpp b10310, matched 8K context (#1):
+    ///   Qwen3 8B Q4_K_M (dense)   — 55.0 tok/s measured against 46.5 predicted, 1.18x
+    ///   gpt-oss-20b MXFP4 (MoE)   — 89.3 tok/s measured against 103.7 predicted, 0.86x
+    /// The implied dense/MoE ratio of 1.37 is almost exactly the 1.36 already sitting between
+    /// `denseComputeEfficiency` and `moeComputeEfficiency` below — the same architectural effect,
+    /// modelled for prefill and unmodelled for decode.
+    ///
+    /// Splitting this by architecture is the fix. It is not done here because two points on one
+    /// machine cannot set two constants, and guessing the split would replace a known-uniform
+    /// error with an unknown-shaped one. Until then the per-model benchmark calibration absorbs it.
     static let bandwidthEfficiency = 0.60
 
     /// Fraction of peak GPU throughput reached while ingesting a prompt.

@@ -428,12 +428,13 @@ struct CalibrationIsolationTests {
 @Suite("IQ quantization sizing")
 struct IQQuantizationTests {
 
-    /// Effective bpw for the IQ formats, cross-checked against the file's own doc comment
-    /// values rather than re-deriving them here.
+    /// The rates `llama-quantize --help` prints for each format. Pinned here because they are
+    /// transcribed constants with no derivation to check them against — an edit that fat-fingers
+    /// one would otherwise change every plan for that format silently.
     @Test(arguments: [
         (Quantization.iq1_S, 1.56),
         (.iq2_XXS, 2.06),
-        (.iq3_M, 3.70),
+        (.iq3_M, 3.66),
         (.iq4_XS, 4.25),
         (.iq4_NL, 4.50),
     ])

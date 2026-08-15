@@ -239,10 +239,10 @@ struct QuantizationTests {
         #expect(Quantization.inferred(fromFilename: "model.gguf") == nil)
     }
 
-    /// Regression: IQ formats used to fall through to nil (and every call site then defaulted
-    /// to Q4_K_M), which understated how much memory a low-bit IQ model actually needs to plan
-    /// against — the opposite of the mistake that matters, since it makes an oversized model
-    /// look like it fits.
+    /// Regression: IQ formats used to fall through to nil, and every call site then defaulted
+    /// to Q4_K_M — 4.85 bits/weight against IQ2_XXS's 2.06, so a model was planned at more than
+    /// twice its real weight. That direction does not risk an OOM, but it does declare models
+    /// impossible that fit comfortably, which is the whole reason the IQ formats exist.
     @Test(arguments: [
         ("model-IQ1_S.gguf", Quantization.iq1_S),
         ("Llama-3.3-70B-Instruct-IQ2_XXS.gguf", .iq2_XXS),
