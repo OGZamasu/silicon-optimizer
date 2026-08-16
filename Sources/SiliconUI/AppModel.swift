@@ -129,7 +129,10 @@ public final class AppModel {
     /// expects 8, so carrying a step count across a model switch quietly produces a worse image
     /// than the model is capable of. An explicit change to the stepper still stands until the
     /// next switch.
-    public var selectedDiffusionModel: String = DiffusionCatalog.fluxSchnell.id {
+    ///
+    /// Defaults to klein-4B rather than schnell: schnell is gated on Hugging Face and peaks at
+    /// around 35 GB at 1024x1024, so it is the wrong thing to greet anyone with.
+    public var selectedDiffusionModel: String = DiffusionCatalog.flux2Klein4B.id {
         didSet {
             guard selectedDiffusionModel != oldValue,
                   let entry = DiffusionCatalog.entry(id: selectedDiffusionModel) else { return }
@@ -140,6 +143,83 @@ public final class AppModel {
     private var imageTask: Task<Void, Never>?
 
     public var isGeneratingImage: Bool { imageTask != nil }
+
+    // MARK: - Image model installation
+
+    @Observable
+    public final class ImageDownloadTask: Identifiable {
+        public let id: String
+        public var entry: DiffusionEntry
+        public var progress: ModelDownloader.Progress?
+        public var error: String?
+        var task: Task<Void, Never>?
+
+        init(entry: DiffusionEntry) {
+            self.id = entry.id
+            self.entry = entry
+        }
+    }
+
+    public private(set) var imageDownloads: [String: ImageDownloadTask] = [:]
+    /// Bumped when an install finishes, to re-run the installed checks, which hit the filesystem.
+    public private(set) var imageLibraryVersion = 0
+
+    public func isImageModelInstalled(_ entry: DiffusionEntry) -> Bool {
+        _ = imageLibraryVersion
+        return DiffusionInstaller.isInstalled(entry)
+    }
+
+    public func installedImageModelSize(_ entry: DiffusionEntry) -> Bytes {
+        _ = imageLibraryVersion
+        return DiffusionInstaller.installedSize(entry.repository)
+    }
+
+    private func imageInstaller() -> DiffusionInstaller? {
+        guard let mflux = (imageRuntime ?? MFluxRuntime.locate())?.executable,
+              let hf = DiffusionInstaller.locate(besideMFlux: mflux) else { return nil }
+        let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
+        return DiffusionInstaller(executable: hf, token: token)
+    }
+
+    public func installImageModel(_ entry: DiffusionEntry) {
+        guard imageDownloads[entry.id] == nil else { return }
+        guard let installer = imageInstaller() else {
+            alert = AlertContent(
+                title: "Cannot download image models",
+                message: DiffusionInstaller.InstallError.toolMissing.localizedDescription
+            )
+            return
+        }
+
+        let download = ImageDownloadTask(entry: entry)
+        imageDownloads[entry.id] = download
+
+        download.task = Task { [weak self] in
+            do {
+                try await installer.download(entry) { progress in
+                    Task { @MainActor in self?.imageDownloads[entry.id]?.progress = progress }
+                }
+                guard let self else { return }
+                self.imageLibraryVersion += 1
+                self.imageDownloads[entry.id] = nil
+            } catch is CancellationError {
+                self?.imageDownloads[entry.id] = nil
+            } catch {
+                self?.imageDownloads[entry.id]?.error = error.localizedDescription
+            }
+        }
+    }
+
+    public func cancelImageInstall(_ id: String) {
+        imageDownloads[id]?.task?.cancel()
+        imageDownloads[id] = nil
+    }
+
+    public func uninstallImageModel(_ entry: DiffusionEntry) {
+        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository)
+        try? FileManager.default.removeItem(at: directory)
+        imageLibraryVersion += 1
+    }
 
     public func diffusionPlanner() -> DiffusionPlanner { DiffusionPlanner(profile: profile) }
 
@@ -176,7 +256,7 @@ public final class AppModel {
         configuration.canReuseQuantizedSave = entry.supportsQuantizedReuse
         return diffusionPlanner().plan(
             shape: entry.shape, configuration: configuration,
-            otherAppsInUse: memoryUsedByOtherApps
+            otherAppsInUse: memoryUnavailableDuringImage
         )
     }
 
@@ -192,16 +272,18 @@ public final class AppModel {
                 )
                 if planner.plan(
                     shape: entry.shape, configuration: candidate,
-                    otherAppsInUse: memoryUsedByOtherApps
+                    otherAppsInUse: memoryUnavailableDuringImage
                 ).verdict == .comfortable {
                     return candidate
                 }
             }
         }
-        // Nothing fit outright; fall back to the cheapest thing that runs at all.
+        // Nothing fit outright; fall back to the cheapest thing that runs at all. Low-memory
+        // mode is on here not because it lowers the peak — it does not — but because at this
+        // point the machine is tight enough that freeing between images is worth having.
         return ImageConfiguration(
             width: 512, height: 512, steps: entry.shape.defaultSteps,
-            quantization: .mlx4, tiledDecode: true
+            quantization: .mlx4, lowRAM: true
         )
     }
 
@@ -210,6 +292,19 @@ public final class AppModel {
               let entry = DiffusionCatalog.entry(id: selectedDiffusionModel),
               !imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
+
+        // The button used to start regardless of the plan, which made the plan decorative: the
+        // run would begin, climb past the budget and take the machine down with it. The control
+        // API refused all along; this path did not.
+        let plan = diffusionPlan(for: entry, configuration: imageConfiguration)
+        guard plan.verdict.isUsable else {
+            alert = AlertContent(
+                title: "Not enough memory to generate",
+                message: refusalMessage(for: entry, plan: plan)
+            )
+            imageState = .failed(message: refusalMessage(for: entry, plan: plan))
+            return
+        }
 
         noteActivity()
         let output = nextImageOutputURL()
@@ -256,6 +351,31 @@ public final class AppModel {
                     title: "Could not generate the image", message: error.localizedDescription
                 )
             }
+        }
+    }
+
+    /// Explains a refusal, naming the loaded language model when that is the thing in the way.
+    ///
+    /// "Won't fit" is useless on its own when the fix is one button away in another tab.
+    func refusalMessage(for entry: DiffusionEntry, plan: DiffusionPlan) -> String {
+        var message = "\(entry.name) would peak at \(plan.peak.formatted) during "
+            + "\(plan.peakPhase?.name.lowercased() ?? "generation"), against a "
+            + "\(plan.budget.formatted) budget."
+        let reclaimable = memoryReclaimableByUnloading
+        if let loaded = loadedModel, reclaimable > .zero {
+            message += " \(loaded.name) is loaded and holding about \(reclaimable.formatted); "
+                + "unloading it would give that back."
+        } else if let first = plan.remediations.first {
+            message += " Try: \(first.title)."
+        }
+        return message
+    }
+
+    /// Free the language model, then generate. One action, because they are one intention.
+    public func unloadAndGenerateImage() {
+        Task { [weak self] in
+            await self?.unload()
+            self?.generateImage()
         }
     }
 
@@ -563,6 +683,22 @@ public final class AppModel {
         return Bytes(max(0, metrics.memoryWired.rawValue - ours.rawValue))
     }
 
+    /// Wired memory that will *still* be held while an image is generated.
+    ///
+    /// The difference from `memoryUsedByOtherApps` is the loaded language model. Loading a
+    /// language model replaces whatever was there, so the planner excludes the current one from
+    /// its own budget. Generating an image does not replace anything — llama-server keeps its
+    /// weights the whole time — so the loaded model has to be charged against the image.
+    ///
+    /// Getting this wrong is not a rounding error: a 20 GB model and a 19 GB image run were both
+    /// called comfortable on a 38 GB machine, and the machine ran out of memory.
+    public var memoryUnavailableDuringImage: Bytes { metrics.memoryWired }
+
+    /// What unloading the current model would give back to an image run.
+    public var memoryReclaimableByUnloading: Bytes {
+        loadedModel != nil ? estimatedResidentBytes : .zero
+    }
+
     private var estimatedResidentBytes: Bytes {
         guard let model = loadedModel, let shape = model.shape,
               let configuration = activeConfiguration else { return .zero }
@@ -751,6 +887,57 @@ public final class AppModel {
     public func cancelInstall(_ key: String) {
         downloads[key]?.task?.cancel()
         downloads[key] = nil
+    }
+
+    // MARK: - Transfers
+
+    /// Every download in flight, language models and image models alike.
+    ///
+    /// The places a download *starts* are not the places it can be watched. A catalog row shows
+    /// progress underneath itself, which works until the model came from a Hugging Face search:
+    /// there is no row for it, the sheet dismisses on tap, and several gigabytes then move with
+    /// nothing on screen to say so. The sidebar reads this instead, so a transfer is visible
+    /// wherever it was started from and whichever tab you are on.
+    public struct ActiveTransfer: Identifiable, Sendable {
+        public enum Kind: Sendable { case language, image }
+
+        public var id: String
+        public var name: String
+        public var detail: String
+        public var progress: ModelDownloader.Progress?
+        public var error: String?
+        public var kind: Kind
+    }
+
+    /// Sorted by name rather than by start time: the list is read at a glance while the numbers
+    /// inside it are changing, and rows that reorder under the cursor are worse than rows that
+    /// appear in an arbitrary but stable order.
+    public var activeTransfers: [ActiveTransfer] {
+        let language = downloads.values.map {
+            ActiveTransfer(
+                id: $0.id, name: $0.entry.name, detail: $0.quantization.rawValue,
+                progress: $0.progress, error: $0.error, kind: .language
+            )
+        }
+        let images = imageDownloads.values.map {
+            ActiveTransfer(
+                id: $0.id, name: $0.entry.name, detail: "Image model",
+                progress: $0.progress, error: $0.error, kind: .image
+            )
+        }
+        return (language + images).sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+    }
+
+    /// Combined throughput across every transfer, which is what the machine is actually doing.
+    public var transferBytesPerSecond: Double {
+        activeTransfers.compactMap(\.progress?.bytesPerSecond).reduce(0, +)
+    }
+
+    public func cancelTransfer(_ transfer: ActiveTransfer) {
+        switch transfer.kind {
+        case .language: cancelInstall(transfer.id)
+        case .image: cancelImageInstall(transfer.id)
+        }
     }
 
     public func uninstall(_ model: InstalledModel) {

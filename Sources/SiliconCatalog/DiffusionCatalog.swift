@@ -23,10 +23,23 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
     /// mflux 0.18.1.
     public var supportsQuantizedReuse: Bool
 
+    /// Exactly the files the runtime fetches, and nothing else.
+    ///
+    /// Copied from mflux's own `get_download_patterns()` rather than guessed, because both
+    /// directions of the guess are expensive: FLUX.2-klein-4B carries a 7.8 GB single-file
+    /// variant that is never opened, and FLUX.1 keeps its T5-XXL in `text_encoder_2`, which an
+    /// obvious-looking four-directory list silently omits — 9.5 GB of the model, missing, with
+    /// the download reporting success.
+    public var downloadPatterns: [String]
+
+    /// Directories that must contain weights for the model to count as installed.
+    public var componentDirectories: [String]
+
     public init(
         id: String, name: String, author: String, license: String, summary: String,
         shape: DiffusionShape, repository: String, quantizations: [Quantization],
-        rating: Int, isGated: Bool = false, supportsQuantizedReuse: Bool = true
+        rating: Int, isGated: Bool = false, supportsQuantizedReuse: Bool = true,
+        downloadPatterns: [String], componentDirectories: [String]
     ) {
         self.id = id
         self.name = name
@@ -39,7 +52,28 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
         self.rating = rating
         self.isGated = isGated
         self.supportsQuantizedReuse = supportsQuantizedReuse
+        self.downloadPatterns = downloadPatterns
+        self.componentDirectories = componentDirectories
     }
+
+    /// What `mflux-generate` fetches for the FLUX.1 family. Note `text_encoder_2` — the T5-XXL,
+    /// and the largest single file in the repository.
+    public static let flux1Patterns = [
+        "text_encoder/*.safetensors", "text_encoder/*.json",
+        "text_encoder_2/*.safetensors", "text_encoder_2/*.json",
+        "transformer/*.safetensors", "transformer/*.json",
+        "vae/*.safetensors", "vae/*.json",
+        "tokenizer/**", "tokenizer_2/**",
+    ]
+
+    /// What `mflux-generate-flux2` fetches. One text encoder rather than two, and a chat
+    /// template at the repository root, which a directory-shaped pattern list misses.
+    public static let flux2Patterns = [
+        "text_encoder/*.safetensors", "text_encoder/*.json",
+        "transformer/*.safetensors", "transformer/*.json",
+        "vae/*.safetensors", "vae/*.json",
+        "tokenizer/**", "added_tokens.json", "chat_template.jinja",
+    ]
 
     public var parameterLabel: String {
         let billions = Double(shape.totalParameters) / 1e9
@@ -93,7 +127,13 @@ public enum DiffusionCatalog {
         ),
         repository: "black-forest-labs/FLUX.1-schnell",
         quantizations: [.mlx4, .mlx6, .mlx8],
-        rating: 5
+        rating: 5,
+        // Apache-2.0, but the repository itself is still gated (`gated: auto` on the Hub API):
+        // the licence is permissive once you have the weights, and you accept terms to get them.
+        // Checked against the API rather than inferred from the licence.
+        isGated: true,
+        downloadPatterns: DiffusionEntry.flux1Patterns,
+        componentDirectories: ["transformer", "text_encoder", "text_encoder_2", "vae"]
     )
 
     /// FLUX.2-klein-4B — 5 double-stream plus 20 single-stream blocks, 2560 wide, 24 heads,
@@ -122,12 +162,15 @@ public enum DiffusionCatalog {
             patchSize: 2,
             maxTextTokens: 512,
             nativeResolution: 1024,
-            defaultSteps: 8
+            defaultSteps: 8,
+            peakIsCalibrated: true
         ),
         repository: "black-forest-labs/FLUX.2-klein-4B",
         quantizations: [.mlx4, .mlx6, .mlx8],
         rating: 4,
-        supportsQuantizedReuse: false
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.flux2Patterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
     )
 
     /// FLUX.2-klein-9B — 8 double-stream plus 24 single-stream blocks, 4096 wide, 32 heads.
@@ -149,12 +192,16 @@ public enum DiffusionCatalog {
             patchSize: 2,
             maxTextTokens: 512,
             nativeResolution: 1024,
-            defaultSteps: 8
+            defaultSteps: 8,
+            peakIsCalibrated: true
         ),
         repository: "black-forest-labs/FLUX.2-klein-9B",
         quantizations: [.mlx4, .mlx6, .mlx8],
         rating: 4,
-        supportsQuantizedReuse: false
+        isGated: true,
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.flux2Patterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
     )
 
     /// FLUX.1-dev — same architecture as schnell but undistilled, so it needs many more steps
@@ -185,6 +232,8 @@ public enum DiffusionCatalog {
         repository: "black-forest-labs/FLUX.1-dev",
         quantizations: [.mlx4, .mlx6, .mlx8],
         rating: 5,
-        isGated: true
+        isGated: true,
+        downloadPatterns: DiffusionEntry.flux1Patterns,
+        componentDirectories: ["transformer", "text_encoder", "text_encoder_2", "vae"]
     )
 }

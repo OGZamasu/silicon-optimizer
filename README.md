@@ -41,9 +41,9 @@ on a 36 GB Mac.
 **Generates images, and plans those too.** FLUX.1 and FLUX.2 run locally through MFLUX. A
 diffusion model's cost is *phased* rather than one number — load, encode, denoise, decode, each
 releasing the last — so the app shows a bar per phase and names the one that decides whether it
-fits. On a first run that phase is usually the load, because the runtime fetches full-precision
-weights and quantizes them in memory: asking for 4-bit does not spare you the 16 GB spike on the
-way there.
+fits. That phase is almost always the decode, which costs roughly 9.8 GB per megapixel and is the
+reason a render can fail at the very last step after minutes of denoising. Resolution, not
+precision, is the lever that matters: asking for 4-bit barely moves the peak.
 
 **Talks to Claude and ChatGPT.** A bundled MCP server exposes the hardware profile, the planner,
 the catalog and the loaded model as tools. See [MCP setup](#use-from-claude-or-chatgpt).
@@ -216,28 +216,45 @@ because MoE routing turns one large GEMM per layer into a gather plus many small
 matmuls that never reach the same utilization. Generation is within 10% for the models above
 except the dense 7B, which the benchmark's per-model calibration corrects.
 
-**FLUX.2-klein-4B, 1024x1024, 8 steps, 4-bit** — diffusion, where the phases matter:
+**Diffusion**, where the phases matter. Every measurement the memory model has been checked
+against — two models, two machines, mflux 0.18.1 at 4-bit, 8 steps:
 
-| Phase | Predicted | Note |
-|---|---|---|
-| Load | 19.1 GB | fp16 weights, quantized in memory — the peak |
-| Encode | 2.7 GB | text encoders, freed afterwards |
-| Denoise | 2.7 GB | 8 steps through the transformer |
-| Decode | 921 MB | VAE |
-| **Peak** | **19.1 GB** | against **17.9 GB** measured — +6.5% |
+| Model | Resolution | Predicted | Measured | Error |
+|---|---|---|---|---|
+| klein-4B | 512x512 | 11.1 GB | 10.52 GB | +6.0% |
+| klein-4B | 640x640 | 12.6 GB | 11.81 GB | +6.6% |
+| klein-4B | 768x768 | 14.4 GB | 13.53 GB | +6.1% |
+| klein-4B | 896x896 | 16.4 GB | 15.60 GB | +5.4% |
+| klein-4B | 1024x1024 | 18.9 GB | 17.94 GB | +5.1% |
+| klein-9B | 512x512 | 21.4 GB | 20.93 GB | +2.3% |
+| klein-9B | 768x768 | 24.6 GB | 23.94 GB | +2.8% |
 
-Measured three times (17.94, 17.9, 17.9 GB) via MFLUX's own `Peak MLX memory` figure. Summing the
-phases instead of taking the tallest would have said 25.4 GB; assuming the weights arrive already
-quantized — the first version of this planner — said 2.7 GB, a 6.6x under-estimate that would
-have promised a comfortable fit and then swapped.
+The band is deliberately one-sided. Promising a fit and then running the machine out of memory is
+a worse failure than warning slightly early, so the error is kept positive and capped at 10%.
 
-The component parameter counts behind that come from the safetensors headers of the downloaded
-weights, not from model cards: klein-4B's text encoder is 4.15B, larger than its 4.0B transformer,
-and it is what sets the peak.
+Two things in there are measured rather than derived, and both were surprises.
 
-KV figures are exact because they are pure arithmetic. Compute buffers and the diffusion load
-phase are deliberately over-reserved — predicting *more* memory than is used is the safe
-direction.
+The VAE decode costs 9.2 to 9.6 GB per megapixel — the planner charges 9.8, the top of the range —
+which is twenty times what counting feature maps suggests. It is also what a run at any normal
+resolution peaks at, not the load. And a transformer parameter costs two bytes while the model is
+running, whatever precision was asked for: klein-4B and klein-9B agree on that to within 3%,
+across a size difference of more than twice. Why is not established. The number is.
+
+An earlier version of this planner got 1024x1024 right and nothing else, by modelling the load
+phase far too high and the resolution term far too low. The two errors cancelled at exactly the
+one resolution it had been checked at, and it was 82% high at 512x512 — refusing models that ran
+fine. That was found by [a contributor with different hardware](https://github.com/OGZamasu/silicon-optimizer/issues/3),
+which is the only reason it was found at all.
+
+The component parameter counts come from the safetensors headers of the downloaded weights, not
+from model cards: klein-4B's text encoder is 4.15B, larger than its 4.0B transformer, and it is
+what sets the load phase.
+
+Figures for the FLUX.1 family are extrapolated from these, and the app says so when it shows
+them. Nobody has measured one.
+
+KV figures are exact because they are pure arithmetic. Compute buffers and every diffusion phase
+are deliberately over-reserved — predicting *more* memory than is used is the safe direction.
 
 ---
 

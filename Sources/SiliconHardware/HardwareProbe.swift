@@ -123,6 +123,11 @@ public enum HardwareProbe {
 
         // M5 moved to LPDDR5X. Higher-tier parts are estimated by scaling the base part on
         // the same ratios the M4 family used; they are refined once real silicon reports in.
+        //
+        // An attempt to replace the Pro figure with one derived from a real M5 Pro was reverted
+        // (#1): the residual it corrected was measured on a single dense model, and bandwidth is
+        // a machine-wide term, so absorbing a dense-specific error here necessarily mis-predicts
+        // MoE models. See `SpeedEstimator.bandwidthEfficiency` — that is where the error lives.
         case (.m5, .base): 153
         case (.m5, .pro): 345
         case (.m5, .max): gpuCores <= 32 ? 520 : 690

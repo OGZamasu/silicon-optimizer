@@ -413,11 +413,8 @@ extension AppModel {
         // in the pessimistic direction still leaves someone unable to run a model that works.
         guard predicted.verdict.isUsable || request.allowOverBudget == true else {
             throw ControlHostError.loadFailed(
-                "\(entry.name) would peak at \(predicted.peak.formatted) during "
-                + "\(predicted.peakPhase?.name.lowercased() ?? "generation"), against a "
-                + "\(predicted.budget.formatted) budget. "
-                + (predicted.remediations.first.map { "Try: \($0.title). " } ?? "")
-                + "If you have measured this configuration and know it fits, set "
+                refusalMessage(for: entry, plan: predicted)
+                + " If you have measured this configuration and know it fits, set "
                 + "allowOverBudget to proceed anyway."
             )
         }

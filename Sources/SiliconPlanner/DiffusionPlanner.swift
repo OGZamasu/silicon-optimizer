@@ -13,9 +13,14 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
     /// Whether the runtime frees the text encoders once the prompt is encoded. Worth several
     /// gigabytes and costs nothing on a single image.
     public var evictTextEncoders: Bool
-    /// Decode the image in tiles rather than whole. Trades a little speed for a much lower
-    /// decode peak.
-    public var tiledDecode: Bool
+    /// Run the runtime in its low-memory mode.
+    ///
+    /// Named for what mflux actually offers — `--low-ram` — rather than for tiled VAE decoding,
+    /// which this used to promise and mflux 0.18.1 has no flag for. Measured peak on
+    /// FLUX.2-klein-4B is byte-identical with and without it (10.52 GB either way, issue #3), so
+    /// the planner charges it nothing. What it does buy is freeing the transformer *between*
+    /// images, which matters for a batch and not for one.
+    public var lowRAM: Bool
     /// Blocks kept resident when streaming the denoiser from disk. Nil means all of them.
     public var residentBlocks: Int?
     /// Whether the weights on disk are already at the target precision.
@@ -42,7 +47,7 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
         steps: Int = 4,
         quantization: Quantization = .mlx4,
         evictTextEncoders: Bool = true,
-        tiledDecode: Bool = false,
+        lowRAM: Bool = false,
         residentBlocks: Int? = nil,
         weightsArePrequantized: Bool = false,
         canReuseQuantizedSave: Bool = true,
@@ -53,7 +58,7 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
         self.steps = steps
         self.quantization = quantization
         self.evictTextEncoders = evictTextEncoders
-        self.tiledDecode = tiledDecode
+        self.lowRAM = lowRAM
         self.residentBlocks = residentBlocks
         self.weightsArePrequantized = weightsArePrequantized
         self.canReuseQuantizedSave = canReuseQuantizedSave
@@ -118,6 +123,38 @@ public struct DiffusionPlanner: Sendable {
         Bytes(Int64(Double(parameters) * quantization.bitsPerWeight / 8.0))
     }
 
+    /// What a transformer parameter costs in memory once the model is running, whatever
+    /// precision was asked for.
+    ///
+    /// Two bytes — as though the request to quantize had been ignored. It was not: the weights
+    /// on disk really are 4-bit, and a saved copy really is 4.61 GB. But the peak while
+    /// generating tracks the *unquantized* parameter count, and does so across two models whose
+    /// sizes differ by more than twice:
+    ///
+    ///     FLUX.2-klein-4B   8.0 GB flat term / 3.997B params = 2.01 bytes
+    ///     FLUX.2-klein-9B  18.5 GB flat term / 9.0B params   = 2.06 bytes
+    ///
+    /// Why is not established. MLX evaluates lazily, so a plausible story is that a step's graph
+    /// holds dequantized weights live until it is evaluated — but that is a story, and two points
+    /// cannot confirm it. What is established is the number, and that planning against the
+    /// quantized size instead under-predicts by more than half.
+    public static let residentBytesPerParameter = 2.05
+
+    /// Working memory the VAE decode needs per megapixel of output.
+    ///
+    /// This is the term the planner used to be missing almost entirely — it modelled the decode
+    /// as one wide feature map, about 0.5 GB at 1024x1024, where measurement needs twenty times
+    /// that. It was the larger half of issue #3: too small here, too large in the load phase, and
+    /// the two errors happened to cancel at exactly the one resolution the planner was
+    /// calibrated at.
+    ///
+    /// Measured slope is 9.48 GB/Mpx on klein-4B (five resolutions, all within 1% of the line)
+    /// and 9.18 GB/Mpx on klein-9B (two). That they agree within 3.3% across models with
+    /// different block counts and hidden sizes is what says this belongs to the VAE — which is
+    /// the same component in both — rather than to the transformer. 9.8 is the top of the
+    /// measured range, chosen so the residual error stays positive.
+    public static let decodeBytesPerMegapixel = 9.8e9
+
     /// Latents carried between denoising steps, in fp16.
     ///
     /// Small next to the weights, but they scale with image area, so they are what makes a
@@ -129,12 +166,24 @@ public struct DiffusionPlanner: Sendable {
         return Bytes(elements * 2 * 3 * Int64(configuration.batchSize))
     }
 
+    /// Bytes the resident weights cost during a run, as opposed to on disk.
+    ///
+    /// Everything but the transformer is charged at the precision it was quantized to. The
+    /// transformer is charged at `residentBytesPerParameter`, which measurement says is what it
+    /// costs no matter what precision was requested.
+    public static func residentWeightBytes(_ parameters: Int64) -> Bytes {
+        Bytes(Int64(Double(parameters) * residentBytesPerParameter))
+    }
+
     /// Activation memory inside a transformer block while denoising.
     ///
-    /// Attention over the latent grid is quadratic in the token count, and the token count is
-    /// itself proportional to image area — so activations grow with the *fourth* power of the
-    /// image's side length. This is the term that makes high resolutions fail suddenly rather
-    /// than gradually.
+    /// Small — tens of megabytes at 1024x1024, against nearly ten gigabytes for the decode. It
+    /// is kept because it is real and because it is the term layer streaming acts on, not
+    /// because it moves any verdict.
+    ///
+    /// Linear in token count, not quadratic: Metal's attention kernels are tiled, so the score
+    /// matrix is never materialised in full. An earlier comment here claimed growth with the
+    /// fourth power of the image side, which the code below has never done.
     public static func denoiseActivationBytes(
         _ shape: DiffusionShape, _ configuration: ImageConfiguration
     ) -> Bytes {
@@ -154,19 +203,19 @@ public struct DiffusionPlanner: Sendable {
 
     /// Peak while the VAE turns latents back into pixels.
     ///
-    /// The decoder upsamples to full resolution and briefly holds wide intermediate feature
-    /// maps — often the tallest moment of the whole run, and the reason an image can fail at
-    /// the very last step after minutes of denoising. Tiling caps it by decoding in pieces.
+    /// The tallest moment of the whole run above about half a megapixel, and the reason an image
+    /// can fail at the very last step after minutes of denoising. It dominates because the
+    /// decoder upsamples to full resolution and holds its intermediate feature maps rather than
+    /// freeing them as it climbs.
+    ///
+    /// A single measured coefficient rather than a count of feature maps: the count would have to
+    /// be guessed, and the guess was wrong by twenty times. See `decodeBytesPerMegapixel`.
     public static func decodeActivationBytes(
         _ shape: DiffusionShape, _ configuration: ImageConfiguration
     ) -> Bytes {
-        let pixels = Double(configuration.width * configuration.height)
-        if configuration.tiledDecode {
-            // Bounded by the tile, not the image.
-            return Bytes(Int64(512 * 512 * 128 * 2 * 2))
-        }
-        // Widest feature map is roughly 128 channels at full resolution, fp16, double-buffered.
-        return Bytes(Int64(pixels * 128 * 2 * 2 * Double(configuration.batchSize)))
+        Bytes(Int64(
+            decodeBytesPerMegapixel * configuration.megapixels * Double(configuration.batchSize)
+        ))
     }
 
     // MARK: - Planning
@@ -183,14 +232,17 @@ public struct DiffusionPlanner: Sendable {
         let latents = Self.latentBytes(shape, configuration)
 
         // Layer streaming: only the resident slice of the denoiser is in memory.
-        var transformer = Self.weightBytes(shape.transformerParameters, quantization)
+        var transformer = Self.residentWeightBytes(shape.transformerParameters)
+        var loadedTransformer = Self.weightBytes(shape.transformerParameters, quantization)
         var streamed = Bytes.zero
         var notes: [String] = []
 
         if let resident = configuration.residentBlocks, resident < shape.blockCount, resident > 0 {
-            let perBlock = Self.weightBytes(shape.parametersPerBlock, quantization)
+            let perBlock = Self.residentWeightBytes(shape.parametersPerBlock)
             let full = transformer
             transformer = perBlock * Double(resident)
+            loadedTransformer = Self.weightBytes(shape.parametersPerBlock, quantization)
+                * Double(resident)
             streamed = full - transformer
             notes.append(
                 "Layer streaming keeps \(resident) of \(shape.blockCount) transformer blocks "
@@ -203,29 +255,39 @@ public struct DiffusionPlanner: Sendable {
             )
         }
 
-        // Loading comes first, and on a first run it is usually the tallest thing that happens.
+        // Loading is sequential, and modelling it as simultaneous was the smaller half of issue
+        // #3. mflux reads transformer, text encoder and VAE as separate safetensors, quantizing
+        // and releasing each before opening the next, so only one component is ever at full
+        // precision. Charging every component at full precision at once overstated klein-4B's
+        // load by 8 GB.
         //
-        // Charging a full-precision copy of everything plus the largest quantized component is
-        // deliberately pessimistic: mflux quantizes component by component and frees as it goes,
-        // so the true peak sits below this. On FLUX.2-klein-4B (16.46 GB of fp16 weights, 4.61 GB
-        // once quantized) it predicts 19.1 GB against 17.9 GB measured. Erring high is the point
-        // — the failure mode of the opposite error is an OOM partway through a long run.
-        let fullPrecision = Self.weightBytes(shape.totalParameters, .f16)
-        let quantizedLargest = Self.weightBytes(
-            max(shape.transformerParameters, shape.textEncoderParameters), quantization
-        )
+        // The largest component sets it, because the order the components are read in does not
+        // matter to the worst case: whichever is biggest, it is at full precision while every
+        // other one is either not yet read or already reduced. On klein-4B that is 8.30 GB for
+        // the text encoder plus 2.30 GB for the rest, and 10.59 GB predicted against 10.52 GB
+        // measured at 512x512, where this phase is what the run peaks at.
+        let largestComponent = max(shape.transformerParameters, shape.textEncoderParameters)
+        let othersQuantized = Self.weightBytes(shape.totalParameters - largestComponent, quantization)
         let loadResident = configuration.weightsArePrequantized
             ? Self.weightBytes(shape.totalParameters, quantization)
-            : fullPrecision + quantizedLargest
+            : Self.weightBytes(largestComponent, .f16) + othersQuantized
 
         if !configuration.weightsArePrequantized, quantization != .f16, quantization != .bf16 {
             notes.append(
-                "Weights are downloaded at full precision and quantized in memory, so the first "
-                + "run peaks at \(loadResident.formatted) regardless of the precision asked for. "
+                "Weights are downloaded at full precision and quantized one component at a time, "
+                + "so loading peaks at \(loadResident.formatted) whatever precision was asked for. "
                 + (configuration.canReuseQuantizedSave
                    ? "Saving a quantized copy removes that spike."
                    : "This runtime cannot load a quantized copy back for this model family, so "
                      + "the spike applies to every run, not just the first.")
+            )
+        }
+
+        if !shape.peakIsCalibrated {
+            notes.append(
+                "This estimate is extrapolated. The memory model was fitted to measured "
+                + "FLUX.2 klein runs; nothing in this model's family has been measured against "
+                + "it, so treat the figure as an order of magnitude rather than a number."
             )
         }
 
@@ -238,24 +300,32 @@ public struct DiffusionPlanner: Sendable {
                     : "Reads full-precision weights and quantizes them in memory",
                 resident: loadResident
             ),
+            // The transformer is charged at the size it was loaded at here, not at the two bytes
+            // a parameter the phases below use. The step change happens the first time it runs:
+            // whatever makes a running transformer cost its unquantized size, it has not happened
+            // yet while the prompt is still being encoded. No measurement pins this phase — it
+            // has never been the peak in any run measured — so it is left at the smaller of the
+            // two rather than inflated on a guess.
             .init(
                 name: "Encode",
                 detail: "Text encoders turn the prompt into conditioning",
-                resident: textEncoders + latents
+                resident: textEncoders + loadedTransformer + vae + latents
             ),
             .init(
                 name: "Denoise",
                 detail: "\(configuration.steps) steps through the transformer",
-                resident: transformer + latents
+                resident: transformer + vae + latents
                     + Self.denoiseActivationBytes(shape, configuration)
                     + (configuration.evictTextEncoders ? .zero : textEncoders)
             ),
+            // The transformer is still resident here. mflux does not free it before decoding —
+            // which is why the decode peak tracks transformer size across models, and why this
+            // phase rather than the load is what a 1024x1024 run actually peaks at.
             .init(
                 name: "Decode",
-                detail: configuration.tiledDecode
-                    ? "VAE reconstructs the image in tiles"
-                    : "VAE reconstructs the image",
-                resident: vae + latents + Self.decodeActivationBytes(shape, configuration)
+                detail: "VAE reconstructs the image",
+                resident: transformer + vae + latents
+                    + Self.decodeActivationBytes(shape, configuration)
             ),
         ]
 
@@ -343,39 +413,29 @@ public struct DiffusionPlanner: Sendable {
             }
         }
 
-        // Only worth suggesting when decode is what is actually killing it.
-        if peakName == "Decode", !configuration.tiledDecode {
-            var tiled = configuration
-            tiled.tiledDecode = true
-            let saving = plan.peak - self.plan(shape: shape, configuration: tiled).peak
-            if saving > .mib(256) {
-                results.append(.init(
-                    title: "Decode the image in tiles",
-                    detail: "The final VAE step is the tallest moment of the run. Decoding in "
-                        + "pieces caps it at the tile size instead of the image size.",
-                    saving: saving,
-                    cost: "Slightly slower, and can leave faint seams on some models.",
-                    kind: .quantizeKVCache
-                ))
-            }
-        }
+        // There used to be a "decode the image in tiles" suggestion here. It is gone because
+        // mflux 0.18.1 has no tiled-decode flag — the app was passing `--low-ram` and calling it
+        // tiling, and `--low-ram` was measured to change the peak by nothing at all. Lowering
+        // the resolution is the only lever that acts on the decode, and it is already below.
 
-        // Resolution is the strongest lever, because cost scales with area.
+        // Resolution is the strongest lever, because the decode scales with area and the decode
+        // is what peaks.
         if configuration.width > 512 || configuration.height > 512 {
             let smaller = ImageConfiguration(
                 width: max(512, configuration.width / 2),
                 height: max(512, configuration.height / 2),
                 steps: configuration.steps, quantization: configuration.quantization,
                 evictTextEncoders: configuration.evictTextEncoders,
-                tiledDecode: configuration.tiledDecode,
+                lowRAM: configuration.lowRAM,
                 residentBlocks: configuration.residentBlocks, batchSize: configuration.batchSize
             )
             let saving = plan.peak - self.plan(shape: shape, configuration: smaller).peak
             if saving > .mib(256) {
                 results.append(.init(
                     title: "Render at \(smaller.width)×\(smaller.height)",
-                    detail: "Cost scales with area, so halving each side quarters the latents "
-                        + "and the activations.",
+                    detail: "The VAE decode costs about "
+                        + "\(Bytes(Int64(Self.decodeBytesPerMegapixel)).formatted) per megapixel, "
+                        + "so halving each side takes three quarters of it off the peak.",
                     saving: saving,
                     cost: "A smaller image. Upscaling afterwards recovers much of the detail.",
                     kind: .reduceContext

@@ -291,43 +291,70 @@ struct ModelDetailSheet: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
-            Button("Close") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-            Spacer()
+        let plan = model.plan(
+            for: entry, quantization: quantization, configuration: currentConfiguration
+        )
+        let installed = model.isInstalled(entry, quantization: quantization)
 
-            let plan = model.plan(
-                for: entry, quantization: quantization, configuration: currentConfiguration
-            )
-            if model.isInstalled(entry, quantization: quantization) {
-                Button {
-                    if let installed = model.installedModels.first(where: {
-                        $0.catalogID == entry.id && $0.quantization == quantization
-                    }) {
-                        model.load(installed, configuration: currentConfiguration)
-                        model.selectedTab = .chat
-                        dismiss()
+        return VStack(alignment: .leading, spacing: 8) {
+            // Downloading costs only disk, so it is never gated on memory — only loading is.
+            if !installed, !plan.verdict.isUsable {
+                Label(installWarning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+
+                if installed {
+                    Button {
+                        if let installed = model.installedModels.first(where: {
+                            $0.catalogID == entry.id && $0.quantization == quantization
+                        }) {
+                            model.load(installed, configuration: currentConfiguration)
+                            model.selectedTab = .chat
+                            dismiss()
+                        }
+                    } label: {
+                        Label("Load model", systemImage: "play.fill")
                     }
-                } label: {
-                    Label("Load model", systemImage: "play.fill")
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!plan.verdict.isUsable)
+                } else {
+                    Button {
+                        model.install(entry, quantization: quantization)
+                        dismiss()
+                    } label: {
+                        Label(
+                            "Install \(entry.variant(for: quantization)?.downloadSize.formatted ?? "")",
+                            systemImage: "arrow.down.circle.fill"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!plan.verdict.isUsable)
-            } else {
-                Button {
-                    model.install(entry, quantization: quantization)
-                    dismiss()
-                } label: {
-                    Label(
-                        "Install \(entry.variant(for: quantization)?.downloadSize.formatted ?? "")",
-                        systemImage: "arrow.down.circle.fill"
-                    )
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!plan.verdict.isUsable)
             }
         }
         .padding(16)
+    }
+
+    /// Explains why the plan fails while the Install button stays enabled.
+    ///
+    /// Two very different situations produce the same verdict: other apps currently hogging
+    /// memory (temporary — the download is fine) and a model that genuinely exceeds the machine
+    /// (permanent — the user should know before spending the bandwidth).
+    private var installWarning: String {
+        let idlePlan = model.planner().plan(
+            shape: entry.shape, quantization: quantization, configuration: currentConfiguration
+        )
+        if idlePlan.verdict.isUsable {
+            return "This fits on its own, but other apps are currently holding too much memory. "
+                + "You can download now and free up memory before loading."
+        }
+        return "This configuration is not expected to fit in memory on this Mac. You can still "
+            + "download it — see the suggestions above for ways to make it run."
     }
 
     // MARK: - State

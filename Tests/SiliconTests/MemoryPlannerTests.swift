@@ -424,3 +424,59 @@ struct CalibrationIsolationTests {
         )
     }
 }
+
+@Suite("IQ quantization sizing")
+struct IQQuantizationTests {
+
+    /// The rates `llama-quantize --help` prints for each format. Pinned here because they are
+    /// transcribed constants with no derivation to check them against — an edit that fat-fingers
+    /// one would otherwise change every plan for that format silently.
+    @Test(arguments: [
+        (Quantization.iq1_S, 1.56),
+        (.iq2_XXS, 2.06),
+        (.iq3_M, 3.66),
+        (.iq4_XS, 4.25),
+        (.iq4_NL, 4.50),
+    ])
+    func bitsPerWeightMatchesPublishedRates(quantization: Quantization, expectedBpw: Double) {
+        #expect(quantization.bitsPerWeight == expectedBpw)
+    }
+
+    /// Regression: `Quantization.inferred(fromFilename:)` used to return nil for IQ names, so
+    /// every call site fell back to `.q4_K_M` (4.85 bpw) — roughly 2.35x too heavy at IQ2_XXS —
+    /// which is the exact scenario IQ quants exist to solve. A 70B IQ2_XXS should size to
+    /// roughly 18 GB, not the ~43 GB the old fallback would have produced.
+    @Test func iq2XXSSeventyBSizesNearEighteenGigabytesNotFortyThree() {
+        let bytes = MemoryPlanner.weightBytes(
+            ModelCatalog.llama3_3_70B.shape.totalParameters, .iq2_XXS
+        )
+        #expect(abs(bytes.gibibytes - 16.9) < 0.5)
+
+        let wronglyFallenBack = MemoryPlanner.weightBytes(
+            ModelCatalog.llama3_3_70B.shape.totalParameters, .q4_K_M
+        )
+        #expect(wronglyFallenBack.gibibytes > bytes.gibibytes * 2)
+    }
+
+    /// The planning-level consequence: on a 36 GB Mac, a 70B model correctly identified as
+    /// IQ2_XXS fits; the same model mis-sized at the old Q4_K_M fallback would not.
+    @Test func correctlyInferredIQQuantizationFitsWhereFallbackWouldNotHaveFit() {
+        let inferred = Quantization.inferred(fromFilename: "Llama-3.3-70B-Instruct-IQ2_XXS.gguf")
+        #expect(inferred == .iq2_XXS)
+
+        let planner = MemoryPlanner(profile: m3Max36)
+        let plan = planner.plan(
+            shape: ModelCatalog.llama3_3_70B.shape,
+            quantization: inferred ?? .q4_K_M,
+            configuration: LoadConfiguration(contextLength: 8192)
+        )
+        #expect(plan.verdict.isUsable)
+
+        let asIfFallenBack = planner.plan(
+            shape: ModelCatalog.llama3_3_70B.shape,
+            quantization: .q4_K_M,
+            configuration: LoadConfiguration(contextLength: 8192)
+        )
+        #expect(!asIfFallenBack.verdict.isUsable)
+    }
+}
