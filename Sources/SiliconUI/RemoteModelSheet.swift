@@ -184,26 +184,53 @@ struct RemoteModelSheet: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
-            Button("Close") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-            if isReadingHeader {
-                ProgressView().controlSize(.small)
-                Text("Reading the header…").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            // Downloading costs only disk, so a failing memory plan warns instead of blocking.
+            if let warning = installWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
-            Button {
-                install()
-            } label: {
-                Label(
-                    selected.map { "Install \($0.size.formatted)" } ?? "Install",
-                    systemImage: "arrow.down.circle.fill"
-                )
+            HStack {
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                if isReadingHeader {
+                    ProgressView().controlSize(.small)
+                    Text("Reading the header…").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    install()
+                } label: {
+                    Label(
+                        selected.map { "Install \($0.size.formatted)" } ?? "Install",
+                        systemImage: "arrow.down.circle.fill"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selected == nil)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(selected == nil || plan?.verdict.isUsable == false)
         }
         .padding(16)
+    }
+
+    /// Distinguishes "other apps are in the way right now" from "this Mac cannot run it at all",
+    /// so the user knows whether the download is worth the bandwidth.
+    private var installWarning: String? {
+        guard let plan, !plan.verdict.isUsable, let shape, let selected else { return nil }
+        let quantization = Quantization.inferred(fromFilename: selected.path) ?? .q4_K_M
+        let context = min(shape.trainingContextLength, 8192)
+        let idlePlan = model.planner().plan(
+            shape: shape, quantization: quantization,
+            configuration: LoadConfiguration(contextLength: context)
+        )
+        if idlePlan.verdict.isUsable {
+            return "This fits on its own, but other apps are currently holding too much memory. "
+                + "You can download now and free up memory before loading."
+        }
+        return "This file is not expected to fit in memory on this Mac. You can still download "
+            + "it, but expect to reduce the context or pick a smaller quantization to run it."
     }
 
     // MARK: - Work
