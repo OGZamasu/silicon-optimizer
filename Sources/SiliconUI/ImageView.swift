@@ -148,7 +148,7 @@ struct ImageView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!canGenerate || currentPlan?.verdict.isUsable == false)
+                        .disabled(!canGenerate)
                     }
                 }
 

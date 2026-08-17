@@ -408,16 +408,9 @@ extension AppModel {
         let (entry, configuration) = try resolveImage(request)
         let predicted = diffusionPlan(for: entry, configuration: configuration)
 
-        // Refuse rather than let the runtime die minutes in with an opaque allocation failure.
-        // An explicit override exists because the estimate is not always right and being wrong
-        // in the pessimistic direction still leaves someone unable to run a model that works.
-        guard predicted.verdict.isUsable || request.allowOverBudget == true else {
-            throw ControlHostError.loadFailed(
-                refusalMessage(for: entry, plan: predicted)
-                + " If you have measured this configuration and know it fits, set "
-                + "allowOverBudget to proceed anyway."
-            )
-        }
+        // Warn rather than refuse: the estimate is not always right, and a hard block leaves
+        // someone unable to run a model that would in fact work, with no way to proceed.
+        let warning = predicted.verdict.isUsable ? nil : refusalMessage(for: entry, plan: predicted)
 
         noteActivity()
         let output = nextImageOutputURL()
@@ -458,7 +451,8 @@ extension AppModel {
             elapsedSeconds: result.elapsed,
             peakMemoryBytes: result.peakMemory?.rawValue,
             predictedPeakBytes: predicted.peak.rawValue,
-            model: entry.name
+            model: entry.name,
+            warning: warning
         )
     }
 

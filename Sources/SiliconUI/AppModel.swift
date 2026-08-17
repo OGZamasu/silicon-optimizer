@@ -293,17 +293,14 @@ public final class AppModel {
               !imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
 
-        // The button used to start regardless of the plan, which made the plan decorative: the
-        // run would begin, climb past the budget and take the machine down with it. The control
-        // API refused all along; this path did not.
+        // Warn rather than refuse: the estimate is not always right, and a hard block leaves
+        // someone unable to run a model that would in fact work, with no way to proceed.
         let plan = diffusionPlan(for: entry, configuration: imageConfiguration)
-        guard plan.verdict.isUsable else {
+        if !plan.verdict.isUsable {
             alert = AlertContent(
-                title: "Not enough memory to generate",
+                title: "This may not fit in memory",
                 message: refusalMessage(for: entry, plan: plan)
             )
-            imageState = .failed(message: refusalMessage(for: entry, plan: plan))
-            return
         }
 
         noteActivity()
