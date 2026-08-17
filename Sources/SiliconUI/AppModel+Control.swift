@@ -441,7 +441,7 @@ extension AppModel {
                 imageState = .starting(stage: "Denoising \(index)/\(total)…")
             case .finished(let finished):
                 result = finished
-                lastImage = finished
+                generatedImages.insert(finished, at: 0)
             }
         }
 

@@ -117,12 +117,33 @@ public final class AppModel {
 
     public internal(set) var imageRuntime: RuntimeInstallation?
     public internal(set) var imageState: RuntimeState = .idle
-    public internal(set) var lastImage: ImageResult?
+    /// Every image generated this session, newest first. Nothing is pruned — each one is already
+    /// on disk in the configured output directory, so keeping the in-memory list around too is
+    /// just what makes the gallery scrollable instead of showing only the latest.
+    public internal(set) var generatedImages: [ImageResult] = []
     /// Set when an image had to be written somewhere other than the configured directory.
     public internal(set) var imageOutputWarning: String?
     public internal(set) var imageProgress: (step: Int, total: Int)?
     public var imagePrompt = ""
     public var imageConfiguration = ImageConfiguration()
+
+    /// One prompt submitted for generation, either running now or waiting its turn.
+    ///
+    /// Captured at submit time rather than read live off `imagePrompt`/`imageConfiguration`, so
+    /// editing the composer to queue up the next image does not retroactively change a job that
+    /// is already queued or running.
+    public struct ImageJob: Identifiable {
+        public let id = UUID()
+        public var prompt: String
+        public var configuration: ImageConfiguration
+        public var modelID: String
+        public var modelName: String
+    }
+
+    /// Jobs waiting for the current generation to finish. Only one MFLUX process runs at a time —
+    /// concurrent runs would fight over the same memory budget the plan is checked against.
+    public internal(set) var imageQueue: [ImageJob] = []
+    public internal(set) var currentImageJob: ImageJob?
     /// Switching model adopts that model's step count.
     ///
     /// These are not interchangeable numbers: schnell is distilled to finish in 4 steps and klein
@@ -141,6 +162,12 @@ public final class AppModel {
     }
 
     private var imageTask: Task<Void, Never>?
+    /// The runtime actually running `currentImageJob`, kept so `cancelImage()` can terminate the
+    /// child process rather than merely stop listening to it — otherwise a stopped job's mflux
+    /// process would keep running unseen while the next queued job starts a second one alongside
+    /// it, fighting over the same memory budget.
+    private var activeImageRuntime: MFluxRuntime?
+    private var imageWasCancelled = false
 
     public var isGeneratingImage: Bool { imageTask != nil }
 
@@ -287,9 +314,11 @@ public final class AppModel {
         )
     }
 
+    /// Queues the composer's current prompt. Starts immediately if nothing else is running;
+    /// otherwise waits behind whatever is already queued, so a second and third idea can be
+    /// typed in while the first is still rendering instead of waiting for it to finish.
     public func generateImage() {
-        guard !isGeneratingImage,
-              let entry = DiffusionCatalog.entry(id: selectedDiffusionModel),
+        guard let entry = DiffusionCatalog.entry(id: selectedDiffusionModel),
               !imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
 
@@ -303,29 +332,67 @@ public final class AppModel {
             )
         }
 
+        imageQueue.append(ImageJob(
+            prompt: imagePrompt, configuration: imageConfiguration,
+            modelID: entry.id, modelName: entry.name
+        ))
+        imagePrompt = ""
+        advanceImageQueue()
+    }
+
+    /// Removes one job that has not started running yet. The one already in flight cannot be
+    /// removed this way — use `cancelImage()` for that.
+    public func removeQueuedImageJob(_ id: ImageJob.ID) {
+        imageQueue.removeAll { $0.id == id }
+    }
+
+    public func clearImageQueue() {
+        imageQueue.removeAll()
+    }
+
+    /// Starts the next queued job if nothing is running. Called after a job finishes, fails, or
+    /// is cancelled, and after `generateImage()` queues a new one.
+    private func advanceImageQueue() {
+        guard !isGeneratingImage, !imageQueue.isEmpty else { return }
+        let job = imageQueue.removeFirst()
+        currentImageJob = job
+        runImageJob(job)
+    }
+
+    private func runImageJob(_ job: ImageJob) {
         noteActivity()
         let output = nextImageOutputURL()
         // Diffusion runs as a standalone process, so an InstalledModel is only a carrier for
         // the catalog id the runtime maps to its own alias.
         let carrier = InstalledModel(
-            id: entry.id, name: entry.name, catalogID: entry.id,
-            quantization: imageConfiguration.quantization, format: .mlx,
+            id: job.modelID, name: job.modelName, catalogID: job.modelID,
+            quantization: job.configuration.quantization, format: .mlx,
             primaryFile: output, allFiles: [], projectorFile: nil,
             sizeOnDisk: .zero, installedAt: Date(), shape: nil, capabilities: []
         )
         let request = ImageRequest(
-            prompt: imagePrompt, configuration: imageConfiguration,
+            prompt: job.prompt, configuration: job.configuration,
             seed: nil, output: output
         )
 
         imageState = .starting(stage: "Starting MFLUX…")
         imageProgress = nil
+        imageWasCancelled = false
         let runtime = MFluxRuntime(
             installation: imageRuntime, huggingFaceToken: settings.huggingFaceToken
         )
+        activeImageRuntime = runtime
 
         imageTask = Task { [weak self] in
-            defer { Task { @MainActor in self?.imageTask = nil } }
+            defer {
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.imageTask = nil
+                    self.activeImageRuntime = nil
+                    self.currentImageJob = nil
+                    self.advanceImageQueue()
+                }
+            }
             do {
                 for try await event in try await runtime.generate(request, model: carrier) {
                     guard let self else { return }
@@ -336,17 +403,26 @@ public final class AppModel {
                         imageProgress = (index, total)
                         imageState = .starting(stage: "Denoising \(index)/\(total)…")
                     case .finished(let result):
-                        lastImage = result
+                        generatedImages.insert(result, at: 0)
                         imageProgress = nil
                         imageState = .idle
                     }
                 }
             } catch {
                 guard let self else { return }
-                imageState = .failed(message: error.localizedDescription)
-                alert = AlertContent(
-                    title: "Could not generate the image", message: error.localizedDescription
-                )
+                // A user-requested stop tears down the process the same way a real failure does
+                // — terminating it makes mflux exit non-zero — so it lands in this catch block
+                // too. Report it as idle rather than as a failure the user didn't cause.
+                if imageWasCancelled {
+                    imageState = .idle
+                } else {
+                    imageState = .failed(message: error.localizedDescription)
+                    alert = AlertContent(
+                        title: "Could not generate \"\(job.prompt)\"",
+                        message: error.localizedDescription
+                    )
+                }
+                imageWasCancelled = false
             }
         }
     }
@@ -376,11 +452,23 @@ public final class AppModel {
         }
     }
 
+    /// Stops the job in flight and moves on to the next queued one, if any — stopping one job
+    /// is not a reason to also give up on the rest of the queue.
+    /// Stops the job in flight and moves on to the next queued one, if any — stopping one job is
+    /// not a reason to also give up on the rest of the queue.
+    ///
+    /// Waits for the mflux process to actually exit before starting the next job: `imageTask`,
+    /// `activeImageRuntime` and the queue advance all stay untouched here and are cleared by the
+    /// running task's own completion once `runtime.cancel()` below has made that happen. Clearing
+    /// them immediately instead would let a second process start while the first was still being
+    /// torn down — two runs fighting over the same memory budget, which is exactly what the plan
+    /// this app shows before every run is trying to prevent.
     public func cancelImage() {
+        guard let runtime = activeImageRuntime else { return }
+        imageWasCancelled = true
         imageTask?.cancel()
-        imageTask = nil
-        imageState = .idle
-        imageProgress = nil
+        imageState = .starting(stage: "Stopping…")
+        Task { await runtime.cancel() }
     }
 
     /// Automatic updates. Created lazily because instantiating Sparkle starts its scheduler.
