@@ -923,7 +923,10 @@ public final class AppModel {
         }
     }
 
-    public func install(_ entry: ModelEntry, quantization: Quantization) {
+    /// - Parameter saveTo: A folder to save this model's files under instead of Silicon
+    ///   Optimizer's own managed library directory — an external drive, say. The library's index
+    ///   still lives where it always does; only these files move. Pass `nil` for the default.
+    public func install(_ entry: ModelEntry, quantization: Quantization, saveTo: URL? = nil) {
         let key = "\(entry.id)@\(quantization.rawValue)"
         guard downloads[key] == nil else { return }
 
@@ -939,9 +942,13 @@ public final class AppModel {
 
             do {
                 let resolution = try await resolver.resolve(entry: entry, quantization: quantization)
-                let destination = await self.library.directory(
-                    for: entry.id, quantization: quantization
-                )
+                let destination = if let saveTo {
+                    saveTo.appendingPathComponent(
+                        "\(entry.id)/\(quantization.rawValue)", isDirectory: true
+                    )
+                } else {
+                    await self.library.directory(for: entry.id, quantization: quantization)
+                }
                 // The progress callback is @Sendable and fires off-actor, so it must not
                 // capture the observable task object directly — only the key.
                 let files = try await downloader.download(resolution, to: destination) {

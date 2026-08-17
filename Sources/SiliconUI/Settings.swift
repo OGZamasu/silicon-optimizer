@@ -43,6 +43,11 @@ public struct Settings: Codable, Sendable, Equatable {
     /// Where generated images are written. Empty means the default below.
     public var imageOutputDirectory: String = ""
 
+    /// Last external folder chosen to save a downloaded model to. Only pre-fills the folder
+    /// picker for next time — it doesn't redirect anything by itself, since which models go
+    /// where is chosen per download, not as a standing default.
+    public var lastExternalModelDirectory: String = ""
+
     /// The directory images are actually written to.
     ///
     /// Defaults to `~/Pictures/Silicon Optimizer`. Generation previously wrote into
@@ -130,6 +135,9 @@ public struct Settings: Codable, Sendable, Equatable {
         speedCalibrations = try value(.speedCalibrations, fallback.speedCalibrations)
         huggingFaceToken = try value(.huggingFaceToken, fallback.huggingFaceToken)
         imageOutputDirectory = try value(.imageOutputDirectory, fallback.imageOutputDirectory)
+        lastExternalModelDirectory = try value(
+            .lastExternalModelDirectory, fallback.lastExternalModelDirectory
+        )
         llamaServerPath = try value(.llamaServerPath, fallback.llamaServerPath)
         mlxServerPath = try value(.mlxServerPath, fallback.mlxServerPath)
     }
