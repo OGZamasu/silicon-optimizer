@@ -125,11 +125,8 @@ struct ImageView: View {
                 installBanner
                 loadedModelBanner
 
-                HStack {
-                    if model.isGeneratingImage {
-                        Button("Stop") { model.cancelImage() }
-                            .buttonStyle(.bordered)
-                    } else if unloadingWouldHelp {
+                HStack(spacing: 8) {
+                    if !model.isGeneratingImage && unloadingWouldHelp {
                         // One button, because it is one intention. Offering a disabled Generate
                         // next to an explanation puts the work of connecting them on the reader.
                         Button {
@@ -141,16 +138,34 @@ struct ImageView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!canGenerate)
                     } else {
+                        // Never disabled by "something is already running" — that is exactly the
+                        // case this queues instead of blocking on.
                         Button {
                             model.generateImage()
                         } label: {
-                            Label("Generate", systemImage: "sparkles")
-                                .frame(maxWidth: .infinity)
+                            Label(
+                                queueingRatherThanStarting ? "Add to Queue" : "Generate",
+                                systemImage: queueingRatherThanStarting
+                                    ? "text.badge.plus" : "sparkles"
+                            )
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!canGenerate || currentPlan?.verdict.isUsable == false)
+                        .disabled(!canGenerate)
+                    }
+
+                    if model.isGeneratingImage {
+                        Button {
+                            model.cancelImage()
+                        } label: {
+                            Image(systemName: "stop.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .help("Stop the current image. Anything queued keeps going.")
                     }
                 }
+
+                queueList
 
                 if model.imageRuntime == nil {
                     Label(
@@ -162,6 +177,48 @@ struct ImageView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    private var queueingRatherThanStarting: Bool {
+        model.isGeneratingImage || !model.imageQueue.isEmpty
+    }
+
+    /// Pending prompts, shown so queuing up several ideas in a row doesn't feel like they
+    /// vanished into a void — each one visible until it's actually running.
+    @ViewBuilder
+    private var queueList: some View {
+        if !model.imageQueue.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Queued (\(model.imageQueue.count))")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear") { model.clearImageQueue() }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(model.imageQueue) { job in
+                    HStack(spacing: 6) {
+                        Text(job.prompt)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            model.removeQueuedImageJob(job.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .padding(10)
+            .background(.background.secondary, in: .rect(cornerRadius: 8))
         }
     }
 
@@ -327,75 +384,31 @@ struct ImageView: View {
         Card(title: "Result", systemImage: "photo") {
             VStack(spacing: 14) {
                 if model.isGeneratingImage {
-                    VStack(spacing: 12) {
-                        ProgressView(
-                            value: model.imageProgress.map {
-                                Double($0.step) / Double(max(1, $0.total))
-                            } ?? 0
-                        )
-                        .progressViewStyle(.linear)
-                        Text(model.imageState.label)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        Text("The first run downloads the weights, which can take a while.")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 260)
-                } else if let result = model.lastImage,
-                          let image = NSImage(contentsOf: result.image) {
-                    // Capped rather than free: at 1024² the image otherwise takes the full column
-                    // and pushes the measured peak below the fold, which is the one number worth
-                    // reading after a run — it is what the plan above gets checked against.
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, maxHeight: 460)
-                        .clipShape(.rect(cornerRadius: 8))
-
-                    HStack {
-                        Readout(
-                            label: "Time",
-                            value: String(format: "%.1fs", result.elapsed),
-                            caption: "total"
-                        )
-                        Readout(
-                            label: "Speed",
-                            value: String(format: "%.2f", result.stepsPerSecond),
-                            caption: "steps/sec"
-                        )
-                        if let peak = result.peakMemory {
-                            Readout(
-                                label: "Peak memory",
-                                value: peak.formatted,
-                                caption: "measured"
-                            )
-                        }
-                    }
-
-                    HStack {
-                        Button {
-                            NSWorkspace.shared.activateFileViewerSelecting([result.image])
-                        } label: {
-                            Label("Reveal in Finder", systemImage: "folder")
-                        }
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.writeObjects([image])
-                        } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
-                        }
-                        Spacer()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    generationProgress
                 } else if case .failed(let message) = model.imageState {
                     EmptyStateView(
                         systemImage: "exclamationmark.triangle",
                         title: "Generation failed",
                         message: message
                     )
-                } else {
+                }
+
+                // Everything generated this session, not just the latest — queuing several
+                // prompts in a row is pointless if finishing the second one hides the first.
+                // Every one of these is also already sitting in the output folder, so nothing
+                // here is the only copy.
+                if !model.generatedImages.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            ForEach(model.generatedImages, id: \.image) { result in
+                                imageResult(result)
+                                if result.image != model.generatedImages.last?.image {
+                                    Divider()
+                                }
+                            }
+                        }
+                    }
+                } else if !model.isGeneratingImage, model.imageState == .idle {
                     EmptyStateView(
                         systemImage: "photo.on.rectangle.angled",
                         title: "No image yet",
@@ -405,6 +418,81 @@ struct ImageView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var generationProgress: some View {
+        VStack(spacing: 12) {
+            ProgressView(
+                value: model.imageProgress.map {
+                    Double($0.step) / Double(max(1, $0.total))
+                } ?? 0
+            )
+            .progressViewStyle(.linear)
+            if let current = model.currentImageJob {
+                Text(current.prompt)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(model.imageState.label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Text("The first run downloads the weights, which can take a while.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 160)
+    }
+
+    @ViewBuilder
+    private func imageResult(_ result: ImageResult) -> some View {
+        if let image = NSImage(contentsOf: result.image) {
+            // Capped rather than free: at 1024² the image otherwise takes the full column, and
+            // with several in a scrolling list that would mean paging through one at a time.
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: 360)
+                .clipShape(.rect(cornerRadius: 8))
+
+            HStack {
+                Readout(
+                    label: "Time",
+                    value: String(format: "%.1fs", result.elapsed),
+                    caption: "total"
+                )
+                Readout(
+                    label: "Speed",
+                    value: String(format: "%.2f", result.stepsPerSecond),
+                    caption: "steps/sec"
+                )
+                if let peak = result.peakMemory {
+                    Readout(
+                        label: "Peak memory",
+                        value: peak.formatted,
+                        caption: "measured"
+                    )
+                }
+            }
+
+            HStack {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([result.image])
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder")
+                }
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.writeObjects([image])
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+                Spacer()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 
