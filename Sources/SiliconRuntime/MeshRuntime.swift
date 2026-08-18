@@ -41,7 +41,8 @@ public struct MeshResult: Sendable, Equatable, Identifiable {
     public var obj: URL?
     /// Sidecar textures, when the backend writes them next to the mesh.
     public var textures: [URL]
-    public var sourceImage: URL
+    /// Nil for results rediscovered from disk, where the conditioning image is unknown.
+    public var sourceImage: URL?
     public var modelName: String
     public var elapsed: TimeInterval
 
@@ -50,7 +51,7 @@ public struct MeshResult: Sendable, Equatable, Identifiable {
 
     public init(
         baseName: String, glb: URL?, obj: URL?, textures: [URL],
-        sourceImage: URL, modelName: String, elapsed: TimeInterval
+        sourceImage: URL?, modelName: String, elapsed: TimeInterval
     ) {
         self.baseName = baseName
         self.glb = glb

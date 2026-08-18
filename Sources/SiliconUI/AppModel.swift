@@ -884,6 +884,78 @@ public final class AppModel {
         }
     }
 
+    // MARK: - Recent results on disk
+
+    public struct RecentFile: Identifiable, Equatable, Sendable {
+        public var id: String { url.path }
+        public var url: URL
+        public var date: Date
+    }
+
+    /// Images in the output folder, newest first — the session gallery only knows this
+    /// launch; the folder knows every launch.
+    public func recentImages(limit: Int = 60) -> [RecentFile] {
+        let directory = settings.resolvedImageOutputDirectory
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: .skipsHiddenFiles
+        )) ?? []
+        return urls
+            .filter { ["png", "jpg", "jpeg"].contains($0.pathExtension.lowercased()) }
+            .map { url in
+                RecentFile(
+                    url: url,
+                    date: (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate ?? .distantPast
+                )
+            }
+            .sorted { $0.date > $1.date }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    /// Saved meshes rediscovered from the output folder — one generation per subfolder,
+    /// reassembled into the same `MeshResult` shape the session gallery uses so the viewer
+    /// and the open-externally actions work identically on both.
+    public func recentMeshes(limit: Int = 40) -> [MeshResult] {
+        let root = settings.resolvedMeshOutputDirectory
+        let manager = FileManager.default
+        let folders = (try? manager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: .skipsHiddenFiles
+        )) ?? []
+
+        return folders
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+            .sorted { lhs, rhs in
+                let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                return left > right
+            }
+            .prefix(limit)
+            .compactMap { folder in
+                let files = (try? manager.contentsOfDirectory(
+                    at: folder, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+                )) ?? []
+                let glb = files.first { $0.pathExtension.lowercased() == "glb" }
+                let obj = files.first { $0.pathExtension.lowercased() == "obj" }
+                guard glb != nil || obj != nil else { return nil }
+                return MeshResult(
+                    baseName: folder.lastPathComponent,
+                    glb: glb,
+                    obj: obj,
+                    textures: files.filter { $0.pathExtension.lowercased() == "png" },
+                    sourceImage: nil,
+                    modelName: "",
+                    elapsed: 0
+                )
+            }
+    }
+
     /// What the machine is generating outside the language model, as one status line —
     /// e.g. "Generating image — FLUX.2 klein (4/8)". The Images and 3D pipelines run real
     /// models of their own, so a status surface that says "no model loaded" while a

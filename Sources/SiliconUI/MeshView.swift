@@ -20,6 +20,10 @@ struct MeshView: View {
     }
     @State private var sourceMode: SourceMode = .picture
 
+    @State private var showsRecents = false
+    @State private var recentModels: [MeshResult] = []
+    @State private var selectedRecentModel: MeshResult?
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -30,7 +34,10 @@ struct MeshView: View {
                             planCard
                         }
                         .frame(width: 380)
-                        resultCard
+                        VStack(spacing: 16) {
+                            resultCard
+                            recentsPane
+                        }
                     }
                     .padding(20)
                 } else {
@@ -38,6 +45,7 @@ struct MeshView: View {
                         composer
                         planCard
                         resultCard
+                        recentsPane
                     }
                     .padding(20)
                 }
@@ -45,6 +53,26 @@ struct MeshView: View {
         }
         .background(.background)
         .navigationTitle("3D")
+        .onChange(of: showsRecents) {
+            if showsRecents { recentModels = model.recentMeshes() }
+        }
+        .onChange(of: model.meshResults.count) {
+            if showsRecents { recentModels = model.recentMeshes() }
+        }
+    }
+
+    private var recentsPane: some View {
+        RecentsPane(
+            title: "Recent models",
+            systemImage: "clock.arrow.circlepath",
+            items: recentModels,
+            isExpanded: $showsRecents
+        ) { item in
+            MeshThumbnail(result: item)
+        } onSelect: { item in
+            selectedRecentModel = item
+            selectedResultID = nil
+        }
     }
 
     // MARK: - Composer
@@ -558,6 +586,7 @@ struct MeshView: View {
     }
 
     private var displayedResult: MeshResult? {
+        if let selectedRecentModel { return selectedRecentModel }
         if let id = selectedResultID,
            let match = model.meshResults.first(where: { $0.id == id }) {
             return match
@@ -574,8 +603,15 @@ struct MeshView: View {
         }
 
         HStack(spacing: 16) {
-            Readout(label: "Model", value: result.modelName)
-            Readout(label: "Time", value: result.elapsed.durationLabel)
+            // Results rediscovered from disk carry no run metadata — show what is true.
+            if result.modelName.isEmpty {
+                Readout(label: "From", value: "your library")
+            } else {
+                Readout(label: "Model", value: result.modelName)
+            }
+            if result.elapsed > 0 {
+                Readout(label: "Time", value: result.elapsed.durationLabel)
+            }
             Readout(label: "Files", value: fileSummary(result))
             Spacer()
         }
@@ -724,6 +760,7 @@ struct MeshView: View {
             ForEach(model.meshResults) { result in
                 Button {
                     selectedResultID = result.id
+                    selectedRecentModel = nil
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: result.id == displayedResult?.id

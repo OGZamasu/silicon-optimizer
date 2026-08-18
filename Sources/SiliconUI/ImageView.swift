@@ -12,6 +12,10 @@ import SwiftUI
 struct ImageView: View {
     @Environment(AppModel.self) private var model
 
+    @State private var showsRecents = false
+    @State private var recentImages: [AppModel.RecentFile] = []
+    @State private var selectedRecent: URL?
+
     var body: some View {
         @Bindable var model = model
 
@@ -25,7 +29,10 @@ struct ImageView: View {
                                 planCard
                             }
                             .frame(width: 380)
-                            resultCard
+                            VStack(spacing: 16) {
+                                resultCard
+                                recentsPane
+                            }
                         }
                     } else {
                         // Plan above result, not below it: the cost estimate is the reason this
@@ -35,6 +42,7 @@ struct ImageView: View {
                             composer
                             planCard
                             resultCard
+                            recentsPane
                         }
                     }
                 }
@@ -43,6 +51,27 @@ struct ImageView: View {
         }
         .background(.background)
         .navigationTitle("Images")
+        // Refresh on expand and when a generation finishes — never on the metrics tick,
+        // which re-evaluates this body every second.
+        .onChange(of: showsRecents) {
+            if showsRecents { recentImages = model.recentImages() }
+        }
+        .onChange(of: model.generatedImages.count) {
+            if showsRecents { recentImages = model.recentImages() }
+        }
+    }
+
+    private var recentsPane: some View {
+        RecentsPane(
+            title: "Recent images",
+            systemImage: "clock.arrow.circlepath",
+            items: recentImages,
+            isExpanded: $showsRecents
+        ) { item in
+            ImageThumbnail(url: item.url)
+        } onSelect: { item in
+            selectedRecent = item.url
+        }
     }
 
     // MARK: - Composer
@@ -420,6 +449,11 @@ struct ImageView: View {
                     )
                 }
 
+                if let selected = selectedRecent {
+                    recentResult(selected)
+                    if !model.generatedImages.isEmpty { Divider() }
+                }
+
                 // Everything generated this session, not just the latest — queuing several
                 // prompts in a row is pointless if finishing the second one hides the first.
                 // Every one of these is also already sitting in the output folder, so nothing
@@ -435,7 +469,8 @@ struct ImageView: View {
                             }
                         }
                     }
-                } else if !model.isGeneratingImage, model.imageState == .idle {
+                } else if selectedRecent == nil, !model.isGeneratingImage,
+                          model.imageState == .idle {
                     EmptyStateView(
                         systemImage: "photo.on.rectangle.angled",
                         title: "No image yet",
@@ -471,6 +506,56 @@ struct ImageView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, minHeight: 160)
+    }
+
+    /// A picked recent image, viewed with the same actions as a fresh one — minus the
+    /// run metadata, which the file alone does not carry.
+    @ViewBuilder
+    private func recentResult(_ url: URL) -> some View {
+        if let image = NSImage(contentsOf: url) {
+            VStack(spacing: 10) {
+                HStack {
+                    Label("From your library", systemImage: "clock.arrow.circlepath")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        selectedRecent = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close this preview")
+                }
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: 360)
+                    .clipShape(.rect(cornerRadius: 8))
+                HStack {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    } label: {
+                        Label("Reveal in Finder", systemImage: "folder")
+                    }
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.writeObjects([image])
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        model.makeImage3D(url)
+                    } label: {
+                        Label("Make it 3D", systemImage: "cube")
+                    }
+                    Spacer()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
     }
 
     @ViewBuilder
