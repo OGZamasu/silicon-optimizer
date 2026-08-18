@@ -17,13 +17,35 @@ public actor MFluxRuntime: ImageRuntime {
 
     private var process: ServerProcess?
     private var installation: RuntimeInstallation?
+    private var huggingFaceToken: String?
 
-    public init(installation: RuntimeInstallation? = nil) {
+    /// - Parameter huggingFaceToken: Passed to mflux as `HF_TOKEN` so gated repositories can be
+    ///   fetched. mflux downloads weights itself rather than going through this app's
+    ///   `HuggingFaceClient`, so the token stored in Settings does not reach it otherwise — and a
+    ///   GUI app launched from the Dock inherits no shell environment to fall back on, which left
+    ///   gated image models unreachable however the token was provided.
+    public init(installation: RuntimeInstallation? = nil, huggingFaceToken: String? = nil) {
         self.installation = installation
+        self.huggingFaceToken = huggingFaceToken
     }
 
     public nonisolated static func locate() -> RuntimeInstallation? {
         RuntimeLocator.locateMFlux()
+    }
+
+    /// Environment for the mflux child process.
+    ///
+    /// Both token names are set: `huggingface_hub` reads `HF_TOKEN` and still honours the older
+    /// `HUGGING_FACE_HUB_TOKEN`, and which one applies depends on the version pulled in as a
+    /// transitive dependency rather than on anything this app controls.
+    static func childEnvironment(huggingFaceToken: String?) -> [String: String] {
+        var environment = ["PYTHONUNBUFFERED": "1"]
+        if let token = huggingFaceToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            environment["HF_TOKEN"] = token
+            environment["HUGGING_FACE_HUB_TOKEN"] = token
+        }
+        return environment
     }
 
     public func generate(
@@ -64,7 +86,7 @@ public actor MFluxRuntime: ImageRuntime {
         try await process.start(
             executable: executable,
             arguments: arguments,
-            environment: ["PYTHONUNBUFFERED": "1"],
+            environment: Self.childEnvironment(huggingFaceToken: huggingFaceToken),
             onLogLine: { line in
                 Task {
                     if let event = await box.interpret(line, totalSteps: totalSteps) {
@@ -211,6 +233,11 @@ public struct MFluxArguments: Sendable {
         case "flux2-klein-4b", "flux2-klein-9b": "mflux-generate-flux2"
         case "qwen-image": "mflux-generate-qwen"
         case "z-image-turbo": "mflux-generate-z-image-turbo"
+        case "z-image": "mflux-generate-z-image"
+        case "ernie-image-turbo": "mflux-generate-ernie-image-turbo"
+        case "ernie-image": "mflux-generate-ernie-image"
+        // flux1-krea-dev shares FLUX.1's entry point — it is a dev finetune, not a separate
+        // architecture, and has no binary of its own.
         default: "mflux-generate"
         }
     }
@@ -265,10 +292,14 @@ public struct MFluxArguments: Sendable {
         switch catalogID {
         case "flux1-schnell": "schnell"
         case "flux1-dev": "dev"
+        case "flux1-krea-dev": "krea-dev"
         case "flux2-klein-4b": "flux2-klein-4b"
         case "flux2-klein-9b": "flux2-klein-9b"
         case "qwen-image": "qwen"
         case "z-image-turbo": "z-image-turbo"
+        case "z-image": "z-image"
+        case "ernie-image-turbo": "ernie-image-turbo"
+        case "ernie-image": "ernie-image"
         default: nil
         }
     }

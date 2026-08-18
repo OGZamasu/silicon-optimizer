@@ -3,7 +3,9 @@ import SwiftUI
 /// Application entry point.
 ///
 /// `MenuBarExtra` is declared first because the menu bar is the app's real home — the window is
-/// opened on demand. `LSUIElement` in Info.plist keeps it out of the Dock and the app switcher.
+/// opened on demand. `LSUIElement` in Info.plist keeps it out of the Dock and Cmd+Tab by default;
+/// `MainWindow` promotes the app to a regular activation policy for as long as it is open, so it
+/// is reachable there too while it's actually showing something (image generation, downloads).
 public struct SiliconOptimizerApp: App {
 
     @State private var model = AppModel()

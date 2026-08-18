@@ -1,3 +1,4 @@
+import AppKit
 import SiliconCore
 import SwiftUI
 
@@ -42,6 +43,18 @@ public struct MainWindow: View {
             if model.selectedTab != .chat {
                 model.chatColumnVisibility = .all
             }
+        }
+        // LSUIElement keeps the app out of the Dock and Cmd+Tab, which is right for the menu bar
+        // popover but leaves no way to switch back to this window once something else is
+        // frontmost — awkward for anything long-running, like watching image generation. Promote
+        // to a regular app for as long as this window is open, and drop back to accessory once
+        // it closes so the menu-bar-only behaviour returns.
+        .onAppear {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .onDisappear {
+            NSApp.setActivationPolicy(.accessory)
         }
         .alert(item: $model.alert) { alert in
             Alert(

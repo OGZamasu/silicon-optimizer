@@ -1,3 +1,4 @@
+import AppKit
 import SiliconCatalog
 import SiliconCore
 import SiliconPlanner
@@ -19,6 +20,10 @@ struct ModelDetailSheet: View {
     @State private var flashAttention = true
     @State private var expertStreamingEnabled = false
     @State private var expertSlots: Double = 64
+    /// Where this download's files go, chosen fresh each time the sheet opens rather than
+    /// remembered as a standing default — moving one large model to external media isn't the
+    /// same thing as deciding everything should live there from now on.
+    @State private var externalDestination: URL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -304,6 +309,9 @@ struct ModelDetailSheet: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if !installed {
+                saveLocationRow
+            }
             HStack {
                 Button("Close") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -325,7 +333,7 @@ struct ModelDetailSheet: View {
                     .disabled(!plan.verdict.isUsable)
                 } else {
                     Button {
-                        model.install(entry, quantization: quantization)
+                        model.install(entry, quantization: quantization, saveTo: externalDestination)
                         dismiss()
                     } label: {
                         Label(
@@ -355,6 +363,58 @@ struct ModelDetailSheet: View {
         }
         return "This configuration is not expected to fit in memory on this Mac. You can still "
             + "download it — see the suggestions above for ways to make it run."
+    }
+
+    /// Lets one download go somewhere other than Silicon Optimizer's own managed library
+    /// directory — an external drive, for a model too large to be worth keeping on the internal
+    /// one. The library's index stays where it always is; only this model's files move, the same
+    /// way an imported GGUF already can live anywhere.
+    private var saveLocationRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "externaldrive")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Save to").font(.caption2).foregroundStyle(.secondary)
+                Text(externalDestination?.path ?? "Silicon Optimizer's managed library")
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            if externalDestination != nil {
+                Button("Use Default") { externalDestination = nil }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button(externalDestination == nil ? "Choose Folder…" : "Change…") {
+                chooseExternalDestination()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(.background.secondary, in: .rect(cornerRadius: 8))
+    }
+
+    private func chooseExternalDestination() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Choose where to save \(entry.name)'s files."
+        let lastPath = model.settings.lastExternalModelDirectory
+        if !lastPath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: lastPath)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        externalDestination = url
+        model.settings.lastExternalModelDirectory = url.path
+        // This view isn't SettingsView, whose onChange is what normally persists edits — save
+        // explicitly so the remembered folder survives a relaunch.
+        model.settings.save()
     }
 
     // MARK: - State

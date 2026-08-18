@@ -75,6 +75,34 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
         "tokenizer/**", "added_tokens.json", "chat_template.jinja",
     ]
 
+    /// What `mflux-generate-qwen` fetches — copied from `QwenWeightDefinition.get_download_patterns()`
+    /// in the installed mflux package rather than guessed from the repository's own file listing.
+    /// That listing also has a `scheduler/` directory mflux never reads.
+    public static let qwenImagePatterns = [
+        "vae/*.safetensors", "vae/*.json",
+        "transformer/*.safetensors", "transformer/*.json",
+        "text_encoder/*.safetensors", "text_encoder/*.json",
+        "tokenizer/**", "added_tokens.json", "chat_template.jinja",
+    ]
+
+    /// What `mflux-generate-z-image`/`-z-image-turbo` fetch, from `ZImageWeightDefinition`.
+    public static let zImagePatterns = [
+        "vae/*.safetensors", "vae/*.json",
+        "transformer/*.safetensors", "transformer/*.json",
+        "text_encoder/*.safetensors", "text_encoder/*.json",
+        "tokenizer/*",
+    ]
+
+    /// What `mflux-generate-ernie-image`/`-turbo` fetch, from `ErnieWeightDefinition`. The
+    /// repository also carries a `pe/` directory of comparable size to the text encoder — mflux
+    /// never reads it, and fetching it anyway would roughly double the download for nothing.
+    public static let erniePatterns = [
+        "vae/*.safetensors", "vae/*.json",
+        "transformer/*.safetensors", "transformer/*.json",
+        "text_encoder/*.safetensors", "text_encoder/*.json",
+        "tokenizer/**",
+    ]
+
     public var parameterLabel: String {
         let billions = Double(shape.totalParameters) / 1e9
         return billions >= 10 ? String(format: "%.0fB", billions)
@@ -91,6 +119,7 @@ public enum DiffusionCatalog {
 
     public static let all: [DiffusionEntry] = [
         fluxSchnell, flux2Klein4B, flux2Klein9B, fluxDev,
+        fluxKreaDev, qwenImage, zImageTurbo, zImage, ernieImageTurbo, ernieImage,
     ]
 
     public static func entry(id: String) -> DiffusionEntry? {
@@ -235,5 +264,211 @@ public enum DiffusionCatalog {
         isGated: true,
         downloadPatterns: DiffusionEntry.flux1Patterns,
         componentDirectories: ["transformer", "text_encoder", "text_encoder_2", "vae"]
+    )
+
+    /// FLUX.1-Krea-dev — a Black Forest Labs / Krea finetune of FLUX.1-dev, not a different
+    /// architecture: `transformer/config.json` on the repository is identical to dev's (19
+    /// double-stream plus 38 single-stream blocks, 3072 wide, 24 heads), so it shares dev's
+    /// shape numbers and entry point rather than repeating a guess.
+    public static let fluxKreaDev = DiffusionEntry(
+        id: "flux1-krea-dev",
+        name: "FLUX.1 Krea dev",
+        author: "Black Forest Labs / Krea",
+        license: "FLUX.1 Non-Commercial Licence",
+        summary: """
+            A dev finetune tuned against Krea's own aesthetic preference data for more \
+            photorealistic output. Same cost as dev; non-commercial licence, gated.
+            """,
+        shape: DiffusionShape(
+            blockCount: 57,
+            hiddenSize: 3072,
+            headCount: 24,
+            transformerParameters: 11_900_000_000,
+            vaeParameters: 84_000_000,
+            textEncoderParameters: 4_883_000_000,
+            vaeScaleFactor: 8,
+            latentChannels: 16,
+            patchSize: 2,
+            maxTextTokens: 512,
+            nativeResolution: 1024,
+            defaultSteps: 20
+        ),
+        repository: "black-forest-labs/FLUX.1-Krea-dev",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 4,
+        isGated: true,
+        downloadPatterns: DiffusionEntry.flux1Patterns,
+        componentDirectories: ["transformer", "text_encoder", "text_encoder_2", "vae"]
+    )
+
+    /// Qwen-Image — 60 transformer blocks, 3072 wide (24 heads × 128), from
+    /// `transformer/config.json`. Parameter counts from the safetensors index `total_size`
+    /// (bf16, so ÷2): 20.4B transformer, 8.3B text encoder — the text encoder is Qwen2.5-VL,
+    /// a full vision-language model used purely for its text understanding here.
+    ///
+    /// Not measured against a real run, unlike FLUX.2 klein: `peakIsCalibrated` stays false.
+    public static let qwenImage = DiffusionEntry(
+        id: "qwen-image",
+        name: "Qwen-Image",
+        author: "Qwen",
+        license: "Apache-2.0",
+        summary: """
+            A 20B-parameter model with unusually strong text rendering inside the image \
+            itself. Its text encoder is a full 8B vision-language model, which is most of \
+            what it costs to load.
+            """,
+        shape: DiffusionShape(
+            blockCount: 60,
+            hiddenSize: 3072,
+            headCount: 24,
+            transformerParameters: 20_430_000_000,
+            vaeParameters: 127_000_000,
+            textEncoderParameters: 8_292_000_000,
+            vaeScaleFactor: 8,
+            latentChannels: 16,
+            patchSize: 2,
+            maxTextTokens: 512,
+            nativeResolution: 1328,
+            defaultSteps: 20
+        ),
+        repository: "Qwen/Qwen-Image",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 4,
+        // mflux-save writes a quantized copy, but the entry point's own --base-model handling
+        // has the same "dropped on the floor" bug documented against FLUX.2 and Z-Image below —
+        // unconfirmed for this family specifically, so treated the same until proven otherwise.
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.qwenImagePatterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
+    )
+
+    /// Z-Image-Turbo — 30 blocks, 3840 wide, 30 heads, from `transformer/config.json`. The
+    /// repository ships the transformer in fp32 (double the byte count of the base Z-Image
+    /// repository's bf16 for an identical parameter count) — divided out below, both entries
+    /// agree on 6.15B transformer parameters. Text encoder is the same Qwen3-class model
+    /// shared with base Z-Image, at 4.0B.
+    public static let zImageTurbo = DiffusionEntry(
+        id: "z-image-turbo",
+        name: "Z-Image Turbo",
+        author: "Tongyi-MAI",
+        license: "Apache-2.0",
+        summary: """
+            Distilled for speed at 6B parameters total — the smallest model in this catalogue \
+            by a wide margin, and correspondingly the cheapest to load.
+            """,
+        shape: DiffusionShape(
+            blockCount: 30,
+            hiddenSize: 3840,
+            headCount: 30,
+            transformerParameters: 6_155_000_000,
+            vaeParameters: 84_000_000,
+            textEncoderParameters: 4_022_000_000,
+            vaeScaleFactor: 8,
+            latentChannels: 16,
+            patchSize: 2,
+            maxTextTokens: 512,
+            nativeResolution: 1024,
+            defaultSteps: 8
+        ),
+        repository: "Tongyi-MAI/Z-Image-Turbo",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 4,
+        // Confirmed against mflux 0.18.1: mflux-save writes a quantized copy happily, but
+        // mflux-generate-z-image(-turbo) drops --base-model on the floor reading one back.
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.zImagePatterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
+    )
+
+    /// Z-Image — the undistilled base of Z-Image-Turbo. Identical architecture; only the
+    /// training and the recommended step count differ.
+    public static let zImage = DiffusionEntry(
+        id: "z-image",
+        name: "Z-Image",
+        author: "Tongyi-MAI",
+        license: "Apache-2.0",
+        summary: "The undistilled base Z-Image checkpoint Turbo was distilled from. Same size, more steps.",
+        shape: DiffusionShape(
+            blockCount: 30,
+            hiddenSize: 3840,
+            headCount: 30,
+            transformerParameters: 6_155_000_000,
+            vaeParameters: 84_000_000,
+            textEncoderParameters: 4_022_000_000,
+            vaeScaleFactor: 8,
+            latentChannels: 16,
+            patchSize: 2,
+            maxTextTokens: 512,
+            nativeResolution: 1024,
+            defaultSteps: 20
+        ),
+        repository: "Tongyi-MAI/Z-Image",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 3,
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.zImagePatterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
+    )
+
+    /// ERNIE-Image-Turbo — 36 blocks, 4096 wide, 32 heads, from `transformer/config.json`.
+    /// The repository also carries a `pe/` directory nearly as large as the text encoder;
+    /// `ErnieWeightDefinition.get_download_patterns()` never reads it, so it is excluded from
+    /// both the download and this shape's text-encoder parameter count.
+    public static let ernieImageTurbo = DiffusionEntry(
+        id: "ernie-image-turbo",
+        name: "ERNIE-Image Turbo",
+        author: "Baidu",
+        license: "Apache-2.0",
+        summary: "Baidu's distilled, fast image model. Text-heavy prompts are its particular strength.",
+        shape: DiffusionShape(
+            blockCount: 36,
+            hiddenSize: 4096,
+            headCount: 32,
+            transformerParameters: 8_033_000_000,
+            vaeParameters: 84_000_000,
+            textEncoderParameters: 3_849_000_000,
+            vaeScaleFactor: 8,
+            latentChannels: 32,
+            patchSize: 2,
+            maxTextTokens: 2048,
+            nativeResolution: 1024,
+            defaultSteps: 8
+        ),
+        repository: "baidu/ERNIE-Image-Turbo",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 4,
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.erniePatterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
+    )
+
+    /// ERNIE-Image — the undistilled base ERNIE-Image-Turbo was distilled from. Identical
+    /// transformer configuration to Turbo; only the training and step count differ.
+    public static let ernieImage = DiffusionEntry(
+        id: "ernie-image",
+        name: "ERNIE-Image",
+        author: "Baidu",
+        license: "Apache-2.0",
+        summary: "The undistilled base ERNIE-Image checkpoint Turbo was distilled from.",
+        shape: DiffusionShape(
+            blockCount: 36,
+            hiddenSize: 4096,
+            headCount: 32,
+            transformerParameters: 8_033_000_000,
+            vaeParameters: 84_000_000,
+            textEncoderParameters: 3_849_000_000,
+            vaeScaleFactor: 8,
+            latentChannels: 32,
+            patchSize: 2,
+            maxTextTokens: 2048,
+            nativeResolution: 1024,
+            defaultSteps: 20
+        ),
+        repository: "baidu/ERNIE-Image",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 3,
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.erniePatterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"]
     )
 }

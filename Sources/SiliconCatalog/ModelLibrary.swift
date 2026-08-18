@@ -63,18 +63,29 @@ public actor ModelLibrary {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let entries = (try? decoder.decode([InstalledModel].self, from: data)) ?? []
-        // Drop entries whose files have been deleted behind our back, which is easy to do
-        // when the library lives in a visible folder.
-        index = Dictionary(
-            uniqueKeysWithValues: entries
-                .filter { FileManager.default.fileExists(atPath: $0.primaryFile.path) }
-                .map { ($0.id, $0) }
-        )
-        if index.count != entries.count { try save() }
+        index = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        pruneTrulyDeleted()
+    }
+
+    /// Drops index entries whose file is gone from under this library's own managed directory —
+    /// that really is a deletion, done behind our back in a visible folder. A model stored
+    /// elsewhere (external media, an imported file) is left in the index even when its file is
+    /// briefly unreachable, since for those that far more often means the volume isn't mounted
+    /// right now than that the model was deleted; `installed` already hides it either way, and
+    /// pruning it here would forget it permanently the next time the drive isn't plugged in.
+    private func pruneTrulyDeleted() {
+        let before = index.count
+        index = index.filter { _, model in
+            let isManaged = model.primaryFile.path.hasPrefix(root.path)
+            return !isManaged || FileManager.default.fileExists(atPath: model.primaryFile.path)
+        }
+        if index.count != before { try? save() }
     }
 
     public var installed: [InstalledModel] {
-        index.values.sorted { $0.installedAt > $1.installedAt }
+        index.values
+            .filter { FileManager.default.fileExists(atPath: $0.primaryFile.path) }
+            .sorted { $0.installedAt > $1.installedAt }
     }
 
     public func model(id: String) -> InstalledModel? { index[id] }
@@ -140,8 +151,10 @@ public actor ModelLibrary {
         try save()
     }
 
+    /// Sums only what's actually reachable right now — `index` can also hold entries on
+    /// external media that isn't currently mounted, which shouldn't count toward "on disk".
     public var totalSizeOnDisk: Bytes {
-        index.values.reduce(Bytes.zero) { $0 + $1.sizeOnDisk }
+        installed.reduce(Bytes.zero) { $0 + $1.sizeOnDisk }
     }
 
     /// Imports a GGUF file the user already has, without copying it.
@@ -167,12 +180,14 @@ public actor ModelLibrary {
         return model
     }
 
+    /// Persists every known entry, not just `installed` — a model on unmounted external media
+    /// still belongs in the index even while `installed` is hiding it for being unreachable.
     private func save() throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try encoder.encode(installed).write(to: indexURL, options: .atomic)
+        try encoder.encode(Array(index.values)).write(to: indexURL, options: .atomic)
     }
 
     nonisolated static func fileSize(_ url: URL) -> Bytes {
