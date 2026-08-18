@@ -77,13 +77,16 @@ body::before {
           mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
 }
 
-/* The energy layer: signal pulses and click ripples, painted on the same
-   fixed plane as the grid and masked identically so they share its fade. */
+/* The energy layers. Pulses live on the grid's own plane, behind the page and
+   masked identically so they share its fade. Ripples get an unmasked overlay
+   above the content — click feedback must be visible over cards and at the
+   foot of the page, where the substrate grid has faded out. */
 #fx {
   position: fixed; inset: 0; z-index: -1; pointer-events: none;
   -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
           mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
 }
+#fxo { position: fixed; inset: 0; z-index: 40; pointer-events: none; }
 
 ::selection { background: rgba(77,224,192,.28); color: #EAF7F3; }
 
@@ -457,7 +460,7 @@ footer {
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  #fx { display: none; }
+  #fx, #fxo { display: none; }
   .reveal, .grid .cell { opacity: 1 !important; transform: none !important; transition: none !important; }
   .bar span, .collapse-bar span { animation: none !important; transform: none !important; }
   .cell::after { display: none; }
@@ -468,6 +471,7 @@ footer {
 <body>
 
 <canvas id="fx" aria-hidden="true"></canvas>
+<canvas id="fxo" aria-hidden="true"></canvas>
 
 <header class="site-head">
   <div class="shell masthead">
@@ -844,14 +848,17 @@ python3 -m venv ~/.silicon-mlx
     });
   });
 
-  // The living grid. Signal pulses travel the die traces, and a click sends a
-  // disturbance rippling outward along them — segments lit exactly where the
-  // wavefront crosses a grid line. Both the grid and this canvas are fixed
-  // planes sharing one mask, so alignment holds at any scroll position. The
-  // loop only runs while something is alive; an idle page draws nothing.
+  // The living grid. Signal pulses travel the die traces on the plane behind
+  // the page; a click sends a disturbance rippling outward — segments lit
+  // exactly where the wavefront crosses a grid line — on an overlay above the
+  // content, so the feedback shows over cards and in the grid's faded reaches.
+  // All three planes are fixed, so alignment holds at any scroll position.
+  // The loop only runs while something is alive; an idle page draws nothing.
   const fx = document.getElementById('fx');
-  if (fx && !reduce) {
+  const fxo = document.getElementById('fxo');
+  if (fx && fxo && !reduce) {
     const ctx = fx.getContext('2d');
+    const octx = fxo.getContext('2d');
     const GRID = 64, LINE = -1;
     const TEAL = [77, 224, 192], INDIGO = [110, 139, 200];
     let W = 0, H = 0;
@@ -860,7 +867,9 @@ python3 -m venv ~/.silicon-mlx
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       W = innerWidth; H = innerHeight;
       fx.width = Math.round(W * dpr); fx.height = Math.round(H * dpr);
+      fxo.width = fx.width; fxo.height = fx.height;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      octx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     size();
     addEventListener('resize', size);
@@ -895,36 +904,39 @@ python3 -m venv ~/.silicon-mlx
         ctx.stroke();
       }
 
+      octx.clearRect(0, 0, W, H);
+      octx.globalCompositeOperation = 'lighter';
+      octx.lineWidth = 2;
+      octx.lineCap = 'round';
       for (let i = ripples.length - 1; i >= 0; i--) {
         const r = ripples[i];
         const p = (now - r.t0) / r.dur;
         if (p >= 1) { ripples.splice(i, 1); continue; }
         const rad = 26 + (1 - Math.pow(1 - p, 3)) * r.max;
         const seg = 12 + 26 * (1 - p);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = rgba(TEAL, (1 - p) * 0.65);
-        ctx.beginPath();
+        octx.strokeStyle = rgba(TEAL, (1 - p) * 0.65);
+        octx.beginPath();
         const k0 = Math.ceil((r.x - rad - LINE) / GRID), k1 = Math.floor((r.x + rad - LINE) / GRID);
         for (let k = k0; k <= k1; k++) {
           const x = k * GRID + LINE;
           const dy = Math.sqrt(Math.max(0, rad * rad - (x - r.x) * (x - r.x)));
-          ctx.moveTo(x, r.y - dy - seg / 2); ctx.lineTo(x, r.y - dy + seg / 2);
-          ctx.moveTo(x, r.y + dy - seg / 2); ctx.lineTo(x, r.y + dy + seg / 2);
+          octx.moveTo(x, r.y - dy - seg / 2); octx.lineTo(x, r.y - dy + seg / 2);
+          octx.moveTo(x, r.y + dy - seg / 2); octx.lineTo(x, r.y + dy + seg / 2);
         }
         const j0 = Math.ceil((r.y - rad - LINE) / GRID), j1 = Math.floor((r.y + rad - LINE) / GRID);
         for (let j = j0; j <= j1; j++) {
           const y = j * GRID + LINE;
           const dx = Math.sqrt(Math.max(0, rad * rad - (y - r.y) * (y - r.y)));
-          ctx.moveTo(r.x - dx - seg / 2, y); ctx.lineTo(r.x - dx + seg / 2, y);
-          ctx.moveTo(r.x + dx - seg / 2, y); ctx.lineTo(r.x + dx + seg / 2, y);
+          octx.moveTo(r.x - dx - seg / 2, y); octx.lineTo(r.x - dx + seg / 2, y);
+          octx.moveTo(r.x + dx - seg / 2, y); octx.lineTo(r.x + dx + seg / 2, y);
         }
-        ctx.stroke();
-        ctx.lineWidth = 1.5;
+        octx.stroke();
       }
+      octx.globalCompositeOperation = 'source-over';
 
       ctx.globalCompositeOperation = 'source-over';
       raf = (pulses.length || ripples.length) ? requestAnimationFrame(draw) : 0;
-      if (!raf) ctx.clearRect(0, 0, W, H);
+      if (!raf) { ctx.clearRect(0, 0, W, H); octx.clearRect(0, 0, W, H); }
     };
 
     const wake = () => { if (!raf) { last = performance.now(); raf = requestAnimationFrame(draw); } };
