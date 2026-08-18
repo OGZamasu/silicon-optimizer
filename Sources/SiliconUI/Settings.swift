@@ -211,6 +211,13 @@ public struct Settings: Codable, Sendable, Equatable {
         return "silicon3d-\(formatter.string(from: date))-\(uniqueSuffix)"
     }
 
+    // Swarm
+
+    /// Whether the control server also listens on the LAN (port 8788) so swarm peers can
+    /// reach this Mac. Ignored — the server stays loopback — unless swarm.json holds a
+    /// token, because the jobs API is remote execution.
+    public var exposeControlOnLAN = false
+
     // Runtime overrides
     public var llamaServerPath: String = ""
     public var mlxServerPath: String = ""
@@ -268,6 +275,7 @@ public struct Settings: Codable, Sendable, Equatable {
         )
         trellisBaseDirectory = try value(.trellisBaseDirectory, fallback.trellisBaseDirectory)
         lato2ServiceURL = try value(.lato2ServiceURL, fallback.lato2ServiceURL)
+        exposeControlOnLAN = try value(.exposeControlOnLAN, fallback.exposeControlOnLAN)
         lastExternalModelDirectory = try value(
             .lastExternalModelDirectory, fallback.lastExternalModelDirectory
         )

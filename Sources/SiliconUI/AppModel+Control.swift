@@ -645,6 +645,69 @@ extension AppModel {
         return (entry, configuration)
     }
 
+    /// The Mac's `/v1/node` advertisement — the frozen swarm shape. Capability figures
+    /// come from the same measured catalog the app plans with.
+    public func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement {
+        var capabilities: [ControlAPI.NodeCapability] = []
+
+        capabilities.append(ControlAPI.NodeCapability(
+            id: "llm",
+            kind: "llm",
+            ready: loadedModel != nil,
+            peakGB: loadedModel.map { Double($0.sizeOnDisk.rawValue) / 1e9 },
+            typicalSeconds: nil,
+            detail: loadedModel.map { "\($0.name) loaded" }
+                ?? "No model loaded; load one from the Models tab."
+        ))
+        capabilities.append(ControlAPI.NodeCapability(
+            id: "image-flux",
+            kind: "image",
+            ready: imageRuntime != nil,
+            peakGB: nil,
+            typicalSeconds: nil,
+            detail: imageRuntime != nil
+                ? "MFLUX ready (FLUX family)" : "MFLUX not installed."
+        ))
+        for entry in MeshCatalog.all where entry.backend != .latoRemote {
+            let installation = meshInstallation(for: entry)
+            capabilities.append(ControlAPI.NodeCapability(
+                id: entry.id,
+                kind: "mesh",
+                ready: installation.isInstalled,
+                peakGB: entry.peakMemory > .zero
+                    ? Double(entry.peakMemory.rawValue) / 1e9 : nil,
+                typicalSeconds: nil,
+                detail: installation.detail
+            ))
+        }
+
+        let queueDepth = imageQueue.count + meshQueue.count
+            + (currentImageJob != nil ? 1 : 0) + (currentMeshJob != nil ? 1 : 0)
+            + (isGenerating ? 1 : 0)
+        let resident = loadedModel != nil ? estimatedResidentBytes : .zero
+        let headroom = max(
+            0, Double((profile.safeModelBudget - resident).rawValue) / 1e9
+        )
+
+        return ControlAPI.NodeAdvertisement(
+            name: Host.current().localizedName ?? "mac",
+            platform: "macos-apple-silicon",
+            profile: ControlAPI.MacProfile(
+                chip: profile.chipName,
+                memoryGB: Double(profile.totalMemory.rawValue) / 1e9,
+                bandwidthGBps: profile.memoryBandwidthGBps,
+                gpuCores: profile.gpuCores
+            ),
+            capabilities: capabilities,
+            metrics: ControlAPI.NodeMetrics(
+                queueDepth: queueDepth,
+                headroomGB: headroom,
+                gpuUtilPct: Int(metrics.gpuUtilization * 100),
+                memoryUsedPct: Int(metrics.memoryUsedFraction * 100)
+            )
+        )
+    }
+
     private func describe(_ plan: MeshPlan, entry: MeshEntry) -> ControlAPI.MeshPlan {
         ControlAPI.MeshPlan(
             model: entry.name,

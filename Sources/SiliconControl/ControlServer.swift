@@ -14,6 +14,14 @@ public actor ControlServer {
     private var listener: NWListener?
     private let token: String
     private var port: Int = 0
+    /// The shared swarm secret, accepted alongside the per-launch token when set.
+    private var swarmToken: String?
+    /// Whether the listener is actually reachable beyond loopback.
+    public private(set) var isExposedOnLAN = false
+
+    /// The port peers dial when the server is on the LAN. Fixed rather than ephemeral,
+    /// because the registry lists explicit base URLs.
+    public static let lanPort = 8788
 
     public init(host: any ControlHost) {
         self.host = host
@@ -21,15 +29,27 @@ public actor ControlServer {
         self.token = UUID().uuidString
     }
 
-    public func start(preferredPort: Int = 0) throws {
+    /// Starts listening. The hard rule from the swarm design holds here: without a swarm
+    /// token there is no non-loopback bind, whatever the caller asked for — an
+    /// unauthenticated jobs API is an unauthenticated remote-execution service.
+    public func start(
+        preferredPort: Int = 0, exposeOnLAN: Bool = false, swarmToken: String? = nil
+    ) throws {
+        let lan = exposeOnLAN && !(swarmToken ?? "").isEmpty
+        self.swarmToken = swarmToken
+        self.isExposedOnLAN = lan
+
         let parameters = NWParameters.tcp
-        // Loopback only. This must never be reachable from the network.
-        parameters.requiredInterfaceType = .loopback
+        if !lan {
+            // Loopback only. This must never be reachable from the network.
+            parameters.requiredInterfaceType = .loopback
+        }
         parameters.allowLocalEndpointReuse = true
 
+        let chosenPort = lan ? Self.lanPort : preferredPort
         let listener = try NWListener(
             using: parameters,
-            on: preferredPort > 0 ? NWEndpoint.Port(rawValue: UInt16(preferredPort))! : .any
+            on: chosenPort > 0 ? NWEndpoint.Port(rawValue: UInt16(chosenPort))! : .any
         )
         self.listener = listener
 
@@ -93,7 +113,9 @@ public actor ControlServer {
         if request.path == "/health" {
             return .json(["status": "ok", "version": "0.1.0"])
         }
-        guard request.bearerToken == token else {
+        let authorized = request.bearerToken == token
+            || (swarmToken.map { !$0.isEmpty && request.bearerToken == $0 } ?? false)
+        guard authorized else {
             return .error(401, "Invalid or missing control token.")
         }
 
@@ -137,6 +159,8 @@ public actor ControlServer {
                 return try .encode(await host.generateImage(
                     try request.decode(ControlAPI.ImageRequest.self)
                 ))
+            case ("GET", "/v1/node"):
+                return try .encode(await host.nodeAdvertisement())
             case ("GET", "/mesh/models"):
                 return try .encode(await host.meshModels())
             case ("POST", "/mesh/plan"):

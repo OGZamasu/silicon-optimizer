@@ -637,4 +637,5 @@ public protocol ControlHost: AnyObject, Sendable {
     func meshModels() async -> [ControlAPI.MeshModel]
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse
+    func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement
 }

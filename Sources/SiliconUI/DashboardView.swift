@@ -29,6 +29,7 @@ struct DashboardView: View {
                             VStack(spacing: 16) {
                                 liveMemoryCard
                                 throughputCard
+                                swarmCard
                             }
                         }
                     } else {
@@ -38,6 +39,7 @@ struct DashboardView: View {
                             loadedModelCard
                             if model.loadedModel != nil { BenchmarkCard() }
                             throughputCard
+                            swarmCard
                         }
                     }
                 }
@@ -229,6 +231,86 @@ struct DashboardView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 20)
+            }
+        }
+    }
+
+    // MARK: - Swarm
+
+    /// The read-only swarm: every registry peer's advertised state, polled on arrival.
+    /// Absent entirely until a peer is configured — an empty card would advertise a
+    /// feature instead of showing machines.
+    @ViewBuilder
+    private var swarmCard: some View {
+        if !(model.swarmConfig?.peers.isEmpty ?? true) {
+            Card(title: "Swarm", systemImage: "point.3.connected.trianglepath.dotted") {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(model.swarmPeers) { peer in
+                        peerRow(peer)
+                    }
+                    if model.swarmPeers.isEmpty {
+                        Text("Checking peers…")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    HStack {
+                        Text(model.controlIsOnLAN
+                            ? "This Mac is reachable by its peers."
+                            : "This Mac is local-only — enable swarm access in Settings.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Button {
+                            Task { await model.refreshSwarm() }
+                        } label: {
+                            if model.isRefreshingSwarm {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Poll the peers again")
+                    }
+                }
+            }
+            .task { await model.refreshSwarm() }
+        }
+    }
+
+    private func peerRow(_ peer: AppModel.PeerStatus) -> some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(peer.reachable ? Color.green : Color.red)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(peer.name)
+                    .font(.callout.weight(.medium))
+                Text(peer.reachable
+                    ? (peer.platform ?? "online")
+                    : (peer.error ?? "unreachable"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if peer.reachable {
+                VStack(alignment: .trailing, spacing: 1) {
+                    if let headroom = peer.headroomGB {
+                        Text(String(format: "%.0f GB free", headroom))
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
+                    HStack(spacing: 6) {
+                        if let queue = peer.queueDepth {
+                            Text(queue == 0 ? "idle" : "\(queue) queued")
+                        }
+                        if !peer.readyCapabilities.isEmpty {
+                            Text("· \(peer.readyCapabilities.count) capabilities")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                }
             }
         }
     }

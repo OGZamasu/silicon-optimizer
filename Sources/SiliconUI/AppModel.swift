@@ -715,6 +715,96 @@ public final class AppModel {
         meshDownloads[id] = nil
     }
 
+    // MARK: - Swarm
+
+    /// Whether the control server is currently reachable beyond loopback.
+    public internal(set) var controlIsOnLAN = false
+
+    /// One peer's last-polled state, for the dashboard's read-only swarm view.
+    public struct PeerStatus: Identifiable, Sendable {
+        public var id: String { name }
+        public var name: String
+        public var baseURL: String
+        public var reachable: Bool
+        public var platform: String?
+        public var queueDepth: Int?
+        public var headroomGB: Double?
+        public var readyCapabilities: [String] = []
+        public var error: String?
+    }
+
+    public private(set) var swarmPeers: [PeerStatus] = []
+    public private(set) var isRefreshingSwarm = false
+
+    public var swarmConfig: SwarmConfig? { SwarmConfig.load() }
+
+    /// Applies swarm settings live: tears the control server down and brings it back with
+    /// the new bind — the handshake file is rewritten, so local MCP clients reconnect on
+    /// their next call.
+    public func applySwarmSettings() {
+        Task {
+            await controlServer?.stop()
+            startControlServer()
+        }
+    }
+
+    /// Polls every registry peer's `/v1/node` — the read-only swarm. Parsed leniently:
+    /// a peer that renames a field degrades to "reachable, details unknown", not a crash.
+    public func refreshSwarm() async {
+        guard let config = SwarmConfig.load(), !config.peers.isEmpty else {
+            swarmPeers = []
+            return
+        }
+        isRefreshingSwarm = true
+        defer { isRefreshingSwarm = false }
+
+        var statuses: [PeerStatus] = []
+        for peer in config.peers {
+            statuses.append(await Self.poll(peer: peer, token: config.effectiveToken))
+        }
+        swarmPeers = statuses.sorted {
+            $0.name.localizedCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private nonisolated static func poll(peer: SwarmPeer, token: String?) async -> PeerStatus {
+        var status = PeerStatus(name: peer.name, baseURL: peer.baseURL, reachable: false)
+        guard let base = URL(string: peer.baseURL) else {
+            status.error = "Not a valid URL."
+            return status
+        }
+        var request = URLRequest(url: base.appendingPathComponent("v1/node"))
+        request.timeoutInterval = 5
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            status.error = "Unreachable."
+            return status
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            status.error = "Answered \(http.statusCode)."
+            return status
+        }
+        status.reachable = true
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return status }
+        status.platform = json["platform"] as? String
+        if let metrics = json["metrics"] as? [String: Any] {
+            status.queueDepth = metrics["queue_depth"] as? Int
+            status.headroomGB = metrics["headroom_gb"] as? Double
+                ?? (metrics["vram_free_mb"] as? Double).map { $0 / 1024 }
+                ?? (metrics["vram_free_mb"] as? Int).map { Double($0) / 1024 }
+        }
+        if let capabilities = json["capabilities"] as? [[String: Any]] {
+            status.readyCapabilities = capabilities.compactMap {
+                ($0["ready"] as? Bool) == true ? $0["id"] as? String : nil
+            }
+        }
+        return status
+    }
+
     // MARK: - In-app repairs
 
     /// A fix the app runs itself instead of dictating a Terminal command. If the error
@@ -1229,7 +1319,14 @@ public final class AppModel {
         controlServer = server
         Task {
             do {
-                try await server.start()
+                // The hard swarm rule lives in the server: LAN exposure without a token
+                // silently stays loopback, so a half-configured setup fails safe.
+                let swarm = SwarmConfig.load()
+                try await server.start(
+                    exposeOnLAN: settings.exposeControlOnLAN,
+                    swarmToken: swarm?.effectiveToken
+                )
+                self.controlIsOnLAN = await server.isExposedOnLAN
             } catch {
                 // Not fatal: the app is fully usable without external control.
                 self.libraryError = "Control API unavailable: \(error.localizedDescription)"
@@ -1532,7 +1629,7 @@ public final class AppModel {
         loadedModel != nil ? estimatedResidentBytes : .zero
     }
 
-    private var estimatedResidentBytes: Bytes {
+    var estimatedResidentBytes: Bytes {
         guard let model = loadedModel, let shape = model.shape,
               let configuration = activeConfiguration else { return .zero }
         return MemoryPlanner(profile: profile)
