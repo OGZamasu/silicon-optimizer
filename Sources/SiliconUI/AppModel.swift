@@ -605,10 +605,12 @@ public final class AppModel {
                         ?? "Paste its service address in Settings → 3D toolkit."
                 )
             }
+            // "Configured" is all this can honestly say — the banner's live probe answers
+            // whether the service is actually there. Claiming "connected" from a typed-in
+            // URL once sent someone hunting a server that was fine.
             return MeshInstallation(
                 isInstalled: true,
-                detail: "Connected to \(configured) — jobs run there, the mesh comes back "
-                    + "here."
+                detail: "Will send jobs to \(configured)."
             )
         case .unsupported:
             return MeshInstallation(

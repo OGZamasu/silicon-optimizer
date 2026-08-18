@@ -24,6 +24,11 @@ struct MeshView: View {
     @State private var recentModels: [MeshResult] = []
     @State private var selectedRecentModel: MeshResult?
 
+    /// Live reachability of the LATO.2 service: nil while checking, then the truth.
+    /// "Configured" and "connected" are different claims, and the banner makes only
+    /// the one it has verified.
+    @State private var latoReachable: Bool?
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -276,6 +281,10 @@ struct MeshView: View {
                     .textSelection(.enabled)
             }
 
+            if entry.backend == .latoRemote, installation.isInstalled {
+                latoProbeRow
+            }
+
             if let download = model.meshDownloads[entry.id] {
                 if let error = download.error {
                     Text(error)
@@ -332,6 +341,49 @@ struct MeshView: View {
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: .rect(cornerRadius: 7))
+    }
+
+    /// The verified truth about the LATO.2 service, checked against its /health endpoint
+    /// the moment the entry is selected — not inferred from a URL being typed in.
+    @ViewBuilder
+    private var latoProbeRow: some View {
+        let configured = model.settings.lato2ServiceURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        HStack(spacing: 7) {
+            switch latoReachable {
+            case nil:
+                ProgressView().controlSize(.small)
+                Text("Checking the service…")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            case true?:
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.green)
+                Text("Service is answering.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            case false?:
+                Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                    .imageScale(.small)
+                    .foregroundStyle(.red)
+                Text("Not answering right now — check that the service is running on "
+                    + "that machine, and that both are on the same tailnet or network.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Check again") { latoReachable = nil }
+                    .controlSize(.small)
+                    .font(.caption2)
+            }
+            Spacer()
+        }
+        .task(id: "\(configured)-\(latoReachable == nil)") {
+            guard latoReachable == nil, let url = URL(string: configured) else { return }
+            let reachable = await Lato2Runtime.probe(baseURL: url)
+            latoReachable = reachable
+        }
+        .onChange(of: configured) { latoReachable = nil }
     }
 
     /// The button that runs the fix, and its running/failed states — the app's answer to

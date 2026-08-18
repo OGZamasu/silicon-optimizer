@@ -22,6 +22,18 @@
 	<string>49</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<!-- The swarm talks plain HTTP with bearer tokens over private networks (LAN peers,
+	     tailnet CGNAT addresses like 100.x) by design; ATS's cleartext block would sever
+	     every peer. Off-LAN transport security comes from WireGuard/Tailscale, not TLS. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Silicon Optimizer talks to your other Silicon nodes (like a Windows PC running LATO.2) over your local network.</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
