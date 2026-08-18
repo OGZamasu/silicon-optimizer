@@ -367,11 +367,13 @@ struct MeshView: View {
                 Image(systemName: "antenna.radiowaves.left.and.right.slash")
                     .imageScale(.small)
                     .foregroundStyle(.red)
-                Text("Not answering right now — check that the service is running on "
-                    + "that machine, and that both are on the same tailnet or network.")
+                Text("Not responding.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .help("Check that the service is running on that machine, that both "
+                        + "are on the same tailnet or network, and that Silicon Optimizer "
+                        + "is allowed under System Settings → Privacy & Security → "
+                        + "Local Network.")
                 Button("Check again") { latoReachable = nil }
                     .controlSize(.small)
                     .font(.caption2)
