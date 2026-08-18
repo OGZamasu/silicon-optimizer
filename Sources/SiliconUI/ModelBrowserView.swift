@@ -53,6 +53,7 @@ struct ModelBrowserView: View {
                     importExistingModel()
                 } label: {
                     Label("Import…", systemImage: "square.and.arrow.down.on.square")
+                        .labelStyle(.titleAndIcon)
                 }
                 .help(
                     "Register a .gguf file that's already on disk — moved there by hand, or "
