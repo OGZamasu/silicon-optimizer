@@ -21,6 +21,12 @@ struct RemoteModelSheet: View {
     @State private var isReadingHeader = false
     @State private var failure: String?
 
+    /// Why the header could not be read. Gated repositories list their files publicly but
+    /// lock the bytes until the licence is accepted — which used to leave this sheet with
+    /// no plan, no architecture, and an Install button that swallowed the click.
+    enum HeaderFailure { case gated, unreadable }
+    @State private var headerFailure: HeaderFailure?
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -85,8 +91,24 @@ struct RemoteModelSheet: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if headerFailure == .gated { gatedBanner }
                     if let plan { planSection(plan) }
                     if let shape { architecture(shape) }
+                    if headerFailure == .unreadable, !isReadingHeader {
+                        HStack(spacing: 8) {
+                            Label(
+                                "Couldn't read this file's header, so there is no memory "
+                                    + "plan and installing is paused.",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            Button("Try again") {
+                                if let selected { Task { await readHeader(for: selected) } }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
                     Text("Quantizations").font(.headline)
                     ForEach(files, id: \.path) { file in
                         fileRow(file)
@@ -95,6 +117,42 @@ struct RemoteModelSheet: View {
                 .padding(20)
             }
         }
+    }
+
+    /// The one state the old sheet hid entirely: a licence gate, named, with the way
+    /// through it — same treatment as everywhere else in the app.
+    private var gatedBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("This model needs a licence agreement", systemImage: "lock")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.orange)
+            Text(
+                "\(result.id) is gated on Hugging Face — the files stay locked until you "
+                    + "agree to its licence on the model page."
+                    + (model.settings.huggingFaceToken.isEmpty
+                        ? " After agreeing, add your access token in Settings → Credentials, "
+                            + "then come back and try again."
+                        : " Your access token is already in Settings — agree there, then "
+                            + "come back and try again.")
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button("Open licence page") {
+                    NSWorkspace.shared.open(HuggingFaceClient.pageURL(repository: result.id))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button("Try again") {
+                    if let selected { Task { await readHeader(for: selected) } }
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.08), in: .rect(cornerRadius: 10))
     }
 
     private func fileRow(_ file: HuggingFaceClient.RepoFile) -> some View {
@@ -209,7 +267,9 @@ struct RemoteModelSheet: View {
                     )
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selected == nil)
+                // Also disabled while the header is unread: install() needs the shape, and
+                // an enabled button that swallows the click is the worst of both.
+                .disabled(selected == nil || shape == nil)
             }
         }
         .padding(16)
@@ -275,10 +335,31 @@ struct RemoteModelSheet: View {
 
     private func readHeader(for file: HuggingFaceClient.RepoFile) async {
         isReadingHeader = true
+        headerFailure = nil
         defer { isReadingHeader = false }
         let token = model.settings.huggingFaceToken.isEmpty ? nil : model.settings.huggingFaceToken
         shape = await RemoteGGUFReader(token: token)
             .readShape(repository: result.id, file: file.path)
+        if shape == nil {
+            headerFailure = await Self.isBlockedByGate(
+                repository: result.id, file: file.path, token: token
+            ) ? .gated : .unreadable
+        }
+    }
+
+    /// Asks the file itself whether it is behind the licence gate: gated repositories
+    /// answer 401/403 on the bytes while listing their tree publicly.
+    static func isBlockedByGate(repository: String, file: String, token: String?) async -> Bool {
+        guard let url = URL(
+            string: "https://huggingface.co/\(repository)/resolve/main/\(file)"
+        ) else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 10
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return http.statusCode == 401 || http.statusCode == 403
     }
 
     private func install() {
