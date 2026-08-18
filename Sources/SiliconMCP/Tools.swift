@@ -232,6 +232,56 @@ enum Tools {
             required: ["prompt"]
         ),
         Tool(
+            name: "list_3d_models",
+            description: """
+                Image-to-3D backends on this Mac: TRELLIS.2 (textured, minutes), Hunyuan3D \
+                (fast geometry, seconds) and the remote LATO.2 retopology service, with \
+                whether each is ready to run and what it peaks at in memory.
+                """,
+            properties: [:], required: []
+        ),
+        Tool(
+            name: "plan_3d",
+            description: """
+                Predict what generating a 3D model will cost in memory before running it. \
+                3D figures are measured rather than derived — the planner interpolates \
+                benchmark tables instead of formulas.
+                """,
+            properties: [
+                "model_id": property("string", "trellis2-4b, hunyuan3d-2-mini, "
+                    + "hunyuan3d-2-turbo or lato-2."),
+                "quantize": property("number", "Hunyuan weight quantization: 4 or 8. "
+                    + "Omit for fp16."),
+                "pipeline_type": property("string", "TRELLIS pipeline: 512, 1024 or "
+                    + "1024_cascade."),
+            ],
+            required: []
+        ),
+        Tool(
+            name: "generate_3d",
+            description: """
+                Turn an image into a 3D mesh on this Mac and return the file paths. Give it \
+                the absolute path of an image file — a photo, or something made with \
+                generate_image. TRELLIS.2 produces a textured GLB in minutes; Hunyuan3D \
+                produces clean geometry in well under a minute; lato-2 sends the job to the \
+                remote LATO.2 service and returns a clean low-poly mesh. Long-running: \
+                expect minutes, not seconds.
+                """,
+            properties: [
+                "image_path": property("string", "Absolute path to the input image."),
+                "model_id": property("string", "Optional. Defaults to the best installed "
+                    + "backend."),
+                "steps": property("number", "Hunyuan denoising steps."),
+                "quantize": property("number", "Hunyuan quantization: 4 or 8."),
+                "pipeline_type": property("string", "TRELLIS pipeline: 512, 1024, "
+                    + "1024_cascade."),
+                "texture_size": property("number", "TRELLIS texture side: 512, 1024, 2048."),
+                "vertex_budget": property("number", "LATO.2 output vertex count, 200–5000."),
+                "seed": property("number", "Optional seed."),
+            ],
+            required: ["image_path"]
+        ),
+        Tool(
             name: "get_status",
             description: "What is loaded right now, at what settings, and its last measured speed.",
             properties: [:], required: []
@@ -360,6 +410,55 @@ enum Tools {
                 lines.append("  measured peak : \(bytes(measured)) "
                     + String(format: "(%.0f%% from prediction)", error))
             }
+            if let warning = response.warning {
+                lines.append("\nWarning: \(warning)")
+            }
+            return lines.joined(separator: "\n")
+
+        case "list_3d_models":
+            let models: [ControlAPI.MeshModel] = try await client.get("/mesh/models")
+            return models.map { model in
+                var line = "- \(model.name) [\(model.id)] — \(model.outputs), "
+                    + "\(model.typicalDuration)"
+                if model.peakBytes > 0 {
+                    line += ", peaks ~\(bytes(model.peakBytes))"
+                }
+                line += "\n  " + (model.isInstalled ? "READY" : "NOT READY") + ": "
+                    + model.installDetail
+                return line
+            }.joined(separator: "\n")
+
+        case "plan_3d":
+            let plan: ControlAPI.MeshPlan = try await client.post("/mesh/plan", meshRequest(arguments))
+            var lines = ["\(plan.model): \(plan.verdict)"]
+            if plan.isRemote {
+                lines.append("  Runs remotely — this Mac's memory is untouched.")
+            } else {
+                lines.append("  peak \(bytes(plan.peakBytes)) during "
+                    + "\(plan.peakPhase.lowercased()), budget \(bytes(plan.budgetBytes))")
+                for phase in plan.phases {
+                    lines.append("  \(phase.name): \(bytes(phase.residentBytes)) — \(phase.detail)")
+                }
+            }
+            for suggestion in plan.suggestions {
+                lines.append("  Try: \(suggestion.title) — \(suggestion.detail)")
+            }
+            for note in plan.notes {
+                lines.append("  Note: \(note)")
+            }
+            return lines.joined(separator: "\n")
+
+        case "generate_3d":
+            guard arguments["image_path"]?.stringValue != nil else {
+                throw ToolError.missing("image_path")
+            }
+            let response: ControlAPI.MeshResponse = try await client.post(
+                "/mesh/generate", meshRequest(arguments)
+            )
+            var lines = ["Generated with \(response.model)."]
+            if let glb = response.glbPath { lines.append("  glb : \(glb)") }
+            if let obj = response.objPath { lines.append("  obj : \(obj)") }
+            lines.append(String(format: "  time: %.0fs", response.elapsedSeconds))
             if let warning = response.warning {
                 lines.append("\nWarning: \(warning)")
             }
@@ -547,6 +646,20 @@ enum Tools {
             height: arguments["height"]?.intValue,
             steps: arguments["steps"]?.intValue,
             quantization: arguments["quantization"]?.stringValue,
+            seed: arguments["seed"]?.intValue
+        )
+    }
+
+    static func meshRequest(_ arguments: [String: JSONValue]) -> ControlAPI.MeshRequest {
+        ControlAPI.MeshRequest(
+            imagePath: arguments["image_path"]?.stringValue ?? "",
+            modelID: arguments["model_id"]?.stringValue,
+            pipelineType: arguments["pipeline_type"]?.stringValue,
+            textureSize: arguments["texture_size"]?.intValue,
+            steps: arguments["steps"]?.intValue,
+            quantize: arguments["quantize"]?.intValue,
+            octree: arguments["octree"]?.intValue,
+            vertexBudget: arguments["vertex_budget"]?.intValue,
             seed: arguments["seed"]?.intValue
         )
     }

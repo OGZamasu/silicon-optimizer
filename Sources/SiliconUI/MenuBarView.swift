@@ -199,6 +199,10 @@ struct MenuBarView: View {
                 model.selectedTab = .images
                 openMainWindow()
             }
+            menuButton("3D", systemImage: "cube.transparent") {
+                model.selectedTab = .threeD
+                openMainWindow()
+            }
             Divider().padding(.vertical, 4)
             menuButton("Settings…", systemImage: "gearshape") {
                 model.selectedTab = .settings

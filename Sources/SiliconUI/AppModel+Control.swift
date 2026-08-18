@@ -511,3 +511,135 @@ extension AppModel {
         )
     }
 }
+
+// MARK: - 3D generation over the control API
+
+extension AppModel {
+
+    public func meshModels() async -> [ControlAPI.MeshModel] {
+        MeshCatalog.all.map { entry in
+            let installation = meshInstallation(for: entry)
+            return ControlAPI.MeshModel(
+                id: entry.id,
+                name: entry.name,
+                author: entry.author,
+                summary: entry.summary,
+                outputs: entry.outputs,
+                typicalDuration: entry.typicalDuration,
+                peakBytes: entry.peakMemory.rawValue,
+                weightsBytes: entry.weightsSize.rawValue,
+                isInstalled: installation.isInstalled,
+                installDetail: installation.detail
+            )
+        }
+    }
+
+    public func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan {
+        let (entry, configuration) = try resolveMesh(request)
+        return describe(meshPlan(for: entry, configuration: configuration), entry: entry)
+    }
+
+    public func generateMesh(
+        _ request: ControlAPI.MeshRequest
+    ) async throws -> ControlAPI.MeshResponse {
+        let (entry, configuration) = try resolveMesh(request)
+        let image = URL(fileURLWithPath: (request.imagePath as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: image.path) else {
+            throw MeshRuntimeError.generationFailed(
+                "No image at \(image.path). Pass an absolute path to an existing image file."
+            )
+        }
+        let installation = meshInstallation(for: entry)
+        guard installation.isInstalled else {
+            throw MeshRuntimeError.notInstalled(installation.detail)
+        }
+        guard let runtime = makeMeshRuntime(for: entry) else {
+            throw MeshRuntimeError.notInstalled(installation.detail)
+        }
+
+        let predicted = meshPlan(for: entry, configuration: configuration)
+        let warning: String? = predicted.verdict.isUsable ? nil :
+            "\(entry.name) was predicted to peak at \(predicted.peak.formatted) against a "
+            + "\(predicted.budget.formatted) budget; expect swapping."
+
+        noteActivity()
+        let (directory, baseName) = nextMeshOutputLocation()
+        meshState = .starting(stage: "Starting \(entry.name)…")
+        defer { meshState = .idle; meshProgress = nil }
+
+        var result: MeshResult?
+        for try await event in try await runtime.generate(MeshRequest(
+            image: image, configuration: configuration,
+            outputDirectory: directory, baseName: baseName
+        )) {
+            switch event {
+            case .stage(let stage): meshState = .starting(stage: stage)
+            case .progress(let fraction): meshProgress = fraction
+            case .finished(let finished):
+                result = finished
+                meshResults.insert(finished, at: 0)
+            }
+        }
+
+        guard let result else { throw MeshRuntimeError.noMeshProduced }
+        return ControlAPI.MeshResponse(
+            glbPath: result.glb?.path,
+            objPath: result.obj?.path,
+            elapsedSeconds: result.elapsed,
+            model: entry.name,
+            warning: warning
+        )
+    }
+
+    private func resolveMesh(
+        _ request: ControlAPI.MeshRequest
+    ) throws -> (MeshEntry, MeshConfiguration) {
+        let entry: MeshEntry
+        if let id = request.modelID {
+            guard let match = MeshCatalog.entry(id: id) else {
+                throw ControlHostError.unknownModel(id)
+            }
+            entry = match
+        } else {
+            // Default to the best installed backend — fast one first, quality one if it is
+            // the only thing ready.
+            entry = MeshCatalog.all.first {
+                $0.backend != .unsupported && meshInstallation(for: $0).isInstalled
+            } ?? MeshCatalog.hunyuanMini
+        }
+
+        var configuration = MeshConfiguration()
+        configuration.steps = entry.defaultSteps
+        if let pipeline = request.pipelineType { configuration.pipelineType = pipeline }
+        if let textureSize = request.textureSize { configuration.textureSize = textureSize }
+        if let steps = request.steps { configuration.steps = steps }
+        if let quantize = request.quantize { configuration.quantize = quantize }
+        if let octree = request.octree { configuration.octree = octree }
+        if let budget = request.vertexBudget {
+            configuration.vertexBudget = max(200, min(5000, budget))
+        }
+        configuration.seed = request.seed
+        return (entry, configuration)
+    }
+
+    private func describe(_ plan: MeshPlan, entry: MeshEntry) -> ControlAPI.MeshPlan {
+        ControlAPI.MeshPlan(
+            model: entry.name,
+            peakBytes: plan.peak.rawValue,
+            peakPhase: plan.peakPhase?.name ?? "",
+            budgetBytes: plan.budget.rawValue,
+            verdict: plan.verdict.label,
+            isRemote: plan.isRemote,
+            phases: plan.phases.map {
+                .init(name: $0.name, detail: $0.detail, residentBytes: $0.resident.rawValue)
+            },
+            suggestions: plan.remediations.map {
+                ControlAPI.Suggestion(
+                    title: $0.title, detail: $0.detail,
+                    savingBytes: $0.saving.rawValue, cost: $0.cost
+                )
+            },
+            notes: plan.notes
+        )
+    }
+}

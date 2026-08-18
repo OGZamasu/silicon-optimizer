@@ -107,6 +107,7 @@ public final class AppModel {
         case models = "Models"
         case chat = "Chat"
         case images = "Images"
+        case threeD = "3D"
         case settings = "Settings"
 
         public var id: String { rawValue }
@@ -117,6 +118,7 @@ public final class AppModel {
             case .models: "square.stack.3d.up"
             case .chat: "bubble.left.and.bubble.right"
             case .images: "photo.on.rectangle.angled"
+            case .threeD: "cube.transparent"
             case .settings: "gearshape"
             }
         }
@@ -483,6 +485,239 @@ public final class AppModel {
         imageWasCancelled = true
         imageTask?.cancel()
         imageState = .starting(stage: "Stopping…")
+        Task { await runtime.cancel() }
+    }
+
+    // MARK: - 3D generation
+
+    public internal(set) var meshState: RuntimeState = .idle
+    /// Every mesh generated this session, newest first. Like images, each is already on disk.
+    public internal(set) var meshResults: [MeshResult] = []
+    /// Fractional progress when the backend reports one.
+    public internal(set) var meshProgress: Double?
+    /// The image the composer will generate from.
+    public var meshInputImage: URL?
+    public var meshConfiguration = MeshConfiguration()
+
+    /// Same capture-at-submit reasoning as `ImageJob`.
+    public struct MeshJob: Identifiable {
+        public let id = UUID()
+        public var image: URL
+        public var configuration: MeshConfiguration
+        public var modelID: String
+        public var modelName: String
+    }
+
+    public internal(set) var meshQueue: [MeshJob] = []
+    public internal(set) var currentMeshJob: MeshJob?
+
+    /// Defaults to Hunyuan mini: it is installed, fast, and greets a first try with a result
+    /// in under a minute rather than a 13 GB download.
+    public var selectedMeshModel: String = MeshCatalog.hunyuanMini.id {
+        didSet {
+            guard selectedMeshModel != oldValue,
+                  let entry = MeshCatalog.entry(id: selectedMeshModel) else { return }
+            meshConfiguration.steps = entry.defaultSteps
+        }
+    }
+
+    private var meshTask: Task<Void, Never>?
+    private var activeMeshRuntime: (any MeshRuntime)?
+    private var meshWasCancelled = false
+    /// Bumped to re-run the filesystem install probes.
+    public private(set) var meshLibraryVersion = 0
+
+    public var isGeneratingMesh: Bool { meshTask != nil }
+
+    public func refreshMeshInstallations() { meshLibraryVersion += 1 }
+
+    static func hunyuanWeightsSlot(for entryID: String) -> String {
+        entryID == MeshCatalog.hunyuanTurbo.id ? "shape-large" : "shape-small"
+    }
+
+    /// Whether a backend can run right now, and why not when it cannot.
+    public func meshInstallation(for entry: MeshEntry) -> MeshInstallation {
+        _ = meshLibraryVersion
+        let base = settings.resolvedTrellisBaseDirectory
+        switch entry.backend {
+        case .trellis:
+            return MeshLocator.trellis(base: base)
+        case .hunyuan:
+            return MeshLocator.hunyuan(
+                base: base, weightsSlot: Self.hunyuanWeightsSlot(for: entry.id)
+            )
+        case .latoRemote:
+            let configured = settings.lato2ServiceURL
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !configured.isEmpty, URL(string: configured) != nil else {
+                return MeshInstallation(
+                    isInstalled: false,
+                    detail: "Set the LATO.2 service URL in Settings → 3D toolkit."
+                )
+            }
+            return MeshInstallation(
+                isInstalled: true,
+                detail: "Sends jobs to \(configured); reachability is checked per job."
+            )
+        case .unsupported:
+            return MeshInstallation(
+                isInstalled: false,
+                detail: entry.setupHint ?? "No runner wired up yet."
+            )
+        }
+    }
+
+    public func meshPlanner() -> MeshPlanner { MeshPlanner(profile: profile) }
+
+    public func meshPlan(
+        for entry: MeshEntry, configuration: MeshConfiguration
+    ) -> MeshPlan {
+        meshPlanner().plan(
+            entry: entry, configuration: configuration,
+            otherAppsInUse: memoryUnavailableDuringImage
+        )
+    }
+
+    /// One folder per generation: a mesh is several files, and interleaving two jobs' GLB,
+    /// OBJ and textures in one directory would make "which texture goes with which mesh"
+    /// a puzzle. Falls back to the temporary directory like images do.
+    func nextMeshOutputLocation() -> (directory: URL, baseName: String) {
+        let baseName = Settings.meshBaseName()
+        let root = settings.resolvedMeshOutputDirectory
+        do {
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: true
+            )
+            return (root.appendingPathComponent(baseName), baseName)
+        } catch {
+            return (
+                FileManager.default.temporaryDirectory.appendingPathComponent(baseName),
+                baseName
+            )
+        }
+    }
+
+    func makeMeshRuntime(for entry: MeshEntry) -> (any MeshRuntime)? {
+        let base = settings.resolvedTrellisBaseDirectory
+        switch entry.backend {
+        case .trellis:
+            return TrellisRuntime(base: base)
+        case .hunyuan:
+            return HunyuanRuntime(
+                base: base,
+                weightsSlot: Self.hunyuanWeightsSlot(for: entry.id),
+                modelName: entry.name,
+                defaultSteps: entry.defaultSteps ?? 30
+            )
+        case .latoRemote:
+            let configured = settings.lato2ServiceURL
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: configured) else { return nil }
+            return Lato2Runtime(baseURL: url)
+        case .unsupported:
+            return nil
+        }
+    }
+
+    /// Queues the composer's current image. Same warn-don't-refuse policy as images.
+    public func generateMesh() {
+        guard let entry = MeshCatalog.entry(id: selectedMeshModel),
+              let image = meshInputImage else { return }
+
+        let plan = meshPlan(for: entry, configuration: meshConfiguration)
+        if !plan.verdict.isUsable {
+            alert = AlertContent(
+                title: "This may not fit in memory",
+                message: "\(entry.name) would peak at \(plan.peak.formatted) against a "
+                    + "\(plan.budget.formatted) budget. The run is queued anyway — expect "
+                    + "swapping and a long wait, or cancel and free memory first."
+            )
+        }
+
+        meshQueue.append(MeshJob(
+            image: image, configuration: meshConfiguration,
+            modelID: entry.id, modelName: entry.name
+        ))
+        advanceMeshQueue()
+    }
+
+    public func removeQueuedMeshJob(_ id: MeshJob.ID) {
+        meshQueue.removeAll { $0.id == id }
+    }
+
+    private func advanceMeshQueue() {
+        guard !isGeneratingMesh, !meshQueue.isEmpty else { return }
+        let job = meshQueue.removeFirst()
+        currentMeshJob = job
+        runMeshJob(job)
+    }
+
+    private func runMeshJob(_ job: MeshJob) {
+        noteActivity()
+        guard let entry = MeshCatalog.entry(id: job.modelID),
+              let runtime = makeMeshRuntime(for: entry) else {
+            currentMeshJob = nil
+            meshState = .failed(message: "No runtime available for \(job.modelName).")
+            return
+        }
+        let (directory, baseName) = nextMeshOutputLocation()
+        let request = MeshRequest(
+            image: job.image, configuration: job.configuration,
+            outputDirectory: directory, baseName: baseName
+        )
+
+        meshState = .starting(stage: "Starting \(job.modelName)…")
+        meshProgress = nil
+        meshWasCancelled = false
+        activeMeshRuntime = runtime
+
+        meshTask = Task { [weak self] in
+            defer {
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.meshTask = nil
+                    self.activeMeshRuntime = nil
+                    self.currentMeshJob = nil
+                    self.advanceMeshQueue()
+                }
+            }
+            do {
+                for try await event in try await runtime.generate(request) {
+                    guard let self else { return }
+                    switch event {
+                    case .stage(let stage):
+                        meshState = .starting(stage: stage)
+                        meshProgress = nil
+                    case .progress(let fraction):
+                        meshProgress = fraction
+                    case .finished(let result):
+                        meshResults.insert(result, at: 0)
+                        meshProgress = nil
+                        meshState = .idle
+                    }
+                }
+            } catch {
+                guard let self else { return }
+                if meshWasCancelled {
+                    meshState = .idle
+                } else {
+                    meshState = .failed(message: error.localizedDescription)
+                    alert = AlertContent(
+                        title: "Could not generate a 3D model",
+                        message: error.localizedDescription
+                    )
+                }
+                meshWasCancelled = false
+            }
+        }
+    }
+
+    /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
+    public func cancelMesh() {
+        guard let runtime = activeMeshRuntime else { return }
+        meshWasCancelled = true
+        meshTask?.cancel()
+        meshState = .starting(stage: "Stopping…")
         Task { await runtime.cancel() }
     }
 

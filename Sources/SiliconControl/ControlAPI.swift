@@ -493,6 +493,112 @@ public enum ControlAPI {
         }
     }
 
+    public struct MeshModel: Codable, Sendable {
+        public var id: String
+        public var name: String
+        public var author: String
+        public var summary: String
+        public var outputs: String
+        public var typicalDuration: String
+        public var peakBytes: Int64
+        public var weightsBytes: Int64
+        public var isInstalled: Bool
+        public var installDetail: String
+
+        public init(
+            id: String, name: String, author: String, summary: String, outputs: String,
+            typicalDuration: String, peakBytes: Int64, weightsBytes: Int64,
+            isInstalled: Bool, installDetail: String
+        ) {
+            self.id = id
+            self.name = name
+            self.author = author
+            self.summary = summary
+            self.outputs = outputs
+            self.typicalDuration = typicalDuration
+            self.peakBytes = peakBytes
+            self.weightsBytes = weightsBytes
+            self.isInstalled = isInstalled
+            self.installDetail = installDetail
+        }
+    }
+
+    public struct MeshPlan: Codable, Sendable {
+        public var model: String
+        public var peakBytes: Int64
+        public var peakPhase: String
+        public var budgetBytes: Int64
+        public var verdict: String
+        public var isRemote: Bool
+        public var phases: [ImagePlan.Phase]
+        public var suggestions: [Suggestion]
+        public var notes: [String]
+
+        public init(
+            model: String, peakBytes: Int64, peakPhase: String, budgetBytes: Int64,
+            verdict: String, isRemote: Bool, phases: [ImagePlan.Phase],
+            suggestions: [Suggestion], notes: [String]
+        ) {
+            self.model = model
+            self.peakBytes = peakBytes
+            self.peakPhase = peakPhase
+            self.budgetBytes = budgetBytes
+            self.verdict = verdict
+            self.isRemote = isRemote
+            self.phases = phases
+            self.suggestions = suggestions
+            self.notes = notes
+        }
+    }
+
+    public struct MeshRequest: Codable, Sendable {
+        /// Path to the conditioning image on this machine.
+        public var imagePath: String
+        public var modelID: String?
+        public var pipelineType: String?
+        public var textureSize: Int?
+        public var steps: Int?
+        public var quantize: Int?
+        public var octree: Int?
+        public var vertexBudget: Int?
+        public var seed: Int?
+
+        public init(
+            imagePath: String, modelID: String? = nil, pipelineType: String? = nil,
+            textureSize: Int? = nil, steps: Int? = nil, quantize: Int? = nil,
+            octree: Int? = nil, vertexBudget: Int? = nil, seed: Int? = nil
+        ) {
+            self.imagePath = imagePath
+            self.modelID = modelID
+            self.pipelineType = pipelineType
+            self.textureSize = textureSize
+            self.steps = steps
+            self.quantize = quantize
+            self.octree = octree
+            self.vertexBudget = vertexBudget
+            self.seed = seed
+        }
+    }
+
+    public struct MeshResponse: Codable, Sendable {
+        public var glbPath: String?
+        public var objPath: String?
+        public var elapsedSeconds: Double
+        public var model: String
+        public var warning: String?
+
+        public init(
+            glbPath: String?, objPath: String?, elapsedSeconds: Double, model: String,
+            warning: String? = nil
+        ) {
+            self.glbPath = glbPath
+            self.objPath = objPath
+            self.elapsedSeconds = elapsedSeconds
+            self.model = model
+            self.warning = warning
+        }
+    }
+
     public struct ErrorResponse: Codable, Sendable {
         public var error: String
         public init(error: String) { self.error = error }
@@ -516,4 +622,7 @@ public protocol ControlHost: AnyObject, Sendable {
     func imageModels() async -> [ControlAPI.ImageModel]
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan
     func generateImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImageResponse
+    func meshModels() async -> [ControlAPI.MeshModel]
+    func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan
+    func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse
 }

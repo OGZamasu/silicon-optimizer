@@ -193,6 +193,43 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section("3D toolkit") {
+                LabeledContent("Save models to") {
+                    HStack {
+                        TextField(
+                            Settings.defaultMeshOutputDirectory.path,
+                            text: $model.settings.meshOutputDirectory
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        Button("Choose…") { chooseMeshOutputDirectory() }
+                        if !model.settings.meshOutputDirectory.isEmpty {
+                            Button("Reset") { model.settings.meshOutputDirectory = "" }
+                        }
+                    }
+                }
+                LabeledContent("trellis2 folder") {
+                    TextField(
+                        "/Volumes/T9/trellis2",
+                        text: $model.settings.trellisBaseDirectory
+                    )
+                    .textFieldStyle(.roundedBorder)
+                }
+                LabeledContent("LATO.2 service URL") {
+                    TextField(
+                        "http://<windows-machine>:8790",
+                        text: $model.settings.lato2ServiceURL
+                    )
+                    .textFieldStyle(.roundedBorder)
+                }
+                Text(
+                    "The trellis2 folder holds the TRELLIS.2 venv and the hy3d binary; each "
+                        + "generation gets its own subfolder of the save location. LATO.2 runs "
+                        + "on your CUDA machine — paste its service URL to enable it."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             if model.settings.showAdvancedControls {
                 Section("Advanced") {
                     LabeledContent("llama-server path") {
@@ -333,6 +370,20 @@ struct SettingsView: View {
         panel.directoryURL = model.settings.resolvedImageOutputDirectory
         if panel.runModal() == .OK, let url = panel.url {
             model.settings.imageOutputDirectory = url.path
+        }
+    }
+
+    private func chooseMeshOutputDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Where should generated 3D models be saved?"
+        panel.directoryURL = model.settings.resolvedMeshOutputDirectory
+        if panel.runModal() == .OK, let url = panel.url {
+            model.settings.meshOutputDirectory = url.path
         }
     }
 }

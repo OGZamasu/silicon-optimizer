@@ -34,6 +34,7 @@ public struct MainWindow: View {
             case .models: ModelBrowserView()
             case .chat: ChatView()
             case .images: ImageView()
+            case .threeD: MeshView()
             case .settings: SettingsView()
             }
         }

@@ -137,6 +137,16 @@ public actor ControlServer {
                 return try .encode(await host.generateImage(
                     try request.decode(ControlAPI.ImageRequest.self)
                 ))
+            case ("GET", "/mesh/models"):
+                return try .encode(await host.meshModels())
+            case ("POST", "/mesh/plan"):
+                return try .encode(await host.planMesh(
+                    try request.decode(ControlAPI.MeshRequest.self)
+                ))
+            case ("POST", "/mesh/generate"):
+                return try .encode(await host.generateMesh(
+                    try request.decode(ControlAPI.MeshRequest.self)
+                ))
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):

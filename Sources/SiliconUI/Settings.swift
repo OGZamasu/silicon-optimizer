@@ -147,6 +147,54 @@ public struct Settings: Codable, Sendable, Equatable {
         return "silicon-\(formatter.string(from: date))-\(uniqueSuffix).\(fileExtension)"
     }
 
+    // 3D toolkit
+
+    /// Where generated meshes are written. Empty means the default below.
+    public var meshOutputDirectory: String = ""
+    /// The trellis2 project folder holding trellis-mac and hunyuan3d-swift. Empty means the
+    /// T9 default the engines were set up at.
+    public var trellisBaseDirectory: String = ""
+    /// Base URL of the remote LATO.2 service, e.g. "http://192.168.1.20:8790". Empty means
+    /// not configured.
+    public var lato2ServiceURL: String = ""
+
+    /// Each generation gets its own folder under here — a mesh is several files (GLB, OBJ,
+    /// textures) and mixing jobs in one directory would interleave them.
+    public var resolvedMeshOutputDirectory: URL {
+        let configured = meshOutputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        return Self.defaultMeshOutputDirectory
+    }
+
+    public static var defaultMeshOutputDirectory: URL {
+        let documents = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        ).first
+        return documents?.appendingPathComponent("Silicon Optimizer 3D")
+            ?? FileManager.default.temporaryDirectory
+    }
+
+    public var resolvedTrellisBaseDirectory: URL {
+        let configured = trellisBaseDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        return URL(fileURLWithPath: "/Volumes/T9/trellis2")
+    }
+
+    /// Base name for one generation's files — same chronological-sort idea as images.
+    public static func meshBaseName(
+        date: Date = Date(),
+        uniqueSuffix: String = String(UUID().uuidString.prefix(4))
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return "silicon3d-\(formatter.string(from: date))-\(uniqueSuffix)"
+    }
+
     // Runtime overrides
     public var llamaServerPath: String = ""
     public var mlxServerPath: String = ""
@@ -198,6 +246,9 @@ public struct Settings: Codable, Sendable, Equatable {
         speedCalibrations = try value(.speedCalibrations, fallback.speedCalibrations)
         huggingFaceToken = try value(.huggingFaceToken, fallback.huggingFaceToken)
         imageOutputDirectory = try value(.imageOutputDirectory, fallback.imageOutputDirectory)
+        meshOutputDirectory = try value(.meshOutputDirectory, fallback.meshOutputDirectory)
+        trellisBaseDirectory = try value(.trellisBaseDirectory, fallback.trellisBaseDirectory)
+        lato2ServiceURL = try value(.lato2ServiceURL, fallback.lato2ServiceURL)
         lastExternalModelDirectory = try value(
             .lastExternalModelDirectory, fallback.lastExternalModelDirectory
         )
