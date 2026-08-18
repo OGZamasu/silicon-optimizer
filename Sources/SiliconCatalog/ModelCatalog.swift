@@ -10,9 +10,9 @@ import SiliconCore
 public enum ModelCatalog {
 
     public static let all: [ModelEntry] = [
-        qwen3Coder30B, qwen3_30B_A3B, qwen3_32B, qwen3_14B, qwen3_8B, qwen3_4B, qwen3_1_7B,
-        gptOSS20B, gptOSS120B, gemma3_27B, gemma3_12B, mistralSmall24B, llama3_3_70B,
-        phi4_14B, glm4_5Air, qwen2_5VL_7B, nomicEmbed,
+        qwen3Coder30B, qwen3_8_27B, qwen3_30B_A3B, qwen3_32B, qwen3_14B, qwen3_8B, qwen3_4B,
+        qwen3_1_7B, gptOSS20B, gptOSS120B, gemma3_27B, gemma3_12B, mistralSmall24B,
+        llama3_3_70B, phi4_14B, glm4_5Air, qwen2_5VL_7B, nomicEmbed,
     ]
 
     public static func entry(id: String) -> ModelEntry? {
@@ -75,6 +75,34 @@ public enum ModelCatalog {
             repository: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
             stem: "Qwen3-Coder-30B-A3B-Instruct",
             parameters: 30_500_000_000
+        ),
+        rating: 5, maxContext: 262_144
+    )
+
+    /// Shape figures read from the GGUF header of a real install, not a spec sheet — the
+    /// qwen35 architecture's 256-wide heads (24 Q over 4 KV) are exactly the kind of
+    /// rule-of-thumb break the planner exists to catch.
+    public static let qwen3_8_27B = ModelEntry(
+        id: "qwen3.8-27b",
+        name: "Qwen3.8 27B",
+        author: "Qwen",
+        license: "Apache-2.0",
+        summary: """
+            The dense flagship of the Qwen3.8 generation — the strongest general model a \
+            36 GB Mac holds at Q6, trained to a 256K context. Check the memory plan before \
+            going long: a dense 27B with a huge context is exactly where guessing hurts.
+            """,
+        category: .general,
+        capabilities: [.reasoning, .toolCalling, .multilingual, .coding],
+        format: .gguf,
+        shape: ModelShape(
+            totalParameters: 27_400_000_000, blockCount: 65, embeddingLength: 5120,
+            feedForwardLength: 17_408, headCount: 24, headCountKV: 4,
+            trainingContextLength: 262_144, vocabSize: 248_320, headDimension: 256
+        ),
+        variants: ggufVariants(
+            repository: "unsloth/Qwen3.8-27B-GGUF", stem: "Qwen3.8-27B",
+            parameters: 27_400_000_000
         ),
         rating: 5, maxContext: 262_144
     )
