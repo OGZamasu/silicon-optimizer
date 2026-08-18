@@ -134,12 +134,14 @@ public struct Settings: Codable, Sendable, Equatable {
     /// Filename for a generated image.
     ///
     /// Sorts chronologically in Finder, which is the order anyone browsing a folder of generated
-    /// images wants. The short random suffix keeps two images produced in the same second from
-    /// colliding — batches do that routinely.
+    /// images wants. The random suffix keeps two images produced in the same second from
+    /// colliding — batches do that routinely. Eight hex characters, because four proved too few:
+    /// a 64-image batch collided about one run in thirty (the birthday bound at 16^4), which
+    /// surfaced as a flaky CI test before it could surface as a silently overwritten image.
     public static func imageFilename(
         extension fileExtension: String = "png",
         date: Date = Date(),
-        uniqueSuffix: String = String(UUID().uuidString.prefix(4))
+        uniqueSuffix: String = String(UUID().uuidString.prefix(8))
     ) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -184,10 +186,11 @@ public struct Settings: Codable, Sendable, Equatable {
         return URL(fileURLWithPath: "/Volumes/T9/trellis2")
     }
 
-    /// Base name for one generation's files — same chronological-sort idea as images.
+    /// Base name for one generation's files — same chronological-sort and suffix-width
+    /// reasoning as `imageFilename`.
     public static func meshBaseName(
         date: Date = Date(),
-        uniqueSuffix: String = String(UUID().uuidString.prefix(4))
+        uniqueSuffix: String = String(UUID().uuidString.prefix(8))
     ) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
