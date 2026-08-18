@@ -6,16 +6,21 @@
 <title>Silicon Optimizer — your own AI, on your own Mac</title>
 <meta name="description" content="A free Mac app that runs ChatGPT-style AI on your own computer. No subscription, no cloud, no one reading your chats — and it checks what your Mac can handle before you download anything.">
 <link rel="icon" href="/favicon.png" type="image/png">
+<meta name="theme-color" content="#0B0E14">
 <meta property="og:title" content="Silicon Optimizer">
 <meta property="og:description" content="Your own AI, on your own Mac. Free, private, no subscription — and it knows what your Mac can handle before you download anything.">
 <meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 /* ---------------------------------------------------------------------------
-   Silicon Optimizer — datasheet.
+   Silicon Optimizer — datasheet, polished.
 
    The palette carries meaning rather than decoration: indigo is always a
    predicted value, teal is always a measured one, amber is always something
-   not finished. Nothing else is coloured.
+   not finished. The one deliberate exception is the hero's gradient accent,
+   which runs teal→indigo — measurement meeting prediction.
    --------------------------------------------------------------------------- */
 :root {
   --substrate:  #0B0E14;
@@ -29,19 +34,24 @@
   --measure:    #4DE0C0;
   --flag:       #E0A44D;
 
-  --display: "SF Compact Display", "SF Pro Display", -apple-system,
+  --display: "Space Grotesk", "SF Pro Display", -apple-system,
              BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  --body:    "SF Pro Text", -apple-system, BlinkMacSystemFont,
+  --body:    "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont,
              "Helvetica Neue", sans-serif;
-  --mono:    "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono:    "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --gutter: clamp(20px, 5vw, 64px);
   --measure-width: 1080px;
+  --ease-out: cubic-bezier(.16, .8, .28, 1);
 }
 
 * { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  scroll-padding-top: 92px;
+}
 
 body {
   margin: 0;
@@ -51,13 +61,23 @@ body {
   font-size: 16px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
-  /* A faint die grid. Static, so it reads as substrate rather than effect. */
+}
+
+/* The die grid lives on a fixed layer so it can fade out towards the fold —
+   present where the page introduces itself, quiet where you're reading. */
+body::before {
+  content: "";
+  position: fixed; inset: 0; z-index: -2;
   background-image:
     linear-gradient(var(--rule) 1px, transparent 1px),
     linear-gradient(90deg, var(--rule) 1px, transparent 1px);
   background-size: 64px 64px, 64px 64px;
   background-position: -1px -1px;
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
+          mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
 }
+
+::selection { background: rgba(77,224,192,.28); color: #EAF7F3; }
 
 .shell {
   max-width: var(--measure-width);
@@ -74,19 +94,25 @@ body {
   text-transform: uppercase;
   color: var(--wafer-faint);
   margin: 0 0 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::before {
+  content: ""; width: 22px; height: 1px;
+  background: linear-gradient(90deg, var(--measure), transparent);
+  flex: none;
 }
 
 h1, h2, h3 { font-family: var(--display); font-weight: 600; letter-spacing: -0.02em; margin: 0; }
 
-h1 { font-size: clamp(38px, 6.4vw, 68px); line-height: 1.02; letter-spacing: -0.035em; }
-h2 { font-size: clamp(25px, 3.4vw, 36px); line-height: 1.1; }
+h1 { font-size: clamp(38px, 6.4vw, 68px); line-height: 1.04; letter-spacing: -0.03em; }
+h2 { font-size: clamp(25px, 3.4vw, 36px); line-height: 1.14; }
 h1 + .lede, h2 + .lede, h2 + p { margin-top: 22px; }
 h3 { font-size: 18px; line-height: 1.3; }
 
 p { margin: 0 0 18px; }
 p.lede { font-size: clamp(17px, 2.1vw, 20px); color: var(--wafer-dim); max-width: 60ch; }
 
-a { color: var(--measure); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a { color: var(--measure); text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: pointer; }
 a:focus-visible, button:focus-visible {
   outline: 2px solid var(--measure);
   outline-offset: 3px;
@@ -95,19 +121,42 @@ a:focus-visible, button:focus-visible {
 
 code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
+/* --- Scroll reveal ------------------------------------------------------ */
+
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity .7s var(--ease-out), transform .7s var(--ease-out);
+  transition-delay: var(--d, 0s);
+}
+.reveal.in { opacity: 1; transform: none; }
+
 /* --- Masthead ---------------------------------------------------------- */
 
+.site-head {
+  position: sticky; top: 0; z-index: 50;
+  background: rgba(11, 14, 20, .72);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+          backdrop-filter: blur(14px) saturate(1.4);
+  border-bottom: 1px solid var(--rule);
+}
 .masthead {
   display: flex; align-items: center; gap: 14px;
-  padding: 26px 0 0;
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 20px;
+  padding-top: 14px; padding-bottom: 14px;
 }
-.masthead img { width: 34px; height: 34px; border-radius: 8px; }
+.masthead img { width: 32px; height: 32px; border-radius: 8px; box-shadow: 0 0 0 1px var(--rule-bright); }
 .wordmark {
   font-family: var(--display); font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
 }
 .masthead .spacer { flex: 1; }
+
+.nav { display: flex; gap: 4px; margin-right: 6px; }
+.nav a {
+  font-size: 13.5px; font-weight: 500; color: var(--wafer-dim);
+  text-decoration: none; padding: 6px 11px; border-radius: 7px;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+.nav a:hover { color: var(--wafer); background: rgba(201,207,218,.06); }
 
 .chip {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
@@ -115,20 +164,31 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   border: 1px solid var(--rule-bright); color: var(--wafer-dim);
   white-space: nowrap;
 }
-.chip.warn { border-color: rgba(224,164,77,.42); color: var(--flag); }
 .chip.link {
   text-decoration: none; color: var(--measure); border-color: rgba(77,224,192,.35);
   transition: background-color 140ms ease, border-color 140ms ease;
 }
 .chip.link:hover { background: rgba(77,224,192,.1); border-color: rgba(77,224,192,.6); }
 
+@media (max-width: 860px) { .nav, .chip.spec { display: none; } }
+
 /* --- Hero -------------------------------------------------------------- */
 
-.hero { padding: clamp(56px, 9vw, 104px) 0 clamp(40px, 6vw, 72px); }
+.hero { position: relative; padding: clamp(56px, 9vw, 104px) 0 clamp(40px, 6vw, 72px); }
+/* Two soft blooms behind the headline: the page's colours, at atmosphere volume. */
+.hero::before {
+  content: ""; position: absolute; inset: -140px -20% auto;
+  height: 620px; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(560px 380px at 24% 30%, rgba(77,224,192,.09), transparent 68%),
+    radial-gradient(640px 420px at 76% 16%, rgba(110,139,200,.11), transparent 70%);
+}
 .hero h1 { max-width: 15ch; }
 .hero h1 em {
   font-style: normal;
-  color: var(--wafer-faint);
+  background: linear-gradient(92deg, var(--measure) 10%, var(--predict) 85%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
 }
 
 /* --- Primary action ----------------------------------------------------- */
@@ -139,31 +199,46 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 }
 .download {
   display: inline-flex; flex-direction: column; gap: 3px;
-  padding: 14px 24px; border-radius: 10px; text-decoration: none;
-  background: var(--measure); color: #05231D;
+  padding: 14px 24px; border-radius: 12px; text-decoration: none;
+  background: linear-gradient(180deg, #5BE7C8, #3FD1B0);
+  color: #05231D;
   font-family: var(--display); font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
-  transition: transform 140ms ease, box-shadow 140ms ease;
-  box-shadow: 0 0 0 0 rgba(77,224,192,0);
+  box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 10px 30px -14px rgba(77,224,192,.55);
+  transition: transform 160ms var(--ease-out), box-shadow 160ms ease;
 }
-.download span {
+.download .dl-row { display: inline-flex; align-items: center; gap: 9px; }
+.download .dl-row svg { flex: none; }
+.download .dl-sub {
   font-family: var(--mono); font-size: 11px; font-weight: 400;
   letter-spacing: 0.06em; opacity: .68;
 }
-.download:hover { transform: translateY(-1px); box-shadow: 0 8px 26px -12px rgba(77,224,192,.7); }
+.download:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 1px 0 rgba(255,255,255,.3) inset, 0 16px 40px -14px rgba(77,224,192,.75);
+}
+.download:active { transform: translateY(0) scale(.985); }
 .secondary {
   font-family: var(--body); font-size: 15px; color: var(--wafer-dim);
   text-decoration: none; border-bottom: 1px solid var(--rule-bright); padding-bottom: 2px;
+  transition: color 160ms ease, border-color 160ms ease;
 }
 .secondary:hover { color: var(--wafer); border-color: var(--wafer-faint); }
 
 /* --- The receipts: the page's signature --------------------------------- */
 
 .ledger {
+  position: relative;
   margin-top: clamp(34px, 5vw, 52px);
   border: 1px solid var(--rule-bright);
-  border-radius: 10px;
+  border-radius: 12px;
   background: linear-gradient(180deg, var(--substrate-2), var(--substrate));
   overflow: hidden;
+  box-shadow: 0 30px 60px -40px rgba(0,0,0,.8);
+}
+/* A hairline of light along the top edge, like a screen catching the lamp. */
+.ledger::before {
+  content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(77,224,192,.45), rgba(110,139,200,.45), transparent);
 }
 .ledger-head {
   display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline;
@@ -186,15 +261,18 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .row.predicted .row-label, .row.predicted .row-value { color: var(--predict); }
 .row.measured  .row-label, .row.measured  .row-value { color: var(--measure); }
 
-/* Bars are drawn to the same scale so the two lengths can be compared by eye. */
+/* Bars are drawn to the same scale so the two lengths can be compared by eye.
+   They extend only once the ledger has scrolled into view. */
 .bar { height: 7px; border-radius: 100px; background: var(--rule); overflow: hidden; }
 .bar span {
   display: block; height: 100%; border-radius: 100px;
+  transform: scaleX(0);
   transform-origin: left center;
-  animation: extend 1100ms cubic-bezier(.16,.8,.28,1) both;
 }
+.in .bar span { animation: extend 1100ms var(--ease-out) both; }
 .row.predicted .bar span { background: var(--predict); }
-.row.measured  .bar span { background: var(--measure); animation-delay: 160ms; }
+.row.measured  .bar span { background: var(--measure); }
+.in .row.measured .bar span { animation-delay: 180ms; }
 
 @keyframes extend { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 
@@ -229,7 +307,8 @@ th {
   color: var(--wafer-faint); font-weight: 500; font-size: 11px;
   letter-spacing: 0.1em; text-transform: uppercase;
 }
-td { color: var(--wafer-dim); }
+td { color: var(--wafer-dim); transition: background-color 160ms ease; }
+tbody tr:hover td { background: rgba(201,207,218,.03); }
 td.p { color: var(--predict); }
 td.m { color: var(--measure); }
 td.subject { color: var(--wafer); }
@@ -246,30 +325,64 @@ tbody tr.total td.subject { color: var(--wafer); }
   font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; line-height: 1.4;
   text-transform: uppercase; color: var(--wafer-faint);
 }
-.collapse-bar { position: relative; height: 40px; border-radius: 6px; background: var(--rule); overflow: hidden; }
+.collapse-bar { position: relative; height: 40px; border-radius: 8px; background: var(--rule); overflow: hidden; }
 .collapse-bar span {
-  position: absolute; inset: 0 auto 0 0; border-radius: 6px;
+  position: absolute; inset: 0 auto 0 0; border-radius: 8px;
   display: flex; align-items: center; padding-left: 14px;
   font-family: var(--mono); font-size: 13.5px; color: var(--substrate); font-weight: 600;
-  animation: extend 1200ms cubic-bezier(.16,.8,.28,1) both;
+  transform: translateX(-101%);
 }
+.in .collapse-bar span { animation: slide-in 1100ms var(--ease-out) both; }
 .collapse-bar .full { width: 100%; background: var(--rule-bright); color: var(--wafer); }
-.collapse-bar .streamed { width: 28%; background: var(--measure); animation-delay: 220ms; }
+.collapse-bar .streamed { width: 28%; background: var(--measure); }
+.in .collapse-bar .streamed { animation-delay: 240ms; }
+
+@keyframes slide-in { from { transform: translateX(-101%); } to { transform: translateX(0); } }
 
 /* --- Feature grid ------------------------------------------------------ */
 
-.grid { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+.grid { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; }
 @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
-.cell { background: var(--substrate); padding: 26px 24px; }
+.cell {
+  position: relative; overflow: hidden;
+  background: var(--substrate); padding: 26px 24px;
+  transition: background-color 300ms ease;
+  opacity: 0; transform: translateY(14px);
+}
+.grid.in .cell {
+  opacity: 1; transform: none;
+  transition: opacity .6s var(--ease-out), transform .6s var(--ease-out), background-color 300ms ease;
+}
+.grid.in .cell:nth-child(2) { transition-delay: 60ms, 60ms, 0ms; }
+.grid.in .cell:nth-child(3) { transition-delay: 120ms, 120ms, 0ms; }
+.grid.in .cell:nth-child(4) { transition-delay: 180ms, 180ms, 0ms; }
+.grid.in .cell:nth-child(5) { transition-delay: 240ms, 240ms, 0ms; }
+.grid.in .cell:nth-child(6) { transition-delay: 300ms, 300ms, 0ms; }
+.cell:hover { background: #0D1119; }
+/* A soft spotlight that follows the pointer — the one flourish per card. */
+.cell::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  opacity: 0; transition: opacity 350ms ease;
+  background: radial-gradient(240px circle at var(--mx, 50%) var(--my, 50%), rgba(77,224,192,.07), transparent 70%);
+}
+.cell:hover::after { opacity: 1; }
 .cell h3 { margin-bottom: 8px; }
 .cell p { color: var(--wafer-dim); font-size: 15px; margin: 0; }
+.cell-icon {
+  width: 38px; height: 38px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(77,224,192,.07); border: 1px solid rgba(77,224,192,.16);
+  color: var(--measure); margin-bottom: 14px;
+  transition: background-color 300ms ease, border-color 300ms ease;
+}
+.cell:hover .cell-icon { background: rgba(77,224,192,.12); border-color: rgba(77,224,192,.3); }
 
 /* --- Tool list --------------------------------------------------------- */
 
 .tools { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
 .tools li {
   display: grid; grid-template-columns: minmax(0, 190px) 1fr; gap: 8px 18px;
-  padding-bottom: 10px; border-bottom: 1px solid var(--rule); align-items: baseline;
+  padding: 6px 0 10px; border-bottom: 1px solid var(--rule); align-items: baseline;
 }
 .tools li:last-child { border-bottom: none; }
 .tools code { color: var(--measure); font-size: 13px; }
@@ -282,13 +395,15 @@ tbody tr.total td.subject { color: var(--wafer); }
 .status ul {
   margin: clamp(28px, 4vw, 44px) 0 0; padding: 0; list-style: none;
   display: grid; gap: 1px; background: var(--rule);
-  border: 1px solid var(--rule); border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--rule); border-radius: 12px; overflow: hidden;
 }
 .status li {
   display: grid; grid-template-columns: 18px 1fr; gap: 12px;
   background: var(--substrate); padding: 18px 22px;
   color: var(--wafer-dim); font-size: 15px; line-height: 1.55;
+  transition: background-color 200ms ease;
 }
+.status li:hover { background: #0D1119; }
 .status li::before { content: "—"; color: var(--flag); font-family: var(--mono); }
 .status strong { color: var(--wafer); font-weight: 600; }
 
@@ -297,7 +412,7 @@ tbody tr.total td.subject { color: var(--wafer); }
 pre {
   margin: 0; padding: 20px; overflow-x: auto;
   background: var(--substrate-2); border: 1px solid var(--rule);
-  border-radius: 10px; font-family: var(--mono); font-size: 13px; line-height: 1.75;
+  border-radius: 12px; font-family: var(--mono); font-size: 13px; line-height: 1.75;
   color: var(--wafer);
 }
 pre .c { color: var(--wafer-faint); }
@@ -321,27 +436,37 @@ footer {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bar span, .collapse-bar span { animation: none; }
+  html { scroll-behavior: auto; }
+  .reveal, .grid .cell { opacity: 1 !important; transform: none !important; transition: none !important; }
+  .bar span, .collapse-bar span { animation: none !important; transform: none !important; }
+  .cell::after { display: none; }
   * { transition: none !important; }
 }
 </style>
 </head>
 <body>
 
-<div class="shell">
-  <header class="masthead">
-    <img src="/icon.png" alt="" width="34" height="34">
+<header class="site-head">
+  <div class="shell masthead">
+    <img src="/icon.png" alt="" width="32" height="32">
     <span class="wordmark">Silicon Optimizer</span>
     <span class="spacer"></span>
-    <span class="chip">v0.1</span>
-    <span class="chip">M1 Macs and newer</span>
+    <nav class="nav" aria-label="Sections">
+      <a href="#proof">Proof</a>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+    </nav>
+    <span class="chip spec">v0.1</span>
+    <span class="chip spec">M1 Macs and newer</span>
     <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
-  </header>
+  </div>
+</header>
 
+<div class="shell">
   <div class="hero">
-    <p class="eyebrow">A free Mac app</p>
-    <h1>Your own AI, on your own Mac. <em>Free. Private. No subscription.</em></h1>
-    <p class="lede">
+    <p class="eyebrow reveal">A free Mac app</p>
+    <h1 class="reveal" style="--d:.06s">Your own AI, on your own Mac. <em>Free. Private. No subscription.</em></h1>
+    <p class="lede reveal" style="--d:.14s">
       Silicon Optimizer runs ChatGPT-style AI right on your Mac — chat, coding help, even
       image generation. No account, no monthly fee, and nothing you type ever leaves your
       machine. Before you download anything, it checks what your Mac can actually handle, so
@@ -349,15 +474,18 @@ footer {
     </p>
 
     <!-- Signature: the receipts. Predicted in indigo, measured in teal, everywhere. -->
-    <div class="actions">
+    <div class="actions reveal" style="--d:.22s">
       <a class="download" href="https://github.com/OGZamasu/silicon-optimizer/releases/latest/download/Silicon.Optimizer.dmg">
-        Download for Mac
-        <span>free · 2.5 MB · macOS 14+ · Apple Silicon</span>
+        <span class="dl-row">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download for Mac
+        </span>
+        <span class="dl-sub">free · 2.5 MB · macOS 14+ · Apple Silicon</span>
       </a>
       <a class="secondary" href="https://github.com/OGZamasu/silicon-optimizer">or build it from source</a>
     </div>
 
-    <div class="ledger">
+    <div class="ledger reveal" style="--d:.3s">
       <div class="ledger-head">
         <strong>Receipts</strong>
         <span>The app predicted what a big coding AI would need — before loading it. Then we measured.</span>
@@ -367,20 +495,20 @@ footer {
         <div class="row predicted">
           <div class="row-top">
             <span class="row-label">The app said</span>
-            <span class="row-value">20.30 GB</span>
+            <span class="row-value"><span class="count" data-to="20.30" data-dec="2">20.30</span> GB</span>
           </div>
           <div class="bar"><span style="width:72.5%"></span></div>
         </div>
         <div class="row measured">
           <div class="row-top">
             <span class="row-label">It actually used</span>
-            <span class="row-value">20.24 GB</span>
+            <span class="row-value"><span class="count" data-to="20.24" data-dec="2">20.24</span> GB</span>
           </div>
           <div class="bar"><span style="width:72.3%"></span></div>
         </div>
         <dl class="delta">
           <dt>How far off</dt>
-          <dd class="num">0.31%</dd>
+          <dd class="num"><span class="count" data-to="0.31" data-dec="2">0.31</span>%</dd>
           <dt>Speed, promised vs real</dt>
           <dd class="num">89 → 89 tokens/sec</dd>
         </dl>
@@ -389,9 +517,9 @@ footer {
   </div>
 </div>
 
-<section>
+<section id="proof">
   <div class="shell">
-    <div class="section-head">
+    <div class="section-head reveal">
       <p class="eyebrow">Why trust it</p>
       <h2>It doesn't guess. It does the math — and shows its work.</h2>
       <p class="lede">
@@ -402,7 +530,7 @@ footer {
       </p>
     </div>
 
-    <div class="table-wrap">
+    <div class="table-wrap reveal">
       <table>
         <caption>Memory — a big coding AI (Qwen3-Coder 30B)</caption>
         <thead>
@@ -416,7 +544,7 @@ footer {
       </table>
     </div>
 
-    <div class="table-wrap" style="margin-top:40px">
+    <div class="table-wrap reveal" style="margin-top:40px">
       <table>
         <caption>Speed — same Mac (tokens per second; a token is about ¾ of a word)</caption>
         <thead>
@@ -431,7 +559,7 @@ footer {
       </table>
     </div>
 
-    <div class="notes" style="margin-top:28px">
+    <div class="notes reveal" style="margin-top:28px">
       <p>
         That last row misses — and that's exactly why the app has a built-in speed test. Run it
         once (about a minute) and every future prediction for that model is tuned to your Mac
@@ -443,7 +571,7 @@ footer {
 
 <section>
   <div class="shell">
-    <div class="section-head">
+    <div class="section-head reveal">
       <p class="eyebrow">The party trick</p>
       <h2>Run AI that looks way too big for your Mac.</h2>
       <p class="lede">
@@ -453,7 +581,7 @@ footer {
       </p>
     </div>
 
-    <div class="collapse">
+    <div class="collapse reveal">
       <div class="collapse-row">
         <span class="collapse-key">The normal way</span>
         <div class="collapse-bar"><span class="full">19.0 GB</span></div>
@@ -464,7 +592,7 @@ footer {
       </div>
     </div>
 
-    <div class="notes" style="margin-top:30px">
+    <div class="notes reveal" style="margin-top:30px">
       <p>
         The trade-off is speed: reading from disk makes the AI respond slower, especially on
         long prompts. The app tells you exactly how much slower <em>before</em> you switch it
@@ -478,42 +606,60 @@ footer {
   </div>
 </section>
 
-<section>
+<section id="features">
   <div class="shell">
-    <div class="section-head">
+    <div class="section-head reveal">
       <p class="eyebrow">What it does</p>
       <h2>No Terminal. No settings maze. No math homework.</h2>
     </div>
     <div class="grid">
       <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+        </div>
         <h3>Knows what your Mac can handle</h3>
         <p>It reads your Mac's real specs — chip, memory, storage — and tells you what fits
            before you download. If something doesn't fit, it lists exactly what to change and
            how much each change saves.</p>
       </div>
       <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
         <h3>Picks the AI for you</h3>
         <p>One button. The app ranks every model it knows against your machine and picks the
            strongest one that actually runs at a decent speed. You can always override it.</p>
       </div>
       <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        </div>
         <h3>A chat that actually does things</h3>
         <p>The Chat tab runs <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek
            Harness</a> on your local AI: it can browse the web, read and edit files in a folder
            you choose, and run commands — always asking you first. Not just talk.</p>
       </div>
       <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        </div>
         <h3>Makes images too</h3>
         <p>FLUX and other image AIs run locally. The app tells you whether a render fits in
            memory before you start it — not at 95%, after minutes of waiting.</p>
       </div>
       <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </div>
         <h3>Any model, not just a menu</h3>
         <p>Search all of Hugging Face — the internet's library of free AI models. The app reads
            a tiny slice of any model's file and gives you a full verdict before you download
            gigabytes.</p>
       </div>
       <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+        </div>
         <h3>Stays out of your way</h3>
         <p>Lives in the menu bar: what's loaded, how fast it's running, memory at a glance.
            Downloads survive bad Wi-Fi and pick up where they stopped.</p>
@@ -524,7 +670,7 @@ footer {
 
 <section>
   <div class="shell">
-    <div class="section-head">
+    <div class="section-head reveal">
       <p class="eyebrow">For power users</p>
       <h2>Already use Claude or ChatGPT? Connect them.</h2>
       <p class="lede">
@@ -533,7 +679,7 @@ footer {
         private work. The private part stays on your machine. Nothing leaves it.
       </p>
     </div>
-    <ul class="tools">
+    <ul class="tools reveal">
       <li><code>get_hardware_profile</code><span>What is this Mac, and what can it hold?</span></li>
       <li><code>recommend_model</code><span>What should I run?</span></li>
       <li><code>plan_memory</code><span>Will this fit — and what should I change if not?</span></li>
@@ -548,13 +694,13 @@ footer {
 <section>
   <div class="shell">
     <div class="status">
-      <p class="eyebrow">The fine print</p>
-      <h2>What's solid, and what's still rough.</h2>
-      <p class="lede">
+      <p class="eyebrow reveal">The fine print</p>
+      <h2 class="reveal">What's solid, and what's still rough.</h2>
+      <p class="lede reveal">
         Everything on this page is a real measurement, not marketing. In the same spirit,
         here's what a young app hasn't finished yet — so you know exactly where you stand.
       </p>
-      <ul>
+      <ul class="reveal">
         <li><div><strong>Speed predictions start from one Mac.</strong> They're tuned on an M3 Max; other chips use published specs until you run the built-in one-minute speed test, which tunes them to yours.</div></li>
         <li><div><strong>macOS will complain once.</strong> The app isn't notarized by Apple yet, so the first launch needs one command to approve it (shown below). Building from source skips this entirely.</div></li>
         <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet. The app checks your build and hides the option if it can't do it.</div></li>
@@ -565,25 +711,25 @@ footer {
   </div>
 </section>
 
-<section>
+<section id="install">
   <div class="shell">
-    <div class="section-head">
+    <div class="section-head reveal">
       <p class="eyebrow">Get started</p>
       <h2>Running in about two minutes.</h2>
     </div>
     <div class="steps">
-      <div>
+      <div class="reveal">
         <p class="step-label">1 · Easiest: Homebrew</p>
 <pre>brew tap OGZamasu/tap
 brew install --cask silicon-optimizer</pre>
       </div>
-      <div>
+      <div class="reveal">
         <p class="step-label">2 · Or download the app directly</p>
 <pre><span class="c"># macOS blocks apps from new developers once. After dragging</span>
 <span class="c"># it to Applications, approve it with:</span>
 xattr -d com.apple.quarantine "/Applications/Silicon Optimizer.app"</pre>
       </div>
-      <div>
+      <div class="reveal">
         <p class="step-label">3 · Or build it yourself</p>
 <pre><span class="c"># Needs Xcode 16+ on an Apple Silicon Mac (macOS 14 or later)</span>
 git clone https://github.com/OGZamasu/silicon-optimizer
@@ -591,18 +737,18 @@ cd silicon-optimizer
 Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/</pre>
       </div>
-      <div>
+      <div class="reveal">
         <p class="step-label">4 · Install an engine — the thing that does the AI math</p>
 <pre>brew install llama.cpp                              <span class="c"># recommended</span>
 python3 -m venv ~/.silicon-mlx
 ~/.silicon-mlx/bin/pip install mlx-lm               <span class="c"># optional — Apple's MLX</span></pre>
       </div>
-      <div>
+      <div class="reveal">
         <p class="step-label">5 · Optional: connect Claude or ChatGPT</p>
 <pre>Scripts/install-mcp.sh --configure-claude</pre>
       </div>
     </div>
-    <div class="notes" style="margin-top:26px">
+    <div class="notes reveal" style="margin-top:26px">
       <p>
         The app finds engines on its own, even inside a Python virtual environment. Settings
         shows what it found and what each one can do.
@@ -619,6 +765,63 @@ python3 -m venv ~/.silicon-mlx
     <span>Models carry their own licences</span>
   </footer>
 </div>
+
+<script>
+(() => {
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const revealed = document.querySelectorAll('.reveal, .ledger, .collapse, .grid');
+
+  if (reduce || !('IntersectionObserver' in window)) {
+    revealed.forEach(el => el.classList.add('in'));
+  } else {
+    const io = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('in');
+          io.unobserve(entry.target);
+        }
+      }
+    }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
+    revealed.forEach(el => io.observe(el));
+  }
+
+  // Count-up on the receipt numbers. The static markup already holds the final
+  // value, so no JS (or reduced motion) simply shows the truth immediately.
+  if (!reduce && 'IntersectionObserver' in window) {
+    const ease = t => 1 - Math.pow(1 - t, 3);
+    const run = el => {
+      const to = parseFloat(el.dataset.to);
+      const dec = +(el.dataset.dec || 0);
+      const t0 = performance.now();
+      const dur = 950;
+      const step = now => {
+        const p = Math.min(1, (now - t0) / dur);
+        el.textContent = (to * ease(p)).toFixed(dec);
+        if (p < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    };
+    const cio = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          run(entry.target);
+          cio.unobserve(entry.target);
+        }
+      }
+    }, { threshold: 0.6 });
+    document.querySelectorAll('.count').forEach(el => cio.observe(el));
+  }
+
+  // Pointer-tracking spotlight on the feature cards.
+  document.querySelectorAll('.cell').forEach(cell => {
+    cell.addEventListener('pointermove', e => {
+      const r = cell.getBoundingClientRect();
+      cell.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+      cell.style.setProperty('--my', (e.clientY - r.top) + 'px');
+    });
+  });
+})();
+</script>
 
 </body>
 </html>
