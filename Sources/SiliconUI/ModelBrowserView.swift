@@ -23,6 +23,7 @@ struct ModelBrowserView: View {
                 }
                 catalogSection
                 imageSection
+                meshSection
                 remoteSection
             }
             .padding(20)
@@ -202,6 +203,30 @@ struct ModelBrowserView: View {
 
                 ForEach(DiffusionCatalog.all) { entry in
                     DiffusionCatalogRow(entry: entry)
+                }
+            }
+        }
+    }
+
+    // MARK: - 3D models
+
+    /// Same reasoning as the image section: 3D backends are their own programs with their
+    /// own memory characters, so they get their own list — but they still belong in the
+    /// one place someone looks to answer "what models do I have".
+    @ViewBuilder
+    private var meshSection: some View {
+        if search.isEmpty, category == nil {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("3D models")
+                        .font(.title3.weight(.semibold))
+                    Text("image to mesh, in the 3D tab")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach(MeshCatalog.all) { entry in
+                    MeshCatalogRow(entry: entry)
                 }
             }
         }
@@ -632,6 +657,127 @@ private struct DiffusionCatalogRow: View {
         }
         .padding(12)
         .background(.background.secondary, in: .rect(cornerRadius: 10))
+    }
+}
+
+/// One 3D backend in the browser: state, measured peak, and the download when weights are
+/// the missing piece. Styled to match `DiffusionCatalogRow` — the sections read as siblings.
+private struct MeshCatalogRow: View {
+    @Environment(AppModel.self) private var model
+    var entry: MeshEntry
+
+    var body: some View {
+        let installation = model.meshInstallation(for: entry)
+        let download = model.meshDownloads[entry.id]
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "cube.transparent")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(entry.name).font(.headline)
+                        if installation.isInstalled {
+                            Badge(
+                                text: "Ready", systemImage: "checkmark.circle.fill",
+                                tint: .green
+                            )
+                        } else if entry.backend == .unsupported {
+                            Badge(text: "Not available yet", tint: .secondary)
+                        }
+                    }
+                    Text(entry.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 10) {
+                        Label(entry.typicalDuration, systemImage: "clock")
+                        if entry.peakMemory > .zero {
+                            Label(
+                                "peaks at \(entry.peakMemory.formatted)",
+                                systemImage: "memorychip"
+                            )
+                        }
+                        Label(entry.outputs, systemImage: "shippingbox")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    if !installation.isInstalled, entry.backend != .unsupported {
+                        Text(installation.detail)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if download == nil, installation.missing == .weights,
+                   model.meshWeightsDownload(for: entry) != nil {
+                    Button("Download") { model.installMeshWeights(entry) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                } else if installation.isInstalled {
+                    Button("Open 3D tab") { model.selectedTab = .threeD }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
+
+            if let download {
+                MeshDownloadProgressView(download: download) {
+                    model.cancelMeshInstall(entry.id)
+                }
+            }
+        }
+        .padding(12)
+        .background(.background.secondary, in: .rect(cornerRadius: 10))
+    }
+}
+
+/// Progress for a 3D-weights install — the same readout as every other download here.
+private struct MeshDownloadProgressView: View {
+    var download: AppModel.MeshDownloadTask
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let error = download.error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let progress = download.progress, progress.bytesExpected > .zero {
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                HStack {
+                    Text("\(progress.bytesReceived.formatted) of \(progress.bytesExpected.formatted)")
+                    Spacer()
+                    if progress.bytesPerSecond > 0 {
+                        Text("\(Bytes(Int64(progress.bytesPerSecond)).formatted)/s")
+                    }
+                    Button("Cancel", action: onCancel)
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                }
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Starting the download…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel", action: onCancel)
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                }
+            }
+        }
     }
 }
 

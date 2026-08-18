@@ -742,9 +742,13 @@ public final class AppModel {
         )
     }
 
+    /// Set when a mesh had to be written somewhere other than the configured directory.
+    public internal(set) var meshOutputWarning: String?
+
     /// One folder per generation: a mesh is several files, and interleaving two jobs' GLB,
     /// OBJ and textures in one directory would make "which texture goes with which mesh"
-    /// a puzzle. Falls back to the temporary directory like images do.
+    /// a puzzle. Falls back to the temporary directory like images do — and says so, since
+    /// a silently relocated result is a result the user cannot find.
     func nextMeshOutputLocation() -> (directory: URL, baseName: String) {
         let baseName = Settings.meshBaseName()
         let root = settings.resolvedMeshOutputDirectory
@@ -752,8 +756,12 @@ public final class AppModel {
             try FileManager.default.createDirectory(
                 at: root, withIntermediateDirectories: true
             )
+            meshOutputWarning = nil
             return (root.appendingPathComponent(baseName), baseName)
         } catch {
+            meshOutputWarning =
+                "Could not write to \(root.path) — saving to the temporary folder instead. "
+                + "Check the save location in Settings → 3D toolkit."
             return (
                 FileManager.default.temporaryDirectory.appendingPathComponent(baseName),
                 baseName

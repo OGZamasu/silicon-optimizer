@@ -118,7 +118,7 @@ struct DashboardView: View {
 
                 VStack(spacing: 6) {
                     LegendRow(color: .orange, label: "Wired", value: model.metrics.memoryWired.formatted)
-                    LegendRow(color: .blue, label: "Applications",
+                    LegendRow(color: .blue, label: "Apps",
                               value: Bytes(max(0, model.metrics.memoryUsed.rawValue
                                   - model.metrics.memoryWired.rawValue
                                   - model.metrics.memoryCompressed.rawValue)).formatted)
@@ -190,6 +190,16 @@ struct DashboardView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.blue)
+                    }
+
+                    // An image or 3D render running alongside the loaded language model.
+                    if let activity = model.activeGenerationSummary {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(activity)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             } else if let activity = model.activeGenerationSummary {

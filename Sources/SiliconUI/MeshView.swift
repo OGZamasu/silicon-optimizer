@@ -365,11 +365,16 @@ struct MeshView: View {
             }
             .controlSize(.large)
         } else {
+            // Same queueing affordance as the Images tab: the button says what pressing it
+            // does right now.
             Button {
                 model.generateMesh()
             } label: {
-                Label("Generate 3D model", systemImage: "cube")
-                    .frame(maxWidth: .infinity)
+                Label(
+                    model.meshQueue.isEmpty ? "Generate 3D model" : "Add to queue",
+                    systemImage: model.meshQueue.isEmpty ? "cube" : "text.badge.plus"
+                )
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -500,6 +505,16 @@ struct MeshView: View {
 
     private var resultCard: some View {
         Card(title: "Result", systemImage: "rotate.3d") {
+            if let warning = model.meshOutputWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(9)
+                    .background(.background.secondary, in: .rect(cornerRadius: 7))
+            }
+
             if model.isGeneratingMesh {
                 generationProgress
             } else if case .failed(let message) = model.meshState {

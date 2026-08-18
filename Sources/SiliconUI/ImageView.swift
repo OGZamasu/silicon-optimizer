@@ -400,6 +400,16 @@ struct ImageView: View {
     private var resultCard: some View {
         Card(title: "Result", systemImage: "photo") {
             VStack(spacing: 14) {
+                if let warning = model.imageOutputWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(9)
+                        .background(.background.secondary, in: .rect(cornerRadius: 7))
+                }
+
                 if model.isGeneratingImage {
                     generationProgress
                 } else if case .failed(let message) = model.imageState {
