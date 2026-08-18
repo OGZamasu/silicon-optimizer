@@ -233,6 +233,11 @@ public struct MFluxArguments: Sendable {
         case "flux2-klein-4b", "flux2-klein-9b": "mflux-generate-flux2"
         case "qwen-image": "mflux-generate-qwen"
         case "z-image-turbo": "mflux-generate-z-image-turbo"
+        case "z-image": "mflux-generate-z-image"
+        case "ernie-image-turbo": "mflux-generate-ernie-image-turbo"
+        case "ernie-image": "mflux-generate-ernie-image"
+        // flux1-krea-dev shares FLUX.1's entry point — it is a dev finetune, not a separate
+        // architecture, and has no binary of its own.
         default: "mflux-generate"
         }
     }
@@ -287,10 +292,14 @@ public struct MFluxArguments: Sendable {
         switch catalogID {
         case "flux1-schnell": "schnell"
         case "flux1-dev": "dev"
+        case "flux1-krea-dev": "krea-dev"
         case "flux2-klein-4b": "flux2-klein-4b"
         case "flux2-klein-9b": "flux2-klein-9b"
         case "qwen-image": "qwen"
         case "z-image-turbo": "z-image-turbo"
+        case "z-image": "z-image"
+        case "ernie-image-turbo": "ernie-image-turbo"
+        case "ernie-image": "ernie-image"
         default: nil
         }
     }
