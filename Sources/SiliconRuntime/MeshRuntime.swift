@@ -109,12 +109,27 @@ public enum MeshRuntimeError: Error, LocalizedError {
 /// engines were set up: TRELLIS.2 in `trellis-mac/` with its venv, Hunyuan3D in
 /// `hunyuan3d-swift/` with its weights.
 public struct MeshInstallation: Sendable {
+    /// The one thing standing between this backend and a working generation — which decides
+    /// what the UI offers: a download button fixes `.weights`, a Settings field fixes
+    /// `.serviceURL`, and nothing in the app fixes `.engine` or `.unsupported`.
+    public enum Missing: Sendable, Equatable {
+        case nothing
+        case engine
+        case weights
+        case serviceURL
+        case unsupported
+    }
+
+    /// Whether a generation can run right now. True with `missing == .weights` is possible:
+    /// TRELLIS.2 fetches its own weights mid-run, so it is runnable but better pre-downloaded.
     public var isInstalled: Bool
-    /// Human answer to "why not", or "what to expect" when installed.
+    public var missing: Missing
+    /// Plain words for the person reading the banner — what the state means and what to do.
     public var detail: String
 
-    public init(isInstalled: Bool, detail: String) {
+    public init(isInstalled: Bool, missing: Missing = .nothing, detail: String) {
         self.isInstalled = isInstalled
+        self.missing = missing
         self.detail = detail
     }
 }
@@ -128,8 +143,9 @@ public enum MeshLocator {
         guard FileManager.default.fileExists(atPath: python.path) else {
             return MeshInstallation(
                 isInstalled: false,
-                detail: "trellis-mac venv not found under \(base.path). Set the trellis2 "
-                    + "folder in Settings → 3D toolkit."
+                missing: .engine,
+                detail: "TRELLIS.2 isn't set up on this Mac yet. In Settings → 3D toolkit, "
+                    + "point the trellis2 folder at where it's installed."
             )
         }
         let weights = FileManager.default.homeDirectoryForCurrentUser
@@ -137,11 +153,14 @@ public enum MeshLocator {
         let weightsPresent = (try? FileManager.default.contentsOfDirectory(
             at: weights.appendingPathComponent("snapshots"), includingPropertiesForKeys: nil
         ))?.isEmpty == false
+        if weightsPresent {
+            return MeshInstallation(isInstalled: true, detail: "Ready to go.")
+        }
         return MeshInstallation(
             isInstalled: true,
-            detail: weightsPresent
-                ? "Ready — weights cached."
-                : "Ready — first run downloads ~13 GB of weights."
+            missing: .weights,
+            detail: "Works, but its first run would stop to fetch 13 GB of model files. "
+                + "Download them now and generating starts right away."
         )
     }
 
@@ -152,9 +171,10 @@ public enum MeshLocator {
         guard hy3dExecutable(base: base) != nil else {
             return MeshInstallation(
                 isInstalled: false,
-                detail: "hy3d binary not built with its Metal library. Build it with: "
-                    + "cd \(package.path) && xcodebuild -scheme hy3d -configuration Release "
-                    + "-derivedDataPath .xcbuild build"
+                missing: .engine,
+                detail: "The Hunyuan engine needs a one-time build on this Mac. In Terminal: "
+                    + "cd \"\(package.path)\" && xcodebuild -scheme hy3d -configuration "
+                    + "Release -derivedDataPath .xcbuild build"
             )
         }
         let weights = package.appendingPathComponent("weights/\(weightsSlot)")
@@ -163,10 +183,14 @@ public enum MeshLocator {
         guard hasWeights else {
             return MeshInstallation(
                 isInstalled: false,
-                detail: "Weights missing at weights/\(weightsSlot)."
+                missing: .weights,
+                detail: "Needs a one-time download of its model files."
             )
         }
-        return MeshInstallation(isInstalled: true, detail: "Ready — native MLX.")
+        return MeshInstallation(
+            isInstalled: true,
+            detail: "Ready to go — runs natively on Apple Silicon."
+        )
     }
 
     /// The hy3d binary to run. Prefers the xcodebuild products (which carry the compiled

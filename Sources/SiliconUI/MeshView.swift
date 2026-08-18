@@ -13,6 +13,13 @@ struct MeshView: View {
     @Environment(AppModel.self) private var model
     @State private var selectedResultID: String?
 
+    /// Two ways in: bring a picture, or describe one and let the local image model draft it.
+    enum SourceMode: String, CaseIterable {
+        case picture = "Use a picture"
+        case describe = "Describe it"
+    }
+    @State private var sourceMode: SourceMode = .picture
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -45,16 +52,31 @@ struct MeshView: View {
     private var composer: some View {
         @Bindable var model = model
         return Card(title: "Source image", systemImage: "cube.transparent") {
-            imageWell
-
-            if !model.generatedImages.isEmpty {
-                Button {
-                    model.meshInputImage = model.generatedImages.first?.image
-                } label: {
-                    Label("Use the latest generated image", systemImage: "photo.on.rectangle")
+            Picker("Source", selection: $sourceMode) {
+                ForEach(SourceMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
-                .buttonStyle(.link)
-                .controlSize(.small)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            switch sourceMode {
+            case .picture:
+                imageWell
+                if !model.generatedImages.isEmpty {
+                    Button {
+                        model.meshInputImage = model.generatedImages.first?.image
+                    } label: {
+                        Label(
+                            "Use the latest generated image",
+                            systemImage: "photo.on.rectangle"
+                        )
+                    }
+                    .buttonStyle(.link)
+                    .controlSize(.small)
+                }
+            case .describe:
+                describePanel
             }
 
             Divider()
@@ -126,19 +148,126 @@ struct MeshView: View {
         }
     }
 
+    /// Describe → draft → approve → generate. The draft goes through the same image pipeline
+    /// as the Images tab; when it lands it fills the source slot above the Generate button,
+    /// so the person sees the picture before committing minutes to the mesh.
+    @ViewBuilder
+    private var describePanel: some View {
+        @Bindable var model = model
+
+        TextField(
+            "What should it look like? e.g. \"a red sneaker, plain background\"",
+            text: $model.imagePrompt,
+            axis: .vertical
+        )
+        .lineLimit(2...4)
+        .textFieldStyle(.plain)
+        .padding(8)
+        .background(.background.secondary, in: .rect(cornerRadius: 8))
+
+        HStack {
+            Picker("Image model", selection: $model.selectedDiffusionModel) {
+                ForEach(DiffusionCatalog.all) { entry in
+                    Text(entry.name).tag(entry.id)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 170)
+            Spacer()
+            Button {
+                model.draftImageForMesh()
+            } label: {
+                Label("Draft the picture", systemImage: "wand.and.stars")
+            }
+            .disabled(
+                model.imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || model.isGeneratingImage
+            )
+        }
+
+        if model.isGeneratingImage, model.routeNextImageToMesh || model.currentImageJob != nil {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(model.imageState.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if let image = model.meshInputImage, let preview = NSImage(contentsOf: image) {
+            VStack(alignment: .leading, spacing: 6) {
+                Image(nsImage: preview)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: 140)
+                    .clipShape(.rect(cornerRadius: 8))
+                Text("Happy with it? Generate below — or change the words and draft again.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
     @ViewBuilder
     private func statusBanner(_ entry: MeshEntry) -> some View {
         let installation = model.meshInstallation(for: entry)
-        HStack(alignment: .firstTextBaseline, spacing: 7) {
-            Image(systemName: installation.isInstalled
-                ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(installation.isInstalled ? .green : .orange)
-                .imageScale(.small)
-            Text(installation.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: installation.isInstalled
+                    ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(installation.isInstalled ? .green : .orange)
+                    .imageScale(.small)
+                Text(installation.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+
+            if let download = model.meshDownloads[entry.id] {
+                if let error = download.error {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Try again") {
+                        model.cancelMeshInstall(entry.id)
+                        model.installMeshWeights(entry)
+                    }
+                    .controlSize(.small)
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView(value: download.progress?.fraction ?? 0)
+                            .progressViewStyle(.linear)
+                        if let progress = download.progress {
+                            Text("\(Int(progress.fraction * 100))%")
+                                .font(.caption2)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        Button {
+                            model.cancelMeshInstall(entry.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .imageScale(.small)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel this download")
+                    }
+                }
+            } else if installation.missing == .weights,
+                      let download = model.meshWeightsDownload(for: entry) {
+                Button {
+                    model.installMeshWeights(entry)
+                } label: {
+                    Label(
+                        "Download (\(download.expectedSize.formatted))",
+                        systemImage: "arrow.down.circle"
+                    )
+                }
+                .controlSize(.small)
+            }
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)

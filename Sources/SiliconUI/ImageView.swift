@@ -489,6 +489,12 @@ struct ImageView: View {
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                 }
+                Button {
+                    model.makeImage3D(result.image)
+                } label: {
+                    Label("Make it 3D", systemImage: "cube")
+                }
+                .help("Send this image to the 3D tab and turn it into a model")
                 Spacer()
             }
             .buttonStyle(.bordered)

@@ -423,6 +423,10 @@ public final class AppModel {
                         generatedImages.insert(result, at: 0)
                         imageProgress = nil
                         imageState = .idle
+                        if routeNextImageToMesh {
+                            routeNextImageToMesh = false
+                            meshInputImage = result.image
+                        }
                     }
                 }
             } catch {
@@ -552,19 +556,138 @@ public final class AppModel {
             guard !configured.isEmpty, URL(string: configured) != nil else {
                 return MeshInstallation(
                     isInstalled: false,
-                    detail: "Set the LATO.2 service URL in Settings → 3D toolkit."
+                    missing: .serviceURL,
+                    detail: entry.setupHint
+                        ?? "Paste its service address in Settings → 3D toolkit."
                 )
             }
             return MeshInstallation(
                 isInstalled: true,
-                detail: "Sends jobs to \(configured); reachability is checked per job."
+                detail: "Connected to \(configured) — jobs run there, the mesh comes back "
+                    + "here."
             )
         case .unsupported:
             return MeshInstallation(
                 isInstalled: false,
-                detail: entry.setupHint ?? "No runner wired up yet."
+                missing: .unsupported,
+                detail: entry.setupHint ?? "Not available yet."
             )
         }
+    }
+
+    // MARK: - 3D weights installation
+
+    @Observable
+    public final class MeshDownloadTask: Identifiable {
+        public let id: String
+        public var entry: MeshEntry
+        public var progress: ModelDownloader.Progress?
+        public var error: String?
+        var task: Task<Void, Never>?
+
+        init(entry: MeshEntry) {
+            self.id = entry.id
+            self.entry = entry
+        }
+    }
+
+    public private(set) var meshDownloads: [String: MeshDownloadTask] = [:]
+
+    /// The one-click fix when a backend's `missing` is `.weights`.
+    public func meshWeightsDownload(for entry: MeshEntry) -> MeshInstaller.Download? {
+        let base = settings.resolvedTrellisBaseDirectory
+        switch entry.backend {
+        case .trellis:
+            return MeshInstaller.Download(
+                repository: "microsoft/TRELLIS.2-4B",
+                destination: .hubCache,
+                expectedSize: entry.weightsSize
+            )
+        case .hunyuan:
+            let slot = Self.hunyuanWeightsSlot(for: entry.id)
+            let repository = entry.id == MeshCatalog.hunyuanTurbo.id
+                ? "zimengxiong/hunyuan3d-mlx-shape-large"
+                : "zimengxiong/hunyuan3d-mlx-shape-small"
+            return MeshInstaller.Download(
+                repository: repository,
+                destination: .localDirectory(
+                    base.appendingPathComponent("hunyuan3d-swift/weights/\(slot)")
+                ),
+                expectedSize: entry.weightsSize
+            )
+        case .latoRemote, .unsupported:
+            return nil
+        }
+    }
+
+    /// The `hf` CLI rides with MFLUX like image installs do, with the Homebrew copy as a
+    /// fallback so 3D downloads still work on a machine without MFLUX.
+    private func meshInstaller() -> MeshInstaller? {
+        var hf: URL?
+        if let mflux = (imageRuntime ?? MFluxRuntime.locate())?.executable {
+            hf = DiffusionInstaller.locate(besideMFlux: mflux)
+        }
+        if hf == nil {
+            let brew = URL(fileURLWithPath: "/opt/homebrew/bin/hf")
+            if FileManager.default.isExecutableFile(atPath: brew.path) { hf = brew }
+        }
+        guard let hf else { return nil }
+        let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
+        return MeshInstaller(executable: hf, token: token)
+    }
+
+    public func installMeshWeights(_ entry: MeshEntry) {
+        guard meshDownloads[entry.id] == nil,
+              let download = meshWeightsDownload(for: entry) else { return }
+        guard let installer = meshInstaller() else {
+            alert = AlertContent(
+                title: "Cannot download 3D models",
+                message: MeshInstaller.InstallError.toolMissing.localizedDescription
+            )
+            return
+        }
+
+        let task = MeshDownloadTask(entry: entry)
+        meshDownloads[entry.id] = task
+
+        task.task = Task { [weak self] in
+            do {
+                try await installer.download(download) { progress in
+                    Task { @MainActor in self?.meshDownloads[entry.id]?.progress = progress }
+                }
+                guard let self else { return }
+                self.meshDownloads[entry.id] = nil
+                self.refreshMeshInstallations()
+            } catch is CancellationError {
+                self?.meshDownloads[entry.id] = nil
+            } catch {
+                self?.meshDownloads[entry.id]?.error = error.localizedDescription
+            }
+        }
+    }
+
+    public func cancelMeshInstall(_ id: String) {
+        meshDownloads[id]?.task?.cancel()
+        meshDownloads[id] = nil
+    }
+
+    // MARK: - Image-to-3D chaining
+
+    /// Set while a "describe it" draft from the 3D tab is rendering: the next finished image
+    /// becomes the 3D source, so the two tools chain without the user ferrying files.
+    public private(set) var routeNextImageToMesh = false
+
+    /// Drafts an image from the composer prompt and routes the result to the 3D tab's
+    /// source slot. Same queue and models as the Images tab — one pipeline, two doors.
+    public func draftImageForMesh() {
+        routeNextImageToMesh = true
+        generateImage()
+    }
+
+    /// Hands an already-generated image to the 3D tab — the "Make it 3D" button.
+    public func makeImage3D(_ image: URL) {
+        meshInputImage = image
+        selectedTab = .threeD
     }
 
     public func meshPlanner() -> MeshPlanner { MeshPlanner(profile: profile) }
@@ -1294,7 +1417,7 @@ public final class AppModel {
     /// nothing on screen to say so. The sidebar reads this instead, so a transfer is visible
     /// wherever it was started from and whichever tab you are on.
     public struct ActiveTransfer: Identifiable, Sendable {
-        public enum Kind: Sendable { case language, image }
+        public enum Kind: Sendable { case language, image, mesh }
 
         public var id: String
         public var name: String
@@ -1320,7 +1443,14 @@ public final class AppModel {
                 progress: $0.progress, error: $0.error, kind: .image
             )
         }
-        return (language + images).sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+        let meshes = meshDownloads.values.map {
+            ActiveTransfer(
+                id: $0.id, name: $0.entry.name, detail: "3D model",
+                progress: $0.progress, error: $0.error, kind: .mesh
+            )
+        }
+        return (language + images + meshes)
+            .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
     }
 
     /// Combined throughput across every transfer, which is what the machine is actually doing.
@@ -1332,6 +1462,7 @@ public final class AppModel {
         switch transfer.kind {
         case .language: cancelInstall(transfer.id)
         case .image: cancelImageInstall(transfer.id)
+        case .mesh: cancelMeshInstall(transfer.id)
         }
     }
 

@@ -153,9 +153,7 @@ public enum MeshCatalog {
         rating: 4,
         defaultSteps: 8,
         supportsSteps: true,
-        supportsQuantization: true,
-        setupHint: "hf download zimengxiong/hunyuan3d-mlx-shape-large "
-            + "--local-dir <trellis2>/hunyuan3d-swift/weights/shape-large"
+        supportsQuantization: true
     )
 
     /// LATO.2 — retopology on a remote CUDA box. The service chains TRELLIS densification
@@ -178,8 +176,8 @@ public enum MeshCatalog {
         isTextured: false,
         rating: 4,
         supportsVertexBudget: true,
-        setupHint: "Set the LATO.2 service URL in Settings → 3D toolkit. The service plan "
-            + "lives at /Volumes/T9/LATO.2/LATO2-SETUP-PLAN.md."
+        setupHint: "Runs on a separate computer with an NVIDIA card. Paste that machine's "
+            + "service address in Settings → 3D toolkit to connect the two."
     )
 
     /// TripoSR — catalogued so the comparison is visible, but no runner is wired yet.
@@ -199,7 +197,8 @@ public enum MeshCatalog {
         outputs: "OBJ (geometry only)",
         isTextured: false,
         rating: 2,
-        setupHint: "No local runner yet — the catalog entry marks the intent."
+        setupHint: "Not available yet — no one has made a version of this one that runs on "
+            + "a Mac. It's listed so you can see what's coming."
     )
 
     /// Stable Fast 3D — same situation as TripoSR.
@@ -218,6 +217,7 @@ public enum MeshCatalog {
         outputs: "Textured GLB",
         isTextured: true,
         rating: 3,
-        setupHint: "No local runner yet — the catalog entry marks the intent."
+        setupHint: "Not available yet — no one has made a version of this one that runs on "
+            + "a Mac. It's listed so you can see what's coming."
     )
 }
