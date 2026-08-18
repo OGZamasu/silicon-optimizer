@@ -29,6 +29,13 @@ struct MeshView: View {
     /// the one it has verified.
     @State private var latoReachable: Bool?
 
+    /// Sharing: a handle on the live viewer for exact-pose snapshots, render progress
+    /// while a GIF spins up, and a short confirmation that fades on its own.
+    @State private var viewerLink = MeshViewerLink()
+    @State private var gifProgress: Double?
+    @State private var shareNote: String?
+    @State private var shareNoteToken = 0
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -727,7 +734,7 @@ struct MeshView: View {
     @ViewBuilder
     private func meshResult(_ result: MeshResult) -> some View {
         if let file = result.primaryFile {
-            MeshViewer(url: file)
+            MeshViewer(url: file, link: viewerLink)
                 .frame(maxWidth: .infinity, minHeight: 340)
                 .background(.background.secondary, in: .rect(cornerRadius: 8))
         }
@@ -754,6 +761,7 @@ struct MeshView: View {
                     Label("Reveal in Finder", systemImage: "folder")
                 }
                 openExternallyMenu(file: file, result: result)
+                shareMenu(result: result)
             }
             // 3D revision is image revision: no local model edits meshes, but reworking
             // the source picture with its composition held and regenerating gets the
@@ -768,6 +776,16 @@ struct MeshView: View {
                     Label("Revise source", systemImage: "wand.and.rays")
                 }
                 .help("Rework the picture this came from, then regenerate the model")
+            }
+            if let shareNote {
+                Label(
+                    shareNote,
+                    systemImage: shareNote.hasPrefix("Couldn't")
+                        ? "exclamationmark.triangle" : "checkmark"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .transition(.opacity)
             }
         }
         .buttonStyle(.bordered)
@@ -833,6 +851,100 @@ struct MeshView: View {
             }
         } label: {
             Label("Open in…", systemImage: "arrow.up.forward.app")
+        }
+    }
+
+    /// Share — a still of the exact pose in the viewer, or a slow full turn as a
+    /// looping GIF, each either copied for pasting straight into a chat or saved
+    /// as a file.
+    private func shareMenu(result: MeshResult) -> some View {
+        Menu {
+            Button("Copy picture") { copyPicture() }
+            Button("Save picture…") { savePicture(result: result) }
+            Divider()
+            Button("Copy spinning GIF") { shareGIF(result: result, copyToClipboard: true) }
+            Button("Save spinning GIF…") { shareGIF(result: result, copyToClipboard: false) }
+        } label: {
+            if let gifProgress {
+                Label("Making GIF… \(Int(gifProgress * 100))%", systemImage: "circle.dotted")
+                    .monospacedDigit()
+            } else {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+        }
+        .disabled(gifProgress != nil)
+    }
+
+    private func copyPicture() {
+        guard let view = viewerLink.view else {
+            flashShareNote("Couldn't snap the viewer")
+            return
+        }
+        MeshShare.copy(image: MeshShare.still(of: view))
+        flashShareNote("Copied")
+    }
+
+    private func savePicture(result: MeshResult) {
+        guard let view = viewerLink.view else {
+            flashShareNote("Couldn't snap the viewer")
+            return
+        }
+        // Snap first: the turntable keeps moving, and the picture should be the pose
+        // they clicked on, not the pose after they picked a folder.
+        let image = MeshShare.still(of: view)
+        guard let data = MeshShare.pngData(image),
+              let url = MeshShare.askWhereToSave(name: result.baseName + ".png", type: .png)
+        else { return }
+        do {
+            try data.write(to: url)
+            flashShareNote("Saved")
+        } catch {
+            flashShareNote("Couldn't save")
+        }
+    }
+
+    private func shareGIF(result: MeshResult, copyToClipboard: Bool) {
+        guard let file = result.primaryFile else { return }
+        // The destination question comes before the wait, not after.
+        var saveURL: URL?
+        if !copyToClipboard {
+            guard let url = MeshShare.askWhereToSave(
+                name: result.baseName + ".gif", type: .gif
+            ) else { return }
+            saveURL = url
+        }
+        let pose = MeshShare.pose(of: viewerLink.view)
+        let size = MeshShare.gifSize(matching: viewerLink.view)
+        gifProgress = 0
+        Task {
+            defer { gifProgress = nil }
+            do {
+                let data = try await MeshShare.turntableGIF(
+                    mesh: file, pose: pose, size: size
+                ) { fraction in
+                    Task { @MainActor in gifProgress = fraction }
+                }
+                if let saveURL {
+                    try data.write(to: saveURL)
+                    flashShareNote("Saved")
+                } else {
+                    try MeshShare.copy(gif: data, name: result.baseName)
+                    flashShareNote("Copied — paste it anywhere")
+                }
+            } catch {
+                flashShareNote("Couldn't make the GIF")
+            }
+        }
+    }
+
+    private func flashShareNote(_ text: String) {
+        shareNoteToken += 1
+        let token = shareNoteToken
+        withAnimation(.easeOut(duration: 0.15)) { shareNote = text }
+        Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            guard shareNoteToken == token else { return }
+            withAnimation(.easeIn(duration: 0.3)) { shareNote = nil }
         }
     }
 

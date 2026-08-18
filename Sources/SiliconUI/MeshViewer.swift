@@ -8,6 +8,7 @@ import SwiftUI
 /// slow turntable so the result reads as 3D the moment it appears.
 struct MeshViewer: NSViewRepresentable {
     var url: URL
+    var link: MeshViewerLink?
 
     func makeNSView(context: Context) -> SCNView {
         let view = SCNView()
@@ -15,12 +16,18 @@ struct MeshViewer: NSViewRepresentable {
         view.autoenablesDefaultLighting = true
         view.antialiasingMode = .multisampling4X
         view.backgroundColor = .clear
+        link?.view = view
+        context.coordinator.loadedURL = url
         load(url, into: view)
         return view
     }
 
     func updateNSView(_ view: SCNView, context: Context) {
+        link?.view = view
+        // Only a genuine file change reloads; any other state change passing through
+        // here would otherwise reset the camera the user has carefully posed.
         guard context.coordinator.loadedURL != url else { return }
+        context.coordinator.loadedURL = url
         load(url, into: view)
     }
 
