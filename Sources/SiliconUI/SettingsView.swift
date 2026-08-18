@@ -53,12 +53,14 @@ struct SettingsView: View {
                     if model.settings.showAdvancedControls {
                         LabeledContent("Node.js path") {
                             TextField(
-                                "Auto-detect",
+                                "Node.js path",
                                 text: Binding(
                                     get: { model.settings.nodeBinaryPath ?? "" },
                                     set: { model.settings.nodeBinaryPath = $0.isEmpty ? nil : $0 }
-                                )
+                                ),
+                                prompt: Text("Auto-detect")
                             )
+                            .labelsHidden()
                             .textFieldStyle(.roundedBorder)
                         }
                         LabeledContent("Harness home") {
@@ -164,18 +166,22 @@ struct SettingsView: View {
             }
 
             Section("Generated images") {
-                LabeledContent("Save to") {
+                LabeledContent {
                     HStack {
                         TextField(
-                            Settings.defaultImageOutputDirectory.path,
-                            text: $model.settings.imageOutputDirectory
+                            "Save to",
+                            text: $model.settings.imageOutputDirectory,
+                            prompt: Text("Default")
                         )
+                        .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         Button("Choose…") { chooseImageOutputDirectory() }
                         if !model.settings.imageOutputDirectory.isEmpty {
                             Button("Reset") { model.settings.imageOutputDirectory = "" }
                         }
                     }
+                } label: {
+                    fieldLabel("Save to", caption: Settings.defaultImageOutputDirectory.path)
                 }
                 HStack {
                     Text("Images are written here as `silicon-<date>-<id>.png`.")
@@ -194,32 +200,48 @@ struct SettingsView: View {
             }
 
             Section("3D toolkit") {
-                LabeledContent("Save models to") {
+                LabeledContent {
                     HStack {
                         TextField(
-                            Settings.defaultMeshOutputDirectory.path,
-                            text: $model.settings.meshOutputDirectory
+                            "Save models to",
+                            text: $model.settings.meshOutputDirectory,
+                            prompt: Text("Default")
                         )
+                        .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         Button("Choose…") { chooseMeshOutputDirectory() }
                         if !model.settings.meshOutputDirectory.isEmpty {
                             Button("Reset") { model.settings.meshOutputDirectory = "" }
                         }
                     }
-                }
-                LabeledContent("trellis2 folder") {
-                    TextField(
-                        "/Volumes/T9/trellis2",
-                        text: $model.settings.trellisBaseDirectory
+                } label: {
+                    fieldLabel(
+                        "Save models to", caption: Settings.defaultMeshOutputDirectory.path
                     )
-                    .textFieldStyle(.roundedBorder)
                 }
-                LabeledContent("LATO.2 service URL") {
+                LabeledContent {
                     TextField(
-                        "http://<windows-machine>:8790",
-                        text: $model.settings.lato2ServiceURL
+                        "trellis2 folder",
+                        text: $model.settings.trellisBaseDirectory,
+                        prompt: Text("Default")
                     )
+                    .labelsHidden()
                     .textFieldStyle(.roundedBorder)
+                } label: {
+                    fieldLabel("trellis2 folder", caption: "/Volumes/T9/trellis2")
+                }
+                LabeledContent {
+                    TextField(
+                        "LATO.2 service URL",
+                        text: $model.settings.lato2ServiceURL,
+                        prompt: Text("Not connected")
+                    )
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                } label: {
+                    fieldLabel(
+                        "LATO.2 service URL", caption: "e.g. http://192.168.1.20:8790"
+                    )
                 }
                 Text(
                     "The trellis2 folder holds the TRELLIS.2 venv and the hy3d binary; each "
@@ -233,12 +255,22 @@ struct SettingsView: View {
             if model.settings.showAdvancedControls {
                 Section("Advanced") {
                     LabeledContent("llama-server path") {
-                        TextField("Auto-detect", text: $model.settings.llamaServerPath)
-                            .textFieldStyle(.roundedBorder)
+                        TextField(
+                            "llama-server path",
+                            text: $model.settings.llamaServerPath,
+                            prompt: Text("Auto-detect")
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
                     }
                     LabeledContent("mlx_lm.server path") {
-                        TextField("Auto-detect", text: $model.settings.mlxServerPath)
-                            .textFieldStyle(.roundedBorder)
+                        TextField(
+                            "mlx_lm.server path",
+                            text: $model.settings.mlxServerPath,
+                            prompt: Text("Auto-detect")
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
                     }
                     if let command = model.currentLaunchCommand {
                         LabeledContent("Launch command") {
@@ -359,6 +391,19 @@ struct SettingsView: View {
     ///
     /// Stored as a plain path rather than a security-scoped bookmark: this app is not sandboxed,
     /// so a path is sufficient and survives being edited by hand in the field beside the button.
+    /// A row label with its default value underneath in a quieter voice. The caption lives
+    /// in the label column's whitespace, where there is room for a whole path on one line —
+    /// instead of word-wrapping into three beside the field.
+    private func fieldLabel(_ title: String, caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
     private func chooseImageOutputDirectory() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
