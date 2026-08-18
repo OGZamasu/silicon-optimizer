@@ -126,18 +126,10 @@ struct RemoteModelSheet: View {
             Label("This model needs a licence agreement", systemImage: "lock")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.orange)
-            Text(
-                "\(result.id) is gated on Hugging Face — the files stay locked until you "
-                    + "agree to its licence on the model page."
-                    + (model.settings.huggingFaceToken.isEmpty
-                        ? " After agreeing, add your access token in Settings → Credentials, "
-                            + "then come back and try again."
-                        : " Your access token is already in Settings — agree there, then "
-                            + "come back and try again.")
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+            Text(gatedMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 Button("Open licence page") {
                     NSWorkspace.shared.open(HuggingFaceClient.pageURL(repository: result.id))
@@ -345,6 +337,19 @@ struct RemoteModelSheet: View {
                 repository: result.id, file: file.path, token: token
             ) ? .gated : .unreadable
         }
+    }
+
+    private var gatedMessage: String {
+        var text = "\(result.id) is gated on Hugging Face — the files stay locked until "
+            + "you agree to its licence on the model page."
+        if model.settings.huggingFaceToken.isEmpty {
+            text += " After agreeing, add your access token in Settings → Credentials, "
+                + "then come back and try again."
+        } else {
+            text += " Your access token is already in Settings — agree there, then come "
+                + "back and try again."
+        }
+        return text
     }
 
     /// Asks the file itself whether it is behind the licence gate: gated repositories
