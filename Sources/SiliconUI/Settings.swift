@@ -149,6 +149,19 @@ public struct Settings: Codable, Sendable, Equatable {
         return "silicon-\(formatter.string(from: date))-\(uniqueSuffix).\(fileExtension)"
     }
 
+    // Model library
+
+    /// Where language-model downloads land. Empty means the app-managed default. The
+    /// library index never moves with this — models downloaded to earlier locations stay
+    /// listed and loadable, exactly like imported files.
+    public var modelLibraryDirectory: String = ""
+
+    public var resolvedModelLibraryDirectory: URL? {
+        let configured = modelLibraryDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !configured.isEmpty else { return nil }
+        return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+    }
+
     // 3D toolkit
 
     /// Where generated meshes are written. Empty means the default below.
@@ -250,6 +263,9 @@ public struct Settings: Codable, Sendable, Equatable {
         huggingFaceToken = try value(.huggingFaceToken, fallback.huggingFaceToken)
         imageOutputDirectory = try value(.imageOutputDirectory, fallback.imageOutputDirectory)
         meshOutputDirectory = try value(.meshOutputDirectory, fallback.meshOutputDirectory)
+        modelLibraryDirectory = try value(
+            .modelLibraryDirectory, fallback.modelLibraryDirectory
+        )
         trellisBaseDirectory = try value(.trellisBaseDirectory, fallback.trellisBaseDirectory)
         lato2ServiceURL = try value(.lato2ServiceURL, fallback.lato2ServiceURL)
         lastExternalModelDirectory = try value(

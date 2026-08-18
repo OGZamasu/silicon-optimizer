@@ -111,4 +111,41 @@ struct ModelLibraryTests {
         let total = await library.totalSizeOnDisk
         #expect(total == .mib(100), "an unmounted model's recorded size should not count")
     }
+
+    /// A changed download destination moves only where the next download lands; the index
+    /// stays home so every previously downloaded model remains listed.
+    @Test func downloadRootMovesDestinationNotTheIndex() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-test-\(UUID().uuidString)")
+        let elsewhere = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-external-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: elsewhere)
+        }
+        let library = ModelLibrary(root: root)
+        try await library.load()
+
+        let before = await library.directory(for: "some-model", quantization: .q4_K_M)
+        #expect(before.path.hasPrefix(root.path))
+
+        await library.setDownloadRoot(elsewhere)
+        let after = await library.directory(for: "some-model", quantization: .q4_K_M)
+        #expect(after.path.hasPrefix(elsewhere.path))
+
+        // A model registered while pointed elsewhere still lands in the home index, so it
+        // survives pointing the destination somewhere else again.
+        let file = elsewhere.appendingPathComponent("some-model/Q4_K_M/model.gguf")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try "stand-in".write(to: file, atomically: true, encoding: .utf8)
+        try await library.add(stubModel(id: "elsewhere-model", primaryFile: file))
+        await library.setDownloadRoot(nil)
+
+        let reloaded = ModelLibrary(root: root)
+        try await reloaded.load()
+        let ids = await reloaded.installed.map(\.id)
+        #expect(ids.contains("elsewhere-model"))
+    }
 }

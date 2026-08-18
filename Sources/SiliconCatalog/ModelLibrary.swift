@@ -49,12 +49,23 @@ public actor ModelLibrary {
     }()
 
     private let root: URL
+    /// Where new downloads land. Distinct from `root` so the index — the app's memory of
+    /// every model it knows — never moves when the user points downloads at a bigger disk.
+    /// Entries hold absolute paths, so models in every previous location stay listed and
+    /// loadable; only the destination of the *next* download changes.
+    private var downloadRoot: URL
     private var index: [String: InstalledModel] = [:]
 
     private var indexURL: URL { root.appendingPathComponent("index.json") }
 
     public init(root: URL = ModelLibrary.defaultRoot) {
         self.root = root
+        self.downloadRoot = root
+    }
+
+    /// Points new downloads somewhere else; nil returns to the index root.
+    public func setDownloadRoot(_ url: URL?) {
+        downloadRoot = url ?? root
     }
 
     public func load() async throws {
@@ -95,7 +106,9 @@ public actor ModelLibrary {
     }
 
     public func directory(for catalogID: String, quantization: Quantization) -> URL {
-        root.appendingPathComponent("\(catalogID)/\(quantization.rawValue)", isDirectory: true)
+        downloadRoot.appendingPathComponent(
+            "\(catalogID)/\(quantization.rawValue)", isDirectory: true
+        )
     }
 
     public func add(_ model: InstalledModel) throws {
@@ -140,9 +153,13 @@ public actor ModelLibrary {
     public func remove(id: String) throws {
         guard let model = index[id] else { return }
         // Remove the model's own directory rather than individual files so companion files
-        // (projectors, partial downloads) go with it.
+        // (projectors, partial downloads) go with it. Managed means "under a root this
+        // library downloads into" — imported files elsewhere only lose the files we know.
         let directory = model.primaryFile.deletingLastPathComponent()
-        if directory.path.hasPrefix(root.path) && directory.path != root.path {
+        let managed = (directory.path.hasPrefix(root.path) && directory.path != root.path)
+            || (directory.path.hasPrefix(downloadRoot.path)
+                && directory.path != downloadRoot.path)
+        if managed {
             try? FileManager.default.removeItem(at: directory)
         } else {
             for file in model.allFiles { try? FileManager.default.removeItem(at: file) }

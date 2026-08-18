@@ -165,6 +165,40 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section("Model library") {
+                LabeledContent {
+                    HStack {
+                        TextField(
+                            "Download models to",
+                            text: $model.settings.modelLibraryDirectory,
+                            prompt: Text("Default")
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        Button("Choose…") { chooseModelLibraryDirectory() }
+                        if !model.settings.modelLibraryDirectory.isEmpty {
+                            Button("Reset") { model.settings.modelLibraryDirectory = "" }
+                        }
+                    }
+                } label: {
+                    fieldLabel(
+                        "Download models to", caption: ModelLibrary.defaultRoot.path
+                    )
+                }
+                HStack {
+                    Text(
+                        "Changing this only affects new downloads — models in earlier "
+                            + "locations stay listed and loadable. Already have models in a "
+                            + "folder?"
+                    )
+                    Spacer()
+                    Button("Add models from a folder…") { adoptModelsFolder() }
+                        .buttonStyle(.link)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             Section("Generated images") {
                 LabeledContent {
                     HStack {
@@ -415,6 +449,35 @@ struct SettingsView: View {
         panel.directoryURL = model.settings.resolvedImageOutputDirectory
         if panel.runModal() == .OK, let url = panel.url {
             model.settings.imageOutputDirectory = url.path
+        }
+    }
+
+    private func chooseModelLibraryDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Where should downloaded models be stored?"
+        panel.directoryURL = model.settings.resolvedModelLibraryDirectory
+            ?? ModelLibrary.defaultRoot
+        if panel.runModal() == .OK, let url = panel.url {
+            model.settings.modelLibraryDirectory = url.path
+            Task { await model.applyModelLibrarySettings() }
+        }
+    }
+
+    private func adoptModelsFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Scan"
+        panel.message = "Choose a folder to scan for model files (.gguf) — they are "
+            + "registered in place, not copied."
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await model.adoptModelsFromFolder(url) }
         }
     }
 

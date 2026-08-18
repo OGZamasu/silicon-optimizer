@@ -1542,7 +1542,54 @@ public final class AppModel {
 
     // MARK: - Library
 
+    /// Applies the configured download destination to the library. Called on every
+    /// refresh — the setter is an idempotent actor hop — so a Settings change takes
+    /// effect for the very next download without a relaunch.
+    public func applyModelLibrarySettings() async {
+        await library.setDownloadRoot(settings.resolvedModelLibraryDirectory)
+    }
+
+    /// Registers every GGUF found in a folder, so a directory of models from another
+    /// machine or an old install becomes loadable in one action instead of one import
+    /// panel per file.
+    public func adoptModelsFromFolder(_ folder: URL) async {
+        let manager = FileManager.default
+        let known = Set(installedModels.map(\.primaryFile.path))
+        var added = 0
+        var skipped = 0
+        var failed = 0
+
+        let enumerator = manager.enumerator(
+            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        )
+        while let item = enumerator?.nextObject() as? URL {
+            guard item.pathExtension.lowercased() == "gguf",
+                  !ModelResolver.isCompanionFile(item.lastPathComponent)
+            else { continue }
+            // Split models are registered by their head shard only.
+            let name = item.lastPathComponent
+            if name.contains("-of-"), !name.contains("00001-of-") { continue }
+            guard !known.contains(item.path) else {
+                skipped += 1
+                continue
+            }
+            do {
+                _ = try await library.importExternal(file: item)
+                added += 1
+            } catch {
+                failed += 1
+            }
+        }
+        await refreshLibrary()
+
+        var summary = added == 1 ? "Added 1 model." : "Added \(added) models."
+        if skipped > 0 { summary += " \(skipped) already in the library." }
+        if failed > 0 { summary += " \(failed) couldn't be read as models." }
+        alert = AlertContent(title: "Folder scanned", message: summary)
+    }
+
     public func refreshLibrary() async {
+        await applyModelLibrarySettings()
         do {
             try await library.load()
             installedModels = await library.installed
