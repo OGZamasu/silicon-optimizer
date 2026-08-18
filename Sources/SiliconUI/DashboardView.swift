@@ -192,6 +192,18 @@ struct DashboardView: View {
                         .foregroundStyle(.blue)
                     }
                 }
+            } else if let activity = model.activeGenerationSummary {
+                // No language model, but the Images or 3D pipeline has a model working —
+                // say so instead of an idle "no model" shrug.
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text(activity)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "cpu")

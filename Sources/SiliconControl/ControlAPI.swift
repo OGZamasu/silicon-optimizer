@@ -228,11 +228,15 @@ public enum ControlAPI {
         public var contextLength: Int?
         public var expertStreaming: Bool
         public var lastGenerationTokensPerSecond: Double?
+        /// A non-language model at work right now — an image render or a 3D generation.
+        /// Those are models too, and "nothing loaded" while one is running would be false.
+        public var activity: String?
 
         public init(
             state: String, loadedModelID: String?, loadedModelName: String?,
             contextLength: Int?, expertStreaming: Bool,
-            lastGenerationTokensPerSecond: Double?
+            lastGenerationTokensPerSecond: Double?,
+            activity: String? = nil
         ) {
             self.state = state
             self.loadedModelID = loadedModelID
@@ -240,6 +244,7 @@ public enum ControlAPI {
             self.contextLength = contextLength
             self.expertStreaming = expertStreaming
             self.lastGenerationTokensPerSecond = lastGenerationTokensPerSecond
+            self.activity = activity
         }
     }
 

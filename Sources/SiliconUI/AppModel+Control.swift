@@ -49,7 +49,8 @@ extension AppModel: ControlHost {
             loadedModelName: loadedModel?.name,
             contextLength: activeConfiguration?.contextLength,
             expertStreaming: activeConfiguration?.expertStreaming != nil,
-            lastGenerationTokensPerSecond: lastGeneration?.generationTokensPerSecond
+            lastGenerationTokensPerSecond: lastGeneration?.generationTokensPerSecond,
+            activity: activeGenerationSummary
         )
     }
 

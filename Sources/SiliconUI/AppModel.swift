@@ -835,6 +835,28 @@ public final class AppModel {
         }
     }
 
+    /// What the machine is generating outside the language model, as one status line —
+    /// e.g. "Generating image — FLUX.2 klein (4/8)". The Images and 3D pipelines run real
+    /// models of their own, so a status surface that says "no model loaded" while a
+    /// diffusion model is denoising is lying; every such surface checks this first.
+    public var activeGenerationSummary: String? {
+        if let job = currentImageJob {
+            var line = "Generating image — \(job.modelName)"
+            if let progress = imageProgress {
+                line += " (\(progress.step)/\(progress.total))"
+            }
+            return line
+        }
+        if let job = currentMeshJob {
+            var line = "Generating 3D — \(job.modelName)"
+            if let progress = meshProgress {
+                line += " (\(Int(progress * 100))%)"
+            }
+            return line
+        }
+        return nil
+    }
+
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {
         guard let runtime = activeMeshRuntime else { return }

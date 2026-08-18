@@ -144,6 +144,10 @@ struct MenuBarView: View {
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
                 }
+                // An image or 3D render runs alongside the loaded language model.
+                if let activity = model.activeGenerationSummary {
+                    activityRow(activity)
+                }
             } else if model.runtimeState.isBusy {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -151,6 +155,10 @@ struct MenuBarView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            } else if let activity = model.activeGenerationSummary {
+                // No language model, but a diffusion or 3D model is working — that is
+                // absolutely a model, and "No model loaded" here would be false.
+                activityRow(activity)
             } else {
                 Text("No model loaded")
                     .font(.callout)
@@ -177,6 +185,17 @@ struct MenuBarView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private func activityRow(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
 
     // MARK: - Actions

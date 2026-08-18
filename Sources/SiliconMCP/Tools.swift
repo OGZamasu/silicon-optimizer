@@ -595,9 +595,16 @@ enum Tools {
 
     static func describe(_ status: ControlAPI.Status) -> String {
         guard let name = status.loadedModelName else {
-            return "No model loaded. State: \(status.state)"
+            var line = "No language model loaded. State: \(status.state)"
+            if let activity = status.activity {
+                line += "\nWorking: \(activity)"
+            }
+            return line
         }
         var lines = ["Loaded: \(name)"]
+        if let activity = status.activity {
+            lines.append("Also working: \(activity)")
+        }
         if let context = status.contextLength {
             lines.append("Context: \(context) tokens")
         }
