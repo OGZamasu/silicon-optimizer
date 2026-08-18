@@ -239,12 +239,19 @@ struct MenuBarView: View {
         _ title: String, systemImage: String, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.callout)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 5)
-                .contentShape(.rect)
+            // Not a Label: SF Symbols vary in width, so a plain Label starts each title at
+            // a different x. A fixed icon column keeps the glyphs centered under each other
+            // and every title starting at the same point.
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .frame(width: 20, alignment: .center)
+                Text(title)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.callout)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .contentShape(.rect)
         }
         .buttonStyle(.plain)
     }
