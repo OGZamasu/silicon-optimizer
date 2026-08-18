@@ -6,15 +6,15 @@
     <description>Updates for Silicon Optimizer</description>
     <language>en</language>
     <item>
-      <title>Version 0.1.0</title>
-      <pubDate>Fri, 07 Aug 2026 22:21:23 +0000</pubDate>
-      <sparkle:version>7</sparkle:version>
-      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <title>Version 0.2.0</title>
+      <pubDate>Tue, 18 Aug 2026 16:46:46 +0000</pubDate>
+      <sparkle:version>47</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[First public build. Memory planning validated to 0.31% on a 30B MoE, expert streaming, an MCP bridge for Claude and ChatGPT, Hugging Face search with remote header reading, and advanced mode.]]></description>
-      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.1.0/Silicon.Optimizer.dmg"
+      <description><![CDATA[The 3D toolkit: turn an image into a 3D model with TRELLIS.2 (textured, local), Hunyuan3D 2 (clean geometry in seconds, native MLX) or a remote LATO.2 service — with an interactive viewer, Fusion 360 handoff, and full Claude/ChatGPT control via MCP. Qwen3.8 27B joins the curated catalog with figures read from the file itself. Generated filenames now use 8-character suffixes so large batches cannot collide.]]></description>
+      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.2.0/Silicon.Optimizer.dmg"
                  type="application/octet-stream"
-                 sparkle:edSignature="QRBs67DFjZ5SOhZzFGwp2A4IdwYOjbUyfQCe6SPBViBhiEsm0BKEz5SGHGBJUbqM/Fl5LIkfMumZ5+nhtNOrBA==" length="3505857" />
+                 sparkle:edSignature="PjV46xEutCWYjOhGYf0FKAXbIGDzIyd1VcDXm3g91LfsqZyiXi4dMk8OXl7esGcyUA/BZe7UNqOFpp41WUQDAA==" length="4237290" />
     </item>
   </channel>
 </rss>

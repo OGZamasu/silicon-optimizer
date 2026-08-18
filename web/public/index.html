@@ -377,6 +377,7 @@ tbody tr.total td.subject { color: var(--wafer); }
 .grid.in .cell:nth-child(4) { transition-delay: 180ms, 180ms, 0ms; }
 .grid.in .cell:nth-child(5) { transition-delay: 240ms, 240ms, 0ms; }
 .grid.in .cell:nth-child(6) { transition-delay: 300ms, 300ms, 0ms; }
+.grid.in .cell:nth-child(7) { transition-delay: 360ms, 360ms, 0ms; }
 .cell:hover { background: #0D1119; }
 /* A soft spotlight that follows the pointer — the one flourish per card. */
 .cell::after {
@@ -395,6 +396,7 @@ tbody tr.total td.subject { color: var(--wafer); }
   transition: background-color 300ms ease, border-color 300ms ease;
 }
 .cell:hover .cell-icon { background: rgba(77,224,192,.12); border-color: rgba(77,224,192,.3); }
+@media (min-width: 720px) { .cell.wide { grid-column: 1 / -1; } }
 
 /* --- Tool list --------------------------------------------------------- */
 
@@ -483,7 +485,7 @@ footer {
       <a href="#features">Features</a>
       <a href="#install">Install</a>
     </nav>
-    <span class="chip spec">v0.1</span>
+    <span class="chip spec">v0.2</span>
     <span class="chip spec">M1 Macs and newer</span>
     <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
   </div>
@@ -494,10 +496,10 @@ footer {
     <p class="eyebrow reveal">A free Mac app</p>
     <h1 class="reveal" style="--d:.06s">Your own AI, on your own Mac. <em>Free. Private. No subscription.</em></h1>
     <p class="lede reveal" style="--d:.14s">
-      Silicon Optimizer runs ChatGPT-style AI right on your Mac — chat, coding help, even
-      image generation. No account, no monthly fee, and nothing you type ever leaves your
-      machine. Before you download anything, it checks what your Mac can actually handle, so
-      you never wait an hour for an AI that won't run.
+      Silicon Optimizer runs ChatGPT-style AI right on your Mac — chat, coding help, image
+      generation, even 3D models. No account, no monthly fee, and nothing you type ever
+      leaves your machine. Before you download anything, it checks what your Mac can
+      actually handle, so you never wait an hour for an AI that won't run.
     </p>
 
     <!-- Signature: the receipts. Predicted in indigo, measured in teal, everywhere. -->
@@ -507,7 +509,7 @@ footer {
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Download for Mac
         </span>
-        <span class="dl-sub">free · 2.5 MB · macOS 14+ · Apple Silicon</span>
+        <span class="dl-sub">free · v0.2.0 · 4 MB · macOS 14+ · Apple Silicon</span>
       </a>
       <a class="secondary" href="https://github.com/OGZamasu/silicon-optimizer">or build it from source</a>
     </div>
@@ -692,6 +694,16 @@ footer {
         <h3>Stays out of your way</h3>
         <p>Lives in the menu bar: what's loaded, how fast it's running, memory at a glance.
            Downloads survive bad Wi-Fi and pick up where they stopped.</p>
+      </div>
+      <div class="cell wide">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        </div>
+        <h3>New in v0.2: turns images into 3D models</h3>
+        <p>Drop in a picture and get a mesh back — a fast clean-geometry pass in about twenty
+           seconds, or a fully textured model in minutes, all running locally. Spin it around
+           in the built-in viewer, then open it straight in Fusion 360, Blender, or anything
+           else on your Mac that takes a 3D file.</p>
       </div>
     </div>
   </div>
