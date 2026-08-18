@@ -77,6 +77,14 @@ body::before {
           mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
 }
 
+/* The energy layer: signal pulses and click ripples, painted on the same
+   fixed plane as the grid and masked identically so they share its fade. */
+#fx {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
+          mask-image: radial-gradient(120% 90% at 50% 0%, black 30%, transparent 100%);
+}
+
 ::selection { background: rgba(77,224,192,.28); color: #EAF7F3; }
 
 .shell {
@@ -295,7 +303,15 @@ section { padding: clamp(56px, 8vw, 96px) 0; border-top: 1px solid var(--rule); 
 
 /* --- Measurement tables ------------------------------------------------ */
 
-.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* Every data block sits on the same card surface — nothing lies naked on the
+   grid, so table rules never blend into the die lines behind them. */
+.table-wrap {
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  background: linear-gradient(180deg, var(--substrate-2), var(--substrate));
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 18px 22px 10px;
+}
 table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13.5px; }
 caption {
   text-align: left; color: var(--wafer-faint); font-size: 11.5px;
@@ -379,10 +395,14 @@ tbody tr.total td.subject { color: var(--wafer); }
 
 /* --- Tool list --------------------------------------------------------- */
 
-.tools { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.tools {
+  display: grid; margin: 0; padding: 6px 22px; list-style: none;
+  background: linear-gradient(180deg, var(--substrate-2), var(--substrate));
+  border: 1px solid var(--rule); border-radius: 12px;
+}
 .tools li {
   display: grid; grid-template-columns: minmax(0, 190px) 1fr; gap: 8px 18px;
-  padding: 6px 0 10px; border-bottom: 1px solid var(--rule); align-items: baseline;
+  padding: 12px 0; border-bottom: 1px solid var(--rule); align-items: baseline;
 }
 .tools li:last-child { border-bottom: none; }
 .tools code { color: var(--measure); font-size: 13px; }
@@ -437,6 +457,7 @@ footer {
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  #fx { display: none; }
   .reveal, .grid .cell { opacity: 1 !important; transform: none !important; transition: none !important; }
   .bar span, .collapse-bar span { animation: none !important; transform: none !important; }
   .cell::after { display: none; }
@@ -445,6 +466,8 @@ footer {
 </style>
 </head>
 <body>
+
+<canvas id="fx" aria-hidden="true"></canvas>
 
 <header class="site-head">
   <div class="shell masthead">
@@ -820,6 +843,122 @@ python3 -m venv ~/.silicon-mlx
       cell.style.setProperty('--my', (e.clientY - r.top) + 'px');
     });
   });
+
+  // The living grid. Signal pulses travel the die traces, and a click sends a
+  // disturbance rippling outward along them — segments lit exactly where the
+  // wavefront crosses a grid line. Both the grid and this canvas are fixed
+  // planes sharing one mask, so alignment holds at any scroll position. The
+  // loop only runs while something is alive; an idle page draws nothing.
+  const fx = document.getElementById('fx');
+  if (fx && !reduce) {
+    const ctx = fx.getContext('2d');
+    const GRID = 64, LINE = -1;
+    const TEAL = [77, 224, 192], INDIGO = [110, 139, 200];
+    let W = 0, H = 0;
+
+    const size = () => {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      W = innerWidth; H = innerHeight;
+      fx.width = Math.round(W * dpr); fx.height = Math.round(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    size();
+    addEventListener('resize', size);
+
+    const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+    const pulses = [], ripples = [];
+    let raf = 0, last = 0;
+
+    const draw = now => {
+      const dt = Math.min(0.05, (now - last) / 1000 || 0.016);
+      last = now;
+      ctx.clearRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+
+      for (let i = pulses.length - 1; i >= 0; i--) {
+        const p = pulses[i];
+        p.pos += p.speed * dt;
+        if (p.pos - p.len > p.span + 60) { pulses.splice(i, 1); continue; }
+        const head = p.pos, tail = p.pos - p.len;
+        const g = p.vertical
+          ? ctx.createLinearGradient(0, tail, 0, head)
+          : ctx.createLinearGradient(tail, 0, head, 0);
+        g.addColorStop(0, rgba(p.color, 0));
+        g.addColorStop(0.72, rgba(p.color, 0.26));
+        g.addColorStop(1, rgba(p.color, 0.55));
+        ctx.strokeStyle = g;
+        ctx.beginPath();
+        if (p.vertical) { ctx.moveTo(p.line, tail); ctx.lineTo(p.line, head); }
+        else { ctx.moveTo(tail, p.line); ctx.lineTo(head, p.line); }
+        ctx.stroke();
+      }
+
+      for (let i = ripples.length - 1; i >= 0; i--) {
+        const r = ripples[i];
+        const p = (now - r.t0) / r.dur;
+        if (p >= 1) { ripples.splice(i, 1); continue; }
+        const rad = 26 + (1 - Math.pow(1 - p, 3)) * r.max;
+        const seg = 12 + 26 * (1 - p);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = rgba(TEAL, (1 - p) * 0.65);
+        ctx.beginPath();
+        const k0 = Math.ceil((r.x - rad - LINE) / GRID), k1 = Math.floor((r.x + rad - LINE) / GRID);
+        for (let k = k0; k <= k1; k++) {
+          const x = k * GRID + LINE;
+          const dy = Math.sqrt(Math.max(0, rad * rad - (x - r.x) * (x - r.x)));
+          ctx.moveTo(x, r.y - dy - seg / 2); ctx.lineTo(x, r.y - dy + seg / 2);
+          ctx.moveTo(x, r.y + dy - seg / 2); ctx.lineTo(x, r.y + dy + seg / 2);
+        }
+        const j0 = Math.ceil((r.y - rad - LINE) / GRID), j1 = Math.floor((r.y + rad - LINE) / GRID);
+        for (let j = j0; j <= j1; j++) {
+          const y = j * GRID + LINE;
+          const dx = Math.sqrt(Math.max(0, rad * rad - (y - r.y) * (y - r.y)));
+          ctx.moveTo(r.x - dx - seg / 2, y); ctx.lineTo(r.x - dx + seg / 2, y);
+          ctx.moveTo(r.x + dx - seg / 2, y); ctx.lineTo(r.x + dx + seg / 2, y);
+        }
+        ctx.stroke();
+        ctx.lineWidth = 1.5;
+      }
+
+      ctx.globalCompositeOperation = 'source-over';
+      raf = (pulses.length || ripples.length) ? requestAnimationFrame(draw) : 0;
+      if (!raf) ctx.clearRect(0, 0, W, H);
+    };
+
+    const wake = () => { if (!raf) { last = performance.now(); raf = requestAnimationFrame(draw); } };
+
+    const spawn = () => {
+      if (!document.hidden && pulses.length < 4) {
+        const vertical = Math.random() < 0.5;
+        const across = vertical ? W : H;
+        const kMax = Math.floor(across / GRID) - 1;
+        if (kMax >= 1) {
+          pulses.push({
+            vertical,
+            line: (1 + Math.floor(Math.random() * kMax)) * GRID + LINE,
+            span: vertical ? H : W,
+            pos: -160,
+            speed: 240 + Math.random() * 220,
+            len: 80 + Math.random() * 70,
+            color: Math.random() < 0.6 ? TEAL : INDIGO,
+          });
+          wake();
+        }
+      }
+      setTimeout(spawn, 1500 + Math.random() * 2200);
+    };
+
+    addEventListener('pointerdown', e => {
+      if (e.button > 0) return;
+      ripples.push({ x: e.clientX, y: e.clientY, t0: performance.now(), dur: 800, max: 230 });
+      if (ripples.length > 4) ripples.shift();
+      wake();
+    });
+
+    setTimeout(spawn, 900);
+  }
 })();
 </script>
 
