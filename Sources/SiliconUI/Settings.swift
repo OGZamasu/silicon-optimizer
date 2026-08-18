@@ -1,7 +1,38 @@
 import Foundation
 import ServiceManagement
 import SiliconCore
+import SiliconPlanner
 import SiliconRuntime
+
+/// A named, reusable set of load settings — context, cache precision, batches, expert slots
+/// and extra flags — so a combination that took tuning can be applied again with one click.
+public struct ConfigurationPreset: Codable, Sendable, Equatable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var configuration: LoadConfiguration
+    public var extraArguments: String
+
+    public init(
+        id: UUID = UUID(), name: String,
+        configuration: LoadConfiguration, extraArguments: String
+    ) {
+        self.id = id
+        self.name = name
+        self.configuration = configuration
+        self.extraArguments = extraArguments
+    }
+
+    /// The stored knobs, laid over the current machine's own facts: the thread count and GPU
+    /// fraction stay whatever the planner chose here, and expert streaming only survives onto
+    /// a model that has experts to stream.
+    public func applied(to base: LoadConfiguration, isMoE: Bool) -> LoadConfiguration {
+        var result = configuration
+        result.threads = base.threads
+        result.gpuLayerFraction = base.gpuLayerFraction
+        if !isMoE { result.expertStreaming = nil }
+        return result
+    }
+}
 
 /// Which implementation serves the Chat tab.
 public enum ChatEngine: String, Codable, Sendable, CaseIterable {
@@ -58,6 +89,9 @@ public struct Settings: Codable, Sendable, Equatable {
     public var harnessInferencePort: Int?
     /// Manual Node.js path for setups the automatic search cannot see.
     public var nodeBinaryPath: String?
+
+    /// Saved load-settings presets, applied from the advanced sheet.
+    public var configurationPresets: [ConfigurationPreset] = []
 
     public var chatEngine: ChatEngine {
         get { chatEngineRaw.flatMap(ChatEngine.init(rawValue:)) ?? .harness }
@@ -175,6 +209,7 @@ public struct Settings: Codable, Sendable, Equatable {
             Int.self, forKey: .harnessInferencePort
         )
         nodeBinaryPath = try container.decodeIfPresent(String.self, forKey: .nodeBinaryPath)
+        configurationPresets = try value(.configurationPresets, fallback.configurationPresets)
     }
 
     // MARK: - Persistence

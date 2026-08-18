@@ -309,6 +309,16 @@ struct ModelDetailSheet: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if installed, plan.verdict == .willSwap {
+                Label(
+                    "Over the safe memory budget at these settings. Loading will work, but "
+                    + "expect heavy swapping and a slow machine.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
             if !installed {
                 saveLocationRow
             }
@@ -330,7 +340,7 @@ struct ModelDetailSheet: View {
                         Label("Load model", systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!plan.verdict.isUsable)
+                    .disabled(!plan.verdict.isLoadable)
                 } else {
                     Button {
                         model.install(entry, quantization: quantization, saveTo: externalDestination)

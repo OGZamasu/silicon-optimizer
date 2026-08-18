@@ -46,6 +46,10 @@ public struct MemoryPlan: Sendable, Equatable {
         }
 
         public var isUsable: Bool { self == .comfortable || self == .tight }
+
+        /// Whether the runtime can load it at all. `willSwap` is loadable — slow is a choice
+        /// the user is allowed to make with a warning; `impossible` is not a choice.
+        public var isLoadable: Bool { self != .impossible }
     }
 
     public struct Remediation: Sendable, Equatable, Identifiable {

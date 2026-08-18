@@ -19,6 +19,8 @@ struct AdvancedView: View {
     @State private var configuration: LoadConfiguration
     @State private var extraArguments: String
     @State private var didCopy = false
+    @State private var isNamingPreset = false
+    @State private var presetName = ""
 
     init(installed: InstalledModel, configuration: LoadConfiguration, extraArguments: String) {
         self.installed = installed
@@ -45,6 +47,23 @@ struct AdvancedView: View {
             footer
         }
         .frame(width: 660, height: 720)
+        .alert("Save preset", isPresented: $isNamingPreset) {
+            TextField("Name", text: $presetName)
+            Button("Save") { savePreset() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Saves the current settings — context, cache, batches, expert slots and "
+                 + "extra flags — for one-click reuse on any model.")
+        }
+    }
+
+    private func savePreset() {
+        let trimmed = presetName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        model.settings.configurationPresets.append(ConfigurationPreset(
+            name: trimmed, configuration: configuration, extraArguments: extraArguments
+        ))
+        model.settings.save()
     }
 
     // MARK: - Header
@@ -58,6 +77,37 @@ struct AdvancedView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Menu {
+                ForEach(model.settings.configurationPresets) { preset in
+                    Button(preset.name) {
+                        configuration = preset.applied(
+                            to: configuration, isMoE: installed.shape?.isMoE == true
+                        )
+                        extraArguments = preset.extraArguments
+                    }
+                }
+                if !model.settings.configurationPresets.isEmpty { Divider() }
+                Button("Save Current as Preset…") {
+                    presetName = ""
+                    isNamingPreset = true
+                }
+                if !model.settings.configurationPresets.isEmpty {
+                    Menu("Delete Preset") {
+                        ForEach(model.settings.configurationPresets) { preset in
+                            Button(preset.name, role: .destructive) {
+                                model.settings.configurationPresets.removeAll {
+                                    $0.id == preset.id
+                                }
+                                model.settings.save()
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("Presets", systemImage: "square.stack")
+            }
+            .controlSize(.small)
+            .fixedSize()
             Button("Reset to recommended") {
                 configuration = model.defaultConfiguration(for: installed)
                 extraArguments = ""
@@ -290,6 +340,16 @@ struct AdvancedView: View {
         let plan = currentPlan
         return VStack(spacing: 12) {
             MemoryPlanBreakdown(plan: plan)
+            if plan.verdict == .willSwap {
+                Label(
+                    "Over the safe memory budget. This will load and run, but expect heavy "
+                    + "swapping and a slow machine while it does.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -302,7 +362,10 @@ struct AdvancedView: View {
                     Label("Load with these settings", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!plan.verdict.isUsable || !problems.isEmpty)
+                // Swapping is warned about above but allowed — the estimate can be wrong,
+                // and slow-but-running is the user's call. Only a genuinely impossible plan
+                // or an invalid flag combination disables the button.
+                .disabled(!plan.verdict.isLoadable || !problems.isEmpty)
             }
         }
         .padding(16)
