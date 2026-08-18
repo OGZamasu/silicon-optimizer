@@ -96,15 +96,20 @@ cp -R "build/Silicon Optimizer.app" /Applications/
 After that the app keeps itself updated. Updates are signed and checked, so a tampered one
 gets refused.
 
-You also need an engine — the thing that actually runs the model's math. The app is the
-planner and dashboard; either of these does the heavy lifting:
+The engines ship inside the app: llama.cpp (the build that can stream experts from disk)
+runs the language models, and a bundled Node.js runs the harness chat — so a fresh Mac
+works with no extra installs. What each bundled binary is and where it came from is in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+Two optional extras live outside the bundle:
 
 ```bash
-brew install llama.cpp        # recommended — it's the one that can stream experts from disk
-pip install mlx-lm            # Apple's MLX, a fine alternative
+pip install mlx-lm            # Apple's MLX, an alternative language-model engine
+pip install mflux             # image generation (use a venv on modern macOS)
 ```
 
-The app finds them on its own. Settings shows what it found.
+If you install your own engines the app finds those too, and prefers whichever is newer or
+more capable. Settings shows what it found.
 
 ---
 

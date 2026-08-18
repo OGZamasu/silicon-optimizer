@@ -509,7 +509,7 @@ footer {
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Download for Mac
         </span>
-        <span class="dl-sub">free · v0.2.0 · 4 MB · macOS 14+ · Apple Silicon</span>
+        <span class="dl-sub">free · v0.2.1 · 54 MB · everything included · macOS 14+</span>
       </a>
       <a class="secondary" href="https://github.com/OGZamasu/silicon-optimizer">or build it from source</a>
     </div>
@@ -744,7 +744,7 @@ footer {
       <ul class="reveal">
         <li><div><strong>Speed predictions start from one Mac.</strong> They're tuned on an M3 Max; other chips use published specs until you run the built-in one-minute speed test, which tunes them to yours.</div></li>
         <li><div><strong>macOS will complain once.</strong> The app isn't notarized by Apple yet, so the first launch needs one command to approve it (shown below). Building from source skips this entirely.</div></li>
-        <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet. The app checks your build and hides the option if it can't do it.</div></li>
+        <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet — the build that ships inside the app supports it. If you point the app at your own engine instead, it checks that build and hides the option when it can't do it.</div></li>
         <li><div><strong>MLX support is early.</strong> Apple's MLX engine works, but you have to point the app at a model folder yourself for now.</div></li>
         <li><div><strong>Multi-part downloads are untested.</strong> Models split across several files are planned and checked correctly, but the actual multi-file download hasn't been exercised yet.</div></li>
       </ul>
@@ -779,10 +779,11 @@ Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/</pre>
       </div>
       <div class="reveal">
-        <p class="step-label">4 · Install an engine — the thing that does the AI math</p>
-<pre>brew install llama.cpp                              <span class="c"># recommended</span>
+        <p class="step-label">4 · Optional: image generation</p>
+<pre><span class="c"># Chat and language models work out of the box — the engines ship</span>
+<span class="c"># inside the app. Making images needs one extra install:</span>
 python3 -m venv ~/.silicon-mlx
-~/.silicon-mlx/bin/pip install mlx-lm               <span class="c"># optional — Apple's MLX</span></pre>
+~/.silicon-mlx/bin/pip install mflux</pre>
       </div>
       <div class="reveal">
         <p class="step-label">5 · Optional: connect Claude or ChatGPT</p>
@@ -791,8 +792,10 @@ python3 -m venv ~/.silicon-mlx
     </div>
     <div class="notes reveal" style="margin-top:26px">
       <p>
-        The app finds engines on its own, even inside a Python virtual environment. Settings
-        shows what it found and what each one can do.
+        Everything the chat needs ships inside the app — the llama.cpp engine and the Node.js
+        runtime are bundled, checksummed, and listed in the third-party licences file. If you
+        install your own copies the app finds those too, even inside a Python virtual
+        environment; Settings shows what it found and what each one can do.
       </p>
     </div>
   </div>

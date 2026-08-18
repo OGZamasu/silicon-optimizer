@@ -6,15 +6,15 @@
     <description>Updates for Silicon Optimizer</description>
     <language>en</language>
     <item>
-      <title>Version 0.2.0</title>
-      <pubDate>Tue, 18 Aug 2026 16:46:46 +0000</pubDate>
-      <sparkle:version>47</sparkle:version>
-      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <title>Version 0.2.1</title>
+      <pubDate>Tue, 18 Aug 2026 17:11:21 +0000</pubDate>
+      <sparkle:version>49</sparkle:version>
+      <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[The 3D toolkit: turn an image into a 3D model with TRELLIS.2 (textured, local), Hunyuan3D 2 (clean geometry in seconds, native MLX) or a remote LATO.2 service — with an interactive viewer, Fusion 360 handoff, and full Claude/ChatGPT control via MCP. Qwen3.8 27B joins the curated catalog with figures read from the file itself. Generated filenames now use 8-character suffixes so large batches cannot collide.]]></description>
-      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.2.0/Silicon.Optimizer.dmg"
+      <description><![CDATA[Everything the app needs now ships in the box: the llama.cpp engine (with expert streaming) and the Node.js runtime for the harness chat are bundled, checksummed, and documented in THIRD_PARTY_LICENSES.md — a fresh Mac works with zero terminal commands. Plus: missing 3D model weights download with one click, every generated image gets a Make-it-3D button, the 3D tab can draft its source image from a text description, and all status messages are written in plain language.]]></description>
+      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.2.1/Silicon.Optimizer.dmg"
                  type="application/octet-stream"
-                 sparkle:edSignature="PjV46xEutCWYjOhGYf0FKAXbIGDzIyd1VcDXm3g91LfsqZyiXi4dMk8OXl7esGcyUA/BZe7UNqOFpp41WUQDAA==" length="4237290" />
+                 sparkle:edSignature="M2sw5m64RcHtiHJ6cbvI3WDg/UbpZBD+0X5NkKVp6tcpWHp/hjhkTaIwJwQTTuYDDqiPgNL7aohaAbkUJzKBDw==" length="56691215" />
     </item>
   </channel>
 </rss>

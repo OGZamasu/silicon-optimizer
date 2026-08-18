@@ -90,6 +90,26 @@ if [[ -x Vendor/llama-server ]]; then
     fi
 fi
 
+# Node.js powers the default Chat tab (DeepSeek Harness). The official darwin-arm64 binary is
+# self-contained — no rpath surgery needed — so bundling it is a copy, a sign, and a proof.
+if [[ -x Vendor/node ]]; then
+    echo "==> Embedding Node.js"
+    RUNTIME_DIR="$BUNDLE/Contents/Resources/bin"
+    mkdir -p "$RUNTIME_DIR"
+    cp Vendor/node "$RUNTIME_DIR/"
+    codesign --force --sign - "$RUNTIME_DIR/node"
+    if ! "$RUNTIME_DIR/node" --version >/dev/null 2>&1; then
+        echo "ERROR: embedded node cannot launch" >&2
+        exit 1
+    fi
+fi
+
+# The licences travel with the binaries they cover.
+if [[ -f THIRD_PARTY_LICENSES.md ]]; then
+    cp THIRD_PARTY_LICENSES.md "$BUNDLE/Contents/Resources/"
+    [[ -f Vendor/NODE_LICENSE ]] && cp Vendor/NODE_LICENSE "$BUNDLE/Contents/Resources/"
+fi
+
 # Sparkle ships as a framework with its own XPC services and updater app inside. SwiftPM
 # leaves it in the build directory, where a copied bundle cannot find it — the binary links
 # it as @rpath/Sparkle.framework, so it has to live in Contents/Frameworks.

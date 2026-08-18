@@ -1,5 +1,5 @@
 cask "silicon-optimizer" do
-  version "0.1.0"
+  version "0.2.1"
   sha256 :no_check
 
   url "https://github.com/OGZamasu/silicon-optimizer/releases/download/v#{version}/Silicon.Optimizer.dmg"
@@ -11,10 +11,6 @@ cask "silicon-optimizer" do
   auto_updates true
   depends_on macos: ">= :sonoma"
   depends_on arch: :arm64
-
-  # llama.cpp is what actually runs the models. Not a hard dependency: the app also works with
-  # a hand-built runtime, and MLX is an alternative.
-  suggests formula: "llama.cpp"
 
   app "Silicon Optimizer.app"
 
@@ -30,8 +26,9 @@ cask "silicon-optimizer" do
 
       xattr -d com.apple.quarantine "/Applications/Silicon Optimizer.app"
 
-    It needs a runtime to actually run models:
+    Language models and the harness chat work out of the box — llama.cpp and Node.js ship
+    inside the app. Image generation is the one optional extra:
 
-      brew install llama.cpp
+      python3 -m venv ~/.silicon-mlx && ~/.silicon-mlx/bin/pip install mflux
   EOS
 end

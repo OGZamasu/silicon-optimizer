@@ -33,10 +33,15 @@ echo "==> Stamping version $VERSION (build $BUILD_NUMBER)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" Resources/Info.plist
 
 echo "==> Building"
-# Deliberately without Vendor/: a public release should not ship a llama.cpp built from a
-# third-party fork. Users install it with Homebrew.
-if [[ -d Vendor ]]; then mv Vendor .vendor-hold; fi
-trap '[[ -d .vendor-hold ]] && mv .vendor-hold Vendor' EXIT
+# With Vendor/ included: the release ships every runtime the default paths need —
+# llama-server for language models and Node.js for the harness chat — so a fresh Mac works
+# out of the box, no Homebrew, no terminal. The provenance of each binary is stated in
+# THIRD_PARTY_LICENSES.md, which travels inside the bundle. (This reverses an earlier
+# policy of stripping Vendor from public builds; issue #11 made the cost of that concrete.)
+if [[ ! -x Vendor/llama-server || ! -x Vendor/node ]]; then
+    echo "ERROR: Vendor/ is missing llama-server or node — a release must ship both." >&2
+    exit 1
+fi
 ./Scripts/build-app.sh --release --dmg
 
 echo "==> Signing the update"

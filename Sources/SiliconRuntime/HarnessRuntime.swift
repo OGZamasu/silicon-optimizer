@@ -93,6 +93,12 @@ public actor HarnessRuntime {
         }
 
         var candidates: [String] = []
+        // The copy shipped inside the app bundle guarantees the default chat path works on
+        // a Mac that has never seen a terminal. It competes on version like every other
+        // candidate, so someone's newer system Node still wins the pick below.
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/node").path {
+            candidates.append(bundled)
+        }
         candidates += [
             "/opt/homebrew/bin/node",
             "/usr/local/bin/node",
