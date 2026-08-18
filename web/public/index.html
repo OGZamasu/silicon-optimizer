@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Silicon Optimizer — local models on Apple Silicon, measured</title>
-<meta name="description" content="A native macOS menu bar app that predicts what a local model will cost in memory before you download it, then proves the prediction. Expert streaming runs a 30B model in 5.3 GB.">
+<title>Silicon Optimizer — run AI on your own Mac</title>
+<meta name="description" content="A free Mac app that runs AI models on your own computer. It works out what your Mac can handle before you download anything, then proves its predictions with real measurements.">
 <link rel="icon" href="/favicon.png" type="image/png">
 <meta property="og:title" content="Silicon Optimizer">
 <meta property="og:description" content="Predicts what a local model costs in unified memory, then proves it. 0.31% error on a 30B mixture-of-experts, and a 30B running in 5.3 GB.">
@@ -342,9 +342,10 @@ footer {
     <p class="eyebrow">Local model runner · memory planner</p>
     <h1>Stop guessing whether a model will fit. <em>Know before you download it.</em></h1>
     <p class="lede">
-      Silicon Optimizer works out what a model will cost in unified memory from its actual
-      architecture — weights, expert pool, KV cache, compute buffers — then tells you whether
-      your Mac can run it and how fast. Here is that prediction checked against reality.
+      Silicon Optimizer runs AI models directly on your Mac — free, private, no cloud. Before
+      you download a model, it works out from the model's actual design how much memory it
+      needs, whether your Mac can run it, and how fast it will be. Here is one of those
+      predictions checked against reality.
     </p>
 
     <!-- Signature: the reconciliation. Predicted in indigo, measured in teal, everywhere. -->
@@ -394,9 +395,10 @@ footer {
       <p class="eyebrow">Measurement</p>
       <h2>Every number the app shows you is derived, then checked.</h2>
       <p class="lede">
-        Most tools estimate model memory as file size plus a bit. That is wrong in ways that
-        matter at 30B. These figures come from llama.cpp's own buffer accounting and from
-        <code>footprint(1)</code>, against predictions made before the model was loaded.
+        Most tools guess a model's memory cost as "file size plus a bit" — which falls apart
+        exactly when models get big enough for the answer to matter. This app calculates each
+        piece separately. The figures below are its predictions, made before the model was
+        loaded, against what the engine actually used.
       </p>
     </div>
 
@@ -433,11 +435,10 @@ footer {
 
     <div class="notes" style="margin-top:28px">
       <p>
-        The KV cache figure is exact because it is arithmetic, not estimation:
-        <code>2 × layers × kv_heads × head_dim × context × bytes</code>. Head dimension is read
-        from the model file rather than derived — Qwen3 keeps a 128-wide head on a 2048-wide
-        residual stream, and deriving it as <code>d_model / n_heads</code> puts that whole family
-        out by a factor of two.
+        The conversation-memory figure (the "KV cache") is exact because it is arithmetic, not
+        estimation: <code>2 × layers × kv_heads × head_dim × context × bytes</code>. One detail
+        matters: the head width is read from the model file instead of computed from a rule of
+        thumb, because some model families break the rule and would come out wrong by double.
       </p>
       <p>
         The 7B row is the outlier, and it is why the app ships a benchmark. Running it measures
@@ -454,9 +455,10 @@ footer {
       <p class="eyebrow">Mixture-of-experts streaming</p>
       <h2>A 30B model in 5.3 GB.</h2>
       <p class="lede">
-        With llama.cpp's on-demand expert paging, only a pool of experts stays resident and the
-        rest are read from the GGUF as the router asks for them. Output is numerically identical —
-        only residency changes.
+        Some big models are built as a crowd of specialists ("experts"), and each word only uses
+        a few of them. llama.cpp can keep just a working set in memory and read the rest from
+        disk on demand — the answers come out identical, the model just doesn't all have to be
+        loaded at once.
       </p>
     </div>
 
@@ -519,6 +521,12 @@ footer {
         <p>Current model, memory, GPU load and tokens per second at a glance. Downloads resume
            after interruption and are verified by checksum.</p>
       </div>
+      <div class="cell">
+        <h3>Chats with real tools</h3>
+        <p>The Chat tab runs <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek
+           Harness</a> on your local model: it can search the web, read and edit files in a
+           project folder, and run commands with your approval — not just talk.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -575,7 +583,7 @@ footer {
     </div>
     <div class="steps">
       <div>
-        <p class="step-label">1 · Or install with Homebrew</p>
+        <p class="step-label">1 · Install with Homebrew</p>
 <pre>brew tap OGZamasu/tap
 brew install --cask silicon-optimizer</pre>
       </div>

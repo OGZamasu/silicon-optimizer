@@ -2,10 +2,14 @@
 
 [optimize.zamasu.dev](https://optimize.zamasu.dev)
 
-A native macOS menu bar app that makes running local LLMs on Apple Silicon effortless — and
-exposes the whole thing to Claude and ChatGPT over MCP.
+A free Mac app that runs AI on your own computer. Chat models, coding models, image
+generators — all running directly on your Mac, with nothing sent to the cloud. No
+subscription, no API key, and your conversations never leave your machine.
 
-No Terminal. No flags. No guessing whether a model will fit.
+The hard part of local AI was never pressing "run". It's knowing what your Mac can actually
+handle. Models come in hundreds of sizes, and picking wrong means either a 20 GB download
+that chokes your machine, or playing it so safe you run something far weaker than your Mac
+could manage. This app does that math for you, before you download anything:
 
 ```
 Apple M3 Max · 38.7 GB unified memory · 300 GB/s
@@ -13,54 +17,67 @@ Apple M3 Max · 38.7 GB unified memory · 300 GB/s
   20.3 GB of a 27.2 GB budget · ≈89 tok/s
 ```
 
+That's the app reading one Mac's hardware, picking the strongest coding model it can hold,
+and predicting the speed. The predictions are measured, not vibes — usually within a few
+percent of what you actually get (the receipts are [further down](#the-math-for-the-curious)).
+
 ---
 
 ## What it does
 
-**Reads your actual hardware.** Chip generation and variant, performance/efficiency core split,
-GPU core count, Neural Engine, memory bandwidth, disk headroom — all probed from `sysctl` and the
-IORegistry, no elevated privileges.
+### Tells you what fits — before you download
 
-**Predicts memory before you download anything.** Weights, expert pool, KV cache and compute
-buffers are each estimated from the model's real architecture, not a rule of thumb. If it will not
-fit, you get a ranked list of things to change with the exact saving of each.
+The app reads your Mac's real specs (chip, memory, GPU cores, disk speed) and calculates
+exactly how much memory a model needs. If something won't fit, it lists what to change and
+how much each change saves, instead of letting you find out the hard way.
 
-**Picks the model for you.** One button. The highest-quality model your machine can actually run
-at a context length that is useful, with an estimated tokens/sec you can trust.
+### Picks a model for you
 
-**Measures itself.** A one-click benchmark reports generation speed, prompt throughput,
-first-token latency and long-context falloff as a scorecard, then feeds the result back as a
-correction for that model, so later estimates are grounded in measurement rather than in a
-published bandwidth figure. Corrections are per model — architectures differ enough that a single
-global factor makes other predictions worse.
+One button. It ranks everything it knows against your machine and picks the best model you
+can actually run at a useful speed. You can always override it and choose your own.
 
-**Streams MoE experts from disk.** Full support for llama.cpp's on-demand expert paging, including
-the slot-pool sizing and the micro-batch constraint it imposes. This is what lets a 117B model run
-on a 36 GB Mac.
+### Chats like a real assistant, not just a text box
 
-**Generates images, and plans those too.** FLUX.1 and FLUX.2 run locally through MFLUX. A
-diffusion model's cost is *phased* rather than one number — load, encode, denoise, decode, each
-releasing the last — so the app shows a bar per phase and names the one that decides whether it
-fits. That phase is almost always the decode, which costs roughly 9.8 GB per megapixel and is the
-reason a render can fail at the very last step after minutes of denoising. Resolution, not
-precision, is the lever that matters: asking for 4-bit barely moves the peak.
+The Chat tab runs [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), an
+open-source agent framework, on top of your local model. A harness is the wrapper that turns
+a bare model into something useful: your chats can fetch web pages, search, read and edit
+files in a project folder, and run commands (it asks first). It needs Node.js
+(`brew install node`) — the app handles the rest and starts it on demand. Web search needs a
+free API key from a search provider, added inside the chat's own settings; fetching pages
+works with no key at all. If you just want plain chat, Settings → Chat switches to the
+built-in one.
 
-**Talks to Claude and ChatGPT.** A bundled MCP server exposes the hardware profile, the planner,
-the catalog and the loaded model as tools. See [MCP setup](#use-from-claude-or-chatgpt).
+### Runs models that look too big for your Mac
 
-**Chats through an agent harness.** The Chat tab runs [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-on top of the locally served model, so a chat can fetch web pages, search, read and edit files in
-a workspace, and run commands with your approval — instead of only talking. The harness runs
-locally on Node.js (`brew install node`); the app starts it on demand, points it at its own
-llama-server, and embeds its UI. Web search needs a provider key (DeepSeek, Exa, or Perplexity),
-added inside the harness's settings; web fetch works without one. Prefer the plain streaming
-chat? Settings → Chat → Built-in switches back.
+Some large models ("mixture of experts") only use a small slice of themselves for each word
+they generate. The app supports llama.cpp's trick of keeping just that slice in memory and
+loading the rest from disk as needed — which is how a 117 GB-class model runs on a 36 GB Mac.
+The answers stay exactly the same; only where the weights live changes.
+
+### Makes images
+
+FLUX and friends run locally through MFLUX. Image models eat memory in phases (load, encode,
+denoise, decode), so the app shows a bar per phase and tells you which one decides whether
+your render fits. Usually it's the last one — which is why a render can die at 95% after
+minutes of work. The app warns you before you spend those minutes.
+
+### Measures itself and gets smarter
+
+A one-click benchmark measures your real speed — generation, prompt reading, time to first
+word — and feeds the result back in, so the next prediction for that model is based on your
+machine, not a spec sheet.
+
+### Lets Claude and ChatGPT use your local model
+
+The app ships a small [MCP](https://modelcontextprotocol.io) server. Connect it and a cloud
+assistant can check your hardware, pick and download a model, load it, and hand private work
+to the model running on your desk. [Setup below](#use-from-claude-or-chatgpt).
 
 ---
 
-## Install
+## Get started
 
-Requires macOS 14 or later on Apple Silicon.
+You need a Mac with Apple Silicon (M1 or newer) and macOS 14+.
 
 ```bash
 brew tap OGZamasu/tap
@@ -76,36 +93,31 @@ Scripts/build-app.sh --release
 cp -R "build/Silicon Optimizer.app" /Applications/
 ```
 
-The app updates itself after that. Builds are signed with the project's own key and an update
-that does not verify is refused, which is what makes automatic updates safe without Apple
-notarization.
+After that the app keeps itself updated. Updates are signed and checked, so a tampered one
+gets refused.
 
-You also need a runtime. Either is fine; llama.cpp is recommended because it is the only one that
-can page experts from disk:
+You also need an engine — the thing that actually runs the model's math. The app is the
+planner and dashboard; either of these does the heavy lifting:
 
 ```bash
-brew install llama.cpp        # llama.cpp
-pip install mlx-lm            # MLX
+brew install llama.cpp        # recommended — it's the one that can stream experts from disk
+pip install mlx-lm            # Apple's MLX, a fine alternative
 ```
 
-The app finds them automatically. Settings shows what it found and whether the build supports
-expert streaming.
+The app finds them on its own. Settings shows what it found.
 
 ---
 
 ## Use from Claude or ChatGPT
 
-The app publishes a loopback control API when it launches. `silicon-mcp` bridges that to MCP, so
-an assistant drives **the model you already have loaded** instead of starting a second copy and
-doubling the memory bill.
-
-Build and install the bridge:
+The bundled `silicon-mcp` bridge lets a cloud assistant drive the model you already have
+loaded, instead of starting a second copy and doubling the memory cost.
 
 ```bash
 Scripts/install-mcp.sh
 ```
 
-That prints the exact config block for your client. Or wire it up manually:
+That prints the exact config for your client. Or set it up by hand:
 
 **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
 
@@ -128,7 +140,7 @@ claude mcp add silicon-optimizer /usr/local/bin/silicon-mcp
 **ChatGPT** — Settings → Connectors → Advanced → Developer mode, then add a local MCP server
 pointing at `/usr/local/bin/silicon-mcp`.
 
-### Tools it exposes
+### What the assistant can do with it
 
 | Tool | What it answers |
 |---|---|
@@ -140,9 +152,9 @@ pointing at `/usr/local/bin/silicon-mcp`.
 | `install_model` | Download it |
 | `load_model` / `unload_model` | Load it into memory, or free it |
 | `chat` | Ask the local model — text or images, nothing leaves the machine |
-| `list_image_models` | Which image models are available, and what each would peak at |
+| `list_image_models` | Which image models exist here, and what each would peak at |
 | `plan_image` | Phase-by-phase memory for a given size, steps and precision |
-| `generate_image` | Draw it locally — refuses rather than starting a run that will not fit |
+| `generate_image` | Draw it locally, with a warning first if it looks too big |
 | `run_benchmark` | Measure this model here, and recalibrate its estimates |
 | `get_status` | What is loaded, at what settings, how fast |
 
@@ -156,41 +168,42 @@ Once connected you can ask things like:
 >
 > *Show the local vision model this screenshot and tell me what it reads.*
 
-The `chat` tool is the interesting one: it lets a cloud assistant hand private work to a model
-running entirely on your machine, then reason about the answer.
+The `chat` tool is the fun one: a cloud assistant can hand private work to a model running
+entirely on your machine, then reason about the answer.
 
 ---
 
-## How the memory planner works
+## The math, for the curious
 
-Most tools guess model memory as `file size + a bit`. That is wrong in ways that matter, so this
-computes each component from the architecture.
+Everything below is how the predictions work under the hood. You don't need any of it to use
+the app — it's here so you can check the work.
 
-**Weights** — parameter count times the *effective* bit rate. Using the nominal width (4 bits for
-Q4_K_M) underestimates real files by about 20%, because k-quants carry per-block scales.
+Most tools guess a model's memory as "file size plus a bit". That's wrong in ways that
+matter, so this app computes each piece from the model's actual architecture:
 
-**KV cache** — `2 × layers × kv_heads × head_dim × context × bytes_per_element`. Note `head_dim`
-is read from the model rather than derived: Qwen3 keeps a 128-wide head on a 2048-wide residual
-stream, and gpt-oss uses 64 on 2880. Deriving it as `d_model / n_heads` puts those families off by
-a factor of two.
+**Weights** — the parameter count times the *effective* bits per parameter. Compressed
+("quantized") models carry bookkeeping data alongside the weights; ignoring it
+underestimates real files by about 20%.
 
-**Compute buffers** — scales with micro-batch and hidden size. Without Flash Attention the
-attention score matrix (`ubatch × context × heads`, fp32) is materialised, which on a 32K context
-is over 2 GB on its own. That is why the planner treats Flash Attention as close to mandatory.
+**KV cache** — the model's working memory of your conversation. It grows with context
+length: `2 × layers × kv_heads × head_dim × context × bytes_per_element`. One subtlety: the
+head width is read from the model file rather than derived, because some model families
+(Qwen3, gpt-oss) break the usual rule of thumb and would come out wrong by 2×.
 
-**Expert pool** — see below.
+**Compute buffers** — scratch space for the math itself. Without Flash Attention this blows
+up quadratically (over 2 GB at a 32K context), which is why the planner treats Flash
+Attention as basically mandatory.
 
-The budget is a fraction of unified memory that scales with machine size (55% on 8 GB, 85% on
-128 GB+), reduced only by other processes' **wired** memory. Ordinary app memory is compressible
-and evictable — macOS pages it out to make room for the model — so charging the planner for it
-would make any machine with a browser open look unable to run anything.
+**The budget** — a slice of your unified memory that scales with machine size (55% on 8 GB
+up to 85% on 128 GB+), reduced only by other apps' *wired* memory — the kind macOS can't
+page out. Ordinary app memory gets evicted to make room for the model, so counting it would
+make any Mac with a browser open look unable to run anything.
 
-### Measured accuracy
+### Receipts
 
-Checked against llama.cpp b10280 on an M3 Max, against its own buffer accounting and against
-`footprint(1)`.
+Checked against llama.cpp's own accounting on an M3 Max.
 
-**Qwen3-1.7B Q4_K_M, 32K context** — dense:
+**Qwen3-1.7B Q4_K_M, 32K context** — a dense model:
 
 | Component | Predicted | Actual | Error |
 |---|---|---|---|
@@ -199,18 +212,16 @@ Checked against llama.cpp b10280 on an M3 Max, against its own buffer accounting
 | Compute buffers | 201 MB | 118 MiB | +62% (over-reserves) |
 | **Total** | **5.0 GB** | **4.99 GB** | **0.3%** |
 
-**Qwen3-Coder 30B-A3B Q4_K_M, 16K context** — mixture-of-experts, the case the expert model
-exists for:
+**Qwen3-Coder 30B-A3B Q4_K_M, 16K context** — mixture-of-experts, the case the expert
+model exists for:
 
 | Component | Predicted | Actual | Error |
 |---|---|---|---|
-| Non-expert weights | 924 MB | — | |
-| Routed experts | 17.6 GB | — | |
 | Weights total | 18.50 GB | 18.56 GB (file) | −0.3% |
 | KV + compute | 1.81 GB | 1.68 GB | +7.7% |
 | **Total resident** | **20.30 GB** | **20.24 GB** | **0.31%** |
 
-**Throughput**, measured on the same M3 Max:
+**Speed**, same machine:
 
 | Model | Predicted | Measured |
 |---|---|---|
@@ -219,68 +230,45 @@ exists for:
 | Qwen3-1.7B — prompt | 2344 tok/s | 2374 tok/s |
 | Qwen2.5-VL 7B — generation | 39 tok/s | 57 tok/s |
 
-Prompt throughput uses separate efficiency constants for dense and mixture-of-experts models,
-because MoE routing turns one large GEMM per layer into a gather plus many smaller per-expert
-matmuls that never reach the same utilization. Generation is within 10% for the models above
-except the dense 7B, which the benchmark's per-model calibration corrects.
+The dense 7B misses by a lot, which is exactly what the benchmark's per-model calibration
+exists to fix — one run and its future estimates are corrected.
 
-**Diffusion**, where the phases matter. Every measurement the memory model has been checked
-against — two models, two machines, mflux 0.18.1 at 4-bit, 8 steps:
+**Image models**, two models on two different machines, mflux 0.18.1 at 4-bit:
 
 | Model | Resolution | Predicted | Measured | Error |
 |---|---|---|---|---|
-| klein-4B | 512x512 | 11.1 GB | 10.52 GB | +6.0% |
-| klein-4B | 640x640 | 12.6 GB | 11.81 GB | +6.6% |
-| klein-4B | 768x768 | 14.4 GB | 13.53 GB | +6.1% |
-| klein-4B | 896x896 | 16.4 GB | 15.60 GB | +5.4% |
-| klein-4B | 1024x1024 | 18.9 GB | 17.94 GB | +5.1% |
-| klein-9B | 512x512 | 21.4 GB | 20.93 GB | +2.3% |
-| klein-9B | 768x768 | 24.6 GB | 23.94 GB | +2.8% |
+| klein-4B | 512×512 | 11.1 GB | 10.52 GB | +6.0% |
+| klein-4B | 768×768 | 14.4 GB | 13.53 GB | +6.1% |
+| klein-4B | 1024×1024 | 18.9 GB | 17.94 GB | +5.1% |
+| klein-9B | 512×512 | 21.4 GB | 20.93 GB | +2.3% |
+| klein-9B | 768×768 | 24.6 GB | 23.94 GB | +2.8% |
 
-The band is deliberately one-sided. Promising a fit and then running the machine out of memory is
-a worse failure than warning slightly early, so the error is kept positive and capped at 10%.
+The error is kept deliberately on the high side, capped at 10%: warning slightly early is a
+much better failure than promising a fit and running your machine out of memory.
 
-Two things in there are measured rather than derived, and both were surprises.
+Two of the image-model numbers are measured rather than derived, because measurement
+disagreed with theory. The final decode step costs about 9.8 GB per megapixel — twenty times
+what counting feature maps suggests — and it, not the model size, is what usually decides
+whether a render fits. And a running transformer parameter costs two bytes regardless of the
+precision you asked for; both test models agree on that within 3%. Why is not established.
+The number is.
 
-The VAE decode costs 9.2 to 9.6 GB per megapixel — the planner charges 9.8, the top of the range —
-which is twenty times what counting feature maps suggests. It is also what a run at any normal
-resolution peaks at, not the load. And a transformer parameter costs two bytes while the model is
-running, whatever precision was asked for: klein-4B and klein-9B agree on that to within 3%,
-across a size difference of more than twice. Why is not established. The number is.
+An earlier version of the planner was checked at only one resolution — and was quietly wrong
+at every other one, with two errors cancelling exactly there. [A contributor with different
+hardware](https://github.com/OGZamasu/silicon-optimizer/issues/3) caught it. Fits are now
+checked across the whole table above.
 
-An earlier version of this planner got 1024x1024 right and nothing else, by modelling the load
-phase far too high and the resolution term far too low. The two errors cancelled at exactly the
-one resolution it had been checked at, and it was 82% high at 512x512 — refusing models that ran
-fine. That was found by [a contributor with different hardware](https://github.com/OGZamasu/silicon-optimizer/issues/3),
-which is the only reason it was found at all.
-
-The component parameter counts come from the safetensors headers of the downloaded weights, not
-from model cards: klein-4B's text encoder is 4.15B, larger than its 4.0B transformer, and it is
-what sets the load phase.
-
-Figures for the FLUX.1 family are extrapolated from these, and the app says so when it shows
-them. Nobody has measured one.
-
-KV figures are exact because they are pure arithmetic. Compute buffers and every diffusion phase
-are deliberately over-reserved — predicting *more* memory than is used is the safe direction.
-
----
-
-## MoE expert streaming
+### Expert streaming, in short
 
 Based on [ggml-org/llama.cpp#23324](https://github.com/ggml-org/llama.cpp/discussions/23324).
-Instead of keeping all experts resident, a fixed pool of slots lives in Metal shared memory, a CPU
-sidecar resolves the router's choices to slots with an LRU policy, and misses are `pread` from the
-GGUF. **Inference stays numerically exact** — only residency changes.
+Mixture-of-experts models route each token through a few "experts" out of many. Instead of
+keeping all of them in memory, a fixed pool of slots lives in GPU-shared memory and experts
+are read from disk when the router asks for one that isn't resident. The output is
+numerically identical — only residency changes.
 
-One slot holds one expert across every MoE layer, so its cost is:
-
-```
-3 × d_model × d_expert_ffn × n_moe_layers × bits_per_weight / 8
-```
-
-For Qwen3-30B-A3B at Q6_K that is `3 × 2048 × 768 × 48 × 6.56/8` = **0.173 GiB per slot**, which
-reproduces the RFC's measured table to three significant figures:
+One slot costs `3 × d_model × d_expert_ffn × n_moe_layers × bits_per_weight / 8`. For
+Qwen3-30B-A3B at Q6_K that's 0.173 GiB per slot, which reproduces the llama.cpp discussion's
+measured numbers to three significant figures:
 
 | Slots | Measured wired | Planner predicts |
 |---|---|---|
@@ -288,60 +276,29 @@ reproduces the RFC's measured table to three significant figures:
 | 64 | 16.1 GiB | 16.1 GiB |
 | 80 | 18.9 GiB | 18.9 GiB |
 
-The catch the app makes sure you see: the pool must hold every expert the in-flight batch could
-select, so `ubatch × n_expert_used ≤ n_slots`. A 32-slot pool on an 8-expert model forces a
-micro-batch of 4, and prompt processing slows sharply. Generation is barely affected. The UI states
-this before you turn it on.
+The catch — which the app tells you about before you enable it — is that a small pool forces
+prompt processing to slow down sharply on some models. Generation speed is barely affected.
 
-Expert streaming needs a llama.cpp build carrying the patch. The app detects this by probing
-`--help` for `--moe-n-slots` and disables the option if it is absent, rather than letting the
-runtime fail at launch.
+The app checks whether your llama.cpp build actually supports this (by probing for the
+flag) and hides the option if it doesn't, instead of letting the load fail.
 
 ---
 
-## Architecture
+## Beyond the built-in catalog
 
-```
-SiliconCore       Value types: Bytes, Quantization, ModelShape
-SiliconHardware   sysctl/IOKit probes, live metrics, SSD benchmark
-SiliconCatalog    Curated models, GGUF header parser, HF client, downloader
-SiliconPlanner    Memory planner, speed estimator, auto-configurator
-SiliconRuntime    Runtime abstraction, llama.cpp + MLX process supervision
-SiliconControl    Loopback control API (server + client)
-SiliconUI         SwiftUI app
-SiliconMCP        MCP bridge binary
-```
-
-Runtimes are driven as child processes over their OpenAI-compatible HTTP API rather than linked as
-libraries. That keeps the app pure Swift, isolates a crash during a 30 GB load from the UI, and
-lets you point at your own llama.cpp build — including a patched one — without recompiling
-anything.
-
-Adding a runtime means writing one type conforming to `InferenceRuntime`. Nothing in the UI
-changes.
-
----
-
-## Beyond the catalog
-
-The bundled list is 17 models chosen for Apple Silicon. Searching also queries Hugging Face for
-anything else with GGUF weights, and picking a result does not mean losing the memory plan: the
-GGUF header is fetched with a range request — a few hundred kilobytes, no download — so an
-unknown repository gets the same weights/KV/compute breakdown, the same verdict, and its real
-architecture read from the file rather than guessed from its name.
-
-Reading a 30B model's full architecture this way takes under two seconds.
+The bundled list is 17 models curated for Apple Silicon. Search also covers all of Hugging
+Face: for any model with GGUF weights, the app fetches just the file's header (a few hundred
+kilobytes, not the download) and gives an unknown model the same memory breakdown and
+verdict as a curated one — its real architecture read from the file, not guessed from its
+name.
 
 ## Advanced mode
 
-Every setting the planner derives can be overridden by hand, from the installed model's menu.
-Context length, KV cache precision, batch and micro-batch, GPU layers, threads, expert slot
-count, and a free-text field for any llama.cpp flag this app does not model yet.
-
-The point is that nothing becomes guesswork when you take over: the same memory plan updates
-live as you change things, the launch command is shown verbatim, and constraints the runtime
-enforces — the `ubatch x n_expert_used <= n_slots` rule, a micro-batch larger than the batch,
-a flag the app already sets — are reported before the load rather than after it fails.
+Everything the planner decides, you can override: context length, cache precision, batch
+sizes, GPU layers, threads, expert slots, plus a free-text field for any llama.cpp flag the
+app doesn't model yet. The memory plan updates live as you change things, the exact launch
+command is shown, and impossible combinations are flagged before the load instead of after
+it fails.
 
 ## Development
 
@@ -351,26 +308,20 @@ swift test            # run the suite
 Scripts/build-app.sh  # assemble Silicon Optimizer.app
 ```
 
-The test suite validates the planner against the RFC's published benchmark numbers, so a
-regression in the memory model fails the build rather than silently shipping bad advice.
-
----
+The tests pin the planner to published benchmark numbers, so a regression in the memory
+model fails the build rather than silently shipping bad advice.
 
 ## Security
 
-The control API binds to `127.0.0.1` only and requires a bearer token, regenerated each launch and
-published to `~/Library/Application Support/SiliconOptimizer/control.json` with `0600`
-permissions. Any local process could otherwise drive your model silently.
-
-The app is not sandboxed: it launches runtime binaries the user may keep anywhere and reads model
-files from arbitrary paths. Neither is possible under App Sandbox.
-
----
+The app's local control API binds to `127.0.0.1` only and requires a token that's
+regenerated on every launch — otherwise any process on your machine could quietly drive your
+model. The app is not sandboxed, because it launches engine binaries you may keep anywhere
+and reads model files from arbitrary paths; neither works under App Sandbox.
 
 ## Licence
 
 MIT.
 
-Models carry their own licences — the app shows each one and links to its source. Gemma is under
-the Gemma Terms of Use, Llama under the Llama Community Licence; the rest of the shipped catalog
-is Apache-2.0 or MIT.
+Models carry their own licences — the app shows each one and links to its source. Gemma is
+under the Gemma Terms of Use, Llama under the Llama Community Licence; the rest of the
+shipped catalog is Apache-2.0 or MIT.
