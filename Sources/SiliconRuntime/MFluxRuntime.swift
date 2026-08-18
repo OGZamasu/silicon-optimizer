@@ -114,9 +114,13 @@ public actor MFluxRuntime: ImageRuntime {
             await self.finish()
 
             guard status == 0 else {
-                continuation.finish(throwing: ImageRuntimeError.generationFailed(
-                    Self.diagnose(log: log)
-                ))
+                if Self.isGatedFailure(log: log) {
+                    continuation.finish(throwing: ImageRuntimeError.gated)
+                } else {
+                    continuation.finish(throwing: ImageRuntimeError.generationFailed(
+                        Self.diagnose(log: log)
+                    ))
+                }
                 return
             }
             guard FileManager.default.fileExists(atPath: request.output.path) else {
@@ -161,6 +165,14 @@ public actor MFluxRuntime: ImageRuntime {
         return Bytes(Int64(gigabytes * 1e9))
     }
 
+    /// Whether the failure was the licence gate, which callers surface as an actionable
+    /// alert rather than a dead-end message.
+    static func isGatedFailure(log: String) -> Bool {
+        let lowercased = log.lowercased()
+        return lowercased.contains("401") || lowercased.contains("gated")
+            || lowercased.contains("awaiting a review")
+    }
+
     static func diagnose(log: String) -> String {
         let lowercased = log.lowercased()
         if lowercased.contains("no module named 'mflux'") {
@@ -171,8 +183,7 @@ public actor MFluxRuntime: ImageRuntime {
             return "Ran out of memory. Lower the resolution, quantize further, or turn on "
                 + "tiled decoding."
         }
-        if lowercased.contains("401") || lowercased.contains("gated") ||
-           lowercased.contains("awaiting a review") {
+        if isGatedFailure(log: log) {
             return "This model is gated on Hugging Face. Accept its licence on the model page "
                 + "and add an access token in Settings."
         }

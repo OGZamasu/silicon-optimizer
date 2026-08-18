@@ -128,6 +128,10 @@ public final class AppModel {
         public let id = UUID()
         public var title: String
         public var message: String
+        /// When set, the alert offers this as a second button that opens `linkURL` —
+        /// for errors whose fix lives on a web page, like a Hugging Face licence gate.
+        public var linkTitle: String?
+        public var linkURL: URL?
     }
 
     // MARK: - Image generation
@@ -436,6 +440,22 @@ public final class AppModel {
                 // too. Report it as idle rather than as a failure the user didn't cause.
                 if imageWasCancelled {
                     imageState = .idle
+                } else if case ImageRuntimeError.gated = error,
+                          let entry = DiffusionCatalog.entry(id: job.modelID) {
+                    // The fix is on a web page, so the alert must carry the way there —
+                    // "accept the licence" with no model name and no link helps nobody.
+                    imageState = .failed(
+                        message: "\(entry.name) needs its licence accepted on Hugging Face."
+                    )
+                    alert = AlertContent(
+                        title: "\(entry.name) needs a licence agreement",
+                        message: "\(entry.name) is gated on Hugging Face "
+                            + "(\(entry.repository)). Open the licence page, sign in, and "
+                            + "accept or request access. Then check that your access token "
+                            + "is in Settings → Credentials, and try again.",
+                        linkTitle: "Open licence page",
+                        linkURL: URL(string: "https://huggingface.co/\(entry.repository)")
+                    )
                 } else {
                     imageState = .failed(message: error.localizedDescription)
                     alert = AlertContent(

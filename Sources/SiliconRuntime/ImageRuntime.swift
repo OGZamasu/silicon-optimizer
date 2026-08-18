@@ -91,6 +91,10 @@ public enum ImageRuntimeKind: String, Sendable, Codable, CaseIterable, Identifia
 
 public enum ImageRuntimeError: Error, LocalizedError {
     case notInstalled
+    /// The model's weights are behind a Hugging Face licence gate. A distinct case rather
+    /// than a `generationFailed` string, because the caller can turn it into a real fix —
+    /// naming the model and opening its licence page — only if it can recognize it.
+    case gated
     case generationFailed(String)
     case noImageProduced
     case cancelled
@@ -99,6 +103,9 @@ public enum ImageRuntimeError: Error, LocalizedError {
         switch self {
         case .notInstalled:
             "MFLUX is not installed. Run `pip install mflux` in a Python environment."
+        case .gated:
+            "This model is gated on Hugging Face. Accept its licence on the model page "
+                + "while signed in, then add an access token in Settings."
         case .generationFailed(let message):
             message
         case .noImageProduced:

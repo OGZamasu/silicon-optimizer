@@ -58,11 +58,22 @@ public struct MainWindow: View {
             NSApp.setActivationPolicy(.accessory)
         }
         .alert(item: $model.alert) { alert in
-            Alert(
-                title: Text(alert.title),
-                message: Text(alert.message),
-                dismissButton: .default(Text("OK"))
-            )
+            if let linkTitle = alert.linkTitle, let url = alert.linkURL {
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    primaryButton: .default(Text(linkTitle)) {
+                        NSWorkspace.shared.open(url)
+                    },
+                    secondaryButton: .cancel(Text("OK"))
+                )
+            } else {
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
         }
     }
 
