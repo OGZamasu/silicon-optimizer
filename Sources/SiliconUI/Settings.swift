@@ -38,6 +38,52 @@ public struct Settings: Codable, Sendable, Equatable {
     // Credentials
     public var huggingFaceToken = ""
 
+    // Output
+
+    /// Where generated images are written. Empty means the default below.
+    public var imageOutputDirectory: String = ""
+
+    /// Last external folder chosen to save a downloaded model to. Only pre-fills the folder
+    /// picker for next time — it doesn't redirect anything by itself, since which models go
+    /// where is chosen per download, not as a standing default.
+    public var lastExternalModelDirectory: String = ""
+
+    /// The directory images are actually written to.
+    ///
+    /// Defaults to `~/Pictures/Silicon Optimizer`. Generation previously wrote into
+    /// `FileManager.temporaryDirectory`, which resolves to a per-boot path under `/var/folders`
+    /// that no one can navigate to from Finder and that macOS is free to purge — so an image that
+    /// took minutes to produce was both hard to find and not safe to leave there.
+    public var resolvedImageOutputDirectory: URL {
+        let configured = imageOutputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        return Self.defaultImageOutputDirectory
+    }
+
+    public static var defaultImageOutputDirectory: URL {
+        let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+        return pictures?.appendingPathComponent("Silicon Optimizer")
+            ?? FileManager.default.temporaryDirectory
+    }
+
+    /// Filename for a generated image.
+    ///
+    /// Sorts chronologically in Finder, which is the order anyone browsing a folder of generated
+    /// images wants. The short random suffix keeps two images produced in the same second from
+    /// colliding — batches do that routinely.
+    public static func imageFilename(
+        extension fileExtension: String = "png",
+        date: Date = Date(),
+        uniqueSuffix: String = String(UUID().uuidString.prefix(4))
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return "silicon-\(formatter.string(from: date))-\(uniqueSuffix).\(fileExtension)"
+    }
+
     // Runtime overrides
     public var llamaServerPath: String = ""
     public var mlxServerPath: String = ""
@@ -54,6 +100,47 @@ public struct Settings: Codable, Sendable, Equatable {
     }
 
     public init() {}
+
+    // MARK: - Decoding
+
+    /// Decoded key by key, defaulting anything absent.
+    ///
+    /// The synthesized decoder throws on a missing key even where the property has a default, so
+    /// settings written by an earlier build fail to decode the moment a field is added here.
+    /// `load()` swallows that and returns defaults, which reads to the user as the app having
+    /// silently forgotten everything — their token included — on upgrade. Decoding leniently
+    /// makes adding a field a non-event, which is the only way it is safe to keep doing.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = Settings()
+
+        func value<T: Decodable>(_ key: CodingKeys, _ default: T) throws -> T {
+            try container.decodeIfPresent(T.self, forKey: key) ?? `default`
+        }
+
+        temperature = try value(.temperature, fallback.temperature)
+        topP = try value(.topP, fallback.topP)
+        maxTokens = try value(.maxTokens, fallback.maxTokens)
+        reasoningEffort = try value(.reasoningEffort, fallback.reasoningEffort)
+        launchAtLogin = try value(.launchAtLogin, fallback.launchAtLogin)
+        unloadWhenIdle = try value(.unloadWhenIdle, fallback.unloadWhenIdle)
+        idleUnloadMinutes = try value(.idleUnloadMinutes, fallback.idleUnloadMinutes)
+        showAdvancedControls = try value(.showAdvancedControls, fallback.showAdvancedControls)
+        measuredSSDReadMBps = try container.decodeIfPresent(
+            Double.self, forKey: .measuredSSDReadMBps
+        )
+        measuredSSDVolumeID = try container.decodeIfPresent(
+            String.self, forKey: .measuredSSDVolumeID
+        )
+        speedCalibrations = try value(.speedCalibrations, fallback.speedCalibrations)
+        huggingFaceToken = try value(.huggingFaceToken, fallback.huggingFaceToken)
+        imageOutputDirectory = try value(.imageOutputDirectory, fallback.imageOutputDirectory)
+        lastExternalModelDirectory = try value(
+            .lastExternalModelDirectory, fallback.lastExternalModelDirectory
+        )
+        llamaServerPath = try value(.llamaServerPath, fallback.llamaServerPath)
+        mlxServerPath = try value(.mlxServerPath, fallback.mlxServerPath)
+    }
 
     // MARK: - Persistence
 

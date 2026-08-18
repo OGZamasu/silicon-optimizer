@@ -408,16 +408,12 @@ extension AppModel {
         let (entry, configuration) = try resolveImage(request)
         let predicted = diffusionPlan(for: entry, configuration: configuration)
 
-        // Refuse rather than let the runtime die minutes in with an opaque allocation failure.
-        guard predicted.verdict.isUsable else {
-            // Names the loaded language model when that is what is in the way, so a caller with
-            // an unload_model tool can act on the answer instead of just reporting it.
-            throw ControlHostError.loadFailed(refusalMessage(for: entry, plan: predicted))
-        }
+        // Warn rather than refuse: the estimate is not always right, and a hard block leaves
+        // someone unable to run a model that would in fact work, with no way to proceed.
+        let warning = predicted.verdict.isUsable ? nil : refusalMessage(for: entry, plan: predicted)
 
         noteActivity()
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silicon-image-\(UUID().uuidString).png")
+        let output = nextImageOutputURL()
         let carrier = InstalledModel(
             id: entry.id, name: entry.name, catalogID: entry.id,
             quantization: configuration.quantization, format: .mlx,
@@ -429,7 +425,9 @@ extension AppModel {
         defer { imageState = .idle; imageProgress = nil }
 
         var result: ImageResult?
-        for try await event in try await MFluxRuntime(installation: installation).generate(
+        for try await event in try await MFluxRuntime(
+            installation: installation, huggingFaceToken: settings.huggingFaceToken
+        ).generate(
             ImageRequest(
                 prompt: request.prompt, configuration: configuration,
                 seed: request.seed, output: output
@@ -443,7 +441,7 @@ extension AppModel {
                 imageState = .starting(stage: "Denoising \(index)/\(total)…")
             case .finished(let finished):
                 result = finished
-                lastImage = finished
+                generatedImages.insert(finished, at: 0)
             }
         }
 
@@ -453,7 +451,8 @@ extension AppModel {
             elapsedSeconds: result.elapsed,
             peakMemoryBytes: result.peakMemory?.rawValue,
             predictedPeakBytes: predicted.peak.rawValue,
-            model: entry.name
+            model: entry.name,
+            warning: warning
         )
     }
 

@@ -214,8 +214,11 @@ enum Tools {
             name: "generate_image",
             description: """
                 Generate an image on this Mac and return the path to it. Runs entirely locally. \
-                Refuses rather than starting a run the memory plan says will not fit. The first \
-                use of a model downloads its weights, which can take several minutes.
+                Attempts the run even when the memory plan says it will not comfortably fit — \
+                the estimate is pessimistic on some models — and reports a warning in the \
+                response instead of refusing beforehand. Use plan_image first if you want to \
+                know the risk before spending the time. The first use of a model downloads its \
+                weights, which can take several minutes.
                 """,
             properties: [
                 "prompt": property("string", "What to draw."),
@@ -356,6 +359,9 @@ enum Tools {
                     / Double(max(1, response.predictedPeakBytes)) * 100
                 lines.append("  measured peak : \(bytes(measured)) "
                     + String(format: "(%.0f%% from prediction)", error))
+            }
+            if let warning = response.warning {
+                lines.append("\nWarning: \(warning)")
             }
             return lines.joined(separator: "\n")
 

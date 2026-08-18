@@ -475,16 +475,21 @@ public enum ControlAPI {
         public var peakMemoryBytes: Int64?
         public var predictedPeakBytes: Int64
         public var model: String
+        /// Set when the plan predicted this configuration would not comfortably fit. The run was
+        /// attempted anyway; this explains what to expect (swapping, slowdown, or possible
+        /// failure) rather than having refused before trying.
+        public var warning: String?
 
         public init(
             path: String, elapsedSeconds: Double, peakMemoryBytes: Int64?,
-            predictedPeakBytes: Int64, model: String
+            predictedPeakBytes: Int64, model: String, warning: String? = nil
         ) {
             self.path = path
             self.elapsedSeconds = elapsedSeconds
             self.peakMemoryBytes = peakMemoryBytes
             self.predictedPeakBytes = predictedPeakBytes
             self.model = model
+            self.warning = warning
         }
     }
 
