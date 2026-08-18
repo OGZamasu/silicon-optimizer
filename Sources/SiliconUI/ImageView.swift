@@ -81,11 +81,18 @@ struct ImageView: View {
 
         return Card(title: "Prompt", systemImage: "text.cursor") {
             VStack(alignment: .leading, spacing: 12) {
-                TextField("Describe the image", text: $model.imagePrompt, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(3...8)
-                    .padding(10)
-                    .background(.background.secondary, in: .rect(cornerRadius: 8))
+                TextField(
+                    model.imageConfiguration.initImage == nil
+                        ? "Describe the image"
+                        : "Describe what should change",
+                    text: $model.imagePrompt, axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .lineLimit(3...8)
+                .padding(10)
+                .background(.background.secondary, in: .rect(cornerRadius: 8))
+
+                revisionBanner
 
                 Picker("Model", selection: $model.selectedDiffusionModel) {
                     ForEach(DiffusionCatalog.all) { entry in
@@ -267,6 +274,53 @@ struct ImageView: View {
 
     private var queueingRatherThanStarting: Bool {
         model.isGeneratingImage || !model.imageQueue.isEmpty
+    }
+
+    /// Revision mode, kept visible the whole time it is active: the image being revised,
+    /// a dial for how close to stay, and the way out.
+    @ViewBuilder
+    private var revisionBanner: some View {
+        @Bindable var model = model
+        if let base = model.imageConfiguration.initImage {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    if let preview = NSImage(contentsOf: base) {
+                        Image(nsImage: preview)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 36, height: 36)
+                            .clipShape(.rect(cornerRadius: 6))
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Revising this image")
+                            .font(.caption.weight(.medium))
+                        Text("The words above describe the change.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                    Button {
+                        model.endImageRevision()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Back to generating from scratch")
+                }
+                HStack(spacing: 8) {
+                    Text("Fresh take")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Slider(value: $model.imageConfiguration.initImageInfluence, in: 0.05...0.95)
+                    Text("Stay close")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(9)
+            .background(.background.secondary, in: .rect(cornerRadius: 8))
+        }
     }
 
     /// Pending prompts, shown so queuing up several ideas in a row doesn't feel like they
@@ -595,6 +649,12 @@ struct ImageView: View {
                     } label: {
                         Label("Make it 3D", systemImage: "cube")
                     }
+                    Button {
+                        model.beginImageRevision(from: url)
+                    } label: {
+                        Label("Revise", systemImage: "wand.and.rays")
+                    }
+                    .help("Start from this image and describe what should change")
                     Spacer()
                 }
                 .buttonStyle(.bordered)
@@ -652,6 +712,12 @@ struct ImageView: View {
                     Label("Make it 3D", systemImage: "cube")
                 }
                 .help("Send this image to the 3D tab and turn it into a model")
+                Button {
+                    model.beginImageRevision(from: result.image)
+                } label: {
+                    Label("Revise", systemImage: "wand.and.rays")
+                }
+                .help("Start from this image and describe what should change")
                 Spacer()
             }
             .buttonStyle(.bordered)

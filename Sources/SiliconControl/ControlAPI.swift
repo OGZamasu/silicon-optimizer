@@ -459,10 +459,15 @@ public enum ControlAPI {
         public var steps: Int?
         public var quantization: String?
         public var seed: Int?
+        /// Revision: path to an existing image to start from instead of noise.
+        public var initImagePath: String?
+        /// How strongly that image steers the result, 0–1 (mflux influence semantics).
+        public var initImageInfluence: Double?
 
         public init(
             prompt: String, modelID: String? = nil, width: Int? = nil, height: Int? = nil,
-            steps: Int? = nil, quantization: String? = nil, seed: Int? = nil
+            steps: Int? = nil, quantization: String? = nil, seed: Int? = nil,
+            initImagePath: String? = nil, initImageInfluence: Double? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -471,6 +476,8 @@ public enum ControlAPI {
             self.steps = steps
             self.quantization = quantization
             self.seed = seed
+            self.initImagePath = initImagePath
+            self.initImageInfluence = initImageInfluence
         }
     }
 

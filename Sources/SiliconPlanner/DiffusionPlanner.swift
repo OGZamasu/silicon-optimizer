@@ -40,6 +40,11 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
     public var canReuseQuantizedSave: Bool
     /// Images generated in one run. Batching amortises the encode but multiplies the latents.
     public var batchSize: Int
+    /// When set, generation revises this image instead of starting from noise (img2img).
+    public var initImage: URL?
+    /// How strongly the starting image steers the result. mflux's semantics, which are the
+    /// reverse of classic img2img strength: 0 ignores the image entirely, 1 clings to it.
+    public var initImageInfluence: Double
 
     public init(
         width: Int = 1024,
@@ -51,7 +56,9 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
         residentBlocks: Int? = nil,
         weightsArePrequantized: Bool = false,
         canReuseQuantizedSave: Bool = true,
-        batchSize: Int = 1
+        batchSize: Int = 1,
+        initImage: URL? = nil,
+        initImageInfluence: Double = 0.5
     ) {
         self.width = width
         self.height = height
@@ -63,6 +70,8 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
         self.weightsArePrequantized = weightsArePrequantized
         self.canReuseQuantizedSave = canReuseQuantizedSave
         self.batchSize = batchSize
+        self.initImage = initImage
+        self.initImageInfluence = initImageInfluence
     }
 
     public var megapixels: Double {

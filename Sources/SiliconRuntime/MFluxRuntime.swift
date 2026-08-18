@@ -275,6 +275,15 @@ public struct MFluxArguments: Sendable {
             arguments += ["--guidance", String(guidance)]
         }
 
+        // Revision: start from an existing image instead of noise. The atomic `--image
+        // PATH STRENGTH` form is current mflux; `--image-path` is deprecated.
+        if let initImage = configuration.initImage {
+            arguments += [
+                "--image", initImage.path,
+                String(configuration.initImageInfluence),
+            ]
+        }
+
         // `--low-ram` frees the transformer between images and caps the MLX buffer cache. It
         // does not lower the peak of a single image — measured byte-identical with and without
         // on FLUX.2-klein-4B (issue #3) — so it is passed when asked for and never as a

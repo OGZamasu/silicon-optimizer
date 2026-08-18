@@ -436,6 +436,9 @@ public final class AppModel {
                         if routeNextImageToMesh {
                             routeNextImageToMesh = false
                             meshInputImage = result.image
+                            // The 3D flow sets revision state per click; leaving it set
+                            // would quietly turn the Images tab into revision mode too.
+                            imageConfiguration.initImage = nil
                         }
                     }
                 }
@@ -898,6 +901,28 @@ public final class AppModel {
     public func makeImage3D(_ image: URL) {
         meshInputImage = image
         selectedTab = .threeD
+    }
+
+    // MARK: - Image revision (img2img)
+
+    /// Puts the composer in revision mode: generation starts from this image instead of
+    /// noise, and the prompt describes the change. Sticky until ended — iterating on one
+    /// image is the whole point — and visible the whole time via the composer banner.
+    public func beginImageRevision(from image: URL) {
+        imageConfiguration.initImage = image
+    }
+
+    public func endImageRevision() {
+        imageConfiguration.initImage = nil
+    }
+
+    /// Revises the 3D tab's drafted source image in place: img2img from the current draft,
+    /// routed back into the source slot. The words describe the change; the composition
+    /// survives, which is what keeps the regenerated mesh recognizably the same object.
+    public func reviseDraftForMesh() {
+        guard let base = meshInputImage else { return }
+        imageConfiguration.initImage = base
+        draftImageForMesh()
     }
 
     public func meshPlanner() -> MeshPlanner { MeshPlanner(profile: profile) }

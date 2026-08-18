@@ -493,6 +493,19 @@ extension AppModel {
         if let raw = request.quantization, let quantization = Quantization(rawValue: raw) {
             configuration.quantization = quantization
         }
+        if let initPath = request.initImagePath {
+            let url = URL(fileURLWithPath: (initPath as NSString).expandingTildeInPath)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw ControlHostError.loadFailed(
+                    "No image at \(url.path) to revise. Pass an absolute path to an "
+                        + "existing image file."
+                )
+            }
+            configuration.initImage = url
+            if let influence = request.initImageInfluence {
+                configuration.initImageInfluence = max(0, min(1, influence))
+            }
+        }
         return (entry, configuration)
     }
 

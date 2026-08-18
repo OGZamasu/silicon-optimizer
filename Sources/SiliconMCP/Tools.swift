@@ -228,6 +228,10 @@ enum Tools {
                 "steps": property("number", "Denoising steps. Distilled models need very few."),
                 "quantization": property("string", "MLX-4bit, MLX-6bit or MLX-8bit."),
                 "seed": property("number", "Optional seed for a reproducible image."),
+                "init_image_path": property("string", "Optional revision: absolute path to "
+                    + "an existing image to start from instead of noise (img2img)."),
+                "init_image_influence": property("number", "0-1, how strongly the init "
+                    + "image steers the result — 0 ignores it, 1 clings to it. Default 0.5."),
             ],
             required: ["prompt"]
         ),
@@ -653,7 +657,9 @@ enum Tools {
             height: arguments["height"]?.intValue,
             steps: arguments["steps"]?.intValue,
             quantization: arguments["quantization"]?.stringValue,
-            seed: arguments["seed"]?.intValue
+            seed: arguments["seed"]?.intValue,
+            initImagePath: arguments["init_image_path"]?.stringValue,
+            initImageInfluence: arguments["init_image_influence"]?.doubleValue
         )
     }
 

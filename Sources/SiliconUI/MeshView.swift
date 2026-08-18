@@ -229,9 +229,33 @@ struct MeshView: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: 140)
                     .clipShape(.rect(cornerRadius: 8))
-                Text("Happy with it? Generate below — or change the words and draft again.")
+                Text("Happy with it? Generate below. Or change the words and: ")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                HStack(spacing: 8) {
+                    // Revise keeps the composition — which keeps the regenerated mesh
+                    // recognizably the same object. Draft again starts fresh.
+                    Button {
+                        model.reviseDraftForMesh()
+                    } label: {
+                        Label("Revise it", systemImage: "wand.and.rays")
+                    }
+                    .disabled(model.isGeneratingImage
+                        || model.imagePrompt.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty)
+                    .help("Keep this picture's composition and change what the words say")
+                    Slider(
+                        value: Binding(
+                            get: { model.imageConfiguration.initImageInfluence },
+                            set: { model.imageConfiguration.initImageInfluence = $0 }
+                        ),
+                        in: 0.05...0.95
+                    )
+                    .frame(width: 110)
+                    .help("Left: fresh take · Right: stay close")
+                }
+                .controlSize(.small)
             }
         }
     }
@@ -676,6 +700,20 @@ struct MeshView: View {
                     Label("Reveal in Finder", systemImage: "folder")
                 }
                 openExternallyMenu(file: file, result: result)
+            }
+            // 3D revision is image revision: no local model edits meshes, but reworking
+            // the source picture with its composition held and regenerating gets the
+            // same object, changed.
+            if let source = result.sourceImage,
+               FileManager.default.fileExists(atPath: source.path) {
+                Button {
+                    model.meshInputImage = source
+                    model.imageConfiguration.initImage = source
+                    sourceMode = .describe
+                } label: {
+                    Label("Revise source", systemImage: "wand.and.rays")
+                }
+                .help("Rework the picture this came from, then regenerate the model")
             }
         }
         .buttonStyle(.bordered)
