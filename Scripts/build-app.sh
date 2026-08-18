@@ -30,6 +30,12 @@ BUNDLE="build/${APP_NAME}.app"
 BUILD_FLAGS=(--configuration "$CONFIGURATION" --arch arm64)
 
 echo "==> Building ($CONFIGURATION)"
+# The executable embeds Resources/Info.plist via a linker section, but SwiftPM only
+# relinks when a *source* changes, so a plist-only edit leaves the embedded copy stale.
+# The bundle's Contents/Info.plist is what macOS reads for a proper .app, so this mostly
+# matters for bare-binary runs — but the link step is cheap and keeping the two copies
+# in sync removes a whole class of "which plist did the OS read" debugging.
+rm -f "$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/SiliconOptimizer"
 swift build "${BUILD_FLAGS[@]}"
 BINARY="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/SiliconOptimizer"
 

@@ -24,12 +24,14 @@
 	<string>14.0</string>
 	<!-- The swarm talks plain HTTP with bearer tokens over private networks (LAN peers,
 	     tailnet CGNAT addresses like 100.x) by design; ATS's cleartext block would sever
-	     every peer. Off-LAN transport security comes from WireGuard/Tailscale, not TLS. -->
+	     every peer. Off-LAN transport security comes from WireGuard/Tailscale, not TLS.
+	     Do NOT add NSAllowsLocalNetworking here: when that key is present, modern macOS
+	     ignores NSAllowsArbitraryLoads and enforces only the narrower exception — and ATS
+	     does not treat tailnet 100.x addresses as "local", so peers over Tailscale would
+	     be blocked again. That exact combination once shipped as a fix that never worked. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
