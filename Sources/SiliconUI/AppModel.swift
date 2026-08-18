@@ -804,6 +804,21 @@ public final class AppModel {
         }
     }
 
+    /// Registers a GGUF file already on disk without copying it — the same path `install()`'s
+    /// `saveTo` writes new downloads to, but for a file that already exists wherever it is: moved
+    /// there by hand in Finder, or fetched by something other than this app.
+    public func importModel(from file: URL, name: String? = nil) async {
+        do {
+            _ = try await library.importExternal(file: file, name: name)
+            await refreshLibrary()
+        } catch {
+            alert = AlertContent(
+                title: "Could not import \(file.lastPathComponent)",
+                message: error.localizedDescription
+            )
+        }
+    }
+
     public func planner() -> MemoryPlanner { MemoryPlanner(profile: profile) }
 
     public func autoConfigurator() -> AutoConfigurator {

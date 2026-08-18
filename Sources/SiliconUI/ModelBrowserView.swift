@@ -1,7 +1,9 @@
+import AppKit
 import SiliconCatalog
 import SiliconCore
 import SiliconPlanner
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ModelBrowserView: View {
     @Environment(AppModel.self) private var model
@@ -45,6 +47,17 @@ struct ModelBrowserView: View {
                 Toggle("Only what fits", isOn: $showsOnlyRunnable)
                     .toggleStyle(.switch)
                     .controlSize(.small)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    importExistingModel()
+                } label: {
+                    Label("Import…", systemImage: "square.and.arrow.down.on.square")
+                }
+                .help(
+                    "Register a .gguf file that's already on disk — moved there by hand, or "
+                    + "downloaded some other way — without copying it."
+                )
             }
         }
         .sheet(item: $inspecting) { entry in
@@ -283,6 +296,26 @@ struct ModelBrowserView: View {
             .sorted { lhs, rhs in
                 (lhs.recommendation?.score ?? -1) > (rhs.recommendation?.score ?? -1)
             }
+    }
+
+    /// Registers a `.gguf` already sitting somewhere on disk, without moving or copying it.
+    ///
+    /// The way in for a model this app never wrote itself — most usefully, one downloaded to the
+    /// managed library normally and then moved by hand in Finder to external media the app can't
+    /// write to directly. macOS gates non-sandboxed write access to removable and network volumes
+    /// behind a Developer ID signature this build doesn't have, but reading a file the user just
+    /// explicitly chose in an open panel isn't subject to that same restriction.
+    private func importExistingModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.init(filenameExtension: "gguf")].compactMap { $0 }
+        panel.prompt = "Import"
+        panel.message = "Choose a .gguf file to register — its head shard, if it's split into "
+            + "several parts."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await model.importModel(from: url) }
     }
 }
 
