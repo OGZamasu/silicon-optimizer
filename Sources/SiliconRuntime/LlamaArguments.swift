@@ -93,6 +93,11 @@ public struct LlamaArguments: Sendable {
         // is what makes function calling work without per-model special cases.
         arguments += ["--jinja"]
 
+        // The /slots endpoint is how the app asks "are you busy?" before an idle unload.
+        // External clients such as the harness talk to the server directly, so the server
+        // itself is the only party that knows whether a generation is in flight.
+        arguments += ["--slots"]
+
         arguments += expertStreamingArguments()
 
         // Last, so a user can override anything above it — llama.cpp takes the final value

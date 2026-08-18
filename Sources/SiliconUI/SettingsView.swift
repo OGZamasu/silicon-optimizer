@@ -31,6 +31,58 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Chat") {
+                Picker("Chat engine", selection: $model.settings.chatEngine) {
+                    Text("DeepSeek Harness — agent with tools").tag(ChatEngine.harness)
+                    Text("Built-in — plain chat (legacy)").tag(ChatEngine.legacy)
+                }
+                if model.settings.chatEngine == .harness {
+                    Text(
+                        "The harness gives the model tools: fetching web pages, searching, "
+                        + "reading and editing files in a workspace, and running commands "
+                        + "with your approval. It runs locally on Node.js and talks to the "
+                        + "model this app serves. Web search needs a provider key, added "
+                        + "inside the harness under Settings → Web search; web fetch works "
+                        + "without one."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    harnessStatusRow
+
+                    if model.settings.showAdvancedControls {
+                        LabeledContent("Node.js path") {
+                            TextField(
+                                "Auto-detect",
+                                text: Binding(
+                                    get: { model.settings.nodeBinaryPath ?? "" },
+                                    set: { model.settings.nodeBinaryPath = $0.isEmpty ? nil : $0 }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        LabeledContent("Harness home") {
+                            HStack(spacing: 8) {
+                                Text(HarnessRuntime.homeDirectory.path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .truncationMode(.middle)
+                                    .lineLimit(1)
+                                Button("Reveal") {
+                                    NSWorkspace.shared.open(HarnessRuntime.homeDirectory)
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                } else {
+                    Text("The built-in chat streams straight from the local server. "
+                         + "No tools, no web access.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Generation") {
                 LabeledContent("Temperature") {
                     HStack {
@@ -175,6 +227,35 @@ struct SettingsView: View {
         .onChange(of: model.settings) {
             model.settings.save()
             model.settings.applyLaunchAtLogin()
+        }
+        .onChange(of: model.settings.chatEngineRaw) {
+            model.chatEngineDidChange()
+        }
+    }
+
+    /// Live status of the harness process, with a restart escape hatch.
+    private var harnessStatusRow: some View {
+        LabeledContent("Harness") {
+            HStack(spacing: 8) {
+                switch model.harnessState {
+                case .idle:
+                    Badge(text: "Starts with the Chat tab", systemImage: "moon", tint: .secondary)
+                case .starting:
+                    ProgressView().controlSize(.small)
+                    Text("Starting…").font(.caption).foregroundStyle(.secondary)
+                case .ready:
+                    Badge(text: "Running", systemImage: "checkmark.circle.fill", tint: .green)
+                case .stopping:
+                    ProgressView().controlSize(.small)
+                    Text("Stopping…").font(.caption).foregroundStyle(.secondary)
+                case .failed:
+                    Badge(text: "Failed", systemImage: "xmark.circle", tint: .orange)
+                }
+                if case .ready = model.harnessState {
+                    Button("Restart") { model.restartHarness() }
+                        .controlSize(.small)
+                }
+            }
         }
     }
 

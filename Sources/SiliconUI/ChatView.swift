@@ -16,12 +16,21 @@ struct ChatView: View {
     @State private var folderName = ""
 
     var body: some View {
+        if model.settings.chatEngine == .harness {
+            HarnessChatView()
+        } else {
+            legacyChat
+        }
+    }
+
+    /// The built-in chat, kept intact behind the engine toggle in Settings.
+    private var legacyChat: some View {
         @Bindable var model = model
 
         // A plain split rather than a nested NavigationSplitView. Nesting one inside the
         // window's own split view produced two sidebars side by side, each too narrow to show
         // a conversation title or the search field without truncating it.
-        HStack(spacing: 0) {
+        return HStack(spacing: 0) {
             conversationList
                 .frame(width: 248)
             Divider()

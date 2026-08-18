@@ -3,6 +3,14 @@ import ServiceManagement
 import SiliconCore
 import SiliconRuntime
 
+/// Which implementation serves the Chat tab.
+public enum ChatEngine: String, Codable, Sendable, CaseIterable {
+    /// The DeepSeek Harness web UI: an agent with tools, web fetch and search.
+    case harness
+    /// The built-in native chat, talking straight to the local server.
+    case legacy
+}
+
 /// User preferences, persisted to `UserDefaults`.
 public struct Settings: Codable, Sendable, Equatable {
 
@@ -34,6 +42,27 @@ public struct Settings: Codable, Sendable, Equatable {
     /// 30B mixture-of-experts matched it exactly — so a single global factor learned from one
     /// model actively corrupts predictions for every other one.
     public var speedCalibrations: [String: Double] = [:]
+
+    // Chat engine
+    //
+    // The new fields are optionals so that settings saved by an older build — whose JSON
+    // lacks these keys — still decode instead of silently resetting everything to defaults.
+
+    /// Raw storage for `chatEngine`; nil means the default.
+    public var chatEngineRaw: String?
+    /// Port the harness web UI binds. Chosen once and persisted so harness state, sessions
+    /// and the embedded page all keep their addresses across launches.
+    public var harnessWebPort: Int?
+    /// Port the local inference server binds, which the harness's provider entry points at.
+    /// Stable for the same reason: the generated provider config should never go stale.
+    public var harnessInferencePort: Int?
+    /// Manual Node.js path for setups the automatic search cannot see.
+    public var nodeBinaryPath: String?
+
+    public var chatEngine: ChatEngine {
+        get { chatEngineRaw.flatMap(ChatEngine.init(rawValue:)) ?? .harness }
+        set { chatEngineRaw = newValue.rawValue }
+    }
 
     // Credentials
     public var huggingFaceToken = ""

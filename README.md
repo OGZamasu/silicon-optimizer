@@ -48,6 +48,14 @@ precision, is the lever that matters: asking for 4-bit barely moves the peak.
 **Talks to Claude and ChatGPT.** A bundled MCP server exposes the hardware profile, the planner,
 the catalog and the loaded model as tools. See [MCP setup](#use-from-claude-or-chatgpt).
 
+**Chats through an agent harness.** The Chat tab runs [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+on top of the locally served model, so a chat can fetch web pages, search, read and edit files in
+a workspace, and run commands with your approval — instead of only talking. The harness runs
+locally on Node.js (`brew install node`); the app starts it on demand, points it at its own
+llama-server, and embeds its UI. Web search needs a provider key (DeepSeek, Exa, or Perplexity),
+added inside the harness's settings; web fetch works without one. Prefer the plain streaming
+chat? Settings → Chat → Built-in switches back.
+
 ---
 
 ## Install

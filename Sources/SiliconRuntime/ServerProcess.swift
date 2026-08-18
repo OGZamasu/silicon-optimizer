@@ -24,6 +24,7 @@ actor ServerProcess {
         executable: URL,
         arguments: [String],
         environment: [String: String] = [:],
+        currentDirectory: URL? = nil,
         onLogLine: (@Sendable (String) -> Void)? = nil
     ) throws {
         precondition(process == nil, "ServerProcess is single-use per load")
@@ -31,6 +32,9 @@ actor ServerProcess {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        if let currentDirectory {
+            process.currentDirectoryURL = currentDirectory
+        }
 
         var mergedEnvironment = ProcessInfo.processInfo.environment
         mergedEnvironment.merge(environment) { _, new in new }
@@ -91,6 +95,12 @@ actor ServerProcess {
         }
         self.process = nil
         self.logHandler = nil
+    }
+
+    /// Process identifier, or nil when nothing is running.
+    var pid: Int32? {
+        guard let process, process.isRunning else { return nil }
+        return process.processIdentifier
     }
 
     /// Exit status, or nil while still running.

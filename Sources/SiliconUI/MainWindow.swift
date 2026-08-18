@@ -12,7 +12,7 @@ public struct MainWindow: View {
     public var body: some View {
         @Bindable var model = model
 
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $model.chatColumnVisibility) {
             List(selection: $model.selectedTab) {
                 ForEach(AppModel.Tab.allCases) { tab in
                     Label(tab.rawValue, systemImage: tab.systemImage)
@@ -37,6 +37,12 @@ public struct MainWindow: View {
             }
         }
         .frame(minWidth: 940, minHeight: 620)
+        .onChange(of: model.selectedTab) {
+            // The expanded chat borrows the whole window; leaving the tab gives it back.
+            if model.selectedTab != .chat {
+                model.chatColumnVisibility = .all
+            }
+        }
         .alert(item: $model.alert) { alert in
             Alert(
                 title: Text(alert.title),

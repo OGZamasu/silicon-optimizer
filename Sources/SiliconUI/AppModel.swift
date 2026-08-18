@@ -66,6 +66,18 @@ public final class AppModel {
     /// The live runtime, for the control API to send prompts through.
     var activeRuntime: (any InferenceRuntime)? { runtime }
 
+    // MARK: - Harness chat
+
+    /// State of the DeepSeek Harness sidecar that serves the agentic chat.
+    public internal(set) var harnessState: RuntimeState = .idle
+    var harnessRuntime: HarnessRuntime?
+    /// Ports for this app session, resolved once from the persisted choice after checking it
+    /// is still free — a crashed predecessor can leave a squatter on it.
+    var resolvedHarnessPorts: (web: Int, inference: Int)?
+    /// The harness process id, kept here so app termination can reach it synchronously.
+    var harnessProcessID: Int32?
+    var harnessTerminationRegistered = false
+
     // MARK: - Chat
 
     public var conversations: [Conversation] = [] {
@@ -86,6 +98,9 @@ public final class AppModel {
 
     public var selectedTab: Tab = .dashboard
     public var alert: AlertContent?
+    /// Sidebar visibility for the main window, so the harness chat can take the whole
+    /// window over and give it back.
+    public var chatColumnVisibility: NavigationSplitViewVisibility = .all
 
     public enum Tab: String, CaseIterable, Identifiable, Hashable {
         case dashboard = "Dashboard"
@@ -637,13 +652,51 @@ public final class AppModel {
         guard idleSeconds >= Double(settings.idleUnloadMinutes) * 60 else { return }
 
         Task {
-            // Re-check after the hop: the user may have started generating in the meantime.
+            // App-side accounting cannot see clients that talk to the server directly over
+            // HTTP — the harness above all. A 29-minute agent turn looks exactly like 29
+            // minutes of idleness from here, so the server itself gets the last word.
+            switch await serverBusyVerdict() {
+            case .some(true):
+                noteActivity()
+                return
+            case .none:
+                // Could not tell (no /slots on this backend, or the server was too busy to
+                // answer). While the harness is up, killing a possibly-active generation is
+                // the worse mistake; without it, this is the same dead server it always was.
+                if settings.chatEngine == .harness, case .ready = harnessState {
+                    noteActivity()
+                    return
+                }
+            case .some(false):
+                break
+            }
+            // Re-check after the hops: the user may have started generating in the meantime.
             guard !isGenerating, loadedModel != nil else { return }
             await unload()
             runtimeState = .idle
         }
         // Reset immediately so the unload is not queued repeatedly while it runs.
         lastActivityAt = Date()
+    }
+
+    /// Asks the running server whether a generation is in flight. Returns nil when the
+    /// question cannot be answered — an unreachable server, or a backend without `/slots`.
+    private func serverBusyVerdict() async -> Bool? {
+        guard case .ready(let endpoint) = runtimeState else { return false }
+        var request = URLRequest(url: endpoint.appendingPathComponent("slots"))
+        request.timeoutInterval = 3
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let slots = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+
+        return slots.contains { slot in
+            // The field has been renamed across llama.cpp versions; accept either spelling.
+            if let processing = slot["is_processing"] as? Bool { return processing }
+            if let state = slot["state"] as? Int { return state != 0 }
+            return false
+        }
     }
 
     /// Wired memory held by everything other than our own model.
@@ -932,7 +985,11 @@ public final class AppModel {
         await unload()
         noteActivity()
 
-        let resolved = configuration ?? defaultConfiguration(for: model)
+        // Harness chat needs headroom for its system prompt and tools; raise the context when
+        // memory allows, whichever path chose the configuration.
+        let resolved = harnessContextAdjusted(
+            configuration ?? defaultConfiguration(for: model), for: model
+        )
 
         do {
             let selection = try selector.select(model: model, configuration: resolved)
@@ -951,10 +1008,17 @@ public final class AppModel {
             }
 
             try await runtime.start(LoadRequest(
-                model: model, configuration: resolved, extraArguments: extraArguments
+                model: model, configuration: resolved,
+                // A stable port rather than an ephemeral one, so the harness's generated
+                // provider config keeps pointing at a live server across model switches.
+                port: harnessPorts().inference,
+                extraArguments: extraArguments
             ))
             loadedModel = model
             activeConfiguration = resolved
+            // The harness reads its settings document per request, so telling it the new
+            // model's name and true context takes effect from the next message.
+            refreshHarnessProviderIfNeeded()
         } catch {
             runtimeState = .failed(message: error.localizedDescription)
             alert = AlertContent(
