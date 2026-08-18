@@ -57,23 +57,11 @@ public struct MainWindow: View {
         .onDisappear {
             NSApp.setActivationPolicy(.accessory)
         }
-        .alert(item: $model.alert) { alert in
-            if let linkTitle = alert.linkTitle, let url = alert.linkURL {
-                Alert(
-                    title: Text(alert.title),
-                    message: Text(alert.message),
-                    primaryButton: .default(Text(linkTitle)) {
-                        NSWorkspace.shared.open(url)
-                    },
-                    secondaryButton: .cancel(Text("OK"))
-                )
-            } else {
-                Alert(
-                    title: Text(alert.title),
-                    message: Text(alert.message),
-                    dismissButton: .default(Text("OK"))
-                )
-            }
+        // A custom sheet rather than .alert: the system alert on macOS is a narrow column
+        // that word-wraps a two-sentence message into nine lines and stacks its buttons.
+        // This one reads like a paragraph and keeps both buttons on one row.
+        .sheet(item: $model.alert) { alert in
+            AlertDialog(content: alert) { model.alert = nil }
         }
     }
 
@@ -210,5 +198,39 @@ struct TransfersFooter: View {
 extension AppModel.AlertContent: Equatable {
     public static func == (lhs: AppModel.AlertContent, rhs: AppModel.AlertContent) -> Bool {
         lhs.id == rhs.id
+    }
+}
+
+/// The app's alert: comfortable reading width, message set as a paragraph, and every
+/// button on one row — with an optional link button for errors whose fix lives on a
+/// web page (a licence gate, a model card).
+struct AlertDialog: View {
+    let content: AppModel.AlertContent
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(content.title)
+                .font(.title3.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(content.message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                Spacer()
+                if let linkTitle = content.linkTitle, let url = content.linkURL {
+                    Button(linkTitle) { NSWorkspace.shared.open(url) }
+                        .buttonStyle(.bordered)
+                }
+                Button("OK", action: dismiss)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            }
+            .controlSize(.large)
+        }
+        .padding(24)
+        .frame(width: 480)
     }
 }

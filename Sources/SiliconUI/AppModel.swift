@@ -253,7 +253,13 @@ public final class AppModel {
             } catch is CancellationError {
                 self?.imageDownloads[entry.id] = nil
             } catch {
-                self?.imageDownloads[entry.id]?.error = error.localizedDescription
+                // The gated case gets the token-aware guidance instead of the generic
+                // "add a token" — which is wrong advice for anyone who already has one.
+                if case DiffusionInstaller.InstallError.accessDenied = error, let self {
+                    self.imageDownloads[entry.id]?.error = self.gatedGuidance(for: entry)
+                } else {
+                    self?.imageDownloads[entry.id]?.error = error.localizedDescription
+                }
             }
         }
     }
@@ -449,12 +455,9 @@ public final class AppModel {
                     )
                     alert = AlertContent(
                         title: "\(entry.name) needs a licence agreement",
-                        message: "\(entry.name) is gated on Hugging Face "
-                            + "(\(entry.repository)). Open the licence page, sign in, and "
-                            + "accept or request access. Then check that your access token "
-                            + "is in Settings → Credentials, and try again.",
+                        message: gatedGuidance(for: entry),
                         linkTitle: "Open licence page",
-                        linkURL: URL(string: "https://huggingface.co/\(entry.repository)")
+                        linkURL: Self.licenceURL(for: entry.repository)
                     )
                 } else {
                     imageState = .failed(message: error.localizedDescription)
@@ -466,6 +469,24 @@ public final class AppModel {
                 imageWasCancelled = false
             }
         }
+    }
+
+    /// Gated-model guidance that respects what is already done: telling someone to add a
+    /// token they already added sends them hunting in the wrong place, so the message
+    /// changes depending on whether Settings holds one.
+    public func gatedGuidance(for entry: DiffusionEntry) -> String {
+        let base = "\(entry.name) is gated on Hugging Face (\(entry.repository)). "
+            + "Open the licence page, sign in, and accept or request access."
+        if settings.huggingFaceToken.isEmpty {
+            return base + " Then add your access token in Settings → Credentials and "
+                + "try again."
+        }
+        return base + " Your access token is already in Settings, so the licence is the "
+            + "only missing step — then try again."
+    }
+
+    public static func licenceURL(for repository: String) -> URL? {
+        URL(string: "https://huggingface.co/\(repository)")
     }
 
     /// Explains a refusal, naming the loaded language model when that is the thing in the way.

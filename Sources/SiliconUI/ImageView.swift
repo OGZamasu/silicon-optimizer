@@ -66,14 +66,25 @@ struct ImageView: View {
 
                 if let entry = currentEntry {
                     if entry.isGated {
-                        Label(
-                            "Gated on Hugging Face. Accept its licence there and add a token in "
-                            + "Settings before generating.",
-                            systemImage: "lock"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label(
+                                model.settings.huggingFaceToken.isEmpty
+                                    ? "Gated on Hugging Face — accept its licence there, and "
+                                        + "add a token in Settings."
+                                    : "Gated on Hugging Face — your token is set; it just "
+                                        + "needs its licence accepted once.",
+                                systemImage: "lock"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                            if let url = AppModel.licenceURL(for: entry.repository) {
+                                Button("Open licence page") { NSWorkspace.shared.open(url) }
+                                    .buttonStyle(.link)
+                                    .controlSize(.small)
+                                    .font(.caption)
+                            }
+                        }
                     }
                     Text(entry.summary)
                         .font(.caption)
@@ -270,6 +281,12 @@ struct ImageView: View {
                         .font(.caption2)
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
+                    if entry.isGated, let url = AppModel.licenceURL(for: entry.repository) {
+                        Button("Open licence page") { NSWorkspace.shared.open(url) }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                            .font(.caption2)
+                    }
                 }
             }
             .padding(9)

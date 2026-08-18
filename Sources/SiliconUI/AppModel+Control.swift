@@ -426,24 +426,33 @@ extension AppModel {
         defer { imageState = .idle; imageProgress = nil }
 
         var result: ImageResult?
-        for try await event in try await MFluxRuntime(
-            installation: installation, huggingFaceToken: settings.huggingFaceToken
-        ).generate(
-            ImageRequest(
-                prompt: request.prompt, configuration: configuration,
-                seed: request.seed, output: output
-            ),
-            model: carrier
-        ) {
-            switch event {
-            case .stage(let stage): imageState = .starting(stage: stage)
-            case .step(let index, let total):
-                imageProgress = (index, total)
-                imageState = .starting(stage: "Denoising \(index)/\(total)…")
-            case .finished(let finished):
-                result = finished
-                generatedImages.insert(finished, at: 0)
+        do {
+            for try await event in try await MFluxRuntime(
+                installation: installation, huggingFaceToken: settings.huggingFaceToken
+            ).generate(
+                ImageRequest(
+                    prompt: request.prompt, configuration: configuration,
+                    seed: request.seed, output: output
+                ),
+                model: carrier
+            ) {
+                switch event {
+                case .stage(let stage): imageState = .starting(stage: stage)
+                case .step(let index, let total):
+                    imageProgress = (index, total)
+                    imageState = .starting(stage: "Denoising \(index)/\(total)…")
+                case .finished(let finished):
+                    result = finished
+                    generatedImages.insert(finished, at: 0)
+                }
             }
+        } catch ImageRuntimeError.gated {
+            // An agent needs the same things a person does: which model, and where the
+            // licence lives.
+            throw ImageRuntimeError.generationFailed(
+                gatedGuidance(for: entry)
+                    + " Licence page: https://huggingface.co/\(entry.repository)"
+            )
         }
 
         guard let result else { throw ImageRuntimeError.noImageProduced }
