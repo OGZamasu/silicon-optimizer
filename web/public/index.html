@@ -904,34 +904,58 @@ python3 -m venv ~/.silicon-mlx
         ctx.stroke();
       }
 
+      // The wavefront is deliberately not a circle. Each grid crossing carries
+      // a per-ripple radius offset (stable while it expands, so the ragged
+      // shape reads as one physical discharge), and every frame re-rolls each
+      // segment's brightness — with occasional dropouts — for static crackle.
       octx.clearRect(0, 0, W, H);
       octx.globalCompositeOperation = 'lighter';
       octx.lineWidth = 2;
       octx.lineCap = 'round';
+      octx.strokeStyle = rgba(TEAL, 1);
+      const hash = t => { const s = Math.sin(t) * 43758.5453; return s - Math.floor(s); };
+      const crack = (vert, linePos, along, len, a) => {
+        if (Math.random() < 0.14) return;
+        octx.globalAlpha = a * (0.45 + 0.55 * Math.random());
+        octx.beginPath();
+        if (vert) { octx.moveTo(linePos, along - len / 2); octx.lineTo(linePos, along + len / 2); }
+        else { octx.moveTo(along - len / 2, linePos); octx.lineTo(along + len / 2, linePos); }
+        octx.stroke();
+      };
       for (let i = ripples.length - 1; i >= 0; i--) {
         const r = ripples[i];
         const p = (now - r.t0) / r.dur;
         if (p >= 1) { ripples.splice(i, 1); continue; }
-        const rad = 26 + (1 - Math.pow(1 - p, 3)) * r.max;
+        const front = 26 + (1 - Math.pow(1 - p, 3)) * r.max;
         const seg = 12 + 26 * (1 - p);
-        octx.strokeStyle = rgba(TEAL, (1 - p) * 0.65);
-        octx.beginPath();
-        const k0 = Math.ceil((r.x - rad - LINE) / GRID), k1 = Math.floor((r.x + rad - LINE) / GRID);
+        const base = (1 - p) * 0.75;
+        const reach = front + r.rag;
+        const k0 = Math.ceil((r.x - reach - LINE) / GRID), k1 = Math.floor((r.x + reach - LINE) / GRID);
         for (let k = k0; k <= k1; k++) {
           const x = k * GRID + LINE;
-          const dy = Math.sqrt(Math.max(0, rad * rad - (x - r.x) * (x - r.x)));
-          octx.moveTo(x, r.y - dy - seg / 2); octx.lineTo(x, r.y - dy + seg / 2);
-          octx.moveTo(x, r.y + dy - seg / 2); octx.lineTo(x, r.y + dy + seg / 2);
+          const radK = front + (hash(r.seed + k * 12.9898) - 0.5) * 2 * r.rag;
+          const q = radK * radK - (x - r.x) * (x - r.x);
+          if (q <= 0) continue;
+          const dy = Math.sqrt(q);
+          const lenA = seg * (0.6 + 0.8 * hash(r.seed * 1.7 + k * 7.13));
+          const lenB = seg * (0.6 + 0.8 * hash(r.seed * 2.3 + k * 5.41));
+          crack(true, x, r.y - dy, lenA, base);
+          crack(true, x, r.y + dy, lenB, base);
         }
-        const j0 = Math.ceil((r.y - rad - LINE) / GRID), j1 = Math.floor((r.y + rad - LINE) / GRID);
+        const j0 = Math.ceil((r.y - reach - LINE) / GRID), j1 = Math.floor((r.y + reach - LINE) / GRID);
         for (let j = j0; j <= j1; j++) {
           const y = j * GRID + LINE;
-          const dx = Math.sqrt(Math.max(0, rad * rad - (y - r.y) * (y - r.y)));
-          octx.moveTo(r.x - dx - seg / 2, y); octx.lineTo(r.x - dx + seg / 2, y);
-          octx.moveTo(r.x + dx - seg / 2, y); octx.lineTo(r.x + dx + seg / 2, y);
+          const radJ = front + (hash(r.seed * 3.1 + j * 9.871) - 0.5) * 2 * r.rag;
+          const q = radJ * radJ - (y - r.y) * (y - r.y);
+          if (q <= 0) continue;
+          const dx = Math.sqrt(q);
+          const lenA = seg * (0.6 + 0.8 * hash(r.seed * 4.7 + j * 6.29));
+          const lenB = seg * (0.6 + 0.8 * hash(r.seed * 5.9 + j * 8.53));
+          crack(false, y, r.x - dx, lenA, base);
+          crack(false, y, r.x + dx, lenB, base);
         }
-        octx.stroke();
       }
+      octx.globalAlpha = 1;
       octx.globalCompositeOperation = 'source-over';
 
       ctx.globalCompositeOperation = 'source-over';
@@ -964,7 +988,13 @@ python3 -m venv ~/.silicon-mlx
 
     addEventListener('pointerdown', e => {
       if (e.button > 0) return;
-      ripples.push({ x: e.clientX, y: e.clientY, t0: performance.now(), dur: 800, max: 230 });
+      ripples.push({
+        x: e.clientX, y: e.clientY, t0: performance.now(),
+        dur: 700 + Math.random() * 250,
+        max: 200 + Math.random() * 70,
+        rag: 11 + Math.random() * 15,
+        seed: Math.random() * 100,
+      });
       if (ripples.length > 4) ripples.shift();
       wake();
     });
