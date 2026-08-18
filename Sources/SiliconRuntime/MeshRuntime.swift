@@ -170,12 +170,19 @@ public enum MeshLocator {
     public static func hunyuan(base: URL, weightsSlot: String) -> MeshInstallation {
         let package = base.appendingPathComponent("hunyuan3d-swift")
         guard hy3dExecutable(base: base) != nil else {
+            guard FileManager.default.fileExists(atPath: package.path) else {
+                return MeshInstallation(
+                    isInstalled: false,
+                    missing: .engine,
+                    detail: "The Hunyuan engine isn't set up on this Mac. In Settings → "
+                        + "3D toolkit, point the trellis2 folder at where it's installed."
+                )
+            }
             return MeshInstallation(
                 isInstalled: false,
                 missing: .engine,
-                detail: "The Hunyuan engine needs a one-time build on this Mac. In Terminal: "
-                    + "cd \"\(package.path)\" && xcodebuild -scheme hy3d -configuration "
-                    + "Release -derivedDataPath .xcbuild build"
+                detail: "The Hunyuan engine needs a one-time build on this Mac — a few "
+                    + "minutes, and the app can do it for you."
             )
         }
         let weights = package.appendingPathComponent("weights/\(weightsSlot)")

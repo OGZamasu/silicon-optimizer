@@ -295,11 +295,63 @@ struct MeshView: View {
                     )
                 }
                 .controlSize(.small)
+            } else if installation.missing == .engine, entry.backend == .hunyuan,
+                      FileManager.default.fileExists(
+                          atPath: model.settings.resolvedTrellisBaseDirectory
+                              .appendingPathComponent("hunyuan3d-swift").path
+                      ) {
+                repairRow(id: "hy3d-build", buttonTitle: "Build it for me") {
+                    model.buildHy3DEngine()
+                }
             }
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary, in: .rect(cornerRadius: 7))
+    }
+
+    /// The button that runs the fix, and its running/failed states — the app's answer to
+    /// error messages that used to dictate Terminal commands.
+    @ViewBuilder
+    private func repairRow(
+        id: String, buttonTitle: String, action: @escaping () -> Void
+    ) -> some View {
+        if let repair = model.repairs[id] {
+            if let error = repair.error {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Button("Try again") {
+                    model.cancelRepair(id)
+                    action()
+                }
+                .controlSize(.small)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(repair.stage)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer()
+                    Button {
+                        model.cancelRepair(id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .imageScale(.small)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop")
+                }
+            }
+        } else {
+            Button(buttonTitle, systemImage: "hammer") { action() }
+                .controlSize(.small)
+        }
     }
 
     @ViewBuilder

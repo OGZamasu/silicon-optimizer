@@ -712,6 +712,175 @@ public final class AppModel {
         meshDownloads[id] = nil
     }
 
+    // MARK: - In-app repairs
+
+    /// A fix the app runs itself instead of dictating a Terminal command. If the error
+    /// message knows the exact command, the button belongs next to the message.
+    @Observable
+    public final class RepairJob: Identifiable {
+        public let id: String
+        public var stage: String = "Starting…"
+        public var error: String?
+        var task: Task<Void, Never>?
+        @ObservationIgnored var lastStageUpdate = Date.distantPast
+
+        init(id: String) { self.id = id }
+    }
+
+    public private(set) var repairs: [String: RepairJob] = [:]
+
+    public struct RepairStep: Sendable {
+        public var executable: URL
+        public var arguments: [String]
+        public var currentDirectory: URL?
+        /// Shown while this step runs, ahead of the tool's own output.
+        public var label: String
+    }
+
+    /// Runs the steps in order, streaming the tool's output into `stage` (throttled — a
+    /// compiler emits thousands of lines), and re-probes on success.
+    func runRepair(id: String, steps: [RepairStep], onSuccess: @escaping @MainActor () -> Void) {
+        guard repairs[id] == nil else { return }
+        let job = RepairJob(id: id)
+        repairs[id] = job
+
+        job.task = Task { [weak self] in
+            for step in steps {
+                await MainActor.run { job.stage = step.label }
+                let outcome = await Self.runProcess(step: step) { line in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        let job = self.repairs[id]
+                        guard let job, Date().timeIntervalSince(job.lastStageUpdate) > 0.25
+                        else { return }
+                        job.lastStageUpdate = Date()
+                        job.stage = "\(step.label) \(line)"
+                    }
+                }
+                if Task.isCancelled { return }
+                if let failure = outcome {
+                    await MainActor.run { job.error = failure }
+                    return
+                }
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.repairs[id] = nil
+                onSuccess()
+            }
+        }
+    }
+
+    public func cancelRepair(_ id: String) {
+        repairs[id]?.task?.cancel()
+        repairs[id] = nil
+    }
+
+    /// Runs one process to completion off the main actor; returns nil on success or a
+    /// human-sized failure message.
+    private nonisolated static func runProcess(
+        step: RepairStep, onLine: @Sendable @escaping (String) -> Void
+    ) async -> String? {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = step.executable
+            process.arguments = step.arguments
+            if let cwd = step.currentDirectory { process.currentDirectoryURL = cwd }
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            process.standardInput = FileHandle.nullDevice
+
+            let tail = TailBox()
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                for line in String(decoding: data, as: UTF8.self)
+                    .split(separator: "\n", omittingEmptySubsequences: true)
+                {
+                    let text = String(line).trimmingCharacters(in: .whitespaces)
+                    guard !text.isEmpty else { continue }
+                    tail.append(text)
+                    onLine(text)
+                }
+            }
+            process.terminationHandler = { finished in
+                pipe.fileHandleForReading.readabilityHandler = nil
+                if finished.terminationStatus == 0 {
+                    continuation.resume(returning: nil)
+                } else {
+                    continuation.resume(returning: tail.lastLines(4).joined(separator: "\n"))
+                }
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: error.localizedDescription)
+            }
+        }
+    }
+
+    /// Bounded, lock-guarded tail of a process's output for failure messages.
+    private final class TailBox: @unchecked Sendable {
+        private var lines: [String] = []
+        private let lock = NSLock()
+        func append(_ line: String) {
+            lock.lock()
+            lines.append(line)
+            if lines.count > 40 { lines.removeFirst(lines.count - 40) }
+            lock.unlock()
+        }
+        func lastLines(_ count: Int) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return Array(lines.suffix(count))
+        }
+    }
+
+    /// The one-time hy3d build, run for the user — xcodebuild because command-line SwiftPM
+    /// never compiles mlx-swift's Metal shaders.
+    public func buildHy3DEngine() {
+        let package = settings.resolvedTrellisBaseDirectory
+            .appendingPathComponent("hunyuan3d-swift")
+        runRepair(id: "hy3d-build", steps: [
+            RepairStep(
+                executable: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                arguments: [
+                    "-scheme", "hy3d", "-configuration", "Release",
+                    "-destination", "platform=macOS,arch=arm64",
+                    "-derivedDataPath", ".xcbuild", "build",
+                ],
+                currentDirectory: package,
+                label: "Building the engine —"
+            ),
+        ]) { [weak self] in
+            self?.refreshMeshInstallations()
+        }
+    }
+
+    /// Sets up MFLUX for image generation: a private Python environment plus the package.
+    /// The venv step is instant; the install downloads a few hundred megabytes.
+    public func installMFlux() {
+        let venv = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".silicon-mlx")
+        runRepair(id: "mflux-install", steps: [
+            RepairStep(
+                executable: URL(fileURLWithPath: "/usr/bin/python3"),
+                arguments: ["-m", "venv", venv.path],
+                currentDirectory: nil,
+                label: "Creating the Python environment —"
+            ),
+            RepairStep(
+                executable: venv.appendingPathComponent("bin/pip"),
+                arguments: ["install", "--upgrade", "mflux"],
+                currentDirectory: nil,
+                label: "Installing MFLUX —"
+            ),
+        ]) { [weak self] in
+            self?.rediscoverRuntimes()
+        }
+    }
+
     // MARK: - Image-to-3D chaining
 
     /// Set while a "describe it" draft from the 3D tab is rendering: the next finished image

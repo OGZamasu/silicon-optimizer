@@ -208,13 +208,58 @@ struct ImageView: View {
                 queueList
 
                 if model.imageRuntime == nil {
-                    Label(
-                        "MFLUX is not installed. Run `pip install mflux` in a Python environment.",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            "MFLUX, the engine that draws the images, isn't installed yet — "
+                                + "the app can set it up for you (a few hundred megabytes).",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        if let repair = model.repairs["mflux-install"] {
+                            if let error = repair.error {
+                                Text(error)
+                                    .font(.caption2)
+                                    .foregroundStyle(.red)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                                Button("Try again") {
+                                    model.cancelRepair("mflux-install")
+                                    model.installMFlux()
+                                }
+                                .controlSize(.small)
+                            } else {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text(repair.stage)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                    Spacer()
+                                    Button {
+                                        model.cancelRepair("mflux-install")
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .imageScale(.small)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Stop")
+                                }
+                            }
+                        } else {
+                            Button("Install MFLUX for me", systemImage: "hammer") {
+                                model.installMFlux()
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.background.secondary, in: .rect(cornerRadius: 7))
                 }
             }
         }
