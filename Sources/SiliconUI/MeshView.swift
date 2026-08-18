@@ -607,7 +607,8 @@ struct MeshView: View {
         return parts.joined(separator: " + ")
     }
 
-    /// "Open in…" — Fusion 360 first when installed, then every app that claims the file.
+    /// "Open in…" — the modelling tools people actually use first (Fusion 360, Blender)
+    /// when installed, then every app that claims the file.
     private func openExternallyMenu(file: URL, result: MeshResult) -> some View {
         Menu {
             // Fusion 360 imports OBJ, not GLB, so hand it the OBJ when there is one.
@@ -619,6 +620,16 @@ struct MeshView: View {
                         configuration: NSWorkspace.OpenConfiguration()
                     )
                 }
+            }
+            // Blender only auto-opens .blend files, so "open with" would show an empty
+            // scene. Launching it with an import expression puts the mesh on screen —
+            // the GLB when there is one, since its glTF importer carries the textures.
+            if let blender = Self.blender {
+                Button("Blender") {
+                    Self.openInBlender(blender, file: result.glb ?? file)
+                }
+            }
+            if Self.fusion360 != nil || Self.blender != nil {
                 Divider()
             }
             ForEach(Self.applications(for: file), id: \.self) { app in
@@ -656,12 +667,47 @@ struct MeshView: View {
             .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    static var blender: URL? {
+        let candidates = [
+            "/Applications/Blender.app",
+            NSHomeDirectory() + "/Applications/Blender.app",
+        ]
+        return candidates.map { URL(fileURLWithPath: $0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Launches Blender importing the mesh: glTF importer for GLB (textures included),
+    /// the OBJ importer otherwise.
+    static func openInBlender(_ app: URL, file: URL) {
+        let binary = app.appendingPathComponent("Contents/MacOS/Blender")
+        let path = file.path.replacingOccurrences(of: "'", with: "\\'")
+        let ext = file.pathExtension.lowercased()
+        let expression = ext == "glb" || ext == "gltf"
+            ? "import bpy; bpy.ops.import_scene.gltf(filepath='\(path)')"
+            : "import bpy; bpy.ops.wm.obj_import(filepath='\(path)')"
+
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            NSWorkspace.shared.open(
+                [file], withApplicationAt: app,
+                configuration: NSWorkspace.OpenConfiguration()
+            )
+            return
+        }
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = ["--python-expr", expression]
+        try? process.run()
+    }
+
     static func applications(for file: URL) -> [URL] {
         var seen = Set<String>()
         return NSWorkspace.shared.urlsForApplications(toOpen: file)
             .filter { app in
                 let name = applicationName(app)
-                guard name != "Silicon Optimizer", !name.isEmpty else { return false }
+                // Blender is offered above with a real import; a duplicate entry here
+                // would be the broken empty-scene version of the same words.
+                guard name != "Silicon Optimizer", name != "Blender", !name.isEmpty
+                else { return false }
                 return seen.insert(name).inserted
             }
     }
