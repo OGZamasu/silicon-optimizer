@@ -874,6 +874,20 @@ public final class AppModel {
                 ) {
                     llm.availableModels = parseModelList(listJSON)
                 }
+                // The status payload says what the node *thinks* it is serving; the
+                // engine's own model list is what completions actually accept. The two
+                // have disagreed in the wild ("qwen3.8.27b" vs "qwen3.8-27b"), and every
+                // chat request 404s until the engine's spelling wins.
+                if llm.running, let baseString = llm.openAIBase,
+                   let engineBase = URL(string: baseString),
+                   let served = await fetchJSON(
+                       engineBase.appendingPathComponent("models"), token: token
+                   ) {
+                    let ids = parseModelList(served)
+                    if let match = ids.first(where: { $0 == llm.model }) ?? ids.first {
+                        llm.model = match
+                    }
+                }
                 status.llm = llm
             }
         }

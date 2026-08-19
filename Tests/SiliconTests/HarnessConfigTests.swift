@@ -180,6 +180,28 @@ struct HarnessConfigTests {
         #expect(HarnessRuntime.swarmConfiguration(existing: nil, providers: []) == nil)
     }
 
+    /// The exact failure from the wild: the node renamed its model ("qwen3.8.27b" →
+    /// "qwen3.8-27b"), the harness's remembered pick still said the old spelling, and
+    /// every request 404ed. The sync must repair its own provider's dangling reference —
+    /// and only its own.
+    @Test func repairsTheHarnessesRememberedPickWhenTheModelIDChanges() {
+        let existing = """
+        agent-default-model:
+          provider: silicon-swarm-silicon-node
+          model: qwen3.8.27b
+        other-default:
+          provider: someone-elses
+          model: qwen3.8.27b
+        """
+        let document = HarnessRuntime.swarmConfiguration(existing: existing, providers: [node])
+
+        #expect(document?.contains("  model: qwen3.8-27b") == true)
+        // The foreign block keeps its value — it is not ours to correct.
+        let stale = (document ?? "").components(separatedBy: "model: qwen3.8.27b").count - 1
+        #expect(stale == 1)
+        #expect(document?.contains("provider: someone-elses") == true)
+    }
+
     @Test func peerNamesBecomeSafeProviderIDs() {
         #expect(
             HarnessRuntime.SwarmProvider.providerID(peerName: "My PC #2")

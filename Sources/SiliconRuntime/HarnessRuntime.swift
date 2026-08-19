@@ -453,8 +453,33 @@ public actor HarnessRuntime {
             ) { indent in
                 swarmProviderLines(indent: indent, provider: provider)
             }
+            document = repairingDefaultModelReference(in: document, provider: provider)
         }
         return document
+    }
+
+    /// The harness remembers the user's picked model as a provider/model pair it writes
+    /// itself. When a node renames its model, that stored reference dangles — every
+    /// request 404s until the user re-picks. A dangling reference to one of our own
+    /// managed providers is ours to repair; anything else in the file stays untouched.
+    private static func repairingDefaultModelReference(
+        in document: String, provider: SwarmProvider
+    ) -> String {
+        var lines = document.components(separatedBy: "\n")
+        for index in lines.indices {
+            guard lines[index].trimmingCharacters(in: .whitespaces)
+                == "provider: \(provider.providerID)" else { continue }
+            for neighbor in [index + 1, index - 1] where lines.indices.contains(neighbor) {
+                let trimmed = lines[neighbor].trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("model: ") else { continue }
+                let current = String(trimmed.dropFirst("model: ".count))
+                if current != provider.modelID {
+                    let indent = String(lines[neighbor].prefix { $0 == " " })
+                    lines[neighbor] = "\(indent)model: \(provider.modelID)"
+                }
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     private static func managedSwarmIDs(in document: String) -> [String] {
