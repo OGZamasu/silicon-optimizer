@@ -104,7 +104,11 @@ struct TrackerCard: View {
                     .toggleStyle(.checkbox)
                 Toggle("Upper body", isOn: $model.trackBody)
                     .toggleStyle(.checkbox)
-                    .help("Reads shoulders, lean and hands as well as the face")
+                    .help("Reads shoulders, lean and where the hands are")
+                Toggle("Fingers", isOn: $model.trackHands)
+                    .toggleStyle(.checkbox)
+                    .help("Reads every finger joint and sends them as VMC finger "
+                        + "bones — for a rigged model with hands")
                 HStack(spacing: 6) {
                     Text("Smoothing")
                     Slider(value: $model.trackerSmoothing, in: 0.1...0.9)

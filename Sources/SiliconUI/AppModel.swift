@@ -1919,6 +1919,8 @@ public final class AppModel {
     public var trackerSmoothing = 0.45
     /// Whether the upper body is tracked as well as the face.
     public var trackBody = false
+    /// Whether fingers are tracked — another model per frame, so it is opt-in.
+    public var trackHands = false
 
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {

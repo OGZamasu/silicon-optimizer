@@ -38,7 +38,8 @@ extension AppModel {
             oscHost: settings.sendVMC
                 ? settings.vmcHost.trimmingCharacters(in: .whitespaces) : "",
             oscPort: settings.vmcPort,
-            trackBody: trackBody
+            trackBody: trackBody,
+            trackHands: trackHands
         )
         let runtime = trackerRuntime ?? TrackerRuntime()
         trackerRuntime = runtime
@@ -127,6 +128,16 @@ extension AppModel {
             ],
             currentDirectory: nil,
             label: "Fetching the body model —"
+        ))
+        steps.append(RepairStep(
+            executable: URL(fileURLWithPath: "/usr/bin/curl"),
+            arguments: [
+                "-sL", "--create-dirs",
+                "-o", TrackerRuntime.handModel.path,
+                TrackerRuntime.handModelURL,
+            ],
+            currentDirectory: nil,
+            label: "Fetching the hand model —"
         ))
 
         runRepair(id: "tracker-install", steps: steps) { [weak self] in

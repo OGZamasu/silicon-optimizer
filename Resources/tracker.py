@@ -39,6 +39,8 @@ STATE = {
     "body": False,
     "lean": 0.0, "shoulderTilt": 0.0, "bodyTurn": 0.0,
     "leftHand": None, "rightHand": None,
+    # Per-finger curl, 0 (straight) to 1 (closed), for each hand the camera sees.
+    "hands": {},
     "error": None,
 }
 LOCK = threading.Lock()
@@ -126,6 +128,7 @@ def main():
     parser.add_argument("--mirror", action="store_true")
     parser.add_argument("--smoothing", type=float, default=0.45)
     parser.add_argument("--pose-model", default="")
+    parser.add_argument("--hand-model", default="")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     arguments = parser.parse_args()
@@ -158,6 +161,17 @@ def main():
             )
         )
         log("Body tracking on")
+
+    hand_landmarker = None
+    if arguments.hand_model:
+        hand_landmarker = vision.HandLandmarker.create_from_options(
+            vision.HandLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=arguments.hand_model),
+                running_mode=vision.RunningMode.VIDEO,
+                num_hands=2,
+            )
+        )
+        log("Hand tracking on")
 
     sender = None
     if arguments.osc_host:
@@ -244,6 +258,8 @@ def main():
 
                 if pose_landmarker is not None:
                     read_body(pose_landmarker, image, timestamp, smoother)
+                if hand_landmarker is not None:
+                    read_hands(hand_landmarker, image, timestamp, smoother)
 
                 if sender is not None:
                     send_vmc(sender, scores, STATE)
@@ -314,6 +330,64 @@ def read_body(pose_landmarker, image, timestamp, smoother):
         )
 
 
+# Which landmarks make up each finger, in MediaPipe's hand model: the knuckle
+# first, then the joints out to the fingertip.
+FINGERS = {
+    "Thumb": (1, 2, 3, 4),
+    "Index": (5, 6, 7, 8),
+    "Middle": (9, 10, 11, 12),
+    "Ring": (13, 14, 15, 16),
+    "Little": (17, 18, 19, 20),
+}
+# VRM names each finger's three bones this way, and VMC carries VRM names.
+SEGMENTS = ("Proximal", "Intermediate", "Distal")
+
+
+def bend(a, b, c):
+    """How sharply the path a→b→c turns, 0 (straight) to 1 (folded back).
+
+    Curl is measured as an angle rather than a distance so it does not change
+    when a hand moves toward or away from the camera.
+    """
+    v1 = (b.x - a.x, b.y - a.y, b.z - a.z)
+    v2 = (c.x - b.x, c.y - b.y, c.z - b.z)
+    n1 = math.sqrt(sum(v * v for v in v1)) or 1e-6
+    n2 = math.sqrt(sum(v * v for v in v2)) or 1e-6
+    dot = sum(p * q for p, q in zip(v1, v2)) / (n1 * n2)
+    angle = math.acos(max(-1.0, min(1.0, dot)))
+    return min(1.0, angle / math.pi)
+
+
+def curls_from_hand(points):
+    """Every finger joint of one hand, as a curl from 0 to 1."""
+    values = {}
+    for finger, (knuckle, first, second, tip) in FINGERS.items():
+        chain = (points[0], points[knuckle], points[first], points[second], points[tip])
+        for index, segment in enumerate(SEGMENTS):
+            values[f"{finger}{segment}"] = round(
+                bend(chain[index], chain[index + 1], chain[index + 2]), 3
+            )
+    return values
+
+
+def read_hands(hand_landmarker, image, timestamp, smoother):
+    result = hand_landmarker.detect_for_video(image, timestamp)
+    hands = {}
+    for index, points in enumerate(result.hand_landmarks or []):
+        side = "Left"
+        if result.handedness and index < len(result.handedness):
+            # MediaPipe labels the hand as the camera sees it; a mirrored preview
+            # already flipped the picture, so the label is the character's own side.
+            side = result.handedness[index][0].category_name
+        curls = curls_from_hand(points)
+        hands[side] = {
+            key: round(smoother(f"{side}{key}", value), 3)
+            for key, value in curls.items()
+        }
+    with LOCK:
+        STATE["hands"] = hands
+
+
 def send_vmc(sender, scores, state):
     """One frame of VMC: the head bone, every blendshape, then Apply.
 
@@ -335,6 +409,15 @@ def send_vmc(sender, scores, state):
             state["bodyTurn"] * 10, 0.0, state["shoulderTilt"] * 0.5
         )
         sender.send_message("/VMC/Ext/Bone/Pos", ["Chest", 0.0, 0.0, 0.0, cx, cy, cz, cw])
+    for side, curls in (state.get("hands") or {}).items():
+        # A curl is a bend about one axis; VRM finger bones fold on Z, and the two
+        # hands fold toward each other, so the sign flips between them.
+        direction = -1.0 if side == "Left" else 1.0
+        for bone, curl in curls.items():
+            fx, fy, fz, fw = quaternion(0.0, 0.0, direction * curl * 85)
+            sender.send_message(
+                "/VMC/Ext/Bone/Pos", [f"{side}{bone}", 0.0, 0.0, 0.0, fx, fy, fz, fw]
+            )
     for name, value in scores.items():
         # ARKit names pass straight through: that is what perfect-sync receivers want.
         sender.send_message("/VMC/Ext/Blend/Val", [name, float(value)])

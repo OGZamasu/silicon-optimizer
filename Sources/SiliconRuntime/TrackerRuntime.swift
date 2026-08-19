@@ -44,6 +44,10 @@ public actor TrackerRuntime {
         environment.appendingPathComponent("models/pose_landmarker.task")
     }
 
+    public nonisolated static var handModel: URL {
+        environment.appendingPathComponent("models/hand_landmarker.task")
+    }
+
     public nonisolated static var script: URL {
         environment.appendingPathComponent("tracker.py")
     }
@@ -55,6 +59,9 @@ public actor TrackerRuntime {
     public nonisolated static let poseModelURL =
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
         + "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+    public nonisolated static let handModelURL =
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+        + "hand_landmarker/float16/latest/hand_landmarker.task"
 
     public nonisolated static func installation() -> Installation {
         let manager = FileManager.default
@@ -96,11 +103,13 @@ public actor TrackerRuntime {
         public var oscPort: Int
         /// Whether to read the upper body too — shoulders, lean, hands.
         public var trackBody: Bool
+        /// Whether to read fingers, which costs another model per frame.
+        public var trackHands: Bool
 
         public init(
             cameraIndex: Int = 0, port: Int = 8792, mirror: Bool = true,
             smoothing: Double = 0.45, oscHost: String = "", oscPort: Int = 39539,
-            trackBody: Bool = false
+            trackBody: Bool = false, trackHands: Bool = false
         ) {
             self.cameraIndex = cameraIndex
             self.port = port
@@ -109,6 +118,7 @@ public actor TrackerRuntime {
             self.oscHost = oscHost
             self.oscPort = oscPort
             self.trackBody = trackBody
+            self.trackHands = trackHands
         }
     }
 
@@ -137,6 +147,10 @@ public actor TrackerRuntime {
         if options.trackBody,
            FileManager.default.fileExists(atPath: Self.poseModel.path) {
             arguments += ["--pose-model", Self.poseModel.path]
+        }
+        if options.trackHands,
+           FileManager.default.fileExists(atPath: Self.handModel.path) {
+            arguments += ["--hand-model", Self.handModel.path]
         }
         if !options.oscHost.isEmpty {
             arguments += [
