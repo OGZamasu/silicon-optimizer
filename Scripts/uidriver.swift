@@ -53,9 +53,15 @@ func describe(_ element: AXUIElement) -> String {
 }
 
 /// Depth-first walk, numbering every element so a path can name one.
+///
+/// Bounded on both axes. An accessibility tree can contain a cycle — a child that
+/// points back at an ancestor — and an unbounded walk answers that by exhausting the
+/// stack and taking the process with it, which is a confusing way to learn that a
+/// window exists.
 func walk(
     _ element: AXUIElement, path: String = "", depth: Int = 0, into lines: inout [String]
 ) {
+    guard depth < 40, lines.count < 4000 else { return }
     let text = describe(element)
     lines.append("\(path.isEmpty ? "-" : path)\t\(String(repeating: "  ", count: depth))\(text)")
     for (index, child) in children(element).enumerated() {
@@ -97,9 +103,14 @@ guard let app = NSWorkspace.shared.runningApplications.first(where: {
 }
 
 let axApp = AXUIElementCreateApplication(app.processIdentifier)
-// Windows first; fall back to the whole app element for menu-bar popovers.
 let windows = (attribute(axApp, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
-let root = windows.first ?? axApp
+
+// The real window, not whatever is on top. A menu-bar app's popover is also a
+// window and it arrives first, which silently pointed every command at the wrong
+// tree. Prefer a standard window; fall back to the app element.
+let root: AXUIElement = windows.first {
+    string($0, kAXSubroleAttribute as String) == "AXStandardWindow"
+} ?? windows.first ?? axApp
 
 switch command {
 case "dump":
@@ -113,6 +124,21 @@ case "dump":
             print(line)
         }
     }
+
+case "pos":
+    // Where an element actually is on screen, so a real mouse event can find it.
+    guard arguments.count > 3, let target = element(at: arguments[3], from: root) else {
+        print("no element at path"); exit(5)
+    }
+    var positionValue: CFTypeRef?
+    var sizeValue: CFTypeRef?
+    AXUIElementCopyAttributeValue(target, kAXPositionAttribute as CFString, &positionValue)
+    AXUIElementCopyAttributeValue(target, kAXSizeAttribute as CFString, &sizeValue)
+    var point = CGPoint.zero
+    var size = CGSize.zero
+    if let positionValue { AXValueGetValue(positionValue as! AXValue, .cgPoint, &point) }
+    if let sizeValue { AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) }
+    print("\(Int(point.x + size.width / 2)) \(Int(point.y + size.height / 2)) \(Int(size.width))x\(Int(size.height))")
 
 case "read":
     guard arguments.count > 3, let target = element(at: arguments[3], from: root) else {
@@ -164,9 +190,26 @@ case "pick":
         let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
         print(result == .success ? "picked \(wanted)" : "found but could not press \(wanted)")
     } else {
-        // Leave nothing open if the pick failed.
-        AXUIElementPerformAction(target, kAXCancelAction as CFString)
-        print("no menu item matching \(wanted)")
+        // A failed pick must not leave the menu hanging: an open menu blocks every
+        // later query, and the accessibility cancel action does not close it. A real
+        // Escape key event does.
+        let source = CGEventSource(stateID: .hidSystemState)
+        CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: true)?
+            .post(tap: .cghidEventTap)
+        CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false)?
+            .post(tap: .cghidEventTap)
+        var titles: [String] = []
+        func collect(_ element: AXUIElement, depth: Int = 0) {
+            guard depth < 12 else { return }
+            if string(element, kAXRoleAttribute as String) == "AXMenuItem",
+               let title = string(element, kAXTitleAttribute as String)
+                ?? string(element, kAXValueAttribute as String) {
+                titles.append(title)
+            }
+            for child in children(element) { collect(child, depth: depth + 1) }
+        }
+        collect(axApp)
+        print("no menu item matching \(wanted); menu offered: \(titles.joined(separator: " | "))")
     }
 
 default:
