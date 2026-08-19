@@ -1989,10 +1989,12 @@ public final class AppModel {
         guard !hasStarted else { return }
         hasStarted = true
         if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
+        reapAbandonedServers()
         selector = RuntimeSelector.discover()
         imageRuntime = MFluxRuntime.locate()
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
+        registerServerTermination()
         beginSampling()
         startControlServer()
         measureStorageIfNeeded()
@@ -2011,6 +2013,46 @@ public final class AppModel {
                 await self?.refreshSwarm()
                 try? await Task.sleep(for: .seconds(15))
             }
+        }
+    }
+
+    // MARK: - Server lifetime
+
+    /// Where the registry mirrors itself between launches, alongside the control handshake.
+    static var childProcessStoreURL: URL {
+        ControlAPI.handshakeURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("child-processes.json")
+    }
+
+    /// Kills inference servers a previous launch left behind.
+    ///
+    /// A crash or a force quit runs no termination handler, so the server survives — reparented
+    /// to launchd, still holding a model's worth of wired memory and still bound to its port.
+    /// The memory is the visible cost; the port is the confusing one, because `harnessPorts()`
+    /// finds its configured port occupied, quietly moves to another and *persists* that, so the
+    /// number drifts every time it happens.
+    ///
+    /// Runs before anything allocates a port, so by then the ports are genuinely free.
+    private func reapAbandonedServers() {
+        let orphans = ChildProcessRegistry.open(at: Self.childProcessStoreURL)
+        guard !orphans.isEmpty else { return }
+        let killed = ChildProcessRegistry.reap(orphans)
+        guard !killed.isEmpty else { return }
+        runtimeLog = "Reclaimed \(killed.count) server process(es) left by a previous launch.\n"
+            + killed.map { "  pid \($0.pid) — \($0.executablePath)" }.joined(separator: "\n")
+    }
+
+    /// Terminates every child server as the app quits.
+    ///
+    /// The notification is delivered synchronously and the process exits as soon as the
+    /// observers return, so this signals by pid rather than hoping a detached `unload()`
+    /// outruns process exit — which it does not, which is why servers were being orphaned.
+    private func registerServerTermination() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            ChildProcessRegistry.terminateAll()
         }
     }
 

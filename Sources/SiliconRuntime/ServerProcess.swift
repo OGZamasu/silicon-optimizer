@@ -56,11 +56,20 @@ actor ServerProcess {
             Task { await self?.append(text) }
         }
 
+        // Nothing on macOS makes a child die with its parent, so every spawn is recorded where
+        // a synchronous `willTerminate` observer — and the next launch, after a crash — can
+        // find it. A server that exits on its own takes itself back out here, so the registry
+        // never accumulates pids the kernel is free to reissue.
+        process.terminationHandler = { finished in
+            ChildProcessRegistry.unregister(pid: finished.processIdentifier)
+        }
+
         do {
             try process.run()
         } catch {
             throw RuntimeError.launchFailed(error.localizedDescription)
         }
+        ChildProcessRegistry.register(pid: process.processIdentifier)
         self.process = process
     }
 
@@ -93,6 +102,7 @@ actor ServerProcess {
         if process.isRunning {
             kill(process.processIdentifier, SIGKILL)
         }
+        ChildProcessRegistry.unregister(pid: process.processIdentifier)
         self.process = nil
         self.logHandler = nil
     }
