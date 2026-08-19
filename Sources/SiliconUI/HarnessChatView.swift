@@ -39,8 +39,13 @@ struct HarnessChatView: View {
                             banner(
                                 "No model is loaded — the harness has nothing to answer "
                                 + "with. Requests will fail until one is loaded.",
-                                actionTitle: "Open Models"
-                            ) { model.selectedTab = .models }
+                                actionTitle: "Open Models", action: { model.selectedTab = .models },
+                                secondaryActionTitle: model.lastLoaded.map {
+                                    "Reload \($0.model.name)"
+                                },
+                                secondaryAction: model.lastLoaded != nil
+                                    ? { model.reloadLastModel() } : nil
+                            )
                         }
                         Divider()
                     } else if let warning = contextWarning {
@@ -141,7 +146,8 @@ struct HarnessChatView: View {
     }
 
     private func banner(
-        _ warning: String, actionTitle: String?, action: (() -> Void)?
+        _ warning: String, actionTitle: String?, action: (() -> Void)?,
+        secondaryActionTitle: String? = nil, secondaryAction: (() -> Void)? = nil
     ) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -149,6 +155,13 @@ struct HarnessChatView: View {
             Text(warning)
                 .font(.callout)
             Spacer(minLength: 0)
+            // The reload offer first and prominent: it is one click back to exactly where
+            // things were, where "Open Models" is a detour through picking everything again.
+            if let secondaryActionTitle, let secondaryAction {
+                Button(secondaryActionTitle, action: secondaryAction)
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+            }
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
                     .controlSize(.small)

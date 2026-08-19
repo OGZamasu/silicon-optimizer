@@ -318,12 +318,25 @@ struct ChatView: View {
             } else {
                 Text("No model is loaded yet.")
                     .font(.headline)
-                Text("Choose one from the Models tab and it will appear here.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Button("Browse models") { model.selectedTab = .models }
-                    .buttonStyle(.borderedProminent)
+                if let lastLoaded = model.lastLoaded {
+                    Text("\(lastLoaded.model.name) was unloaded — reload it as it was, or "
+                         + "choose something else from the Models tab.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button("Reload \(lastLoaded.model.name)") { model.reloadLastModel() }
+                            .buttonStyle(.borderedProminent)
+                        Button("Browse models") { model.selectedTab = .models }
+                    }
                     .padding(.top, 4)
+                } else {
+                    Text("Choose one from the Models tab and it will appear here.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("Browse models") { model.selectedTab = .models }
+                        .buttonStyle(.borderedProminent)
+                        .padding(.top, 4)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
