@@ -2,9 +2,9 @@
 
 [optimize.zamasu.dev](https://optimize.zamasu.dev)
 
-A free Mac app that runs AI on your own computer. Chat models, coding models, image
-generators — all running directly on your Mac, with nothing sent to the cloud. No
-subscription, no API key, and your conversations never leave your machine.
+A free Mac app that runs AI on your own computer. Chat, coding, images, voice, video and
+3D — running directly on your Mac, with nothing sent to the cloud. No subscription, no API
+key, and your conversations never leave your machine.
 
 The hard part of local AI was never pressing "run". It's knowing what your Mac can actually
 handle. Models come in hundreds of sizes, and picking wrong means either a 20 GB download
@@ -60,6 +60,31 @@ FLUX and friends run locally through MFLUX. Image models eat memory in phases (l
 denoise, decode), so the app shows a bar per phase and tells you which one decides whether
 your render fits. Usually it's the last one — which is why a render can die at 95% after
 minutes of work. The app warns you before you spend those minutes.
+
+### Speaks, sings and listens
+
+Type a line and hear it: LuxTTS, Kokoro 82M and Sesame CSM 1B all run locally. There is a
+music model and a sound-effect model beside them, and Whisper large-v3 turbo and Parakeet
+turn speech back into text — from a file or live from the microphone.
+
+### Makes video, and characters that perform
+
+Describe a shot and a paired node renders the clip; drive a portrait with a recorded take
+and the face moves the way yours did. Build a character, put your webcam behind it, and send
+it to OBS as a browser source. Motion tracking reads face, shoulders and fingers and speaks
+VMC, so VSeeFace, VTube Studio and Warudo take it without a plugin.
+
+### Turns images into 3D
+
+TRELLIS.2 and Hunyuan3D 2 produce a mesh from a single picture — clean geometry in about
+twenty seconds, fully textured in minutes. The built-in viewer spins it, and a turntable GIF
+or a snapshot copies straight to the clipboard.
+
+### Shares the work with a second machine
+
+Pair a Windows box with an NVIDIA card and the heavy jobs — video, meshes, portrait
+animation — go there while the Mac stays free. The app shows the node's own progress: stage,
+step, percent and time left.
 
 ### Measures itself and gets smarter
 
