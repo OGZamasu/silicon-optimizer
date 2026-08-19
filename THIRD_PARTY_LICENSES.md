@@ -25,3 +25,14 @@ setup. Each remains the property of its authors under its own licence.
 
 Models are not bundled. Every model the app downloads shows its own licence in the app and
 links to its source.
+
+## Deep-Live-Cam
+
+The live face camera is [Deep-Live-Cam](https://github.com/hacksider/Deep-Live-Cam),
+licensed **AGPL-3.0**. Silicon Optimizer does not bundle or modify it: the setup step
+clones it into its own Python environment under `~/.silicon-facecam`, and the app runs
+it there as a separate process through a small driver script (`Resources/facecam.py`).
+Its own content check runs as shipped.
+
+Its face model (`inswapper_128`) is downloaded by the project's own pre-check, from the
+project's own release, and carries the InsightFace non-commercial research licence.

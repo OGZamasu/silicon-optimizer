@@ -206,6 +206,10 @@ public struct Settings: Codable, Sendable, Equatable {
     /// The tab the window was last on, so reopening lands where you left off.
     public var lastTab: String = ""
 
+    /// Port the live face camera serves its picture on. Fixed rather than ephemeral
+    /// so an OBS source keeps working across restarts.
+    public var faceCamPort: Int = 8791
+
     // Personas
 
     /// The characters this app can speak and perform as.
@@ -321,6 +325,7 @@ public struct Settings: Codable, Sendable, Equatable {
         voiceOutputDirectory = try value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
         videoOutputDirectory = try value(.videoOutputDirectory, fallback.videoOutputDirectory)
         lastTab = try value(.lastTab, fallback.lastTab)
+        faceCamPort = try value(.faceCamPort, fallback.faceCamPort)
         personas = try value(.personas, fallback.personas)
         selectedPersonaID = try value(.selectedPersonaID, fallback.selectedPersonaID)
         modelLibraryDirectory = try value(

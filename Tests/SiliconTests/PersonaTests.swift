@@ -4,6 +4,7 @@ import CoreGraphics
 import Foundation
 import Testing
 @testable import SiliconControl
+@testable import SiliconRuntime
 @testable import SiliconUI
 
 @Suite("Persona performance")
@@ -311,5 +312,66 @@ enum TestImages {
         context.setFillColor(CGColor(red: 0.4, green: 0.5, blue: 0.6, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return context.makeImage()!
+    }
+}
+
+/// The live face camera talks to the app through one stdout stream; if that parsing
+/// drifts, the UI silently sits on "starting" while the engine is live.
+@Suite("Live face camera")
+struct FaceCamTests {
+
+    @Test func readsTheDriversLifecycleFromItsOutput() throws {
+        let ready = FaceCamRuntime.interpret("ready: http://127.0.0.1:8791/", port: 8791)
+        guard case .live(let url, let fps) = try #require(ready) else {
+            Issue.record("ready line should go live"); return
+        }
+        #expect(url.absoluteString == "http://127.0.0.1:8791/")
+        #expect(fps == 0)
+
+        let running = FaceCamRuntime.interpret("fps: 17.7", port: 8791)
+        guard case .live(_, let rate) = try #require(running) else {
+            Issue.record("fps line should stay live"); return
+        }
+        #expect(rate == 17.7)
+
+        guard case .starting(let stage) = try #require(
+            FaceCamRuntime.interpret("stage: Opening the camera", port: 8791)
+        ) else { Issue.record("stage line should report starting"); return }
+        #expect(stage == "Opening the camera")
+
+        // Anything else the engine prints — model chatter, warnings — is not a state.
+        #expect(FaceCamRuntime.interpret("set det-size: (640, 640)", port: 8791) == nil)
+    }
+
+    /// The engine's terse reasons are useless on their own; each must arrive as
+    /// something the person can act on.
+    @Test func explainsFailuresInTermsOfWhatToDo() throws {
+        guard case .failed(let camera) = try #require(
+            FaceCamRuntime.interpret("fatal: camera unavailable", port: 8791)
+        ) else { Issue.record("fatal should fail"); return }
+        #expect(camera.contains("Privacy"))
+
+        guard case .failed(let face) = try #require(
+            FaceCamRuntime.interpret("fatal: no face in source", port: 8791)
+        ) else { Issue.record("fatal should fail"); return }
+        #expect(face.contains("front-facing"))
+
+        guard case .failed(let refused) = try #require(
+            FaceCamRuntime.interpret(
+                "fatal: source image refused by content check", port: 8791
+            )
+        ) else { Issue.record("fatal should fail"); return }
+        #expect(refused.contains("content check"))
+    }
+
+    @Test func knowsWhatIsMissingBeforeItRuns() {
+        let installation = FaceCamRuntime.installation()
+        // On this machine the environment exists; the assertion that matters either way
+        // is that an incomplete install never claims to be ready.
+        if !installation.isInstalled {
+            #expect(!installation.detail.isEmpty)
+        }
+        #expect(FaceCamRuntime.repository.lastPathComponent == "Deep-Live-Cam")
+        #expect(FaceCamRuntime.swapperModel.lastPathComponent == "inswapper_128.onnx")
     }
 }

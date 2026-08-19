@@ -110,6 +110,13 @@ if [[ -x Vendor/node ]]; then
     fi
 fi
 
+# The live face camera's driver: a script the app hands to Deep-Live-Cam's own
+# environment. It lives in Resources rather than being generated at runtime so it can
+# be read, diffed and fixed like any other source file.
+if [[ -f Resources/facecam.py ]]; then
+    cp Resources/facecam.py "$BUNDLE/Contents/Resources/"
+fi
+
 # The licences travel with the binaries they cover.
 if [[ -f THIRD_PARTY_LICENSES.md ]]; then
     cp THIRD_PARTY_LICENSES.md "$BUNDLE/Contents/Resources/"

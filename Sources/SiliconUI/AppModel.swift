@@ -1897,6 +1897,18 @@ public final class AppModel {
     /// found one at all rather than silently animating the wrong part of the picture.
     public internal(set) var personaGeometry: FaceGeometry?
 
+    // MARK: - Live face camera
+
+    var faceCamRuntime: FaceCamRuntime?
+    var faceCamTerminationRegistered = false
+    public internal(set) var faceCamState: FaceCamRuntime.State = .idle
+    public var faceCamError: String?
+    public var availableCameras: [String] = []
+    public var selectedCameraIndex = 0
+    public var faceCamMirror = true
+    public var faceCamMouthMask = true
+    public var faceCamOpacity = 1.0
+
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {
         guard let runtime = activeMeshRuntime else { return }

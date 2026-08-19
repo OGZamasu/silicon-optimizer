@@ -15,6 +15,7 @@ struct PersonaCards: View {
             if model.selectedPersona != nil {
                 performCard
                 liveCard
+                FaceCamCard()
             }
         }
         .sheet(item: $editing) { persona in
