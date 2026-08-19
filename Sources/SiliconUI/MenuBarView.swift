@@ -161,16 +161,13 @@ struct MenuBarView: View {
                 // No language model, but a diffusion or 3D model is working — that is
                 // absolutely a model, and "No model loaded" here would be false.
                 activityRow(activity)
-            } else if let remote = model.runningPeerLLM {
-                // Nothing local, but the swarm serves a chat model — also not "no model".
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(remote.model)
-                        .font(.callout.weight(.medium))
-                        .lineLimit(1)
-                    Text("running on \(remote.peer.name)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+            } else if model.runningPeerLLM != nil {
+                // A peer is serving a chat model, and its own swarm row directly below
+                // shows it with stats and controls — repeating it here read as two
+                // nodes. This line only scopes the claim to this machine.
+                Text("Nothing loaded on this Mac")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             } else {
                 Text("No model loaded")
                     .font(.callout)
