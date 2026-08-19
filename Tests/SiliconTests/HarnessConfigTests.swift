@@ -131,6 +131,66 @@ struct HarnessConfigTests {
         #expect(document.contains("name: \"A \\\"quoted\\\" model\""))
     }
 
+    // MARK: - Swarm providers
+
+    private let node = HarnessRuntime.SwarmProvider(
+        peerName: "silicon-node",
+        baseURL: "http://100.118.191.121:8081/v1",
+        modelID: "qwen3.8-27b",
+        displayName: "qwen3.8-27b on silicon-node"
+    )
+
+    @Test func addsAPeerProviderBesideTheLocalOne() {
+        let local = HarnessRuntime.providerConfiguration(existing: nil, inferencePort: 9131)
+        let document = HarnessRuntime.swarmConfiguration(existing: local, providers: [node])
+
+        let sections = (document ?? "").components(separatedBy: "llm-pi-ai:").count - 1
+        #expect(sections == 1)
+        #expect(document?.contains("    silicon-local:") == true)
+        #expect(document?.contains("    silicon-swarm-silicon-node:") == true)
+        #expect(document?.contains("      baseURL: http://100.118.191.121:8081/v1") == true)
+        #expect(document?.contains("        - id: qwen3.8-27b") == true)
+        #expect(document?.contains("name: \"qwen3.8-27b on silicon-node\"") == true)
+    }
+
+    @Test func removesTheProviderWhenThePeerLeaves() {
+        let local = HarnessRuntime.providerConfiguration(existing: nil, inferencePort: 9131)
+        let added = HarnessRuntime.swarmConfiguration(existing: local, providers: [node])
+        let removed = HarnessRuntime.swarmConfiguration(existing: added, providers: [])
+
+        #expect(removed?.contains("silicon-swarm-silicon-node") == false)
+        // The local provider and its section survive untouched.
+        #expect(removed?.contains("    silicon-local:") == true)
+        #expect(removed?.contains("baseURL: http://127.0.0.1:9131/v1") == true)
+    }
+
+    @Test func updatesAPeerProviderInPlace() {
+        let first = HarnessRuntime.swarmConfiguration(existing: nil, providers: [node])
+        var moved = node
+        moved.baseURL = "http://192.168.4.23:8081/v1"
+        let second = HarnessRuntime.swarmConfiguration(existing: first, providers: [moved])
+
+        #expect(second?.contains("http://192.168.4.23:8081/v1") == true)
+        #expect(second?.contains("100.118.191.121") == false)
+        let entries = (second ?? "").components(separatedBy: "silicon-swarm-silicon-node:").count - 1
+        #expect(entries == 1)
+    }
+
+    @Test func swarmSyncWithNothingToSayTouchesNothing() {
+        #expect(HarnessRuntime.swarmConfiguration(existing: nil, providers: []) == nil)
+    }
+
+    @Test func peerNamesBecomeSafeProviderIDs() {
+        #expect(
+            HarnessRuntime.SwarmProvider.providerID(peerName: "My PC #2")
+                == "silicon-swarm-my-pc--2"
+        )
+        #expect(
+            HarnessRuntime.SwarmProvider.providerID(peerName: "silicon-node")
+                == "silicon-swarm-silicon-node"
+        )
+    }
+
     @Test func parsesNodeVersions() {
         #expect(HarnessRuntime.parseNodeVersion("v24.19.0\n") ?? (0, 0, 0) == (24, 19, 0))
         #expect(HarnessRuntime.parseNodeVersion("v20.12.2") ?? (0, 0, 0) == (20, 12, 2))

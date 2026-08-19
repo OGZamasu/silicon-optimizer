@@ -99,6 +99,31 @@ extension AppModel {
         )
     }
 
+    /// Every peer chat model becomes a provider in the harness settings, so the Chat
+    /// tab's model picker lists the swarm right next to the local model. Entries follow
+    /// the swarm: a peer that leaves the registry takes its provider with it. Stopped
+    /// models stay listed — jobs preempt a peer's LLM and it auto-restores, and a picker
+    /// entry that flickered with every preemption would be worse than one that briefly
+    /// errors.
+    func syncSwarmChatProviders() {
+        guard settings.chatEngine == .harness else { return }
+        let providers = swarmPeers.compactMap { peer -> HarnessRuntime.SwarmProvider? in
+            guard let llm = peer.llm, llm.installed,
+                  let base = llm.openAIBase, let modelID = llm.model
+            else { return nil }
+            return HarnessRuntime.SwarmProvider(
+                peerName: peer.name,
+                baseURL: base,
+                modelID: modelID,
+                displayName: "\(modelID) on \(peer.name)",
+                contextLength: llm.contextLength
+            )
+        }
+        try? HarnessRuntime.ensureSwarmProvidersConfigured(
+            home: HarnessRuntime.homeDirectory, providers: providers
+        )
+    }
+
     /// Starts the harness unless it is already running or on its way.
     public func startHarnessIfNeeded() {
         switch harnessState {
@@ -111,6 +136,10 @@ extension AppModel {
         harnessRuntime = runtime
         harnessState = .starting(stage: "Looking for Node.js…")
         registerHarnessTermination()
+        // The harness re-reads its settings per request, so polling the swarm now — in
+        // parallel with its boot — has the peers' chat models in the picker by the time
+        // anyone can type.
+        Task { await refreshSwarm() }
 
         let nodePath = settings.nodeBinaryPath ?? ""
         let advertised = advertisedModel

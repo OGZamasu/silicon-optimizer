@@ -289,54 +289,51 @@ public actor HarnessRuntime {
 
     /// Returns the harness settings document with our local provider present and current,
     /// starting from `existing` (nil when no settings file exists yet).
-    ///
-    /// The same file is written by the harness's own settings UI, so this must be surgical:
-    /// everything outside our provider entry is preserved byte for byte. Three cases:
-    /// our entry exists (replace exactly its block), an `llm-pi-ai` section exists without
-    /// our entry (insert into it), or neither exists (append our section).
     static func providerConfiguration(
         existing: String?, inferencePort: Int, model: AdvertisedModel = AdvertisedModel()
     ) -> String {
-        guard let existing, !existing.isEmpty else {
-            return """
+        upserting(
+            providerID: providerID,
+            into: existing,
+            header: """
             # Managed by Silicon Optimizer: the '\(providerID)' provider below is how the harness
             # reaches the model this app serves locally. Other settings in this file are yours.
-            llm-pi-ai:
-              providers:
+            """
+        ) { indent in
+            providerLines(indent: indent, inferencePort: inferencePort, model: model)
+        }
+    }
 
-            """ + providerLines(indent: 4, inferencePort: inferencePort, model: model)
-                .joined(separator: "\n") + "\n"
+    /// Replaces or inserts one provider block by id, preserving everything else.
+    ///
+    /// The same file is written by the harness's own settings UI, so this must be surgical:
+    /// everything outside the named entry is preserved byte for byte. Three cases: the
+    /// entry exists (replace exactly its block), an `llm-pi-ai` section exists without it
+    /// (insert into it), or neither exists (append the section under `header`).
+    private static func upserting(
+        providerID id: String, into existing: String?, header: String,
+        render: (Int) -> [String]
+    ) -> String {
+        guard let existing, !existing.isEmpty else {
+            return header + "\nllm-pi-ai:\n  providers:\n\n"
+                + render(4).joined(separator: "\n") + "\n"
         }
 
         var lines = existing.components(separatedBy: "\n")
 
         if let providerIndex = lines.firstIndex(where: {
-            $0.trimmingCharacters(in: .whitespaces) == "\(providerID):"
+            $0.trimmingCharacters(in: .whitespaces) == "\(id):"
         }) {
-            // Replace our block wholesale — the port, name and context can all have changed.
+            // Replace the block wholesale — the port, name and context can all have changed.
             // Its indentation is taken from where it actually sits, in case the harness's own
             // settings writer reflowed the document around it.
             let indent = lines[providerIndex].prefix { $0 == " " }.count
-            var end = providerIndex + 1
-            while end < lines.count {
-                let trimmed = lines[end].trimmingCharacters(in: .whitespaces)
-                let lineIndent = lines[end].prefix { $0 == " " }.count
-                if !trimmed.isEmpty && lineIndent <= indent { break }
-                end += 1
-            }
-            // Trailing blank lines belong to the document, not to our block.
-            while end > providerIndex + 1,
-                  lines[end - 1].trimmingCharacters(in: .whitespaces).isEmpty {
-                end -= 1
-            }
-            lines.replaceSubrange(
-                providerIndex..<end,
-                with: providerLines(indent: indent, inferencePort: inferencePort, model: model)
-            )
+            let end = endOfBlock(startingAt: providerIndex, indent: indent, in: lines)
+            lines.replaceSubrange(providerIndex..<end, with: render(indent))
             return lines.joined(separator: "\n")
         }
 
-        let fresh = providerLines(indent: 4, inferencePort: inferencePort, model: model)
+        let fresh = render(4)
 
         if let sectionIndex = lines.firstIndex(where: { $0.hasPrefix("llm-pi-ai:") }) {
             // The user configured other pi-ai providers; join them rather than duplicating
@@ -355,6 +352,142 @@ public actor HarnessRuntime {
         let separator = existing.hasSuffix("\n") ? "" : "\n"
         return existing + separator + "llm-pi-ai:\n  providers:\n"
             + fresh.joined(separator: "\n") + "\n"
+    }
+
+    /// Where a provider block ends: the next non-blank line at or above its indentation.
+    /// Trailing blank lines belong to the document, not to the block.
+    private static func endOfBlock(startingAt start: Int, indent: Int, in lines: [String]) -> Int {
+        var end = start + 1
+        while end < lines.count {
+            let trimmed = lines[end].trimmingCharacters(in: .whitespaces)
+            let lineIndent = lines[end].prefix { $0 == " " }.count
+            if !trimmed.isEmpty && lineIndent <= indent { break }
+            end += 1
+        }
+        while end > start + 1,
+              lines[end - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+            end -= 1
+        }
+        return end
+    }
+
+    // MARK: - Swarm providers
+
+    /// A swarm peer's chat model, described the way the settings document needs it. The
+    /// provider id is derived from the peer's name and carries a reserved prefix so the
+    /// app can tell its own managed swarm entries from anything the user wrote by hand.
+    public struct SwarmProvider: Sendable, Equatable {
+        public var peerName: String
+        public var baseURL: String
+        public var modelID: String
+        public var displayName: String
+        public var contextLength: Int?
+
+        public init(
+            peerName: String, baseURL: String, modelID: String,
+            displayName: String, contextLength: Int? = nil
+        ) {
+            self.peerName = peerName
+            self.baseURL = baseURL
+            self.modelID = modelID
+            self.displayName = displayName
+            self.contextLength = contextLength
+        }
+
+        public var providerID: String { Self.providerID(peerName: peerName) }
+
+        public static func providerID(peerName: String) -> String {
+            let slug = String(peerName.lowercased().map { character in
+                character.isLetter || character.isNumber ? character : "-"
+            })
+            return "silicon-swarm-\(slug)"
+        }
+    }
+
+    static let swarmProviderPrefix = "silicon-swarm-"
+
+    private static func swarmProviderLines(
+        indent: Int, provider: SwarmProvider
+    ) -> [String] {
+        let pad = String(repeating: " ", count: indent)
+        let escaped = provider.displayName
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        var lines = [
+            "\(pad)\(provider.providerID):",
+            "\(pad)  apiKeyEnv: \(apiKeyVariable)",
+            "\(pad)  api: openai-completions",
+            "\(pad)  baseURL: \(provider.baseURL)",
+            "\(pad)  models:",
+            "\(pad)    - id: \(provider.modelID)",
+            "\(pad)      name: \"\(escaped)\"",
+        ]
+        if let context = provider.contextLength {
+            lines.append("\(pad)      contextWindow: \(context)")
+        }
+        return lines
+    }
+
+    /// Returns the settings document with exactly the given swarm providers present: stale
+    /// entries updated, entries for peers no longer offering a model removed, everything
+    /// the user or the local provider wrote left untouched.
+    static func swarmConfiguration(
+        existing: String?, providers: [SwarmProvider]
+    ) -> String? {
+        guard existing != nil || !providers.isEmpty else { return nil }
+
+        let wanted = Set(providers.map(\.providerID))
+        var document = existing ?? ""
+
+        for id in managedSwarmIDs(in: document) where !wanted.contains(id) {
+            document = removingProvider(id: id, from: document)
+        }
+        for provider in providers {
+            document = upserting(
+                providerID: provider.providerID,
+                into: document.isEmpty ? nil : document,
+                header: """
+                # Managed by Silicon Optimizer: the 'silicon-swarm-*' providers below are chat
+                # models running on your other Silicon nodes. Other settings here are yours.
+                """
+            ) { indent in
+                swarmProviderLines(indent: indent, provider: provider)
+            }
+        }
+        return document
+    }
+
+    private static func managedSwarmIDs(in document: String) -> [String] {
+        document.components(separatedBy: "\n").compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix(swarmProviderPrefix), trimmed.hasSuffix(":"),
+                  !trimmed.contains(" ") else { return nil }
+            return String(trimmed.dropLast())
+        }
+    }
+
+    private static func removingProvider(id: String, from document: String) -> String {
+        var lines = document.components(separatedBy: "\n")
+        guard let providerIndex = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "\(id):"
+        }) else { return document }
+        let indent = lines[providerIndex].prefix { $0 == " " }.count
+        let end = endOfBlock(startingAt: providerIndex, indent: indent, in: lines)
+        lines.removeSubrange(providerIndex..<end)
+        return lines.joined(separator: "\n")
+    }
+
+    /// Writes the swarm peers' provider entries to disk; skipped when nothing changed.
+    public static func ensureSwarmProvidersConfigured(
+        home: URL, providers: [SwarmProvider]
+    ) throws {
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let settingsURL = home.appendingPathComponent("settings.yaml")
+        let existing = try? String(contentsOf: settingsURL, encoding: .utf8)
+        guard let updated = swarmConfiguration(existing: existing, providers: providers),
+              updated != existing
+        else { return }
+        try updated.write(to: settingsURL, atomically: true, encoding: .utf8)
     }
 
     /// Writes the provider configuration to disk. Called before the harness starts and again

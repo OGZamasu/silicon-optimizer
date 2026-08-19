@@ -732,6 +732,23 @@ public final class AppModel {
         public var detail: String?
     }
 
+    /// A peer's chat model as `GET /v1/llm` reports it — the remote twin of this Mac's
+    /// own loaded model, controllable from here via `POST /v1/llm/start` and `/stop`.
+    public struct PeerLLM: Sendable {
+        public var installed: Bool
+        public var running: Bool
+        public var healthy: Bool
+        public var model: String?
+        public var uptimeSeconds: Double?
+        /// The peer's OpenAI-compatible endpoint, cleaned of any annotation suffix
+        /// ("http://…:8081/v1 (tailnet)" arrives with the parenthetical attached).
+        public var openAIBase: String?
+        public var contextLength: Int?
+        /// Models the peer could serve instead. Empty until nodes ship a list endpoint;
+        /// the loaded model then stands alone in the switcher.
+        public var availableModels: [String] = []
+    }
+
     public struct PeerStatus: Identifiable, Sendable {
         public var id: String { name }
         public var name: String
@@ -750,6 +767,7 @@ public final class AppModel {
         public var headroomGB: Double?
         public var capabilities: [PeerCapability] = []
         public var latency: TimeInterval?
+        public var llm: PeerLLM?
         public var error: String?
 
         public var readyCapabilities: [String] {
@@ -759,6 +777,9 @@ public final class AppModel {
 
     public private(set) var swarmPeers: [PeerStatus] = []
     public private(set) var isRefreshingSwarm = false
+    /// Peers with a start/stop request in flight, and the last brief failure if any.
+    public private(set) var peerLLMBusy: Set<String> = []
+    public var peerLLMError: String?
 
     public var swarmConfig: SwarmConfig? { SwarmConfig.load() }
 
@@ -789,6 +810,7 @@ public final class AppModel {
         swarmPeers = statuses.sorted {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
+        syncSwarmChatProviders()
     }
 
     private nonisolated static func poll(peer: SwarmPeer, token: String?) async -> PeerStatus {
@@ -817,7 +839,97 @@ public final class AppModel {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return status }
         Self.parseNode(json, into: &status)
+
+        // A peer advertising a chat model gets one more question: its live LLM state,
+        // which is what the menu bar's remote controls and the harness's model picker
+        // both run on.
+        if status.capabilities.contains(where: { $0.kind == "llm" }) {
+            if let llmJSON = await fetchJSON(base.appendingPathComponent("v1/llm"), token: token) {
+                var llm = parseLLM(llmJSON)
+                // Proposed but not yet shipped on every node; a 404 just means the one
+                // loaded model is the whole list.
+                if let listJSON = await fetchJSON(
+                    base.appendingPathComponent("v1/llm/models"), token: token
+                ) {
+                    llm.availableModels = parseModelList(listJSON)
+                }
+                status.llm = llm
+            }
+        }
         return status
+    }
+
+    private nonisolated static func fetchJSON(_ url: URL, token: String?) async -> [String: Any]? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode)
+        else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    nonisolated static func parseLLM(_ json: [String: Any]) -> PeerLLM {
+        var llm = PeerLLM(
+            installed: json["installed"] as? Bool ?? false,
+            running: json["running"] as? Bool ?? false,
+            healthy: json["healthy"] as? Bool ?? false,
+            model: json["model"] as? String,
+            uptimeSeconds: number(json["uptime_s"]),
+            contextLength: number(json["context_length"]).map { Int($0) }
+        )
+        if let api = json["api"] as? [String: Any], let raw = api["openai"] as? String {
+            llm.openAIBase = raw.split(separator: " ").first.map(String.init)
+        }
+        return llm
+    }
+
+    /// Accepts every plausible shape of a model list: `{"models": ["a"]}`,
+    /// `{"models": [{"id": "a"}]}`, or `{"data": [{"id": "a"}]}` (the OpenAI dialect).
+    nonisolated static func parseModelList(_ json: [String: Any]) -> [String] {
+        let entries = json["models"] ?? json["data"]
+        if let names = entries as? [String] { return names }
+        if let objects = entries as? [[String: Any]] {
+            return objects.compactMap { $0["id"] as? String ?? $0["name"] as? String }
+        }
+        return []
+    }
+
+    /// Remotely starts or stops a peer's chat model — the same control the node's own
+    /// tray icon offers, reachable from this Mac's menu bar. Failures land briefly in
+    /// `peerLLMError`. Passing a model asks for that one; nodes that cannot choose yet
+    /// ignore the field and start what they have.
+    public func setPeerLLM(_ peer: PeerStatus, running: Bool, model: String? = nil) async {
+        guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+        else { return }
+        peerLLMBusy.insert(peer.name)
+        peerLLMError = nil
+        defer { peerLLMBusy.remove(peer.name) }
+
+        var request = URLRequest(
+            url: base.appendingPathComponent(running ? "v1/llm/start" : "v1/llm/stop")
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        if let token = swarmConfig?.effectiveToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if let model {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
+        }
+
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            peerLLMError = "\(peer.name) didn't answer."
+            return
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            peerLLMError = "\(peer.name) answered \(http.statusCode)."
+            return
+        }
+        await refreshSwarm()
     }
 
     /// The lenient half of peer polling, separated from the network so the wire shapes
@@ -1377,6 +1489,9 @@ public final class AppModel {
             loadConversations()
             if conversations.isEmpty { newConversation() }
         }
+        // One swarm poll at launch, so the peers' chat models reach the harness settings
+        // even when no window ever opens — the dashboard and menu bar keep it fresh after.
+        Task { await refreshSwarm() }
     }
 
     /// Publishes the local control API that the MCP bridge talks to, so Claude and ChatGPT can

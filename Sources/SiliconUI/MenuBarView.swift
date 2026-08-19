@@ -20,9 +20,11 @@ struct MenuBarView: View {
             Divider()
             modelSection
             Divider()
+            swarmSection
             actions
         }
         .frame(width: 300)
+        .task { await model.refreshSwarm() }
     }
 
     // MARK: - Header
@@ -185,6 +187,130 @@ struct MenuBarView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    // MARK: - Swarm
+
+    /// The other machines, given the same glanceable treatment as this one: what model
+    /// each is serving, what it is costing, and the one or two actions worth taking —
+    /// start or stop its chat model, switch it when the node can.
+    @ViewBuilder
+    private var swarmSection: some View {
+        if !model.swarmPeers.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(model.swarmPeers) { peer in
+                    swarmRow(peer)
+                }
+                if let error = model.peerLLMError {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            Divider()
+        }
+    }
+
+    @ViewBuilder
+    private func swarmRow(_ peer: AppModel.PeerStatus) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(peer.reachable ? Color.green : Color.secondary.opacity(0.5))
+                        .frame(width: 7, height: 7)
+                    Text(peer.name)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                }
+                Spacer()
+                if model.peerLLMBusy.contains(peer.name) {
+                    ProgressView().controlSize(.mini)
+                } else if let llm = peer.llm, llm.installed {
+                    Button(llm.running ? "Stop" : "Start") {
+                        Task { await model.setPeerLLM(peer, running: !llm.running) }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help(llm.running
+                        ? "Free the card — stops \(llm.model ?? "the chat model") on \(peer.name)"
+                        : "Serve \(llm.model ?? "the chat model") on \(peer.name) again")
+                }
+            }
+
+            if !peer.reachable {
+                Text(peer.error ?? "unreachable")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                if let llm = peer.llm {
+                    HStack(spacing: 4) {
+                        Text(llm.model ?? "chat model")
+                            .lineLimit(1)
+                        if !llm.running {
+                            Text("· stopped")
+                                .foregroundStyle(.tertiary)
+                        } else if !llm.healthy {
+                            Text("· starting up")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                if let detail = swarmDetail(peer) {
+                    Text(detail)
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                }
+                if let llm = peer.llm, switchableModels(llm).count > 1 {
+                    Menu("Switch model") {
+                        ForEach(switchableModels(llm), id: \.self) { candidate in
+                            Button {
+                                Task {
+                                    await model.setPeerLLM(peer, running: true, model: candidate)
+                                }
+                            } label: {
+                                Label(
+                                    candidate,
+                                    systemImage: candidate == llm.model ? "checkmark" : "circle"
+                                )
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .font(.caption)
+                }
+            }
+        }
+    }
+
+    /// What the peer could serve: the advertised list when the node offers one, else just
+    /// what is loaded — a one-model node gets a status line, not a one-item menu.
+    private func switchableModels(_ llm: AppModel.PeerLLM) -> [String] {
+        var models = llm.availableModels
+        if let loaded = llm.model, !models.contains(loaded) {
+            models.insert(loaded, at: 0)
+        }
+        return models
+    }
+
+    private func swarmDetail(_ peer: AppModel.PeerStatus) -> String? {
+        var parts: [String] = []
+        if let used = peer.usedGB, let total = peer.totalGB {
+            let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...1))
+            parts.append("\(used.formatted(format)) of \(total.formatted(format)) GB")
+        }
+        if let util = peer.gpuUtil {
+            parts.append("GPU \(Int(util * 100))%")
+        }
+        if let queue = peer.queueDepth, queue > 0 {
+            parts.append("\(queue) queued")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func activityRow(_ text: String) -> some View {

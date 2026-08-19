@@ -96,6 +96,32 @@ struct PeerParsingTests {
         #expect(within(status.capabilities.first?.peakGB, of: 17.1))
     }
 
+    /// The live `GET /v1/llm` payload from silicon-node, verbatim — including the URL
+    /// annotated with " (tailnet)", which must not leak into the harness's baseURL.
+    @Test func readsAPeerLLMStatus() {
+        let json: [String: Any] = [
+            "installed": true, "running": true, "healthy": true,
+            "model": "qwen3.8-27b", "profile": "c1", "uptime_s": 4297,
+            "api": [
+                "openai": "http://100.118.191.121:8081/v1 (tailnet)",
+                "anthropic": "http://100.118.191.121:8081 (tailnet, Messages API)",
+            ],
+        ]
+        let llm = AppModel.parseLLM(json)
+        #expect(llm.installed && llm.running && llm.healthy)
+        #expect(llm.model == "qwen3.8-27b")
+        #expect(within(llm.uptimeSeconds, of: 4297))
+        #expect(llm.openAIBase == "http://100.118.191.121:8081/v1")
+        #expect(llm.contextLength == nil)
+    }
+
+    @Test func readsEveryModelListDialect() {
+        #expect(AppModel.parseModelList(["models": ["a", "b"]]) == ["a", "b"])
+        #expect(AppModel.parseModelList(["models": [["id": "a"], ["name": "b"]]]) == ["a", "b"])
+        #expect(AppModel.parseModelList(["data": [["id": "qwen3.8-27b"]]]) == ["qwen3.8-27b"])
+        #expect(AppModel.parseModelList(["unrelated": 1]).isEmpty)
+    }
+
     @Test func degradesGracefullyWhenFieldsAreMissing() {
         var status = AppModel.PeerStatus(
             name: "mystery", baseURL: "http://x", reachable: true
