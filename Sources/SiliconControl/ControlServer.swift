@@ -23,6 +23,13 @@ public actor ControlServer {
     /// because the registry lists explicit base URLs.
     public static let lanPort = 8788
 
+    /// The address to paste into an OBS Browser Source. Carries the token in the URL
+    /// because a browser source cannot send headers; nil until the server is listening.
+    public var overlayURL: URL? {
+        guard port > 0 else { return nil }
+        return URL(string: "http://127.0.0.1:\(port)/overlay?token=\(token)")
+    }
+
     public init(host: any ControlHost) {
         self.host = host
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
@@ -113,6 +120,29 @@ public actor ControlServer {
         if request.path == "/health" {
             return .json(["status": "ok", "version": "0.1.0"])
         }
+        // The OBS overlay is a browser source: it can carry a token in its URL but
+        // cannot set headers, so these three routes accept the token either way. They
+        // are read-only and serve nothing but the character currently on screen.
+        if request.path.hasPrefix("/overlay") {
+            guard request.query["token"] == token || request.bearerToken == token else {
+                return .error(401, "Invalid or missing control token.")
+            }
+            switch request.path {
+            case "/overlay":
+                return .html(OverlayPage.html(token: token))
+            case "/overlay/state":
+                return (try? .encode(OverlayBroadcast.shared.state))
+                    ?? .error(400, "Could not read the overlay state.")
+            case "/overlay/portrait":
+                guard let portrait = OverlayBroadcast.shared.portrait else {
+                    return .error(404, "No persona portrait is set.")
+                }
+                return HTTPResponse(status: 200, body: portrait, contentType: "image/png")
+            default:
+                return .error(404, "Unknown endpoint \(request.method) \(request.path)")
+            }
+        }
+
         let authorized = request.bearerToken == token
             || (swarmToken.map { !$0.isEmpty && request.bearerToken == $0 } ?? false)
         guard authorized else {
@@ -291,11 +321,16 @@ struct HTTPRequest {
 struct HTTPResponse {
     var status: Int
     var body: Data
+    var contentType = "application/json"
 
     static func encode(_ value: some Encodable) throws -> HTTPResponse {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return HTTPResponse(status: 200, body: try encoder.encode(value))
+    }
+
+    static func html(_ text: String) -> HTTPResponse {
+        HTTPResponse(status: 200, body: Data(text.utf8), contentType: "text/html; charset=utf-8")
     }
 
     static func json(_ dictionary: [String: String]) -> HTTPResponse {
@@ -311,7 +346,8 @@ struct HTTPResponse {
     func write(to connection: NWConnection) async throws {
         let head = """
             HTTP/1.1 \(status) \(Self.reason(status))\r
-            Content-Type: application/json\r
+            Content-Type: \(contentType)\r
+            Cache-Control: no-store\r
             Content-Length: \(body.count)\r
             Connection: close\r
             \r\n

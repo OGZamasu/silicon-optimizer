@@ -203,6 +203,12 @@ public struct Settings: Codable, Sendable, Equatable {
             ?? FileManager.default.temporaryDirectory
     }
 
+    // Personas
+
+    /// The characters this app can speak and perform as.
+    public var personas: [Persona] = []
+    public var selectedPersonaID: String = ""
+
     // Voice and video
 
     /// Where spoken audio is written. Empty means `~/Music/Silicon Optimizer`.
@@ -311,6 +317,8 @@ public struct Settings: Codable, Sendable, Equatable {
         meshOutputDirectory = try value(.meshOutputDirectory, fallback.meshOutputDirectory)
         voiceOutputDirectory = try value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
         videoOutputDirectory = try value(.videoOutputDirectory, fallback.videoOutputDirectory)
+        personas = try value(.personas, fallback.personas)
+        selectedPersonaID = try value(.selectedPersonaID, fallback.selectedPersonaID)
         modelLibraryDirectory = try value(
             .modelLibraryDirectory, fallback.modelLibraryDirectory
         )

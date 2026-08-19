@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Observation
 import SiliconCatalog
@@ -1504,10 +1505,10 @@ public final class AppModel {
     public var voiceReferenceAudio: URL?
     public var voiceReferenceText = ""
 
-    private let voiceRuntime = VoiceRuntime()
+    let voiceRuntime = VoiceRuntime()
     public private(set) var isSpeaking = false
     public private(set) var voiceStage: String?
-    public private(set) var speechResults: [SpeechResult] = []
+    public internal(set) var speechResults: [SpeechResult] = []
     public private(set) var isTranscribing = false
     public private(set) var transcriptions: [TranscriptionResult] = []
     public var voiceError: String?
@@ -1799,7 +1800,7 @@ public final class AppModel {
     private let videoRuntime = NodeVideoRuntime()
     public private(set) var isGeneratingVideo = false
     public private(set) var videoStage: String?
-    public private(set) var videoResults: [VideoResult] = []
+    public internal(set) var videoResults: [VideoResult] = []
     public var videoError: String?
 
     /// The first reachable node advertising a ready video capability — video's whole
@@ -1857,6 +1858,21 @@ public final class AppModel {
         Task { await videoRuntime.cancel() }
     }
 
+    // MARK: - Personas
+
+    /// The composer line for the selected character, and whether an exported clip
+    /// should burn the line in as a caption.
+    public var personaLine = ""
+    public var includeCaptions = false
+    public internal(set) var isPerforming = false
+    public internal(set) var performanceStage: String?
+    public var personaError: String?
+    /// The OBS Browser Source address, resolved once the control server is listening.
+    public internal(set) var overlayURL: URL?
+    /// Held while a take plays so its meter can drive the overlay, and so stopping
+    /// mid-line is possible.
+    var livePlayer: AVAudioPlayer?
+
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {
         guard let runtime = activeMeshRuntime else { return }
@@ -1871,7 +1887,7 @@ public final class AppModel {
 
     private var sampler = MetricsSampler()
     private var samplingTask: Task<Void, Never>?
-    private var controlServer: ControlServer?
+    var controlServer: ControlServer?
 
     // MARK: - Init
 

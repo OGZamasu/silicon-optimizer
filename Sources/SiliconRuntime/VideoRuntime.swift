@@ -230,7 +230,7 @@ public actor NodeVideoRuntime {
         return nil
     }
 
-    static func outputName(extension fileExtension: String, date: Date = Date()) -> String {
+    public static func outputName(extension fileExtension: String, date: Date = Date()) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"

@@ -18,8 +18,11 @@ struct VideoView: View {
             ScrollView {
                 if proxy.size.width >= 900 {
                     HStack(alignment: .top, spacing: 16) {
-                        composerCard
-                            .frame(width: 400)
+                        VStack(spacing: 16) {
+                            PersonaCards()
+                            composerCard
+                        }
+                        .frame(width: 400)
                         VStack(spacing: 16) {
                             resultCard
                             recentsPane
@@ -28,6 +31,7 @@ struct VideoView: View {
                     .padding(20)
                 } else {
                     VStack(spacing: 16) {
+                        PersonaCards()
                         composerCard
                         resultCard
                         recentsPane
