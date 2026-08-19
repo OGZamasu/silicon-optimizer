@@ -8,6 +8,12 @@ import SwiftUI
 /// The window is where you go to change things; this is where you check on them. It stays
 /// glanceable: current model, what it is costing, and the two or three actions worth taking
 /// without opening anything.
+/// m:ss, counting down. Zero-padded so the width does not jump every ten seconds.
+private func countdown(_ seconds: TimeInterval) -> String {
+    let total = max(0, Int(seconds.rounded()))
+    return String(format: "%d:%02d", total / 60, total % 60)
+}
+
 struct MenuBarView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -134,6 +140,21 @@ struct MenuBarView: View {
                     Button("Unload") { Task { await model.unload() } }
                         .buttonStyle(.borderless)
                         .font(.caption)
+                }
+
+                // The warning, where a menu-bar app's user actually looks. The notification
+                // reaches someone who has stepped away; this is for someone who is here.
+                if let remaining = model.secondsUntilIdleUnload {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                        Text("Unloading in \(countdown(remaining))")
+                            .monospacedDigit()
+                        Spacer()
+                        Button("Keep it loaded") { model.keepModelLoaded() }
+                            .buttonStyle(.link)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.orange)
                 }
 
                 if let generation = model.lastGeneration, generation.generatedTokens > 0 {

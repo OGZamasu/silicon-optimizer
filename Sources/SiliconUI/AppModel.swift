@@ -1995,6 +1995,7 @@ public final class AppModel {
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
         registerServerTermination()
+        prepareIdleUnloadNotices()
         beginSampling()
         startControlServer()
         measureStorageIfNeeded()
@@ -2041,6 +2042,16 @@ public final class AppModel {
         guard !killed.isEmpty else { return }
         runtimeLog = "Reclaimed \(killed.count) server process(es) left by a previous launch.\n"
             + killed.map { "  pid \($0.pid) — \($0.executablePath)" }.joined(separator: "\n")
+    }
+
+    /// Kept alive for as long as the app is: the notification centre holds its delegate
+    /// weakly, and a released one silently stops answering the button.
+    private var idleNoticeDelegate: IdleUnloadNoticeDelegate?
+
+    private func prepareIdleUnloadNotices() {
+        let delegate = IdleUnloadNoticeDelegate { [weak self] in self?.keepModelLoaded() }
+        idleNoticeDelegate = delegate
+        IdleUnloadNotice.prepare(handler: delegate)
     }
 
     /// Terminates every child server as the app quits.
@@ -2419,11 +2430,73 @@ public final class AppModel {
         }
     }
 
+    // MARK: - The warning before it
+
+    /// How long before the unload the warning appears.
+    ///
+    /// Five minutes, unless the whole idle window is short enough that five minutes would mean
+    /// warning immediately — then it is half the window, so the warning is always a warning
+    /// and never the announcement of something already happening.
+    static func warningLead(forIdleMinutes minutes: Int) -> TimeInterval {
+        min(5 * 60, Double(minutes) * 60 / 2)
+    }
+
+    /// Seconds until the model is unloaded, once that is close enough to say so; nil the rest
+    /// of the time. Drives the countdown in the menu bar.
+    public var secondsUntilIdleUnload: TimeInterval? {
+        guard settings.unloadWhenIdle, loadedModel != nil, !hasWorkInFlight else { return nil }
+        let window = Double(settings.idleUnloadMinutes) * 60
+        let remaining = window - Date().timeIntervalSince(lastActivityAt)
+        guard remaining > 0,
+              remaining <= Self.warningLead(forIdleMinutes: settings.idleUnloadMinutes)
+        else { return nil }
+        return remaining
+    }
+
+    /// The model this Mac is about to release. Nil when nothing is close to being unloaded.
+    public var modelFacingIdleUnload: InstalledModel? {
+        secondsUntilIdleUnload == nil ? nil : loadedModel
+    }
+
+    /// Puts the clock back to the start of the idle window.
+    ///
+    /// The button that calls this says "Keep it loaded", and that is exactly what it does —
+    /// it does not switch the setting off, because someone rescuing one model at 11pm has not
+    /// decided that models should never be released again.
+    public func keepModelLoaded() {
+        noteActivity()
+        idleWarningShownFor = nil
+        IdleUnloadNotice.withdrawWarning()
+    }
+
+    /// The activity stamp the current warning belongs to, so one idle stretch produces one
+    /// notification rather than one per second.
+    private var idleWarningShownFor: Date?
+
+    /// Posts the system notification once per idle stretch.
+    ///
+    /// A menu-bar app is usually not the front window — often the Mac is not being looked at,
+    /// which is the whole reason the model is about to be unloaded — so the countdown in the
+    /// popover cannot be the only warning.
+    private func announceIdleUnloadIfNeeded() {
+        guard let seconds = secondsUntilIdleUnload, let model = loadedModel else {
+            // Out of the window: either something happened, or the unload already did.
+            if secondsUntilIdleUnload == nil { idleWarningShownFor = nil }
+            return
+        }
+        guard idleWarningShownFor != lastActivityAt else { return }
+        idleWarningShownFor = lastActivityAt
+        IdleUnloadNotice.post(
+            modelName: model.name, minutes: Int((seconds / 60).rounded(.up))
+        )
+    }
+
     /// Releases the model after a period of inactivity.
     ///
     /// A loaded model holds tens of gigabytes of wired memory that macOS cannot reclaim on its
     /// own, so leaving one loaded overnight quietly costs the user their whole machine.
     private func enforceIdleUnload() {
+        announceIdleUnloadIfNeeded()
         guard settings.unloadWhenIdle, loadedModel != nil, !hasWorkInFlight else { return }
         let idleSeconds = Date().timeIntervalSince(lastActivityAt)
         guard idleSeconds >= Double(settings.idleUnloadMinutes) * 60 else { return }
@@ -2450,8 +2523,11 @@ public final class AppModel {
             }
             // Re-check after the hops: the user may have started generating in the meantime.
             guard !hasWorkInFlight, loadedModel != nil else { return }
+            let name = loadedModel?.name
             await unload()
             runtimeState = .idle
+            idleWarningShownFor = nil
+            if let name { IdleUnloadNotice.postUnloaded(modelName: name) }
         }
         // Reset immediately so the unload is not queued repeatedly while it runs.
         lastActivityAt = Date()
