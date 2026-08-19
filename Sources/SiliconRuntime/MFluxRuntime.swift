@@ -18,15 +18,22 @@ public actor MFluxRuntime: ImageRuntime {
     private var process: ServerProcess?
     private var installation: RuntimeInstallation?
     private var huggingFaceToken: String?
+    private var hubCache: URL?
 
     /// - Parameter huggingFaceToken: Passed to mflux as `HF_TOKEN` so gated repositories can be
     ///   fetched. mflux downloads weights itself rather than going through this app's
     ///   `HuggingFaceClient`, so the token stored in Settings does not reach it otherwise — and a
     ///   GUI app launched from the Dock inherits no shell environment to fall back on, which left
     ///   gated image models unreachable however the token was provided.
-    public init(installation: RuntimeInstallation? = nil, huggingFaceToken: String? = nil) {
+    /// - Parameter hubCache: Where mflux's own weight downloads land (`HF_HOME`). Without it
+    ///   they default to the startup disk's `~/.cache`, ignoring the model-library setting.
+    public init(
+        installation: RuntimeInstallation? = nil, huggingFaceToken: String? = nil,
+        hubCache: URL? = nil
+    ) {
         self.installation = installation
         self.huggingFaceToken = huggingFaceToken
+        self.hubCache = hubCache
     }
 
     public nonisolated static func locate() -> RuntimeInstallation? {
@@ -38,12 +45,17 @@ public actor MFluxRuntime: ImageRuntime {
     /// Both token names are set: `huggingface_hub` reads `HF_TOKEN` and still honours the older
     /// `HUGGING_FACE_HUB_TOKEN`, and which one applies depends on the version pulled in as a
     /// transitive dependency rather than on anything this app controls.
-    static func childEnvironment(huggingFaceToken: String?) -> [String: String] {
+    static func childEnvironment(
+        huggingFaceToken: String?, hubCache: URL? = nil
+    ) -> [String: String] {
         var environment = ["PYTHONUNBUFFERED": "1"]
         if let token = huggingFaceToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !token.isEmpty {
             environment["HF_TOKEN"] = token
             environment["HUGGING_FACE_HUB_TOKEN"] = token
+        }
+        if let hubCache {
+            environment["HF_HOME"] = hubCache.path
         }
         return environment
     }
@@ -86,7 +98,9 @@ public actor MFluxRuntime: ImageRuntime {
         try await process.start(
             executable: executable,
             arguments: arguments,
-            environment: Self.childEnvironment(huggingFaceToken: huggingFaceToken),
+            environment: Self.childEnvironment(
+                huggingFaceToken: huggingFaceToken, hubCache: hubCache
+            ),
             onLogLine: { line in
                 Task {
                     if let event = await box.interpret(line, totalSteps: totalSteps) {

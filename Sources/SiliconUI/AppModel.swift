@@ -410,7 +410,8 @@ public final class AppModel {
         imageProgress = nil
         imageWasCancelled = false
         let runtime = MFluxRuntime(
-            installation: imageRuntime, huggingFaceToken: settings.huggingFaceToken
+            installation: imageRuntime, huggingFaceToken: settings.huggingFaceToken,
+            hubCache: settings.resolvedEngineCacheDirectory
         )
         activeImageRuntime = runtime
 
@@ -1530,6 +1531,7 @@ public final class AppModel {
             voice: entry.voices.isEmpty ? nil : selectedPresetVoice,
             referenceAudio: entry.supportsCloning ? voiceReferenceAudio : nil,
             referenceText: voiceReferenceText.isEmpty ? nil : voiceReferenceText,
+            hubCache: settings.resolvedEngineCacheDirectory,
             outputDirectory: settings.resolvedVoiceOutputDirectory
         )
         Task {
@@ -1558,7 +1560,8 @@ public final class AppModel {
             defer { isTranscribing = false }
             do {
                 let result = try await voiceRuntime.transcribe(
-                    audio: audio, entryID: entryID
+                    audio: audio, entryID: entryID,
+                    hubCache: settings.resolvedEngineCacheDirectory
                 ) { stage in
                     Task { @MainActor in self.voiceStage = stage }
                 }
@@ -1591,6 +1594,7 @@ public final class AppModel {
             text: caption,
             lyrics: musicLyrics,
             durationSeconds: musicDuration,
+            hubCache: settings.resolvedEngineCacheDirectory,
             outputDirectory: settings.resolvedVoiceOutputDirectory
         ))
     }
@@ -1602,6 +1606,7 @@ public final class AppModel {
             entryID: VoiceCatalog.mossSoundEffect.id,
             text: text,
             durationSeconds: sfxDuration,
+            hubCache: settings.resolvedEngineCacheDirectory,
             outputDirectory: settings.resolvedVoiceOutputDirectory
         ))
     }
@@ -1671,7 +1676,8 @@ public final class AppModel {
             do {
                 try micRecorder.writeSnapshot(to: snapshot)
                 let result = try await voiceRuntime.transcribe(
-                    audio: snapshot, entryID: entryID
+                    audio: snapshot, entryID: entryID,
+                    hubCache: settings.resolvedEngineCacheDirectory
                 ) { _ in }
                 if isLiveTranscribing { liveTranscript = result.text }
             } catch {
@@ -1706,7 +1712,8 @@ public final class AppModel {
                 )
                 try micRecorder.writeSnapshot(to: recording)
                 let result = try await voiceRuntime.transcribe(
-                    audio: recording, entryID: entryID
+                    audio: recording, entryID: entryID,
+                    hubCache: settings.resolvedEngineCacheDirectory
                 ) { _ in }
                 liveTranscript = result.text
                 transcriptions.insert(result, at: 0)

@@ -428,7 +428,8 @@ extension AppModel {
         var result: ImageResult?
         do {
             for try await event in try await MFluxRuntime(
-                installation: installation, huggingFaceToken: settings.huggingFaceToken
+                installation: installation, huggingFaceToken: settings.huggingFaceToken,
+                hubCache: settings.resolvedEngineCacheDirectory
             ).generate(
                 ImageRequest(
                     prompt: request.prompt, configuration: configuration,

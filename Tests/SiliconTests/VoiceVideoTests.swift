@@ -64,6 +64,25 @@ struct VoiceTests {
         #expect(driver.contains("48000"))
     }
 
+    /// The model-library setting must reach the engines: HF_HOME in every child.
+    @Test func childEnvironmentCarriesTheEngineCache() {
+        let cache = URL(fileURLWithPath: "/Volumes/Big/Local Models/Engine Cache")
+        #expect(VoiceRuntime.childEnvironment(hubCache: cache)["HF_HOME"]
+            == "/Volumes/Big/Local Models/Engine Cache")
+        #expect(VoiceRuntime.childEnvironment()["HF_HOME"] == nil)
+        #expect(MFluxRuntime.childEnvironment(huggingFaceToken: nil, hubCache: cache)["HF_HOME"]
+            == "/Volumes/Big/Local Models/Engine Cache")
+    }
+
+    @Test func namesTheRealProblemWhenTheDiskFills() {
+        let diagnosis = VoiceRuntime.diagnosis(
+            from: "RuntimeError: Task error: File reconstruction error: Internal "
+                + "Writer Error: Background writer channel closed"
+        )
+        #expect(diagnosis.contains("disk space"))
+        #expect(diagnosis.contains("Settings"))
+    }
+
     @Test func relaysOnlyMeaningfulStages() {
         #expect(VoiceRuntime.stage(from: "stage: Speaking") == "Speaking")
         #expect(VoiceRuntime.stage(from: "Fetching 56 files: 3%")

@@ -16,12 +16,16 @@ public struct SpeechRequest: Sendable {
     public var lyrics: String?
     /// Requested length in seconds, for music and sound-effect models.
     public var durationSeconds: Int?
+    /// Where the engine's own weight downloads land (`HF_HOME`); nil means the system
+    /// default on the startup disk.
+    public var hubCache: URL?
     public var outputDirectory: URL
 
     public init(
         entryID: String, text: String, voice: String? = nil,
         referenceAudio: URL? = nil, referenceText: String? = nil,
-        lyrics: String? = nil, durationSeconds: Int? = nil, outputDirectory: URL
+        lyrics: String? = nil, durationSeconds: Int? = nil,
+        hubCache: URL? = nil, outputDirectory: URL
     ) {
         self.entryID = entryID
         self.text = text
@@ -30,6 +34,7 @@ public struct SpeechRequest: Sendable {
         self.referenceText = referenceText
         self.lyrics = lyrics
         self.durationSeconds = durationSeconds
+        self.hubCache = hubCache
         self.outputDirectory = outputDirectory
     }
 }
@@ -240,7 +245,10 @@ public actor VoiceRuntime {
         }
 
         let started = Date()
-        let output = try await run(executable: executable, arguments: arguments, onStage: onStage)
+        let output = try await run(
+            executable: executable, arguments: arguments,
+            hubCache: request.hubCache, onStage: onStage
+        )
 
         guard let produced = Self.newestAudioFile(in: scratch) else {
             throw VoiceRuntimeError.failed(Self.diagnosis(from: output))
@@ -328,7 +336,8 @@ public actor VoiceRuntime {
     // MARK: - Transcribing
 
     public func transcribe(
-        audio: URL, entryID: String, onStage: @escaping @Sendable (String) -> Void
+        audio: URL, entryID: String, hubCache: URL? = nil,
+        onStage: @escaping @Sendable (String) -> Void
     ) async throws -> TranscriptionResult {
         guard let entry = VoiceCatalog.entry(id: entryID) else {
             throw VoiceRuntimeError.failed("Unknown transcriber \(entryID).")
@@ -354,6 +363,7 @@ public actor VoiceRuntime {
                 "--output-path", scratch.appendingPathComponent("transcript").path,
                 "--format", "txt",
             ],
+            hubCache: hubCache,
             onStage: onStage
         )
 
@@ -377,8 +387,11 @@ public actor VoiceRuntime {
     /// ships inside the `espeakng-loader` wheel — but misaki only looks for a Homebrew
     /// copy at a hardcoded path. phonemizer honors these variables, so point them at
     /// the bundled library and every machine works, Homebrew or not.
-    nonisolated static func childEnvironment() -> [String: String] {
+    nonisolated static func childEnvironment(hubCache: URL? = nil) -> [String: String] {
         var environment = ["PYTHONUNBUFFERED": "1"]
+        if let hubCache {
+            environment["HF_HOME"] = hubCache.path
+        }
         let lib = Self.environment.appendingPathComponent("lib")
         if let versions = try? FileManager.default.contentsOfDirectory(atPath: lib.path) {
             for version in versions {
@@ -398,14 +411,15 @@ public actor VoiceRuntime {
     }
 
     private func run(
-        executable: URL, arguments: [String], onStage: @escaping @Sendable (String) -> Void
+        executable: URL, arguments: [String], hubCache: URL? = nil,
+        onStage: @escaping @Sendable (String) -> Void
     ) async throws -> String {
         let process = ServerProcess()
         self.process = process
         try await process.start(
             executable: executable,
             arguments: arguments,
-            environment: Self.childEnvironment(),
+            environment: Self.childEnvironment(hubCache: hubCache),
             onLogLine: { line in
                 if let stage = Self.stage(from: line) { onStage(stage) }
             }
@@ -468,6 +482,13 @@ public actor VoiceRuntime {
     /// The last few meaningful lines of a failed run — enough to act on, short enough
     /// to read.
     static func diagnosis(from log: String) -> String {
+        // A full startup disk surfaces as opaque downloader errors; name the real
+        // problem and the fix instead of relaying them.
+        if log.contains("No space left on device")
+            || log.contains("Background writer channel closed") {
+            return "The download ran out of disk space. Point the model library at a "
+                + "bigger drive in Settings → Model library — engine downloads follow it."
+        }
         let lines = log.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("stage: ") }

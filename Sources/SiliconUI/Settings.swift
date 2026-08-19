@@ -162,6 +162,18 @@ public struct Settings: Codable, Sendable, Equatable {
         return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
     }
 
+    /// Where the Python engines' own downloads (the Hugging Face cache) belong.
+    ///
+    /// The engines — MFLUX, mlx-audio, the music and sound-effect models — fetch their
+    /// weights themselves and default to `~/.cache/huggingface` on the startup disk,
+    /// silently ignoring the model-library choice above. 153 GB accumulated there once
+    /// before anyone noticed the disk was full. When a library location is configured,
+    /// every engine child process gets `HF_HOME` pointed here instead, so "save models
+    /// to this drive" means all of them.
+    public var resolvedEngineCacheDirectory: URL? {
+        resolvedModelLibraryDirectory?.appendingPathComponent("Engine Cache")
+    }
+
     // 3D toolkit
 
     /// Where generated meshes are written. Empty means the default below.
