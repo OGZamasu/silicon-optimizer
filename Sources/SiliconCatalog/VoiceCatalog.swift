@@ -5,18 +5,22 @@ import SiliconCore
 /// with its own invocation, so the entry carries which one runs it.
 public enum VoiceBackend: String, Sendable, Codable {
     /// The mlx-audio package in the managed Python environment — Kokoro, CSM, Whisper,
-    /// Parakeet all ride the same CLI.
+    /// Parakeet and MiniMax music all ride its CLIs.
     case mlxAudio
+    /// The mlx-speech package in the same environment — sound effects.
+    case mlxSpeech
     /// LuxTTS, cloned beside the managed environment and driven through a small script.
     case luxTTS
     /// In the catalog for the roadmap; no runner wired yet.
     case unsupported
 }
 
-/// What a voice model does: turns text into speech, or speech into text.
+/// What an audio model does.
 public enum VoiceKind: String, Sendable, Codable {
     case speak
     case transcribe
+    case music
+    case soundEffect
 }
 
 /// One voice model. Sizes are the published weight footprints; durations are what the
@@ -74,11 +78,13 @@ public struct VoiceEntry: Sendable, Identifiable {
 public enum VoiceCatalog {
 
     public static let all: [VoiceEntry] = [
-        luxTTS, kokoro, csm, whisperTurbo, parakeet,
+        luxTTS, kokoro, csm, whisperTurbo, parakeet, minimaxMusic, mossSoundEffect,
     ]
 
     public static var speakers: [VoiceEntry] { all.filter { $0.kind == .speak } }
     public static var transcribers: [VoiceEntry] { all.filter { $0.kind == .transcribe } }
+    public static var musicians: [VoiceEntry] { all.filter { $0.kind == .music } }
+    public static var soundEffects: [VoiceEntry] { all.filter { $0.kind == .soundEffect } }
 
     public static func entry(id: String) -> VoiceEntry? {
         all.first { $0.id == id }
@@ -160,6 +166,44 @@ public enum VoiceCatalog {
         peakMemory: .gib(3),
         typicalDuration: "far faster than the recording",
         rating: 5
+    )
+
+    /// MiniMax Music3 — whole songs, locally: caption plus structured lyrics in, sung
+    /// 44.1 kHz stereo out, through mlx-audio's music CLI.
+    public static let minimaxMusic = VoiceEntry(
+        id: "minimax-music3",
+        name: "MiniMax Music3",
+        author: "MiniMax",
+        license: "MiniMax Community",
+        summary: "Whole songs on this Mac: describe the style, optionally write lyrics "
+            + "with [verse] and [chorus] tags, and it sings. Expect minutes per song "
+            + "and a ~9 GB first download.",
+        backend: .mlxAudio,
+        kind: .music,
+        repo: "mlx-community/MiniMax-Music3-4bit",
+        weightsSize: .gib(9) + .mib(205),
+        peakMemory: .gib(14),
+        typicalDuration: "minutes per song",
+        rating: 5
+    )
+
+    /// MOSS SoundEffect — text to foley, through the mlx-speech package. Figures are a
+    /// measured run on this machine: 6 s of audio in ~5 s of generation, 8.9 GB
+    /// process peak, model load dominating the first call.
+    public static let mossSoundEffect = VoiceEntry(
+        id: "moss-sound-effect",
+        name: "MOSS SoundEffect",
+        author: "OpenMOSS",
+        license: "Apache 2.0",
+        summary: "Describe a sound — rain on a metal roof, glass shattering, a door "
+            + "creak — and get a clean effect at the length you ask for.",
+        backend: .mlxSpeech,
+        kind: .soundEffect,
+        repo: "moss-sound-effect",
+        weightsSize: .gib(4) + .mib(717),
+        peakMemory: .gib(9),
+        typicalDuration: "seconds, after the model loads",
+        rating: 4
     )
 
     /// Parakeet 0.6B — the speed pick for English transcription.

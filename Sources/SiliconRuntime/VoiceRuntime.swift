@@ -12,17 +12,24 @@ public struct SpeechRequest: Sendable {
     public var referenceAudio: URL?
     /// What the reference recording says — some cloners align against it.
     public var referenceText: String?
+    /// Structured lyrics, for music models. Empty means instrumental.
+    public var lyrics: String?
+    /// Requested length in seconds, for music and sound-effect models.
+    public var durationSeconds: Int?
     public var outputDirectory: URL
 
     public init(
         entryID: String, text: String, voice: String? = nil,
-        referenceAudio: URL? = nil, referenceText: String? = nil, outputDirectory: URL
+        referenceAudio: URL? = nil, referenceText: String? = nil,
+        lyrics: String? = nil, durationSeconds: Int? = nil, outputDirectory: URL
     ) {
         self.entryID = entryID
         self.text = text
         self.voice = voice
         self.referenceAudio = referenceAudio
         self.referenceText = referenceText
+        self.lyrics = lyrics
+        self.durationSeconds = durationSeconds
         self.outputDirectory = outputDirectory
     }
 }
@@ -141,6 +148,15 @@ public actor VoiceRuntime {
                 )
             }
             return VoiceInstallation(missing: .nothing, detail: "Ready.")
+        case .mlxSpeech:
+            let cli = environment.appendingPathComponent("bin/mlx-speech")
+            guard manager.isExecutableFile(atPath: cli.path) else {
+                return VoiceInstallation(
+                    missing: .tools,
+                    detail: "The audio tools aren't set up yet — one click installs them."
+                )
+            }
+            return VoiceInstallation(missing: .nothing, detail: "Ready.")
         case .luxTTS:
             let module = luxTTSClone.appendingPathComponent("zipvoice/luxvoice.py")
             guard manager.isExecutableFile(atPath: luxTTSPython.path),
@@ -196,9 +212,15 @@ public actor VoiceRuntime {
         let executable: URL
         let arguments: [String]
         switch entry.backend {
+        case .mlxAudio where entry.kind == .music:
+            executable = Self.python
+            arguments = Self.musicArguments(entry: entry, request: request, scratch: scratch)
         case .mlxAudio:
             executable = Self.python
             arguments = Self.mlxAudioSpeakArguments(entry: entry, request: request, scratch: scratch)
+        case .mlxSpeech:
+            executable = Self.environment.appendingPathComponent("bin/mlx-speech")
+            arguments = Self.soundEffectArguments(entry: entry, request: request, scratch: scratch)
         case .luxTTS:
             guard let reference = request.referenceAudio else {
                 throw VoiceRuntimeError.failed(
@@ -224,7 +246,7 @@ public actor VoiceRuntime {
             throw VoiceRuntimeError.failed(Self.diagnosis(from: output))
         }
         let destination = request.outputDirectory
-            .appendingPathComponent(Self.outputName())
+            .appendingPathComponent(Self.outputName(kind: entry.kind))
         try FileManager.default.moveItem(at: produced, to: destination)
         return SpeechResult(
             audio: destination, modelName: entry.name,
@@ -253,6 +275,35 @@ public actor VoiceRuntime {
             }
         }
         return arguments
+    }
+
+    /// The music CLI wants a caption plus structured lyrics ("[verse]…" lines) and a
+    /// concrete output file. Empty lyrics become "[instrumental]" — the flag is
+    /// mandatory, and that is the tag for a song without words.
+    static func musicArguments(
+        entry: VoiceEntry, request: SpeechRequest, scratch: URL
+    ) -> [String] {
+        let lyrics = request.lyrics?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [
+            "-m", "mlx_audio.music.generate",
+            "--model", entry.repo,
+            "--caption", request.text,
+            "--lyrics", (lyrics?.isEmpty ?? true) ? "[instrumental]" : lyrics!,
+            "--duration", String(request.durationSeconds ?? 30),
+            "--output", scratch.appendingPathComponent("music.wav").path,
+        ]
+    }
+
+    static func soundEffectArguments(
+        entry: VoiceEntry, request: SpeechRequest, scratch: URL
+    ) -> [String] {
+        [
+            "tts",
+            "--model", entry.repo,
+            "--text", request.text,
+            "--duration-seconds", String(request.durationSeconds ?? 6),
+            "-o", scratch.appendingPathComponent("effect.wav").path,
+        ]
     }
 
     /// The LuxTTS driver, verified against the clone's actual layout: the class lives at
@@ -401,12 +452,17 @@ public actor VoiceRuntime {
             }
     }
 
-    static func outputName(date: Date = Date()) -> String {
+    public static func outputName(kind: VoiceKind = .speak, date: Date = Date()) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let suffix = String(UUID().uuidString.prefix(8))
-        return "silicon-voice-\(formatter.string(from: date))-\(suffix).wav"
+        let prefix = switch kind {
+        case .music: "silicon-music"
+        case .soundEffect: "silicon-sfx"
+        default: "silicon-voice"
+        }
+        return "\(prefix)-\(formatter.string(from: date))-\(suffix).wav"
     }
 
     /// The last few meaningful lines of a failed run — enough to act on, short enough

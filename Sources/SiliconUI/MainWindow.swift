@@ -35,7 +35,7 @@ public struct MainWindow: View {
             case .chat: ChatView()
             case .images: ImageView()
             case .threeD: MeshView()
-            case .voice: VoiceView()
+            case .audio: VoiceView()
             case .video: VideoView()
             case .settings: SettingsView()
             }

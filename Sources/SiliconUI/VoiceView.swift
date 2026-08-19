@@ -39,8 +39,9 @@ final class AudioPreview {
     }
 }
 
-/// The Voice tab: text in, speech out — and the reverse. Same promise as every other
-/// tab: what runs is stated plainly, and the result is a real file.
+/// The Audio tab: speech, music, sound effects, and transcription — live or from a
+/// file. Same promise as every other tab: what runs is stated plainly, and the result
+/// is a real file.
 struct VoiceView: View {
     @Environment(AppModel.self) private var model
     @State private var preview = AudioPreview.shared
@@ -55,11 +56,13 @@ struct VoiceView: View {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(spacing: 16) {
                             speakCard
-                            transcribeCard
+                            musicCard
+                            soundEffectCard
                         }
                         .frame(width: 400)
                         VStack(spacing: 16) {
                             resultsCard
+                            transcribeCard
                             recentsPane
                         }
                     }
@@ -67,6 +70,8 @@ struct VoiceView: View {
                 } else {
                     VStack(spacing: 16) {
                         speakCard
+                        musicCard
+                        soundEffectCard
                         resultsCard
                         transcribeCard
                         recentsPane
@@ -76,7 +81,7 @@ struct VoiceView: View {
             }
         }
         .background(.background)
-        .navigationTitle("Voice")
+        .navigationTitle("Audio")
         .task { refreshRecents() }
         .onChange(of: model.speechResults.count) { refreshRecents() }
     }
@@ -258,6 +263,119 @@ struct VoiceView: View {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    // MARK: - Music
+
+    private var musicCard: some View {
+        @Bindable var model = model
+        let entry = VoiceCatalog.minimaxMusic
+        return Card(title: "Music", systemImage: "music.note") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(entry.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                installRow(for: entry)
+
+                TextField(
+                    "Style",
+                    text: $model.musicCaption,
+                    prompt: Text("Style — \"warm lo-fi beat, mellow piano, relaxed\"")
+                )
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
+
+                TextEditor(text: $model.musicLyrics)
+                    .font(.body)
+                    .frame(minHeight: 70)
+                    .padding(6)
+                    .background(.background.secondary, in: .rect(cornerRadius: 7))
+                    .overlay(alignment: .topLeading) {
+                        if model.musicLyrics.isEmpty {
+                            Text("Lyrics with [verse] and [chorus] tags — or leave "
+                                + "empty for an instrumental")
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 12)
+                                .padding(.leading, 11)
+                                .allowsHitTesting(false)
+                        }
+                    }
+
+                HStack(spacing: 10) {
+                    Picker("Length", selection: $model.musicDuration) {
+                        Text("20 s").tag(20)
+                        Text("30 s").tag(30)
+                        Text("60 s").tag(60)
+                        Text("2 min").tag(120)
+                    }
+                    .frame(maxWidth: 160)
+
+                    Button {
+                        model.composeMusic()
+                    } label: {
+                        Label("Compose", systemImage: "music.note.list")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        model.isSpeaking
+                        || model.musicCaption.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                        || !model.voiceInstallation(for: entry).isInstalled
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Sound effects
+
+    private var soundEffectCard: some View {
+        @Bindable var model = model
+        let entry = VoiceCatalog.mossSoundEffect
+        return Card(title: "Sound effect", systemImage: "bolt.horizontal") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(entry.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                installRow(for: entry)
+
+                TextField(
+                    "Sound",
+                    text: $model.sfxText,
+                    prompt: Text("\"rolling thunder with rain on a metal roof\"")
+                )
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
+
+                HStack(spacing: 10) {
+                    Picker("Length", selection: $model.sfxDuration) {
+                        Text("3 s").tag(3)
+                        Text("6 s").tag(6)
+                        Text("10 s").tag(10)
+                    }
+                    .frame(maxWidth: 140)
+
+                    Button {
+                        model.generateSoundEffect()
+                    } label: {
+                        Label("Generate", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        model.isSpeaking
+                        || model.sfxText.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                        || !model.voiceInstallation(for: entry).isInstalled
+                    )
+                }
+            }
+        }
+    }
+
     // MARK: - Results
 
     private var resultsCard: some View {
@@ -354,14 +472,67 @@ struct VoiceView: View {
                         .buttonStyle(.bordered)
                         .disabled(
                             model.isTranscribing
+                            || model.isLiveTranscribing
                             || !model.voiceInstallation(for: entry).isInstalled
                         )
+
+                        Button {
+                            if model.isLiveTranscribing {
+                                model.stopLiveTranscription()
+                            } else {
+                                model.startLiveTranscription()
+                            }
+                        } label: {
+                            Label(
+                                model.isLiveTranscribing ? "Stop" : "Live from mic",
+                                systemImage: model.isLiveTranscribing
+                                    ? "stop.circle.fill" : "mic.fill"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(model.isLiveTranscribing ? .red : nil)
+                        .disabled(
+                            model.isTranscribing
+                            || !model.voiceInstallation(for: entry).isInstalled
+                        )
+
                         if model.isTranscribing {
                             ProgressView().controlSize(.small)
                             Text("Listening…")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                    }
+
+                    // Live captions, honestly labelled: each update is a fresh pass
+                    // over everything said so far, so it runs a few seconds behind.
+                    if model.isLiveTranscribing || !model.liveTranscript.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                if model.isLiveTranscribing {
+                                    Circle()
+                                        .fill(Color.red)
+                                        .frame(width: 7, height: 7)
+                                    Text("Listening — updates run a few seconds behind")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("Last live session")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(model.liveTranscript.isEmpty
+                                ? "Say something…" : model.liveTranscript)
+                                .font(.callout)
+                                .foregroundStyle(model.liveTranscript.isEmpty
+                                    ? .tertiary : .primary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(8)
+                        .background(.background.secondary, in: .rect(cornerRadius: 8))
                     }
                 }
 

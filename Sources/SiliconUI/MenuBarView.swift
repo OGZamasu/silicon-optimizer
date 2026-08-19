@@ -358,8 +358,8 @@ struct MenuBarView: View {
                 model.selectedTab = .threeD
                 openMainWindow()
             }
-            menuButton("Voice", systemImage: "waveform") {
-                model.selectedTab = .voice
+            menuButton("Audio", systemImage: "waveform") {
+                model.selectedTab = .audio
                 openMainWindow()
             }
             menuButton("Video", systemImage: "film") {

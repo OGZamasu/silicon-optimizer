@@ -36,6 +36,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Silicon Optimizer talks to your other Silicon nodes (like a Windows PC running LATO.2) over your local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Live transcription listens to your microphone and turns what you say into text — entirely on this Mac.</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>

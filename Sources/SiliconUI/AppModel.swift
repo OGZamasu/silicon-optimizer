@@ -108,7 +108,7 @@ public final class AppModel {
         case chat = "Chat"
         case images = "Images"
         case threeD = "3D"
-        case voice = "Voice"
+        case audio = "Audio"
         case video = "Video"
         case settings = "Settings"
 
@@ -121,7 +121,7 @@ public final class AppModel {
             case .chat: "bubble.left.and.bubble.right"
             case .images: "photo.on.rectangle.angled"
             case .threeD: "cube.transparent"
-            case .voice: "waveform"
+            case .audio: "waveform"
             case .video: "film"
             case .settings: "gearshape"
             }
@@ -1573,6 +1573,149 @@ public final class AppModel {
         Task { await voiceRuntime.cancel() }
     }
 
+    // MARK: - Music and sound effects
+
+    public var musicCaption = ""
+    public var musicLyrics = ""
+    public var musicDuration = 30
+    public var sfxText = ""
+    public var sfxDuration = 6
+
+    /// One shared runner, one job at a time — deliberately: every generator here loads
+    /// a model into the same unified memory, and two at once would swap, not overlap.
+    public func composeMusic() {
+        let caption = musicCaption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !caption.isEmpty else { return }
+        runAudioJob(SpeechRequest(
+            entryID: VoiceCatalog.minimaxMusic.id,
+            text: caption,
+            lyrics: musicLyrics,
+            durationSeconds: musicDuration,
+            outputDirectory: settings.resolvedVoiceOutputDirectory
+        ))
+    }
+
+    public func generateSoundEffect() {
+        let text = sfxText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        runAudioJob(SpeechRequest(
+            entryID: VoiceCatalog.mossSoundEffect.id,
+            text: text,
+            durationSeconds: sfxDuration,
+            outputDirectory: settings.resolvedVoiceOutputDirectory
+        ))
+    }
+
+    private func runAudioJob(_ request: SpeechRequest) {
+        guard !isSpeaking else { return }
+        isSpeaking = true
+        voiceStage = "Starting"
+        voiceError = nil
+        noteActivity()
+        Task {
+            defer {
+                isSpeaking = false
+                voiceStage = nil
+            }
+            do {
+                let result = try await voiceRuntime.speak(request) { stage in
+                    Task { @MainActor in self.voiceStage = stage }
+                }
+                speechResults.insert(result, at: 0)
+            } catch {
+                voiceError = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: - Live transcription
+
+    private let micRecorder = MicRecorder()
+    public private(set) var isLiveTranscribing = false
+    public private(set) var liveTranscript = ""
+    private var liveTask: Task<Void, Never>?
+
+    public func startLiveTranscription() {
+        guard !isLiveTranscribing else { return }
+        Task {
+            guard await micRecorder.requestPermission() else {
+                voiceError = "Microphone access was declined — allow Silicon Optimizer "
+                    + "under System Settings → Privacy & Security → Microphone."
+                return
+            }
+            do {
+                try micRecorder.start()
+            } catch {
+                voiceError = "The microphone didn't start."
+                return
+            }
+            isLiveTranscribing = true
+            liveTranscript = ""
+            voiceError = nil
+            liveTask = Task { await liveTranscriptionLoop() }
+        }
+    }
+
+    /// Every few seconds the transcriber gets a complete snapshot of everything said so
+    /// far and the display is replaced wholesale. Each pass loads the model fresh — the
+    /// price of process-per-call transcription — so "live" here means a few seconds
+    /// behind, which the UI says out loud.
+    private func liveTranscriptionLoop() async {
+        let entryID = selectedTranscriber
+        while isLiveTranscribing && !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(4))
+            guard isLiveTranscribing, micRecorder.recordedSeconds > 1 else { continue }
+            let snapshot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("live-\(UUID().uuidString.prefix(6)).wav")
+            defer { try? FileManager.default.removeItem(at: snapshot) }
+            do {
+                try micRecorder.writeSnapshot(to: snapshot)
+                let result = try await voiceRuntime.transcribe(
+                    audio: snapshot, entryID: entryID
+                ) { _ in }
+                if isLiveTranscribing { liveTranscript = result.text }
+            } catch {
+                // A transient miss keeps the last good transcript on screen.
+            }
+        }
+    }
+
+    /// Stops listening, saves the recording beside the generated audio, and runs one
+    /// final full pass so the last words make it into the transcript list.
+    public func stopLiveTranscription() {
+        guard isLiveTranscribing else { return }
+        micRecorder.stop()
+        isLiveTranscribing = false
+        liveTask?.cancel()
+        liveTask = nil
+        guard micRecorder.recordedSeconds > 1 else { return }
+
+        let directory = settings.resolvedVoiceOutputDirectory
+        let recording = directory.appendingPathComponent(
+            VoiceRuntime.outputName().replacingOccurrences(
+                of: "silicon-voice", with: "silicon-recording"
+            )
+        )
+        let entryID = selectedTranscriber
+        isTranscribing = true
+        Task {
+            defer { isTranscribing = false }
+            do {
+                try FileManager.default.createDirectory(
+                    at: directory, withIntermediateDirectories: true
+                )
+                try micRecorder.writeSnapshot(to: recording)
+                let result = try await voiceRuntime.transcribe(
+                    audio: recording, entryID: entryID
+                ) { _ in }
+                liveTranscript = result.text
+                transcriptions.insert(result, at: 0)
+            } catch {
+                voiceError = error.localizedDescription
+            }
+        }
+    }
+
     /// One click sets up the shared environment and mlx-audio inside it. The package
     /// list is exactly what a real end-to-end run needed: misaki and its G2P chain for
     /// Kokoro (num2words, spacy and its small English model, phonemizer) plus the
@@ -1591,7 +1734,7 @@ public final class AppModel {
                 executable: VoiceRuntime.environment.appendingPathComponent("bin/pip"),
                 arguments: [
                     "install", "--upgrade",
-                    "mlx-audio", "misaki", "num2words", "spacy",
+                    "mlx-audio", "mlx-speech", "misaki", "num2words", "spacy",
                     "phonemizer", "espeakng-loader",
                     "en_core_web_sm@https://github.com/explosion/spacy-models/releases/"
                     + "download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",

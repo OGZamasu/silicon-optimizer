@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import SiliconCatalog
 @testable import SiliconRuntime
+@testable import SiliconUI
 
 @Suite("Voice catalog and runtime")
 struct VoiceTests {
@@ -76,6 +77,98 @@ struct VoiceTests {
         #expect(a != b)
         #expect(a.hasPrefix("silicon-voice-"))
         #expect(a.hasSuffix(".wav"))
+        #expect(VoiceRuntime.outputName(kind: .music).hasPrefix("silicon-music-"))
+        #expect(VoiceRuntime.outputName(kind: .soundEffect).hasPrefix("silicon-sfx-"))
+    }
+
+    @Test func catalogNowCoversMusicAndSoundEffects() {
+        #expect(!VoiceCatalog.musicians.isEmpty)
+        #expect(!VoiceCatalog.soundEffects.isEmpty)
+        #expect(VoiceCatalog.entry(id: "minimax-music3")?.kind == .music)
+        #expect(VoiceCatalog.entry(id: "moss-sound-effect")?.backend == .mlxSpeech)
+    }
+
+    @Test func buildsTheMusicCommandWithInstrumentalFallback() {
+        let scratch = URL(fileURLWithPath: "/tmp/scratch")
+        let request = SpeechRequest(
+            entryID: "minimax-music3", text: "warm lo-fi beat",
+            lyrics: "   ", durationSeconds: 30,
+            outputDirectory: URL(fileURLWithPath: "/tmp/out")
+        )
+        let arguments = VoiceRuntime.musicArguments(
+            entry: VoiceCatalog.minimaxMusic, request: request, scratch: scratch
+        )
+        #expect(arguments == [
+            "-m", "mlx_audio.music.generate",
+            "--model", "mlx-community/MiniMax-Music3-4bit",
+            "--caption", "warm lo-fi beat",
+            "--lyrics", "[instrumental]",
+            "--duration", "30",
+            "--output", "/tmp/scratch/music.wav",
+        ])
+
+        var withLyrics = request
+        withLyrics.lyrics = "[verse]\nHello world"
+        let sung = VoiceRuntime.musicArguments(
+            entry: VoiceCatalog.minimaxMusic, request: withLyrics, scratch: scratch
+        )
+        #expect(sung.contains("[verse]\nHello world"))
+    }
+
+    @Test func buildsTheSoundEffectCommandExactly() {
+        let request = SpeechRequest(
+            entryID: "moss-sound-effect", text: "glass shattering",
+            durationSeconds: 6,
+            outputDirectory: URL(fileURLWithPath: "/tmp/out")
+        )
+        let arguments = VoiceRuntime.soundEffectArguments(
+            entry: VoiceCatalog.mossSoundEffect, request: request,
+            scratch: URL(fileURLWithPath: "/tmp/scratch")
+        )
+        #expect(arguments == [
+            "tts",
+            "--model", "moss-sound-effect",
+            "--text", "glass shattering",
+            "--duration-seconds", "6",
+            "-o", "/tmp/scratch/effect.wav",
+        ])
+    }
+}
+
+@Suite("Microphone WAV snapshots")
+struct MicWAVTests {
+
+    /// The header a transcriber will actually parse: RIFF/WAVE, PCM, mono, 16-bit,
+    /// sizes consistent with the payload.
+    @Test @MainActor func writesAValidWAVHeader() {
+        let samples: [Float] = [0, 0.5, -0.5, 1.0, -1.0]
+        let data = MicRecorder.wavData(samples: samples, sampleRate: 16000)
+
+        #expect(data.count == 44 + samples.count * 2)
+        #expect(String(data: data[0..<4], encoding: .ascii) == "RIFF")
+        #expect(String(data: data[8..<12], encoding: .ascii) == "WAVE")
+        #expect(String(data: data[36..<40], encoding: .ascii) == "data")
+
+        func u32(_ offset: Int) -> UInt32 {
+            data[offset..<offset + 4].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        }
+        func u16(_ offset: Int) -> UInt16 {
+            data[offset..<offset + 2].withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
+        }
+        #expect(u32(4) == UInt32(36 + samples.count * 2))
+        #expect(u16(20) == 1)                       // PCM
+        #expect(u16(22) == 1)                       // mono
+        #expect(u32(24) == 16000)                   // sample rate
+        #expect(u16(34) == 16)                      // bits per sample
+        #expect(u32(40) == UInt32(samples.count * 2))
+
+        // Full-scale samples clip cleanly instead of wrapping.
+        func s16(_ offset: Int) -> Int16 {
+            Int16(bitPattern: u16(offset))
+        }
+        #expect(s16(44) == 0)
+        #expect(s16(50) == 32767)
+        #expect(s16(52) == -32767)
     }
 }
 
