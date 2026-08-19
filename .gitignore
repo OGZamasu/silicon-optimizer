@@ -16,3 +16,5 @@ web/package-lock.json
 # Build artifacts and local scratch files
 *.profraw
 /pacman.html
+__pycache__/
+*.pyc
