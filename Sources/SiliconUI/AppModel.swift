@@ -1909,6 +1909,17 @@ public final class AppModel {
     public var faceCamMouthMask = true
     public var faceCamOpacity = 1.0
 
+    // MARK: - Face tracking
+
+    var trackerRuntime: TrackerRuntime?
+    var trackerTerminationRegistered = false
+    public internal(set) var trackerState: TrackerRuntime.State = .idle
+    public var trackerError: String?
+    public var trackerMirror = true
+    public var trackerSmoothing = 0.45
+    /// Whether the upper body is tracked as well as the face.
+    public var trackBody = false
+
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {
         guard let runtime = activeMeshRuntime else { return }

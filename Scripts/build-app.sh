@@ -116,6 +116,9 @@ fi
 if [[ -f Resources/facecam.py ]]; then
     cp Resources/facecam.py "$BUNDLE/Contents/Resources/"
 fi
+if [[ -f Resources/tracker.py ]]; then
+    cp Resources/tracker.py "$BUNDLE/Contents/Resources/"
+fi
 
 # The licences travel with the binaries they cover.
 if [[ -f THIRD_PARTY_LICENSES.md ]]; then

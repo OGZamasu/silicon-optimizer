@@ -209,6 +209,13 @@ public struct Settings: Codable, Sendable, Equatable {
     /// Port the live face camera serves its picture on. Fixed rather than ephemeral
     /// so an OBS source keeps working across restarts.
     public var faceCamPort: Int = 8791
+    /// Port face tracking publishes its numbers on.
+    public var trackerPort: Int = 8792
+    /// Whether tracking is also sent out as VMC, for a rigged model elsewhere.
+    public var sendVMC = false
+    public var vmcHost: String = "127.0.0.1"
+    /// The port VSeeFace and friends listen on by convention.
+    public var vmcPort: Int = 39539
 
     // Personas
 
@@ -326,6 +333,10 @@ public struct Settings: Codable, Sendable, Equatable {
         videoOutputDirectory = try value(.videoOutputDirectory, fallback.videoOutputDirectory)
         lastTab = try value(.lastTab, fallback.lastTab)
         faceCamPort = try value(.faceCamPort, fallback.faceCamPort)
+        trackerPort = try value(.trackerPort, fallback.trackerPort)
+        sendVMC = try value(.sendVMC, fallback.sendVMC)
+        vmcHost = try value(.vmcHost, fallback.vmcHost)
+        vmcPort = try value(.vmcPort, fallback.vmcPort)
         personas = try value(.personas, fallback.personas)
         selectedPersonaID = try value(.selectedPersonaID, fallback.selectedPersonaID)
         modelLibraryDirectory = try value(

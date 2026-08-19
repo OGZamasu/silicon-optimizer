@@ -22,6 +22,9 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
     /// looks truly right on stylized art, because the artist drew both states rather
     /// than the software inventing one.
     public var openMouthPortraitPath: String = ""
+    /// An optional drawing with the eyes closed, so blinks are the artist's rather
+    /// than a shadow drawn over the eyes.
+    public var closedEyesPortraitPath: String = ""
     /// Where the mouth is, as a fraction of the portrait's height from the top.
     /// Zero means "work it out" — Vision finds photographic faces reliably but not
     /// stylized art, so drawn characters get a line the artist sets by eye.
@@ -39,6 +42,7 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
         name: String = "",
         portraitPath: String = "",
         openMouthPortraitPath: String = "",
+        closedEyesPortraitPath: String = "",
         mouthLineOverride: Double = 0,
         voiceModelID: String = "kokoro",
         presetVoice: String = "af_heart",
@@ -50,6 +54,7 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
         self.name = name
         self.portraitPath = portraitPath
         self.openMouthPortraitPath = openMouthPortraitPath
+        self.closedEyesPortraitPath = closedEyesPortraitPath
         self.mouthLineOverride = mouthLineOverride
         self.voiceModelID = voiceModelID
         self.presetVoice = presetVoice
@@ -68,6 +73,10 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
 
     public var openMouthPortraitURL: URL? {
         openMouthPortraitPath.isEmpty ? nil : URL(fileURLWithPath: openMouthPortraitPath)
+    }
+
+    public var closedEyesPortraitURL: URL? {
+        closedEyesPortraitPath.isEmpty ? nil : URL(fileURLWithPath: closedEyesPortraitPath)
     }
 }
 

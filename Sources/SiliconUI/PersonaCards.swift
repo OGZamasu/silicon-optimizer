@@ -15,6 +15,7 @@ struct PersonaCards: View {
             if model.selectedPersona != nil {
                 performCard
                 liveCard
+                TrackerCard()
                 FaceCamCard()
             }
         }
@@ -393,6 +394,11 @@ struct PersonaEditor: View {
                         ? "Add mouth-open drawing…" : "Replace mouth-open…") {
                         if let url = pickImage() { persona.openMouthPortraitPath = url.path }
                     }
+                    Button(persona.closedEyesPortraitPath.isEmpty
+                        ? "Add eyes-closed…" : "Replace eyes-closed…") {
+                        if let url = pickImage() { persona.closedEyesPortraitPath = url.path }
+                    }
+                    .help("Used for blinks when motion tracking is running")
                     if !persona.openMouthPortraitPath.isEmpty {
                         Button {
                             persona.openMouthPortraitPath = ""

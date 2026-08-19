@@ -69,6 +69,10 @@ extension AppModel {
             openMouth: persona.openMouthPortraitURL
                 .flatMap { NSImage(contentsOf: $0) }
                 .flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+                .flatMap(png),
+            closedEyes: persona.closedEyesPortraitURL
+                .flatMap { NSImage(contentsOf: $0) }
+                .flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
                 .flatMap(png)
         )
     }

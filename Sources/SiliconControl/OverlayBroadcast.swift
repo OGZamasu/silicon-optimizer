@@ -26,12 +26,19 @@ public final class OverlayBroadcast: @unchecked Sendable {
         public var mouthTop: Double = 0.66
         /// Whether a second, mouth-open drawing is available to cross to.
         public var hasOpenMouth: Bool = false
+        /// Whether a closed-eyes drawing is available, so blinks can be real.
+        public var hasClosedEyes: Bool = false
+        /// Where the overlay can read live face tracking, when it is running. The
+        /// page polls this directly rather than through the app: head motion wants
+        /// every frame it can get, and a relay would cost it latency for nothing.
+        public var trackerURL: String = ""
     }
 
     private let lock = NSLock()
     private var _state = State()
     private var _portrait: Data?
     private var _openMouthPortrait: Data?
+    private var _closedEyesPortrait: Data?
 
     public var state: State {
         get { lock.lock(); defer { lock.unlock() }; return _state }
@@ -50,17 +57,34 @@ public final class OverlayBroadcast: @unchecked Sendable {
         return _openMouthPortrait
     }
 
+    public var closedEyesPortrait: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _closedEyesPortrait
+    }
+
     /// Replaces the portrait and bumps the version so open overlays pick it up.
     public func setPortrait(
-        _ data: Data?, name: String, mouthTop: Double = 0.66, openMouth: Data? = nil
+        _ data: Data?, name: String, mouthTop: Double = 0.66,
+        openMouth: Data? = nil, closedEyes: Data? = nil
     ) {
         lock.lock()
         _portrait = data
         _openMouthPortrait = openMouth
+        _closedEyesPortrait = closedEyes
         _state.name = name
         _state.mouthTop = mouthTop
         _state.hasOpenMouth = openMouth != nil
+        _state.hasClosedEyes = closedEyes != nil
         _state.portraitVersion += 1
+        lock.unlock()
+    }
+
+    /// The address the overlay should poll for tracking, or empty when the tracker
+    /// is not running and the character should fall back to the voice.
+    public func setTrackerURL(_ url: String) {
+        lock.lock()
+        _state.trackerURL = url
         lock.unlock()
     }
 

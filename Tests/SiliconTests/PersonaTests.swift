@@ -375,3 +375,62 @@ struct FaceCamTests {
         #expect(FaceCamRuntime.swapperModel.lastPathComponent == "inswapper_128.onnx")
     }
 }
+
+@Suite("Face tracking")
+struct TrackerTests {
+
+    @Test func readsTheTrackersLifecycle() throws {
+        guard case .tracking(let url, let fps) = try #require(
+            TrackerRuntime.interpret("ready: http://127.0.0.1:8792/state", port: 8792)
+        ) else { Issue.record("ready should start tracking"); return }
+        #expect(url.absoluteString.hasSuffix("/state"))
+        #expect(fps == 0)
+
+        guard case .tracking(_, let rate) = try #require(
+            TrackerRuntime.interpret("fps: 126.3", port: 8792)
+        ) else { Issue.record("fps should stay tracking"); return }
+        #expect(rate == 126.3)
+
+        guard case .failed(let message) = try #require(
+            TrackerRuntime.interpret("fatal: camera unavailable", port: 8792)
+        ) else { Issue.record("fatal should fail"); return }
+        #expect(message.contains("Privacy"))
+
+        #expect(TrackerRuntime.interpret("GL version: 2.1", port: 8792) == nil)
+    }
+
+    /// The overlay reads tracking straight from the tracker, so the address has to
+    /// survive the trip through the broadcast — an empty one means "use the voice".
+    @Test func broadcastCarriesTheTrackerAddress() {
+        let broadcast = OverlayBroadcast.shared
+        broadcast.setTrackerURL("http://127.0.0.1:8792/state")
+        #expect(broadcast.state.trackerURL == "http://127.0.0.1:8792/state")
+        broadcast.setTrackerURL("")
+        #expect(broadcast.state.trackerURL.isEmpty)
+    }
+
+    /// A blink needs a drawing to cross to, and the page needs to know it exists.
+    @Test func broadcastAdvertisesTheClosedEyesDrawing() {
+        let broadcast = OverlayBroadcast.shared
+        broadcast.setPortrait(
+            Data([1]), name: "X", mouthTop: 0.7, openMouth: nil, closedEyes: Data([2])
+        )
+        #expect(broadcast.state.hasClosedEyes)
+        #expect(broadcast.closedEyesPortrait?.count == 1)
+        broadcast.setPortrait(nil, name: "")
+        #expect(!broadcast.state.hasClosedEyes)
+    }
+
+    /// The overlay must prefer the camera over the voice when tracking is live, and
+    /// fall back when it goes stale — otherwise stopping the tracker freezes the face.
+    @Test func overlayPrefersTrackingAndFallsBackWhenItGoesStale() {
+        let html = OverlayPage.html(token: "t")
+        #expect(html.contains("trackerURL"))
+        #expect(html.contains("trackFresh) < 500"))
+        #expect(html.contains("track.mouthOpen"))
+        #expect(html.contains("track.blink"))
+        #expect(html.contains("headYaw"))
+        // Still nothing off this machine.
+        #expect(!html.contains("http://") && !html.contains("https://"))
+    }
+}
