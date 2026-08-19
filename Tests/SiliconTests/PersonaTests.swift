@@ -498,3 +498,58 @@ struct TakeRecorderTests {
         #expect(TakeRecorder.State.recording(seconds: 75) != .idle)
     }
 }
+
+/// The regression that cost a real person their settings: one stored value the decoder
+/// could not read took the whole file down, and the next save wrote defaults over it.
+@Suite("Settings survive their own past")
+struct SettingsCompatibilityTests {
+
+    /// A character saved before three fields existed. The synthesized decoder throws
+    /// on the missing keys; nothing else may notice.
+    private let oldPersona = """
+    {"id":"abc-123","name":"Tester","portraitPath":"/tmp/tester.png",
+     "voiceModelID":"kokoro","presetVoice":"af_heart","referenceAudioPath":"",
+     "voiceCredit":"my own voice","brief":"dry"}
+    """
+
+    @Test func readsACharacterSavedBeforeItsNewestFieldsExisted() throws {
+        let persona = try JSONDecoder().decode(Persona.self, from: Data(oldPersona.utf8))
+        #expect(persona.name == "Tester")
+        #expect(persona.portraitPath == "/tmp/tester.png")
+        #expect(persona.voiceCredit == "my own voice")
+        // The fields that did not exist take their defaults rather than throwing.
+        #expect(persona.openMouthPortraitPath.isEmpty)
+        #expect(persona.closedEyesPortraitPath.isEmpty)
+        #expect(persona.mouthLineOverride == 0)
+    }
+
+    /// The whole point: an unreadable value costs its own key and nothing else.
+    @Test func oneUnreadableFieldCannotWipeEverythingElse() throws {
+        let stored = """
+        {"modelLibraryDirectory":"/Volumes/T9/Local Models",
+         "meshOutputDirectory":"/Volumes/T9/Models",
+         "huggingFaceToken":"hf_example",
+         "personas":[{"id":"x","name":"Tester","portraitPath":"/tmp/t.png"}],
+         "temperature":0.4,
+         "speedCalibrations":"this is not a dictionary at all"}
+        """
+        let settings = try JSONDecoder().decode(Settings.self, from: Data(stored.utf8))
+
+        #expect(settings.modelLibraryDirectory == "/Volumes/T9/Local Models")
+        #expect(settings.meshOutputDirectory == "/Volumes/T9/Models")
+        #expect(settings.huggingFaceToken == "hf_example")
+        #expect(settings.temperature == 0.4)
+        #expect(settings.personas.count == 1)
+        #expect(settings.personas.first?.name == "Tester")
+        // Only the broken one falls back.
+        #expect(settings.speedCalibrations.isEmpty)
+    }
+
+    @Test func settingsFromAFutureVersionStillLoad() throws {
+        let stored = """
+        {"temperature":0.9,"someFieldFromLater":{"nested":true},"personas":[]}
+        """
+        let settings = try JSONDecoder().decode(Settings.self, from: Data(stored.utf8))
+        #expect(settings.temperature == 0.9)
+    }
+}

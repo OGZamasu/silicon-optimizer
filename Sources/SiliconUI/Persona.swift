@@ -63,6 +63,32 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
         self.brief = brief
     }
 
+    /// Decoded field by field, every one optional with a default.
+    ///
+    /// The synthesized decoder throws when a key is absent, and a character saved
+    /// before a field existed has no such key — so adding one field to this struct
+    /// made every stored character unreadable, and because the settings decoder
+    /// propagated that error, it wiped every other setting with them. A struct that
+    /// lives inside saved state has to be able to read its own past.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func string(_ key: CodingKeys, _ fallback: String = "") -> String {
+            ((try? container.decodeIfPresent(String.self, forKey: key)) ?? nil) ?? fallback
+        }
+        id = string(.id, UUID().uuidString)
+        name = string(.name)
+        portraitPath = string(.portraitPath)
+        openMouthPortraitPath = string(.openMouthPortraitPath)
+        closedEyesPortraitPath = string(.closedEyesPortraitPath)
+        voiceModelID = string(.voiceModelID, "kokoro")
+        presetVoice = string(.presetVoice, "af_heart")
+        referenceAudioPath = string(.referenceAudioPath)
+        voiceCredit = string(.voiceCredit)
+        brief = string(.brief)
+        mouthLineOverride =
+            ((try? container.decodeIfPresent(Double.self, forKey: .mouthLineOverride)) ?? nil) ?? 0
+    }
+
     public var portraitURL: URL? {
         portraitPath.isEmpty ? nil : URL(fileURLWithPath: portraitPath)
     }

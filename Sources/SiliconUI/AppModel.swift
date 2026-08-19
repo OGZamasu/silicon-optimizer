@@ -801,6 +801,10 @@ public final class AppModel {
 
     public private(set) var swarmPeers: [PeerStatus] = []
     public private(set) var isRefreshingSwarm = false
+    private var swarmPollTask: Task<Void, Never>?
+    /// When the swarm was last polled, so a stale view can be seen for what it is
+    /// rather than mistaken for a node that has nothing to offer.
+    public private(set) var lastSwarmPoll: Date?
     /// Peers with a start/stop request in flight, and the last brief failure if any.
     public private(set) var peerLLMBusy: Set<String> = []
     public var peerLLMError: String?
@@ -855,6 +859,7 @@ public final class AppModel {
         swarmPeers = statuses.sorted {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
+        lastSwarmPoll = Date()
         syncSwarmChatProviders()
     }
 
@@ -1976,9 +1981,16 @@ public final class AppModel {
             loadConversations()
             if conversations.isEmpty { newConversation() }
         }
-        // One swarm poll at launch, so the peers' chat models reach the harness settings
-        // even when no window ever opens — the dashboard and menu bar keep it fresh after.
-        Task { await refreshSwarm() }
+        // Keep the swarm view fresh for the whole app, not per view. It used to be
+        // polled by whichever screen was open, so a tab left sitting never learned
+        // that a node had gained a capability — the Video tab kept saying no node
+        // could make video while the node had been advertising it for hours.
+        swarmPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshSwarm()
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
     }
 
     /// Publishes the local control API that the MCP bridge talks to, so Claude and ChatGPT can

@@ -277,14 +277,9 @@ struct DashboardView: View {
                     }
                 }
             }
-            // Live like the Performance card, not a one-shot: peers change state on
-            // their own schedule (a job preempts their LLM, a queue drains).
-            .task {
-                while !Task.isCancelled {
-                    await model.refreshSwarm()
-                    try? await Task.sleep(for: .seconds(15))
-                }
-            }
+            // The app polls the swarm on its own clock now, so this card only needs
+            // to ask for a fresh reading when it appears.
+            .task { await model.refreshSwarm() }
         }
     }
 

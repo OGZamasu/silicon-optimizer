@@ -199,6 +199,8 @@ public actor ControlServer {
                 return try .encode(await host.generateImage(
                     try request.decode(ControlAPI.ImageRequest.self)
                 ))
+            case ("GET", "/swarm"):
+                return try .encode(await host.swarm())
             case ("GET", "/v1/node"):
                 return try .encode(await host.nodeAdvertisement())
             case ("GET", "/mesh/models"):

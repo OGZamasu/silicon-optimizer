@@ -648,6 +648,26 @@ extension AppModel {
 
     /// The Mac's `/v1/node` advertisement — the frozen swarm shape. Capability figures
     /// come from the same measured catalog the app plans with.
+    /// The swarm as this app currently sees it, including how old that view is.
+    public func swarm() async -> ControlAPI.SwarmView {
+        ControlAPI.SwarmView(
+            peers: swarmPeers.map { peer in
+                ControlAPI.SwarmView.Peer(
+                    name: peer.name,
+                    baseURL: peer.baseURL,
+                    reachable: peer.reachable,
+                    error: peer.error,
+                    capabilities: peer.capabilities.map {
+                        ControlAPI.SwarmView.Capability(
+                            id: $0.id, kind: $0.kind, ready: $0.ready
+                        )
+                    }
+                )
+            },
+            polledSecondsAgo: lastSwarmPoll.map { Date().timeIntervalSince($0) }
+        )
+    }
+
     public func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement {
         var capabilities: [ControlAPI.NodeCapability] = []
 

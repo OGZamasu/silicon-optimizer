@@ -618,7 +618,57 @@ public enum ControlAPI {
 }
 
 /// What the app must provide for the control server to answer requests.
+extension ControlAPI {
+    /// One peer as this app currently sees it — what the swarm card shows, in a form
+    /// a script or an MCP client can read. Exists because "the node advertises it"
+    /// and "this app sees it" are different claims, and only the second one decides
+    /// whether a button is enabled.
+    public struct SwarmView: Codable, Sendable {
+        public struct Peer: Codable, Sendable {
+            public var name: String
+            public var baseURL: String
+            public var reachable: Bool
+            public var error: String?
+            public var capabilities: [Capability]
+
+            public init(
+                name: String, baseURL: String, reachable: Bool,
+                error: String?, capabilities: [Capability]
+            ) {
+                self.name = name
+                self.baseURL = baseURL
+                self.reachable = reachable
+                self.error = error
+                self.capabilities = capabilities
+            }
+        }
+
+        public struct Capability: Codable, Sendable {
+            public var id: String
+            public var kind: String
+            public var ready: Bool
+
+            public init(id: String, kind: String, ready: Bool) {
+                self.id = id
+                self.kind = kind
+                self.ready = ready
+            }
+        }
+
+        public var peers: [Peer]
+        /// When the app last polled, in seconds ago — a stale view is the failure
+        /// this endpoint exists to expose.
+        public var polledSecondsAgo: Double?
+
+        public init(peers: [Peer], polledSecondsAgo: Double?) {
+            self.peers = peers
+            self.polledSecondsAgo = polledSecondsAgo
+        }
+    }
+}
+
 public protocol ControlHost: AnyObject, Sendable {
+    func swarm() async -> ControlAPI.SwarmView
     func profile() async -> ControlAPI.Profile
     func metrics() async -> ControlAPI.Metrics
     func status() async -> ControlAPI.Status

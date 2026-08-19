@@ -307,56 +307,63 @@ public struct Settings: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let fallback = Settings()
 
-        func value<T: Decodable>(_ key: CodingKeys, _ default: T) throws -> T {
-            try container.decodeIfPresent(T.self, forKey: key) ?? `default`
+        // Deliberately non-throwing. A key that fails to decode costs that one key,
+        // never the file: this helper used to propagate, so a single stored value the
+        // decoder could not read took every other setting down with it and the next
+        // save wrote the defaults over the lot — model library, output folders, tokens,
+        // characters, all of it. One bad field is a bad field; it is not a reset.
+        func value<T: Decodable>(_ key: CodingKeys, _ default: T) -> T {
+            guard let decoded = try? container.decodeIfPresent(T.self, forKey: key)
+            else { return `default` }
+            return decoded ?? `default`
         }
 
-        temperature = try value(.temperature, fallback.temperature)
-        topP = try value(.topP, fallback.topP)
-        maxTokens = try value(.maxTokens, fallback.maxTokens)
-        reasoningEffort = try value(.reasoningEffort, fallback.reasoningEffort)
-        launchAtLogin = try value(.launchAtLogin, fallback.launchAtLogin)
-        unloadWhenIdle = try value(.unloadWhenIdle, fallback.unloadWhenIdle)
-        idleUnloadMinutes = try value(.idleUnloadMinutes, fallback.idleUnloadMinutes)
-        showAdvancedControls = try value(.showAdvancedControls, fallback.showAdvancedControls)
-        measuredSSDReadMBps = try container.decodeIfPresent(
+        temperature = value(.temperature, fallback.temperature)
+        topP = value(.topP, fallback.topP)
+        maxTokens = value(.maxTokens, fallback.maxTokens)
+        reasoningEffort = value(.reasoningEffort, fallback.reasoningEffort)
+        launchAtLogin = value(.launchAtLogin, fallback.launchAtLogin)
+        unloadWhenIdle = value(.unloadWhenIdle, fallback.unloadWhenIdle)
+        idleUnloadMinutes = value(.idleUnloadMinutes, fallback.idleUnloadMinutes)
+        showAdvancedControls = value(.showAdvancedControls, fallback.showAdvancedControls)
+        measuredSSDReadMBps = try? container.decodeIfPresent(
             Double.self, forKey: .measuredSSDReadMBps
         )
-        measuredSSDVolumeID = try container.decodeIfPresent(
+        measuredSSDVolumeID = try? container.decodeIfPresent(
             String.self, forKey: .measuredSSDVolumeID
         )
-        speedCalibrations = try value(.speedCalibrations, fallback.speedCalibrations)
-        huggingFaceToken = try value(.huggingFaceToken, fallback.huggingFaceToken)
-        imageOutputDirectory = try value(.imageOutputDirectory, fallback.imageOutputDirectory)
-        meshOutputDirectory = try value(.meshOutputDirectory, fallback.meshOutputDirectory)
-        voiceOutputDirectory = try value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
-        videoOutputDirectory = try value(.videoOutputDirectory, fallback.videoOutputDirectory)
-        lastTab = try value(.lastTab, fallback.lastTab)
-        faceCamPort = try value(.faceCamPort, fallback.faceCamPort)
-        trackerPort = try value(.trackerPort, fallback.trackerPort)
-        sendVMC = try value(.sendVMC, fallback.sendVMC)
-        vmcHost = try value(.vmcHost, fallback.vmcHost)
-        vmcPort = try value(.vmcPort, fallback.vmcPort)
-        personas = try value(.personas, fallback.personas)
-        selectedPersonaID = try value(.selectedPersonaID, fallback.selectedPersonaID)
-        modelLibraryDirectory = try value(
+        speedCalibrations = value(.speedCalibrations, fallback.speedCalibrations)
+        huggingFaceToken = value(.huggingFaceToken, fallback.huggingFaceToken)
+        imageOutputDirectory = value(.imageOutputDirectory, fallback.imageOutputDirectory)
+        meshOutputDirectory = value(.meshOutputDirectory, fallback.meshOutputDirectory)
+        voiceOutputDirectory = value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
+        videoOutputDirectory = value(.videoOutputDirectory, fallback.videoOutputDirectory)
+        lastTab = value(.lastTab, fallback.lastTab)
+        faceCamPort = value(.faceCamPort, fallback.faceCamPort)
+        trackerPort = value(.trackerPort, fallback.trackerPort)
+        sendVMC = value(.sendVMC, fallback.sendVMC)
+        vmcHost = value(.vmcHost, fallback.vmcHost)
+        vmcPort = value(.vmcPort, fallback.vmcPort)
+        personas = value(.personas, fallback.personas)
+        selectedPersonaID = value(.selectedPersonaID, fallback.selectedPersonaID)
+        modelLibraryDirectory = value(
             .modelLibraryDirectory, fallback.modelLibraryDirectory
         )
-        trellisBaseDirectory = try value(.trellisBaseDirectory, fallback.trellisBaseDirectory)
-        lato2ServiceURL = try value(.lato2ServiceURL, fallback.lato2ServiceURL)
-        exposeControlOnLAN = try value(.exposeControlOnLAN, fallback.exposeControlOnLAN)
-        lastExternalModelDirectory = try value(
+        trellisBaseDirectory = value(.trellisBaseDirectory, fallback.trellisBaseDirectory)
+        lato2ServiceURL = value(.lato2ServiceURL, fallback.lato2ServiceURL)
+        exposeControlOnLAN = value(.exposeControlOnLAN, fallback.exposeControlOnLAN)
+        lastExternalModelDirectory = value(
             .lastExternalModelDirectory, fallback.lastExternalModelDirectory
         )
-        llamaServerPath = try value(.llamaServerPath, fallback.llamaServerPath)
-        mlxServerPath = try value(.mlxServerPath, fallback.mlxServerPath)
-        chatEngineRaw = try container.decodeIfPresent(String.self, forKey: .chatEngineRaw)
-        harnessWebPort = try container.decodeIfPresent(Int.self, forKey: .harnessWebPort)
-        harnessInferencePort = try container.decodeIfPresent(
+        llamaServerPath = value(.llamaServerPath, fallback.llamaServerPath)
+        mlxServerPath = value(.mlxServerPath, fallback.mlxServerPath)
+        chatEngineRaw = try? container.decodeIfPresent(String.self, forKey: .chatEngineRaw)
+        harnessWebPort = try? container.decodeIfPresent(Int.self, forKey: .harnessWebPort)
+        harnessInferencePort = try? container.decodeIfPresent(
             Int.self, forKey: .harnessInferencePort
         )
-        nodeBinaryPath = try container.decodeIfPresent(String.self, forKey: .nodeBinaryPath)
-        configurationPresets = try value(.configurationPresets, fallback.configurationPresets)
+        nodeBinaryPath = try? container.decodeIfPresent(String.self, forKey: .nodeBinaryPath)
+        configurationPresets = value(.configurationPresets, fallback.configurationPresets)
     }
 
     // MARK: - Persistence
