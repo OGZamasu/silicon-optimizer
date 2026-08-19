@@ -723,16 +723,38 @@ public final class AppModel {
     public internal(set) var controlIsOnLAN = false
 
     /// One peer's last-polled state, for the dashboard's read-only swarm view.
+    public struct PeerCapability: Identifiable, Sendable {
+        public var id: String
+        public var kind: String
+        public var ready: Bool
+        public var peakGB: Double?
+        public var typicalSeconds: Double?
+        public var detail: String?
+    }
+
     public struct PeerStatus: Identifiable, Sendable {
         public var id: String { name }
         public var name: String
         public var baseURL: String
         public var reachable: Bool
         public var platform: String?
+        /// "NVIDIA GeForce RTX 3090 Ti" on a CUDA node, "Apple M4 Pro" on a Mac.
+        public var hardware: String?
+        /// The card or machine's working memory: VRAM on a discrete GPU, unified
+        /// memory on a Mac. Used/total tell the real story — a busy 24 GB card and
+        /// a free 4 GB one advertise the same headroom.
+        public var totalGB: Double?
+        public var usedGB: Double?
+        public var gpuUtil: Double?
         public var queueDepth: Int?
         public var headroomGB: Double?
-        public var readyCapabilities: [String] = []
+        public var capabilities: [PeerCapability] = []
+        public var latency: TimeInterval?
         public var error: String?
+
+        public var readyCapabilities: [String] {
+            capabilities.filter(\.ready).map(\.id)
+        }
     }
 
     public private(set) var swarmPeers: [PeerStatus] = []
@@ -779,6 +801,7 @@ public final class AppModel {
         request.timeoutInterval = 5
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
+        let started = Date()
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse else {
             status.error = "Unreachable."
@@ -789,22 +812,64 @@ public final class AppModel {
             return status
         }
         status.reachable = true
+        status.latency = Date().timeIntervalSince(started)
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return status }
+        Self.parseNode(json, into: &status)
+        return status
+    }
+
+    /// The lenient half of peer polling, separated from the network so the wire shapes
+    /// both platforms actually send — a CUDA node names VRAM fields, a Mac names
+    /// unified-memory ones — stay pinned by tests without a server.
+    nonisolated static func parseNode(_ json: [String: Any], into status: inout PeerStatus) {
         status.platform = json["platform"] as? String
-        if let metrics = json["metrics"] as? [String: Any] {
-            status.queueDepth = metrics["queue_depth"] as? Int
-            status.headroomGB = metrics["headroom_gb"] as? Double
-                ?? (metrics["vram_free_mb"] as? Double).map { $0 / 1024 }
-                ?? (metrics["vram_free_mb"] as? Int).map { Double($0) / 1024 }
+        if let profile = json["profile"] as? [String: Any] {
+            status.hardware = profile["gpu"] as? String ?? profile["chip"] as? String
+            status.totalGB = number(profile["vram_mb"]).map { $0 / 1024 }
+                ?? number(profile["memory_gb"])
         }
-        if let capabilities = json["capabilities"] as? [[String: Any]] {
-            status.readyCapabilities = capabilities.compactMap {
-                ($0["ready"] as? Bool) == true ? $0["id"] as? String : nil
+        if let metrics = json["metrics"] as? [String: Any] {
+            status.queueDepth = number(metrics["queue_depth"]).map { Int($0) }
+            status.gpuUtil = number(metrics["gpu_util_pct"]).map { $0 / 100 }
+            status.usedGB = number(metrics["vram_used_mb"]).map { $0 / 1024 }
+            if status.usedGB == nil,
+               let percent = number(metrics["memory_used_pct"]),
+               let total = status.totalGB {
+                status.usedGB = total * percent / 100
+            }
+            status.headroomGB = number(metrics["headroom_gb"])
+                ?? number(metrics["vram_free_mb"]).map { $0 / 1024 }
+            if status.headroomGB == nil,
+               let total = status.totalGB, let used = status.usedGB {
+                status.headroomGB = max(0, total - used)
             }
         }
-        return status
+        if let capabilities = json["capabilities"] as? [[String: Any]] {
+            status.capabilities = capabilities.compactMap { entry in
+                guard let id = entry["id"] as? String else { return nil }
+                return PeerCapability(
+                    id: id,
+                    kind: entry["kind"] as? String ?? "",
+                    ready: entry["ready"] as? Bool ?? false,
+                    peakGB: number(entry["peak_gb"]) ?? number(entry["peak_vram_gb"]),
+                    typicalSeconds: number(entry["typical_seconds"]),
+                    detail: entry["detail"] as? String
+                )
+            }
+        }
+    }
+
+    /// JSON numbers arrive as whatever the decoder felt like — NSNumber, Int, Double —
+    /// and a field that parses on one shape and not another is a silent blank on the
+    /// dashboard. One door for all of them.
+    private nonisolated static func number(_ value: Any?) -> Double? {
+        switch value {
+        case let double as Double: return double
+        case let int as Int: return Double(int)
+        default: return nil
+        }
     }
 
     // MARK: - In-app repairs

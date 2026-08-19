@@ -247,6 +247,9 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(model.swarmPeers) { peer in
                         peerRow(peer)
+                        if peer.id != model.swarmPeers.last?.id {
+                            Divider()
+                        }
                     }
                     if model.swarmPeers.isEmpty {
                         Text("Checking peers…")
@@ -270,49 +273,130 @@ struct DashboardView: View {
                             }
                         }
                         .buttonStyle(.borderless)
-                        .help("Poll the peers again")
+                        .help("Poll the peers now — they refresh on their own every 15 seconds")
                     }
                 }
             }
-            .task { await model.refreshSwarm() }
+            // Live like the Performance card, not a one-shot: peers change state on
+            // their own schedule (a job preempts their LLM, a queue drains).
+            .task {
+                while !Task.isCancelled {
+                    await model.refreshSwarm()
+                    try? await Task.sleep(for: .seconds(15))
+                }
+            }
         }
     }
 
     private func peerRow(_ peer: AppModel.PeerStatus) -> some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(peer.reachable ? Color.green : Color.red)
-                .frame(width: 8, height: 8)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(peer.name)
-                    .font(.callout.weight(.medium))
-                Text(peer.reachable
-                    ? (peer.platform ?? "online")
-                    : (peer.error ?? "unreachable"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if peer.reachable {
-                VStack(alignment: .trailing, spacing: 1) {
-                    if let headroom = peer.headroomGB {
-                        Text(String(format: "%.0f GB free", headroom))
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
-                    HStack(spacing: 6) {
-                        if let queue = peer.queueDepth {
-                            Text(queue == 0 ? "idle" : "\(queue) queued")
-                        }
-                        if !peer.readyCapabilities.isEmpty {
-                            Text("· \(peer.readyCapabilities.count) capabilities")
-                        }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(peer.reachable ? Color.green : Color.red)
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(peer.name)
+                        .font(.callout.weight(.medium))
+                    Text(peerSubtitle(peer))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let latency = peer.latency {
+                    Text("\(Int(latency * 1000)) ms")
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                        .help("Round trip to this node")
                 }
             }
+
+            // The same used-of-total reading as this Mac's Memory card. Free space
+            // alone misleads: a 24 GB card with a chat model resident shows 3 GB
+            // free, and that is busy, not small.
+            if peer.reachable, let total = peer.totalGB, total > 0, let used = peer.usedGB {
+                SegmentedBar(
+                    segments: [.init(
+                        label: "Used",
+                        bytes: .gib(used),
+                        color: Palette.pressure(used / total)
+                    )],
+                    total: .gib(total),
+                    height: 8
+                )
+                HStack {
+                    Text("\(gb(used)) of \(gb(total)) GB in use")
+                    Spacer()
+                    Text(peerActivity(peer))
+                }
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            }
+
+            if peer.reachable, !peer.capabilities.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(peer.capabilities) { capability in
+                        capabilityRow(capability)
+                    }
+                }
+                .padding(.leading, 18)
+            }
         }
+    }
+
+    private func peerSubtitle(_ peer: AppModel.PeerStatus) -> String {
+        guard peer.reachable else { return peer.error ?? "unreachable" }
+        let parts = [peer.platform, peer.hardware].compactMap(\.self)
+        return parts.isEmpty ? "online" : parts.joined(separator: " · ")
+    }
+
+    private func peerActivity(_ peer: AppModel.PeerStatus) -> String {
+        var parts: [String] = []
+        if let util = peer.gpuUtil {
+            parts.append("GPU \(Int(util * 100))%")
+        }
+        if let queue = peer.queueDepth {
+            parts.append(queue == 0 ? "idle" : "\(queue) queued")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func capabilityRow(_ capability: AppModel.PeerCapability) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(capability.ready ? Color.green : Color.secondary.opacity(0.35))
+                .frame(width: 5, height: 5)
+            Text(capability.id)
+                .font(.caption2)
+            Spacer()
+            Text(capabilityFigures(capability))
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+        }
+        .help(capability.detail ?? capability.id)
+    }
+
+    private func capabilityFigures(_ capability: AppModel.PeerCapability) -> String {
+        var parts: [String] = []
+        if let seconds = capability.typicalSeconds {
+            parts.append(seconds < 90
+                ? "~\(Int(seconds.rounded())) s"
+                : "~\(gb(seconds / 60)) min")
+        }
+        if let peak = capability.peakGB {
+            parts.append("peak \(gb(peak)) GB")
+        }
+        if parts.isEmpty {
+            parts.append(capability.ready ? "ready" : "not ready")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "21.3", "24" — one decimal when it earns its place, none when it would be ".0".
+    private func gb(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(0...1)))
     }
 
     // MARK: - Throughput
