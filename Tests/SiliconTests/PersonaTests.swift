@@ -71,16 +71,6 @@ struct PersonaTests {
         #expect(roomy.travel <= 0.09)
     }
 
-    @Test func overlayCarriesTheMouthLineItFound() {
-        let broadcast = OverlayBroadcast.shared
-        broadcast.setPortrait(Data([1]), name: "X", mouthTop: 0.71, openMouth: Data([2]))
-        #expect(broadcast.state.mouthTop == 0.71)
-        #expect(broadcast.state.hasOpenMouth)
-        #expect(broadcast.openMouthPortrait?.count == 1)
-        broadcast.setPortrait(nil, name: "")
-        #expect(!broadcast.state.hasOpenMouth)
-    }
-
     @Test func idleMotionStaysSubtleAndKeepsMoving() {
         let offsets = (0..<90).map { PersonaAnimator.idleOffset(frame: $0) }
         #expect(offsets.allSatisfy { abs($0.bob) <= 0.006 && abs($0.tilt) <= 0.3 })
@@ -98,29 +88,6 @@ struct PersonaTests {
         // Nothing may be fetched from off the machine — a stream overlay must not
         // depend on the internet being up.
         #expect(!html.contains("http://") && !html.contains("https://"))
-    }
-
-    @Test func broadcastCarriesStateAndBumpsPortraitVersion() {
-        let broadcast = OverlayBroadcast.shared
-        let before = broadcast.state.portraitVersion
-
-        broadcast.setPortrait(Data([0x89, 0x50]), name: "Vale")
-        #expect(broadcast.state.name == "Vale")
-        #expect(broadcast.state.portraitVersion == before + 1)
-        #expect(broadcast.portrait?.count == 2)
-
-        broadcast.setSpeaking(true, level: 0.7, caption: "Hello there")
-        #expect(broadcast.state.speaking)
-        #expect(broadcast.state.level == 0.7)
-        #expect(broadcast.state.caption == "Hello there")
-
-        broadcast.setSpeaking(false, level: 0)
-        #expect(!broadcast.state.speaking)
-        // A caption left unset survives, so the line stays readable as it ends.
-        #expect(broadcast.state.caption == "Hello there")
-
-        broadcast.setPortrait(nil, name: "")
-        broadcast.setSpeaking(false, level: 0, caption: "")
     }
 
     /// Personas are persisted settings; a decoder that forgets them wipes the cast.
@@ -399,6 +366,59 @@ struct TrackerTests {
         #expect(TrackerRuntime.interpret("GL version: 2.1", port: 8792) == nil)
     }
 
+    /// The overlay must prefer the camera over the voice when tracking is live, and
+    /// fall back when it goes stale — otherwise stopping the tracker freezes the face.
+    @Test func overlayPrefersTrackingAndFallsBackWhenItGoesStale() {
+        let html = OverlayPage.html(token: "t")
+        #expect(html.contains("trackerURL"))
+        #expect(html.contains("trackFresh) < 500"))
+        #expect(html.contains("track.mouthOpen"))
+        #expect(html.contains("track.blink"))
+        #expect(html.contains("headYaw"))
+        // Still nothing off this machine.
+        #expect(!html.contains("http://") && !html.contains("https://"))
+    }
+}
+
+/// Every test here writes to `OverlayBroadcast.shared`, which is one object for the
+/// whole process. Run in parallel they overwrite each other's portraits and versions —
+/// which passed locally and failed in CI, the usual way that lesson arrives.
+@Suite("Overlay broadcast", .serialized)
+struct OverlayBroadcastTests {
+
+    @Test func broadcastCarriesStateAndBumpsPortraitVersion() {
+        let broadcast = OverlayBroadcast.shared
+        let before = broadcast.state.portraitVersion
+
+        broadcast.setPortrait(Data([0x89, 0x50]), name: "Vale")
+        #expect(broadcast.state.name == "Vale")
+        #expect(broadcast.state.portraitVersion == before + 1)
+        #expect(broadcast.portrait?.count == 2)
+
+        broadcast.setSpeaking(true, level: 0.7, caption: "Hello there")
+        #expect(broadcast.state.speaking)
+        #expect(broadcast.state.level == 0.7)
+        #expect(broadcast.state.caption == "Hello there")
+
+        broadcast.setSpeaking(false, level: 0)
+        #expect(!broadcast.state.speaking)
+        // A caption left unset survives, so the line stays readable as it ends.
+        #expect(broadcast.state.caption == "Hello there")
+
+        broadcast.setPortrait(nil, name: "")
+        broadcast.setSpeaking(false, level: 0, caption: "")
+    }
+
+    @Test func overlayCarriesTheMouthLineItFound() {
+        let broadcast = OverlayBroadcast.shared
+        broadcast.setPortrait(Data([1]), name: "X", mouthTop: 0.71, openMouth: Data([2]))
+        #expect(broadcast.state.mouthTop == 0.71)
+        #expect(broadcast.state.hasOpenMouth)
+        #expect(broadcast.openMouthPortrait?.count == 1)
+        broadcast.setPortrait(nil, name: "")
+        #expect(!broadcast.state.hasOpenMouth)
+    }
+
     /// The overlay reads tracking straight from the tracker, so the address has to
     /// survive the trip through the broadcast — an empty one means "use the voice".
     @Test func broadcastCarriesTheTrackerAddress() {
@@ -419,18 +439,5 @@ struct TrackerTests {
         #expect(broadcast.closedEyesPortrait?.count == 1)
         broadcast.setPortrait(nil, name: "")
         #expect(!broadcast.state.hasClosedEyes)
-    }
-
-    /// The overlay must prefer the camera over the voice when tracking is live, and
-    /// fall back when it goes stale — otherwise stopping the tracker freezes the face.
-    @Test func overlayPrefersTrackingAndFallsBackWhenItGoesStale() {
-        let html = OverlayPage.html(token: "t")
-        #expect(html.contains("trackerURL"))
-        #expect(html.contains("trackFresh) < 500"))
-        #expect(html.contains("track.mouthOpen"))
-        #expect(html.contains("track.blink"))
-        #expect(html.contains("headYaw"))
-        // Still nothing off this machine.
-        #expect(!html.contains("http://") && !html.contains("https://"))
     }
 }
