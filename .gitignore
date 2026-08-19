@@ -12,3 +12,7 @@ web/package-lock.json
 
 # Local scratch
 *.log
+
+# Build artifacts and local scratch files
+*.profraw
+/pacman.html
