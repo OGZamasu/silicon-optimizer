@@ -112,9 +112,10 @@ struct VideoView: View {
                         imageRow
                     }
 
-                    Text("Typically \(entry.typicalDuration).")
+                    Text(timingNote(for: entry))
                         .font(.caption)
                         .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     if let error = model.videoError {
                         Label(error, systemImage: "exclamationmark.triangle")
@@ -152,6 +153,22 @@ struct VideoView: View {
                 }
             }
         }
+    }
+
+    /// What the render will actually cost. The catalog carries an estimate; a node
+    /// that has run the thing carries a measurement, and a measurement wins.
+    private func timingNote(for entry: VideoEntry) -> String {
+        guard let node = model.videoCapableNode,
+              let capability = node.capabilities.first(where: {
+                  $0.kind == NodeVideoRuntime.capabilityKind && $0.ready
+              }),
+              let seconds = capability.typicalSeconds, seconds > 0
+        else { return "Typically \(entry.typicalDuration)." }
+
+        let measured = seconds < 90
+            ? "about \(Int(seconds.rounded())) seconds"
+            : "about \(Int((seconds / 60).rounded())) minutes"
+        return "\(node.name) measures \(measured) for a clip like this."
     }
 
     /// The machine doing the work, stated plainly — with the truth when there is none.
