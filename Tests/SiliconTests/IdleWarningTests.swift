@@ -36,5 +36,17 @@ struct IdleWarningTests {
         model.settings.unloadWhenIdle = true
         model.keepModelLoaded()
         #expect(model.settings.unloadWhenIdle)
+        #expect(model.secondsUntilIdleUnload == nil)
+    }
+
+    /// Reaching the notification centre from a process that is not a bundled app raises an
+    /// Objective-C exception and takes the process with it — which is what this test run is,
+    /// and what `swift run` is. Every call has to check first.
+    @Test func notificationsAreSkippedOutsideAnAppBundle() {
+        #expect(IdleUnloadNotice.isAvailable == false)
+        // The proof that the guard holds: none of these may crash here.
+        IdleUnloadNotice.post(modelName: "Test", minutes: 5)
+        IdleUnloadNotice.postUnloaded(modelName: "Test")
+        IdleUnloadNotice.withdrawWarning()
     }
 }

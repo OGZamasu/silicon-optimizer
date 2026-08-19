@@ -19,12 +19,23 @@ enum IdleUnloadNotice {
     static let keepLoadedAction = "keep-loaded"
     private static let warningIdentifier = "idle-unload-warning-current"
 
+    /// Whether this process can talk to the notification centre at all.
+    ///
+    /// `UNUserNotificationCenter.current()` does not fail politely outside a bundled
+    /// application: it raises an Objective-C exception, which is not a Swift error and cannot
+    /// be caught, so the process dies. A test runner and `swift run` are both that case, and
+    /// the app has no business crashing either of them over a courtesy notification.
+    static var isAvailable: Bool {
+        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
+    }
+
     /// Registers the "Keep it loaded" button and asks for permission, once, at startup.
     ///
     /// Asked at launch rather than at the moment of the first warning: a permission prompt
     /// arriving five minutes before an unload would be one more thing to read under time
     /// pressure, and answering it would cost the warning it was asked for.
     static func prepare(handler: UNUserNotificationCenterDelegate) {
+        guard isAvailable else { return }
         let centre = UNUserNotificationCenter.current()
         centre.delegate = handler
         centre.setNotificationCategories([
@@ -42,6 +53,7 @@ enum IdleUnloadNotice {
     }
 
     static func post(modelName: String, minutes: Int) {
+        guard isAvailable else { return }
         let content = UNMutableNotificationContent()
         content.title = "\(modelName) will unload soon"
         content.body = minutes <= 1
@@ -56,6 +68,7 @@ enum IdleUnloadNotice {
     /// The unload happened. Replaces the warning rather than stacking under it, so the
     /// Notification Centre never shows a countdown that has already run out.
     static func postUnloaded(modelName: String) {
+        guard isAvailable else { return }
         UNUserNotificationCenter.current()
             .removeDeliveredNotifications(withIdentifiers: [warningIdentifier])
         let content = UNMutableNotificationContent()
@@ -67,15 +80,15 @@ enum IdleUnloadNotice {
     /// Takes the warning down when it no longer applies — the model was kept, or unloaded by
     /// hand. A stale "will unload soon" sitting in Notification Centre is worse than none.
     static func withdrawWarning() {
+        guard isAvailable else { return }
         let centre = UNUserNotificationCenter.current()
         centre.removeDeliveredNotifications(withIdentifiers: [warningIdentifier])
         centre.removePendingNotificationRequests(withIdentifiers: [warningIdentifier])
     }
 
     private static func send(_ content: UNMutableNotificationContent, identifier: String) {
-        // A nil trigger delivers immediately. Notifications are only possible from a bundled,
-        // signed app; from a bare `swift run` the request is refused, which is why the
-        // completion is ignored rather than treated as an error worth showing anyone.
+        // A nil trigger delivers immediately. Whether the person granted permission is their
+        // business, so the completion is ignored rather than treated as an error.
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         )
