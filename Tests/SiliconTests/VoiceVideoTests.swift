@@ -221,11 +221,29 @@ struct VideoTests {
     }
 
     @Test func describesProgressFromWhateverTheNodeSends() {
-        #expect(NodeVideoRuntime.stageDescription(from: ["stage": "Denoising"]) == "Denoising")
-        #expect(NodeVideoRuntime.stageDescription(from: ["progress": 0.4])
-            == "Rendering — 40%")
-        #expect(NodeVideoRuntime.stageDescription(from: ["status": "queued"]) == "Queued")
-        #expect(NodeVideoRuntime.stageDescription(from: [:]) == nil)
+        // What silicon-node sends mid-render, per its job contract.
+        let running = NodeJobProgress(from: [
+            "status": "running", "stage": "video-denoise", "progress": 0.42,
+            "step": 6, "steps_total": 8, "eta_seconds": 130.0, "elapsed_s": 72.0,
+        ])
+        #expect(running.line() == "Video denoise · step 6 of 8 · 42% · 1:12 in · ~2:10 left")
+        #expect(running.fraction == 0.42)
+
+        // A percentage rather than a fraction, which some services send.
+        #expect(NodeJobProgress(from: ["progress": 40]).fraction == 0.4)
+        // No progress field at all: steps still give a bar.
+        #expect(NodeJobProgress(from: ["step": 1, "steps_total": 4]).fraction == 0.25)
+
+        // Queued: no percentage, because 0% next to a spinner reads as a stall.
+        let queued = NodeJobProgress(from: ["status": "queued", "queue_position": 2])
+        #expect(queued.isQueued)
+        #expect(queued.line() == "Queued on the node — 2 jobs ahead")
+        #expect(NodeJobProgress(from: ["status": "queued"]).line() == "Queued on the node")
+
+        // Nothing usable: the caller's own wording, not an empty line.
+        #expect(NodeJobProgress(from: [:]).line(fallback: "Working") == "Working")
+        // Over an hour reads as h:mm:ss.
+        #expect(NodeJobProgress.duration(3725) == "1:02:05")
     }
 
     @Test func videoOutputNamesSortAndDoNotCollide() {

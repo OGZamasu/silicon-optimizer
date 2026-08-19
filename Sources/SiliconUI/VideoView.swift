@@ -140,14 +140,28 @@ struct VideoView: View {
                         )
 
                         if model.isGeneratingVideo {
-                            ProgressView().controlSize(.small)
-                            Text(model.videoStage ?? "Working")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
                             Button("Cancel") { model.cancelVideo() }
                                 .buttonStyle(.borderless)
                                 .font(.caption)
+                        }
+                    }
+
+                    // Its own row, full width. Squeezed in beside the buttons, the line that
+                    // says how far along the node is — the whole point of showing it — was
+                    // the first thing to be truncated away.
+                    if model.isGeneratingVideo {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let fraction = model.videoProgress {
+                                ProgressView(value: fraction)
+                                    .progressViewStyle(.linear)
+                            } else {
+                                ProgressView()
+                                    .progressViewStyle(.linear)
+                            }
+                            Text(model.videoStage ?? "Working")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }

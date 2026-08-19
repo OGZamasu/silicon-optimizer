@@ -309,6 +309,13 @@ public actor Lato2Runtime: MeshRuntime {
                     if let progress = job.progress {
                         continuation.yield(.progress(progress))
                     }
+                    // The same line every other swarm tool shows: stage, step, percentage,
+                    // elapsed and what is left, in the node's own numbers.
+                    if let reported = job.reported {
+                        continuation.yield(
+                            .stage(reported.line(fallback: "Rendering on the LATO.2 machine…"))
+                        )
+                    }
                     switch job.state {
                     case .done:
                         fileURLs = job.files
@@ -441,6 +448,8 @@ public actor Lato2Runtime: MeshRuntime {
         var state: JobState
         var progress: Double?
         var files: [URL]
+        /// Everything the node said about the job, for the status line.
+        var reported: NodeJobProgress?
     }
 
     private static func jobStatus(jobID: String, baseURL: URL) async throws -> JobSnapshot {
@@ -479,14 +488,18 @@ public actor Lato2Runtime: MeshRuntime {
         }
         collect(json)
 
+        let reported = NodeJobProgress(from: json)
         switch status {
         case "done", "completed", "complete", "succeeded", "finished":
-            return JobSnapshot(state: .done, progress: 1.0, files: files)
+            return JobSnapshot(state: .done, progress: 1.0, files: files, reported: nil)
         case "failed", "error":
             let message = (json["error"] as? String) ?? "The LATO.2 job failed."
             return JobSnapshot(state: .failed(message), progress: progress, files: [])
         default:
-            return JobSnapshot(state: .running, progress: progress, files: files)
+            return JobSnapshot(
+                state: .running, progress: progress ?? reported.fraction,
+                files: files, reported: reported
+            )
         }
     }
 }

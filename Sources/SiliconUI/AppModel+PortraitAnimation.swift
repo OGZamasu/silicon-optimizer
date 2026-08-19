@@ -15,10 +15,19 @@ extension AppModel {
         return false
     }
 
+    /// How far in, when the renderer says. Nil while nothing is measurable.
+    public var portraitAnimationProgress: Double? {
+        guard case .running(_, let progress) = portraitAnimationState, progress > 0
+        else { return nil }
+        return progress
+    }
+
     public var portraitAnimationStage: String {
         switch portraitAnimationState {
         case .running(let stage, let progress):
-            progress > 0.05 ? "\(stage) — \(Int(progress * 100))%" : stage
+            // A stage that already names its own percentage — everything a node sends does —
+            // must not get a second one stapled on.
+            progress > 0.05 && !stage.contains("%") ? "\(stage) — \(Int(progress * 100))%" : stage
         case .finished: "Done"
         case .failed(let message): message
         case .idle: ""
@@ -109,9 +118,13 @@ extension AppModel {
                 let file = try await runtime.animatePortrait(
                     portrait: portrait, driving: driving, node: base, token: token,
                     outputDirectory: destination
-                ) { stage in
+                ) { progress in
                     Task { @MainActor in
-                        self.portraitAnimationState = .running(stage: stage, progress: 0.5)
+                        // The node's own numbers, not the half-way guess this used to show.
+                        self.portraitAnimationState = .running(
+                            stage: progress.line(fallback: "Animating on the node"),
+                            progress: progress.fraction ?? 0
+                        )
                     }
                 }
                 videoResults.insert(

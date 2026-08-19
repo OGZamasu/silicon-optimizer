@@ -275,7 +275,13 @@ struct PersonaCards: View {
                     .disabled(model.isAnimatingPortrait || recorder.isRecording)
 
                     if model.isAnimatingPortrait {
-                        ProgressView().controlSize(.small)
+                        if let fraction = model.portraitAnimationProgress {
+                            ProgressView(value: fraction)
+                                .progressViewStyle(.linear)
+                                .frame(width: 70)
+                        } else {
+                            ProgressView().controlSize(.small)
+                        }
                         Text(model.portraitAnimationStage)
                             .font(.caption2)
                             .foregroundStyle(.secondary)

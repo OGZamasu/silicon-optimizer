@@ -63,6 +63,12 @@ func walk(
     _ element: AXUIElement, path: String = "", depth: Int = 0, into lines: inout [String]
 ) {
     guard depth < 40, lines.count < 4000 else { return }
+    // A window's tree can point back at the application, and from there at every menu bar
+    // in the system — thousands of lines of nothing before the budget runs out and the
+    // controls you were looking for never get printed. Nothing inside a window is one of
+    // these, so walking into them is always the cycle, never the content.
+    let role = string(element, kAXRoleAttribute as String) ?? ""
+    if depth > 0, ["AXApplication", "AXMenuBar", "AXMenuBarItem"].contains(role) { return }
     let text = describe(element)
     lines.append("\(path.isEmpty ? "-" : path)\t\(String(repeating: "  ", count: depth))\(text)")
     for (index, child) in children(element).enumerated() {
@@ -96,6 +102,15 @@ guard AXIsProcessTrusted() else {
     print("not trusted: grant Accessibility to this terminal in System Settings")
     exit(3)
 }
+
+// A locked screen hides every window from accessibility. The app is still running and its
+// windows are still on screen behind the lock, so without this the answer is an empty tree
+// and a long hunt for a bug that is really someone stepping away from the machine.
+if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+   session["CGSSessionScreenIsLocked"] as? Int == 1 {
+    print("screen is locked: unlock the Mac before driving the UI")
+    exit(7)
+}
 guard let app = NSWorkspace.shared.runningApplications.first(where: {
     $0.localizedName == appName || $0.bundleIdentifier?.contains(appName) == true
 }) else {
@@ -104,14 +119,66 @@ guard let app = NSWorkspace.shared.runningApplications.first(where: {
 }
 
 let axApp = AXUIElementCreateApplication(app.processIdentifier)
-let windows = (attribute(axApp, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
+
+/// The app's windows. Asked for more than once because the answer is sometimes an empty
+/// array for a moment — right after a window opens, or while a menu-bar popover is being
+/// dismissed — and a caller that believes it has just found an app with no windows goes on
+/// to dump one useless line.
+func windowList() -> [AXUIElement] {
+    for attempt in 0..<6 {
+        let found = (attribute(axApp, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
+        if !found.isEmpty { return found }
+        if attempt < 5 { Thread.sleep(forTimeInterval: 0.3) }
+    }
+    return []
+}
+let windows = windowList()
 
 // The real window, not whatever is on top. A menu-bar app's popover is also a
 // window and it arrives first, which silently pointed every command at the wrong
 // tree. Prefer a standard window; fall back to the app element.
-let root: AXUIElement = windows.first {
-    string($0, kAXSubroleAttribute as String) == "AXStandardWindow"
-} ?? windows.first ?? axApp
+/// The window to drive.
+///
+/// Not simply `windows.first`: an app can hand back a window list whose first entry is a
+/// proxy that reports itself as the application, and walking that lands in the menu bars of
+/// every app on the system instead of the window in front of you. So the choice is made by
+/// role, and `AXMainWindow` — which names the real one directly — is asked first.
+func pickRoot() -> AXUIElement {
+    func isWindow(_ element: AXUIElement) -> Bool {
+        string(element, kAXRoleAttribute as String) == "AXWindow"
+    }
+    for name in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+        if let candidate = attribute(axApp, name as String),
+           CFGetTypeID(candidate) == AXUIElementGetTypeID() {
+            let element = candidate as! AXUIElement
+            if isWindow(element) { return element }
+        }
+    }
+    let real = windows.filter(isWindow)
+    if let standard = real.first(where: {
+        string($0, kAXSubroleAttribute as String) == "AXStandardWindow"
+    }) { return standard }
+    if let any = real.first { return any }
+
+    // Neither the window list nor the main-window attribute gave a window. That happens
+    // while the app is in the background: what comes back is a proxy that reports itself as
+    // the application. The real window is a short way inside it.
+    var queue = windows + children(axApp)
+    var depth = 0
+    while !queue.isEmpty, depth < 4 {
+        if let found = queue.first(where: isWindow) { return found }
+        queue = queue.flatMap(children)
+        depth += 1
+    }
+    return windows.first ?? axApp
+}
+let root = pickRoot()
+if windows.isEmpty {
+    // Say so rather than printing a one-line tree and letting it read as "nothing there".
+    FileHandle.standardError.write(
+        Data("note: \(appName) reports no windows; dumping the application element\n".utf8)
+    )
+}
 
 switch command {
 case "dump":
@@ -131,15 +198,36 @@ case "pos":
     guard arguments.count > 3, let target = element(at: arguments[3], from: root) else {
         print("no element at path"); exit(5)
     }
-    var positionValue: CFTypeRef?
-    var sizeValue: CFTypeRef?
-    AXUIElementCopyAttributeValue(target, kAXPositionAttribute as CFString, &positionValue)
-    AXUIElementCopyAttributeValue(target, kAXSizeAttribute as CFString, &sizeValue)
-    var point = CGPoint.zero
-    var size = CGSize.zero
-    if let positionValue { AXValueGetValue(positionValue as! AXValue, .cgPoint, &point) }
-    if let sizeValue { AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) }
-    print("\(Int(point.x + size.width / 2)) \(Int(point.y + size.height / 2)) \(Int(size.width))x\(Int(size.height))")
+
+    func frame(_ element: AXUIElement) -> CGRect {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
+        AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        if let positionValue { AXValueGetValue(positionValue as! AXValue, .cgPoint, &point) }
+        if let sizeValue { AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) }
+        return CGRect(origin: point, size: size)
+    }
+
+    // Bring it into view first. A control inside a scrolled pane still reports a position
+    // when it is nowhere near the screen, and clicking that lands on whatever app happens
+    // to be underneath — which is how a prompt meant for this app ends up typed into
+    // someone's terminal.
+    AXUIElementPerformAction(target, "AXScrollToVisible" as CFString)
+    Thread.sleep(forTimeInterval: 0.35)
+
+    let box = frame(target)
+    let window = frame(root)
+    let centre = CGPoint(x: box.midX, y: box.midY)
+    if !window.isEmpty, !window.insetBy(dx: -2, dy: -2).contains(centre) {
+        print("offscreen: element is at \(Int(centre.x)),\(Int(centre.y)), outside the window "
+              + "\(Int(window.minX)),\(Int(window.minY)) \(Int(window.width))x\(Int(window.height)) "
+              + "— scroll it into view before clicking")
+        exit(6)
+    }
+    print("\(Int(centre.x)) \(Int(centre.y)) \(Int(box.width))x\(Int(box.height))")
 
 case "text":
     // The whole value, untruncated. `read` summarises for a dump; a launch command or
@@ -152,6 +240,73 @@ case "text":
             print(value)
             break
         }
+    }
+
+case "show":
+    // Scroll until the element is actually on screen.
+    //
+    // SwiftUI panes do not answer the accessibility scroll-to-visible action, so this does
+    // what a person does: put the pointer over the pane and turn the wheel, checking after
+    // each turn. Bounded, because a pane that will not move must not spin here forever.
+    guard arguments.count > 3, let target = element(at: arguments[3], from: root) else {
+        print("no element at path"); exit(5)
+    }
+
+    func rect(_ element: AXUIElement) -> CGRect {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
+        AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        if let positionValue { AXValueGetValue(positionValue as! AXValue, .cgPoint, &point) }
+        if let sizeValue { AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) }
+        return CGRect(origin: point, size: size)
+    }
+
+    let windowFrame = rect(root)
+
+    // Two cheaper ways first. Both are what the app itself does when a control needs to be
+    // seen — and scroll wheel events only reach the app that owns the pointer's window, so
+    // it has to be in front either way.
+    app.activate()
+    Thread.sleep(forTimeInterval: 0.3)
+    AXUIElementPerformAction(target, "AXScrollToVisible" as CFString)
+    AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    Thread.sleep(forTimeInterval: 0.4)
+
+    let source = CGEventSource(stateID: .hidSystemState)
+    // Over the element's own column, not the middle of the window: a pane split into two
+    // scrolling columns only scrolls the one the pointer is over.
+    let hover = CGPoint(
+        x: min(max(rect(target).midX, windowFrame.minX + 20), windowFrame.maxX - 20),
+        y: windowFrame.midY
+    )
+    CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: hover,
+            mouseButton: .left)?.post(tap: .cghidEventTap)
+
+    var moved = 0
+    for _ in 0..<60 {
+        let box = rect(target)
+        // Keep a margin: a control flush against the window edge is half under the chrome.
+        let visible = windowFrame.insetBy(dx: 0, dy: 40)
+        if visible.contains(CGPoint(x: box.midX, y: box.midY)) { break }
+        // Positive scrolls the content down, which is what is wanted when the target sits
+        // above the window; below it, the wheel turns the other way.
+        let ticks: Int32 = box.midY > windowFrame.midY ? -3 : 3
+        CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 1,
+                wheel1: ticks, wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
+        moved += 1
+        Thread.sleep(forTimeInterval: 0.12)
+    }
+
+    let box = rect(target)
+    let centre = CGPoint(x: box.midX, y: box.midY)
+    if windowFrame.insetBy(dx: 0, dy: 20).contains(centre) {
+        print("\(Int(centre.x)) \(Int(centre.y)) \(Int(box.width))x\(Int(box.height)) after \(moved) turns")
+    } else {
+        print("could not bring it into view after \(moved) turns; it sits at \(Int(centre.x)),\(Int(centre.y))")
+        exit(6)
     }
 
 case "read":

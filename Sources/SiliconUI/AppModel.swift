@@ -1826,6 +1826,9 @@ public final class AppModel {
     let videoRuntime = NodeVideoRuntime()
     public private(set) var isGeneratingVideo = false
     public private(set) var videoStage: String?
+    /// How far into the render the node says it is, when it says. Nil means a spinner,
+    /// which is the honest answer for a stage nobody can measure.
+    public private(set) var videoProgress: Double?
     public internal(set) var videoResults: [VideoResult] = []
     public var videoError: String?
 
@@ -1850,6 +1853,7 @@ public final class AppModel {
         }
         isGeneratingVideo = true
         videoStage = "Starting"
+        videoProgress = nil
         videoError = nil
         noteActivity()
 
@@ -1866,12 +1870,16 @@ public final class AppModel {
             defer {
                 isGeneratingVideo = false
                 videoStage = nil
+                videoProgress = nil
             }
             do {
                 let result = try await videoRuntime.generate(
                     request, node: base, token: token
-                ) { stage in
-                    Task { @MainActor in self.videoStage = stage }
+                ) { progress in
+                    Task { @MainActor in
+                        self.videoStage = progress.line(fallback: "Rendering on the node")
+                        self.videoProgress = progress.fraction
+                    }
                 }
                 videoResults.insert(result, at: 0)
                 NodeVideoRuntime.log.notice(

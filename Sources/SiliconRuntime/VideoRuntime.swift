@@ -79,12 +79,12 @@ public actor NodeVideoRuntime {
 
     public func cancel() { cancelled = true }
 
-    /// Generates a clip on the node at `baseURL`, reporting progress through `onStage`.
+    /// Generates a clip on the node at `baseURL`, reporting progress through `onProgress`.
     public func generate(
         _ request: VideoRequest,
         node baseURL: URL,
         token: String?,
-        onStage: @escaping @Sendable (String) -> Void
+        onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> VideoResult {
         guard let entry = VideoCatalog.entry(id: request.entryID) else {
             throw VideoRuntimeError.failed("Unknown video model \(request.entryID).")
@@ -92,7 +92,7 @@ public actor NodeVideoRuntime {
         cancelled = false
         let started = Date()
 
-        onStage("Sending the job")
+        onProgress(.stage("Sending the job"))
         var body: [String: Any] = [
             "model": entry.id,
             "prompt": request.prompt,
@@ -134,7 +134,7 @@ public actor NodeVideoRuntime {
                 continue
             }
 
-            if let stage = Self.stageDescription(from: status) { onStage(stage) }
+            onProgress(NodeJobProgress(from: status))
 
             let state = (status["status"] as? String ?? "").lowercased()
             Self.log.notice("video job \(jobID, privacy: .public): status=\(state, privacy: .public)")
@@ -143,7 +143,7 @@ public actor NodeVideoRuntime {
                 throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
-                onStage("Downloading the clip")
+                onProgress(.stage("Downloading the clip"))
                 let found = Self.videoURLs(in: status, base: baseURL)
                 Self.log.notice("video job \(jobID, privacy: .public): artifacts=\(found.map(\.absoluteString).joined(separator: ", "), privacy: .public)")
                 guard let remote = found.first else {
@@ -174,10 +174,10 @@ public actor NodeVideoRuntime {
         node baseURL: URL,
         token: String?,
         outputDirectory: URL,
-        onStage: @escaping @Sendable (String) -> Void
+        onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> URL {
         cancelled = false
-        onStage("Sending the job")
+        onProgress(.stage("Sending the job"))
         guard let portraitData = try? Data(contentsOf: portrait),
               let drivingData = try? Data(contentsOf: driving)
         else { throw VideoRuntimeError.failed("The portrait or the take could not be read.") }
@@ -208,14 +208,14 @@ public actor NodeVideoRuntime {
                   let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
 
-            if let stage = Self.stageDescription(from: status) { onStage(stage) }
+            onProgress(NodeJobProgress(from: status))
             let state = (status["status"] as? String ?? "").lowercased()
             if ["failed", "error", "cancelled"].contains(state) {
                 let detail = status["error"] as? String ?? status["detail"] as? String
                 throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
-                onStage("Downloading the clip")
+                onProgress(.stage("Downloading the clip"))
                 guard let remote = Self.videoURLs(in: status, base: baseURL).first else {
                     throw VideoRuntimeError.failed(
                         "The job finished but the node listed no video file."
@@ -326,17 +326,6 @@ public actor NodeVideoRuntime {
         } else if let array = value as? [Any] {
             for entry in array { collectVideoStrings(entry, into: &found, base: base) }
         }
-    }
-
-    static func stageDescription(from status: [String: Any]) -> String? {
-        if let stage = status["stage"] as? String, !stage.isEmpty { return stage }
-        if let progress = status["progress"] as? Double {
-            return "Rendering — \(Int(progress * 100))%"
-        }
-        if let state = status["status"] as? String, !state.isEmpty {
-            return state.capitalized
-        }
-        return nil
     }
 
     public static func outputName(extension fileExtension: String, date: Date = Date()) -> String {
