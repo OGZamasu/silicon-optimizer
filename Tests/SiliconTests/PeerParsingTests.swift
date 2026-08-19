@@ -115,6 +115,23 @@ struct PeerParsingTests {
         #expect(llm.contextLength == nil)
     }
 
+    /// A stopped LLM, as silicon-node reports it since the node started listing its
+    /// installed models inline. `running: false` with the engine down is exactly the
+    /// state behind "connection error" in chat — the parse must keep it distinct.
+    @Test func readsAStoppedPeerLLMWithInstalledModels() {
+        let json: [String: Any] = [
+            "installed": true, "installed_models": ["qwen3_8_27b.ninfer"],
+            "running": false, "healthy": false,
+            "model": "qwen3.8-27b", "profile": NSNull(), "uptime_s": NSNull(),
+            "api": ["openai": "http://100.118.191.121:8081/v1 (tailnet)"],
+        ]
+        let llm = AppModel.parseLLM(json)
+        #expect(llm.installed && !llm.running && !llm.healthy)
+        #expect(llm.model == "qwen3.8-27b")
+        #expect(llm.availableModels == ["qwen3_8_27b.ninfer"])
+        #expect(llm.uptimeSeconds == nil)
+    }
+
     @Test func readsEveryModelListDialect() {
         #expect(AppModel.parseModelList(["models": ["a", "b"]]) == ["a", "b"])
         #expect(AppModel.parseModelList(["models": [["id": "a"], ["name": "b"]]]) == ["a", "b"])

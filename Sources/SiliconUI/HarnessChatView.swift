@@ -16,17 +16,42 @@ struct HarnessChatView: View {
             case .ready(let endpoint):
                 VStack(spacing: 0) {
                     if model.loadedModel == nil {
-                        banner(
-                            "No model is loaded — the harness has nothing to answer with. "
-                            + "Requests will fail until one is loaded.",
-                            actionTitle: "Open Models"
-                        ) { model.selectedTab = .models }
+                        // Nothing local doesn't always mean nothing at all: the swarm may
+                        // be serving a model, or have one a single Start away.
+                        if let remote = model.runningPeerLLM {
+                            banner(
+                                "Nothing is loaded on this Mac — \(remote.model) is live on "
+                                + "\(remote.peer.name). Pick it in the model picker, or load "
+                                + "a local model.",
+                                actionTitle: "Open Models"
+                            ) { model.selectedTab = .models }
+                        } else if let stopped = model.stoppedPeerLLM {
+                            banner(
+                                "No model is running anywhere — \(stopped.model) on "
+                                + "\(stopped.peer.name) is stopped. Chat fails with a "
+                                + "connection error until a model is up.",
+                                actionTitle: model.peerLLMBusy.contains(stopped.peer.name)
+                                    ? "Starting…" : "Start \(stopped.model)"
+                            ) {
+                                Task { await model.setPeerLLM(stopped.peer, running: true) }
+                            }
+                        } else {
+                            banner(
+                                "No model is loaded — the harness has nothing to answer "
+                                + "with. Requests will fail until one is loaded.",
+                                actionTitle: "Open Models"
+                            ) { model.selectedTab = .models }
+                        }
                         Divider()
                     } else if let warning = contextWarning {
                         banner(warning, actionTitle: nil, action: nil)
                         Divider()
                     }
                     HarnessWebView(url: endpoint)
+                }
+                .task {
+                    // The banner's claims about peers must be as fresh as the page.
+                    await model.refreshSwarm()
                 }
                 .overlay(alignment: .topTrailing) {
                     if isExpanded { collapseButton }

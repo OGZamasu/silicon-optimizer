@@ -781,6 +781,27 @@ public final class AppModel {
     public private(set) var peerLLMBusy: Set<String> = []
     public var peerLLMError: String?
 
+    /// The first peer chat model that could answer right now — running on a reachable
+    /// node. While one of these exists, "No model loaded" is a false claim.
+    public var runningPeerLLM: (peer: PeerStatus, model: String)? {
+        for peer in swarmPeers {
+            guard peer.reachable, let llm = peer.llm, llm.running,
+                  let model = llm.model else { continue }
+            return (peer, model)
+        }
+        return nil
+    }
+
+    /// A peer chat model that exists but is not serving — one Start away from useful.
+    public var stoppedPeerLLM: (peer: PeerStatus, model: String)? {
+        for peer in swarmPeers {
+            guard peer.reachable, let llm = peer.llm, llm.installed, !llm.running,
+                  let model = llm.model else { continue }
+            return (peer, model)
+        }
+        return nil
+    }
+
     public var swarmConfig: SwarmConfig? { SwarmConfig.load() }
 
     /// Applies swarm settings live: tears the control server down and brings it back with
@@ -881,6 +902,11 @@ public final class AppModel {
         )
         if let api = json["api"] as? [String: Any], let raw = api["openai"] as? String {
             llm.openAIBase = raw.split(separator: " ").first.map(String.init)
+        }
+        // Nodes have started listing what they have installed right in the status
+        // payload; a dedicated models endpoint, when present, overrides this later.
+        if let installed = json["installed_models"] as? [String] {
+            llm.availableModels = installed
         }
         return llm
     }
@@ -2326,9 +2352,14 @@ public final class AppModel {
 
     public func send(_ text: String, images: [String] = []) {
         guard let runtime, runtimeState.isRunning else {
+            let remote = runningPeerLLM.map {
+                " Or switch Chat to the harness (Settings → Chat) to use \($0.model), "
+                + "which is running on \($0.peer.name) right now."
+            } ?? ""
             alert = AlertContent(
                 title: "No model loaded",
                 message: "Load a model from the Models tab before starting a conversation."
+                    + remote
             )
             return
         }
