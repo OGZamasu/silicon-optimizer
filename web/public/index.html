@@ -485,7 +485,7 @@ footer {
       <a href="#features">Features</a>
       <a href="#install">Install</a>
     </nav>
-    <span class="chip spec">v0.2</span>
+    <span class="chip spec">v0.2.1</span>
     <span class="chip spec">M1 Macs and newer</span>
     <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
   </div>
@@ -496,10 +496,9 @@ footer {
     <p class="eyebrow reveal">A free Mac app</p>
     <h1 class="reveal" style="--d:.06s">Your own AI, on your own Mac. <em>Free. Private. No subscription.</em></h1>
     <p class="lede reveal" style="--d:.14s">
-      Silicon Optimizer runs ChatGPT-style AI right on your Mac — chat, coding help, image
-      generation, even 3D models. No account, no monthly fee, and nothing you type ever
-      leaves your machine. Before you download anything, it checks what your Mac can
-      actually handle, so you never wait an hour for an AI that won't run.
+      Chat, code, images, voice, video, 3D — all running on your Mac instead of someone's
+      cloud. No account, no monthly fee, nothing leaves your machine. And it checks what
+      your Mac can handle <em>before</em> you download anything.
     </p>
 
     <!-- Signature: the receipts. Predicted in indigo, measured in teal, everywhere. -->
@@ -552,10 +551,9 @@ footer {
       <p class="eyebrow">Why trust it</p>
       <h2>It doesn't guess. It does the math — and shows its work.</h2>
       <p class="lede">
-        Most tools guess how much memory an AI needs, and when they guess wrong you find out
-        after the download: your Mac crawls, or the model just won't load. This app calculates
-        it properly first. Every number below is a real prediction, made before loading,
-        checked against what the Mac actually used.
+        Most tools guess how much memory an AI needs, and you find out they guessed wrong
+        after the download — when your Mac crawls. This one does the arithmetic first. Every
+        number below was predicted before loading, then checked against what really happened.
       </p>
     </div>
 
@@ -590,9 +588,8 @@ footer {
 
     <div class="notes reveal" style="margin-top:28px">
       <p>
-        That last row misses — and that's exactly why the app has a built-in speed test. Run it
-        once (about a minute) and every future prediction for that model is tuned to your Mac
-        instead of a spec sheet.
+        That last row misses, which is why there's a built-in speed test. Run it once — about a
+        minute — and predictions for that model are tuned to your Mac instead of a spec sheet.
       </p>
     </div>
   </div>
@@ -604,9 +601,9 @@ footer {
       <p class="eyebrow">The party trick</p>
       <h2>Run AI that looks way too big for your Mac.</h2>
       <p class="lede">
-        Some big AIs are built like a huge team of specialists, and each word only needs a few
-        of them. The app can keep just those specialists in memory and grab the rest from disk
-        the moment they're needed. Exact same answers — a fraction of the memory.
+        Some big AIs are a team of specialists, and each word only needs a few of them. The app
+        keeps those in memory and pulls the rest off disk the moment they're wanted. Same
+        answers, a fraction of the memory.
       </p>
     </div>
 
@@ -623,13 +620,13 @@ footer {
 
     <div class="notes reveal" style="margin-top:30px">
       <p>
-        The trade-off is speed: reading from disk makes the AI respond slower, especially on
-        long prompts. The app tells you exactly how much slower <em>before</em> you switch it
-        on — not after you're stuck waiting.
+        The trade-off is speed: disk is slower than memory, and long prompts feel it most. The
+        app tells you how much slower <em>before</em> you turn it on.
       </p>
       <p>
-        This trick needs a special build of the llama.cpp engine. The app checks the one you
-        have and simply hides the option if it can't do it, instead of failing mysteriously.
+        It needs a special build of the llama.cpp engine, which ships inside the app. Point the
+        app at your own engine and it checks first, then hides the option rather than failing
+        halfway.
       </p>
     </div>
   </div>
@@ -647,63 +644,77 @@ footer {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
         </div>
         <h3>Knows what your Mac can handle</h3>
-        <p>It reads your Mac's real specs — chip, memory, storage — and tells you what fits
-           before you download. If something doesn't fit, it lists exactly what to change and
-           how much each change saves.</p>
+        <p>It reads your chip, memory and storage, then says what fits before you download. If something doesn't fit, it lists what to change and how much each change saves.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
         <h3>Picks the AI for you</h3>
-        <p>One button. The app ranks every model it knows against your machine and picks the
-           strongest one that actually runs at a decent speed — on a 36 GB Mac that's
-           Qwen3.8 27B, the dense flagship, with its huge 256K context planned before you
-           commit. You can always override it.</p>
+        <p>One button ranks every model against your Mac and takes the strongest one that still runs fast. On a 36 GB Mac that's Qwen3.8 27B. Override it whenever you like.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
         </div>
         <h3>A chat that actually does things</h3>
-        <p>The Chat tab runs <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek
-           Harness</a> on your local AI: it can browse the web, read and edit files in a folder
-           you choose, and run commands — always asking you first. Not just talk.</p>
+        <p>The Chat tab runs <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> on your local model: it browses the web, reads and edits files in a folder you pick, and runs commands — asking you first, every time.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
         </div>
-        <h3>Makes images too</h3>
-        <p>FLUX and other image AIs run locally. The app tells you whether a render fits in
-           memory before you start it — not at 95%, after minutes of waiting.</p>
+        <h3>Makes images</h3>
+        <p>FLUX and friends, running locally. You get a yes or no on memory before the render starts — not at 95%.</p>
+      </div>
+      <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+        </div>
+        <h3>Speaks, sings, listens</h3>
+        <p>Type a line and hear it back — LuxTTS, Kokoro or Sesame CSM. There's a music model and a sound-effect model too. Whisper and Parakeet turn speech into text, live from your mic.</p>
+      </div>
+      <div class="cell">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+        </div>
+        <h3>Makes video</h3>
+        <p>Describe a shot and get a real clip. Or record yourself and drive a portrait with it — the face moves the way yours did.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </div>
         <h3>Any model, not just a menu</h3>
-        <p>Search all of Hugging Face — the internet's library of free AI models. The app reads
-           a tiny slice of any model's file and gives you a full verdict before you download
-           gigabytes.</p>
+        <p>Search all of Hugging Face. The app reads a slice of any model's file and gives you a verdict before you download gigabytes.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
         </div>
         <h3>Stays out of your way</h3>
-        <p>Lives in the menu bar: what's loaded, how fast it's running, memory at a glance.
-           Downloads survive bad Wi-Fi and pick up where they stopped.</p>
+        <p>Lives in the menu bar: what's loaded, how fast, memory at a glance. It warns you five minutes before it frees an idle model, and downloads survive bad Wi-Fi.</p>
+      </div>
+      <div class="cell wide">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M2 12h2M20 12h2"/></svg>
+        </div>
+        <h3>Be a character, live</h3>
+        <p>Make a character, put your webcam behind it, and send it to OBS as a browser source. Motion tracking follows your face, shoulders and fingers, and speaks VMC — so VSeeFace, VTube Studio and Warudo take it as-is. Record a take and the character performs it.</p>
       </div>
       <div class="cell wide">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
         </div>
-        <h3>New in v0.2: turns images into 3D models</h3>
-        <p>Drop in a picture and get a mesh back — a fast clean-geometry pass in about twenty
-           seconds, or a fully textured model in minutes, all running locally. Spin it around
-           in the built-in viewer, then open it straight in Fusion 360, Blender, or anything
-           else on your Mac that takes a 3D file.</p>
+        <h3>Turns images into 3D</h3>
+        <p>Drop in a picture, get a mesh — clean geometry in about twenty seconds, or fully textured in minutes. Spin it in the viewer, copy it out as a turning GIF, or open it in Blender or Fusion 360.</p>
+      </div>
+      <div class="cell wide">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg>
+        </div>
+        <h3>Bring your gaming PC into it</h3>
+        <p>Pair a Windows machine with an NVIDIA card and the heavy jobs go there — video, 3D, portrait animation — while your Mac stays free. You watch it work: stage, step, percent, time left.</p>
       </div>
     </div>
   </div>
@@ -715,19 +726,22 @@ footer {
       <p class="eyebrow">For power users</p>
       <h2>Already use Claude or ChatGPT? Connect them.</h2>
       <p class="lede">
-        The app can plug into Claude or ChatGPT, so the assistant you already use can borrow
-        the AI running on your Mac — check your hardware, pick a model, load it, and hand it
-        private work. The private part stays on your machine. Nothing leaves it.
+        Plug the app into Claude or ChatGPT and the assistant you already use can drive the AI
+        on your Mac — pick a model, load it, hand it the private work. Eighteen tools; these
+        are the ones you'll notice.
       </p>
     </div>
     <ul class="tools reveal">
       <li><code>get_hardware_profile</code><span>What is this Mac, and what can it hold?</span></li>
       <li><code>recommend_model</code><span>What should I run?</span></li>
-      <li><code>plan_memory</code><span>Will this fit — and what should I change if not?</span></li>
+      <li><code>plan_memory</code><span>Will this fit — and what do I change if not?</span></li>
       <li><code>install_model</code><span>Download it, after a disk-space check</span></li>
       <li><code>load_model</code> <span>Load it into memory</span></li>
       <li><code>chat</code><span>Ask the local AI — text or images</span></li>
-      <li><code>run_benchmark</code><span>Time it on this Mac and tune future predictions</span></li>
+      <li><code>generate_image</code><span>Make a picture on this Mac</span></li>
+      <li><code>generate_3d</code><span>Turn a picture into a mesh</span></li>
+      <li><code>run_benchmark</code><span>Time it here and tune future predictions</span></li>
+      <li><code>get_status</code><span>What's loaded and what's running right now</span></li>
     </ul>
   </div>
 </section>
@@ -738,15 +752,17 @@ footer {
       <p class="eyebrow reveal">The fine print</p>
       <h2 class="reveal">What's solid, and what's still rough.</h2>
       <p class="lede reveal">
-        Everything on this page is a real measurement, not marketing. In the same spirit,
-        here's what a young app hasn't finished yet — so you know exactly where you stand.
+        Every number on this page is measured, not marketing. Same deal here: what's still
+        rough, so you know where you stand.
       </p>
       <ul class="reveal">
-        <li><div><strong>Speed predictions start from one Mac.</strong> They're tuned on an M3 Max; other chips use published specs until you run the built-in one-minute speed test, which tunes them to yours.</div></li>
-        <li><div><strong>macOS will complain once.</strong> The app isn't notarized by Apple yet, so the first launch needs one command to approve it (shown below). Building from source skips this entirely.</div></li>
-        <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet — the build that ships inside the app supports it. If you point the app at your own engine instead, it checks that build and hides the option when it can't do it.</div></li>
-        <li><div><strong>MLX support is early.</strong> Apple's MLX engine works, but you have to point the app at a model folder yourself for now.</div></li>
-        <li><div><strong>Multi-part downloads are untested.</strong> Models split across several files are planned and checked correctly, but the actual multi-file download hasn't been exercised yet.</div></li>
+        <li><div><strong>Video clips need a second machine.</strong> Making a clip from a prompt runs on a paired Windows PC with an NVIDIA card. Everything else on this page — chat, images, voice, 3D, talking portraits — runs on the Mac alone.</div></li>
+        <li><div><strong>Voice, video and 3D download their own engines.</strong> Chat and images work out of the box. The first time you open one of the others, it fetches what it needs — a few gigabytes, once, and it tells you before it starts.</div></li>
+        <li><div><strong>Speed predictions start from one Mac.</strong> Tuned on an M3 Max; other chips use published specs until you run the built-in one-minute speed test, which tunes them to yours.</div></li>
+        <li><div><strong>macOS will complain once.</strong> The app isn't notarized by Apple yet, so the first launch needs one command to approve it (below). Building from source skips it.</div></li>
+        <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet. The build inside the app has it; point the app at your own engine and it checks, then hides the option if that build can't do it.</div></li>
+        <li><div><strong>MLX support is early.</strong> Apple's MLX engine works, but you point the app at a model folder yourself for now.</div></li>
+        <li><div><strong>Multi-part downloads are untested.</strong> Models split across several files are planned and checked correctly, but that download path hasn't been exercised yet.</div></li>
       </ul>
     </div>
   </div>
