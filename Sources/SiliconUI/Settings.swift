@@ -191,6 +191,33 @@ public struct Settings: Codable, Sendable, Equatable {
             ?? FileManager.default.temporaryDirectory
     }
 
+    // Voice and video
+
+    /// Where spoken audio is written. Empty means `~/Music/Silicon Optimizer`.
+    public var voiceOutputDirectory: String = ""
+    /// Where generated clips are written. Empty means `~/Movies/Silicon Optimizer`.
+    public var videoOutputDirectory: String = ""
+
+    public var resolvedVoiceOutputDirectory: URL {
+        let configured = voiceOutputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        let music = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
+        return music?.appendingPathComponent("Silicon Optimizer")
+            ?? FileManager.default.temporaryDirectory
+    }
+
+    public var resolvedVideoOutputDirectory: URL {
+        let configured = videoOutputDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        }
+        let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
+        return movies?.appendingPathComponent("Silicon Optimizer")
+            ?? FileManager.default.temporaryDirectory
+    }
+
     public var resolvedTrellisBaseDirectory: URL {
         let configured = trellisBaseDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
         if !configured.isEmpty {
@@ -270,6 +297,8 @@ public struct Settings: Codable, Sendable, Equatable {
         huggingFaceToken = try value(.huggingFaceToken, fallback.huggingFaceToken)
         imageOutputDirectory = try value(.imageOutputDirectory, fallback.imageOutputDirectory)
         meshOutputDirectory = try value(.meshOutputDirectory, fallback.meshOutputDirectory)
+        voiceOutputDirectory = try value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
+        videoOutputDirectory = try value(.videoOutputDirectory, fallback.videoOutputDirectory)
         modelLibraryDirectory = try value(
             .modelLibraryDirectory, fallback.modelLibraryDirectory
         )

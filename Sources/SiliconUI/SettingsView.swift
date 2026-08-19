@@ -234,6 +234,57 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section("Voice and video") {
+                LabeledContent {
+                    HStack {
+                        TextField(
+                            "Audio",
+                            text: $model.settings.voiceOutputDirectory,
+                            prompt: Text("Default")
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        Button("Choose…") {
+                            chooseDirectory(
+                                message: "Where should spoken audio be saved?",
+                                current: model.settings.resolvedVoiceOutputDirectory
+                            ) { model.settings.voiceOutputDirectory = $0.path }
+                        }
+                        if !model.settings.voiceOutputDirectory.isEmpty {
+                            Button("Reset") { model.settings.voiceOutputDirectory = "" }
+                        }
+                    }
+                } label: {
+                    fieldLabel(
+                        "Audio", caption: "~/Music/Silicon Optimizer"
+                    )
+                }
+                LabeledContent {
+                    HStack {
+                        TextField(
+                            "Clips",
+                            text: $model.settings.videoOutputDirectory,
+                            prompt: Text("Default")
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        Button("Choose…") {
+                            chooseDirectory(
+                                message: "Where should generated clips be saved?",
+                                current: model.settings.resolvedVideoOutputDirectory
+                            ) { model.settings.videoOutputDirectory = $0.path }
+                        }
+                        if !model.settings.videoOutputDirectory.isEmpty {
+                            Button("Reset") { model.settings.videoOutputDirectory = "" }
+                        }
+                    }
+                } label: {
+                    fieldLabel(
+                        "Clips", caption: "~/Movies/Silicon Optimizer"
+                    )
+                }
+            }
+
             Section("3D toolkit") {
                 LabeledContent {
                     HStack {
@@ -461,6 +512,22 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
+        }
+    }
+
+    private func chooseDirectory(
+        message: String, current: URL, onPick: (URL) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = message
+        panel.directoryURL = current
+        if panel.runModal() == .OK, let url = panel.url {
+            onPick(url)
         }
     }
 

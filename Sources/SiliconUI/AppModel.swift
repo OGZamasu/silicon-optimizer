@@ -108,6 +108,8 @@ public final class AppModel {
         case chat = "Chat"
         case images = "Images"
         case threeD = "3D"
+        case voice = "Voice"
+        case video = "Video"
         case settings = "Settings"
 
         public var id: String { rawValue }
@@ -119,6 +121,8 @@ public final class AppModel {
             case .chat: "bubble.left.and.bubble.right"
             case .images: "photo.on.rectangle.angled"
             case .threeD: "cube.transparent"
+            case .voice: "waveform"
+            case .video: "film"
             case .settings: "gearshape"
             }
         }
@@ -1478,7 +1482,229 @@ public final class AppModel {
             }
             return line
         }
+        if isSpeaking {
+            return voiceStage.map { "Speaking — \($0)" } ?? "Generating speech"
+        }
+        if isTranscribing {
+            return "Transcribing audio"
+        }
+        if isGeneratingVideo {
+            return videoStage.map { "Generating video — \($0)" } ?? "Generating video"
+        }
         return nil
+    }
+
+    // MARK: - Voice
+
+    public var selectedVoiceModel = VoiceCatalog.kokoro.id
+    public var selectedTranscriber = VoiceCatalog.whisperTurbo.id
+    public var voiceText = ""
+    public var selectedPresetVoice = "af_heart"
+    public var voiceReferenceAudio: URL?
+    public var voiceReferenceText = ""
+
+    private let voiceRuntime = VoiceRuntime()
+    public private(set) var isSpeaking = false
+    public private(set) var voiceStage: String?
+    public private(set) var speechResults: [SpeechResult] = []
+    public private(set) var isTranscribing = false
+    public private(set) var transcriptions: [TranscriptionResult] = []
+    public var voiceError: String?
+
+    public func voiceInstallation(for entry: VoiceEntry) -> VoiceInstallation {
+        VoiceRuntime.installation(for: entry)
+    }
+
+    public func speak() {
+        let text = voiceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isSpeaking,
+              let entry = VoiceCatalog.entry(id: selectedVoiceModel) else { return }
+        isSpeaking = true
+        voiceStage = "Starting"
+        voiceError = nil
+        noteActivity()
+
+        let request = SpeechRequest(
+            entryID: entry.id,
+            text: text,
+            voice: entry.voices.isEmpty ? nil : selectedPresetVoice,
+            referenceAudio: entry.supportsCloning ? voiceReferenceAudio : nil,
+            referenceText: voiceReferenceText.isEmpty ? nil : voiceReferenceText,
+            outputDirectory: settings.resolvedVoiceOutputDirectory
+        )
+        Task {
+            defer {
+                isSpeaking = false
+                voiceStage = nil
+            }
+            do {
+                let result = try await voiceRuntime.speak(request) { stage in
+                    Task { @MainActor in self.voiceStage = stage }
+                }
+                speechResults.insert(result, at: 0)
+            } catch {
+                voiceError = error.localizedDescription
+            }
+        }
+    }
+
+    public func transcribe(_ audio: URL) {
+        guard !isTranscribing else { return }
+        isTranscribing = true
+        voiceError = nil
+        noteActivity()
+        let entryID = selectedTranscriber
+        Task {
+            defer { isTranscribing = false }
+            do {
+                let result = try await voiceRuntime.transcribe(
+                    audio: audio, entryID: entryID
+                ) { stage in
+                    Task { @MainActor in self.voiceStage = stage }
+                }
+                transcriptions.insert(result, at: 0)
+            } catch {
+                voiceError = error.localizedDescription
+            }
+        }
+    }
+
+    public func cancelVoice() {
+        Task { await voiceRuntime.cancel() }
+    }
+
+    /// One click sets up the shared environment and mlx-audio inside it. The package
+    /// list is exactly what a real end-to-end run needed: misaki and its G2P chain for
+    /// Kokoro (num2words, spacy and its small English model, phonemizer) plus the
+    /// espeakng-loader wheel that carries the espeak library misaki otherwise only
+    /// finds via Homebrew. The spacy model is pinned by URL because spacy's own
+    /// downloader shells out to uv and dies outside an activated environment.
+    public func installVoiceTools() {
+        runRepair(id: "voice-install", steps: [
+            RepairStep(
+                executable: URL(fileURLWithPath: "/usr/bin/python3"),
+                arguments: ["-m", "venv", VoiceRuntime.environment.path],
+                currentDirectory: nil,
+                label: "Creating the Python environment —"
+            ),
+            RepairStep(
+                executable: VoiceRuntime.environment.appendingPathComponent("bin/pip"),
+                arguments: [
+                    "install", "--upgrade",
+                    "mlx-audio", "misaki", "num2words", "spacy",
+                    "phonemizer", "espeakng-loader",
+                    "en_core_web_sm@https://github.com/explosion/spacy-models/releases/"
+                    + "download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+                ],
+                currentDirectory: nil,
+                label: "Installing the voice tools —"
+            ),
+        ]) { }
+    }
+
+    /// LuxTTS pins transformers to the 4.x line while mflux and mlx-audio need 5.x, so
+    /// it gets an environment of its own — sharing one quietly breaks whichever family
+    /// installed first.
+    public func installLuxTTS() {
+        var steps = [
+            RepairStep(
+                executable: URL(fileURLWithPath: "/usr/bin/python3"),
+                arguments: ["-m", "venv", VoiceRuntime.luxTTSEnvironment.path],
+                currentDirectory: nil,
+                label: "Creating LuxTTS's own Python environment —"
+            ),
+        ]
+        if !FileManager.default.fileExists(atPath: VoiceRuntime.luxTTSClone.path) {
+            steps.append(RepairStep(
+                executable: URL(fileURLWithPath: "/usr/bin/git"),
+                arguments: [
+                    "clone", "--depth", "1",
+                    "https://github.com/ysharma3501/LuxTTS.git",
+                    VoiceRuntime.luxTTSClone.path,
+                ],
+                currentDirectory: nil,
+                label: "Downloading LuxTTS —"
+            ))
+        }
+        steps.append(RepairStep(
+            executable: VoiceRuntime.luxTTSEnvironment.appendingPathComponent("bin/pip"),
+            arguments: [
+                "install", "-r",
+                VoiceRuntime.luxTTSClone.appendingPathComponent("requirements.txt").path,
+            ],
+            currentDirectory: nil,
+            label: "Installing LuxTTS's dependencies (a few minutes) —"
+        ))
+        runRepair(id: "luxtts-install", steps: steps) { }
+    }
+
+    // MARK: - Video
+
+    public var selectedVideoModel = VideoCatalog.wan22.id
+    public var videoPrompt = ""
+    public var videoImage: URL?
+    public var videoSeconds = 5
+    public var videoResolution = "720p"
+
+    private let videoRuntime = NodeVideoRuntime()
+    public private(set) var isGeneratingVideo = false
+    public private(set) var videoStage: String?
+    public private(set) var videoResults: [VideoResult] = []
+    public var videoError: String?
+
+    /// The first reachable node advertising a ready video capability — video's whole
+    /// backend, until Apple Silicon ports are worth wiring.
+    public var videoCapableNode: PeerStatus? {
+        swarmPeers.first { peer in
+            peer.reachable && peer.capabilities.contains {
+                $0.kind == NodeVideoRuntime.capabilityKind && $0.ready
+            }
+        }
+    }
+
+    public func generateVideo() {
+        let prompt = videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !isGeneratingVideo else { return }
+        guard let node = videoCapableNode,
+              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+        else {
+            videoError = "No swarm node offers video yet."
+            return
+        }
+        isGeneratingVideo = true
+        videoStage = "Starting"
+        videoError = nil
+        noteActivity()
+
+        let request = VideoRequest(
+            entryID: selectedVideoModel,
+            prompt: prompt,
+            image: videoImage,
+            seconds: videoSeconds,
+            resolution: videoResolution,
+            outputDirectory: settings.resolvedVideoOutputDirectory
+        )
+        let token = swarmConfig?.effectiveToken
+        Task {
+            defer {
+                isGeneratingVideo = false
+                videoStage = nil
+            }
+            do {
+                let result = try await videoRuntime.generate(
+                    request, node: base, token: token
+                ) { stage in
+                    Task { @MainActor in self.videoStage = stage }
+                }
+                videoResults.insert(result, at: 0)
+            } catch {
+                videoError = error.localizedDescription
+            }
+        }
+    }
+
+    public func cancelVideo() {
+        Task { await videoRuntime.cancel() }
     }
 
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.

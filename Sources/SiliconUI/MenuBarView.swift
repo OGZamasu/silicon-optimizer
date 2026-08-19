@@ -358,6 +358,14 @@ struct MenuBarView: View {
                 model.selectedTab = .threeD
                 openMainWindow()
             }
+            menuButton("Voice", systemImage: "waveform") {
+                model.selectedTab = .voice
+                openMainWindow()
+            }
+            menuButton("Video", systemImage: "film") {
+                model.selectedTab = .video
+                openMainWindow()
+            }
             Divider().padding(.vertical, 4)
             menuButton("Settings…", systemImage: "gearshape") {
                 model.selectedTab = .settings
