@@ -25,6 +25,17 @@ extension AppModel {
         }
     }
 
+    /// A swarm node that can do this far faster than this Mac can. LivePortrait
+    /// takes about 740 ms a frame here and 13 ms on a 4090, so when a node offers the
+    /// capability it is not a close call.
+    public var portraitAnimationNode: PeerStatus? {
+        swarmPeers.first { peer in
+            peer.reachable && peer.capabilities.contains {
+                ["talking-head", "portrait-animate"].contains($0.kind) && $0.ready
+            }
+        }
+    }
+
     /// Animates the selected character with a driving video the user picks. The
     /// result joins the video results like any other clip.
     public func animatePortrait(with driving: URL) {
@@ -32,11 +43,17 @@ extension AppModel {
             personaError = "Pick a character with a portrait first."
             return
         }
+        guard !isAnimatingPortrait else { return }
+        // A capable node beats this Mac by a factor of fifty; take it when it is there.
+        if let node = portraitAnimationNode {
+            animatePortraitRemotely(persona: persona, portrait: portrait,
+                                    driving: driving, node: node)
+            return
+        }
         guard portraitAnimatorInstallation.isInstalled else {
             personaError = portraitAnimatorInstallation.detail
             return
         }
-        guard !isAnimatingPortrait else { return }
 
         portraitAnimationState = .running(stage: "Starting…", progress: 0)
         personaError = nil
@@ -58,6 +75,48 @@ extension AppModel {
                 videoResults.insert(
                     VideoResult(
                         file: file, modelName: "\(name) (LivePortrait)",
+                        prompt: "Driven by \(driving.lastPathComponent)", elapsed: 0
+                    ),
+                    at: 0
+                )
+                portraitAnimationState = .idle
+            } catch {
+                portraitAnimationState = .failed(message: error.localizedDescription)
+                personaError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Sends the job to a node and brings the clip back, in the same shape as every
+    /// other delegated job: submit, poll, download.
+    private func animatePortraitRemotely(
+        persona: Persona, portrait: URL, driving: URL, node: PeerStatus
+    ) {
+        guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+        else { return }
+        portraitAnimationState = .running(stage: "Sending to \(node.name)…", progress: 0)
+        personaError = nil
+        noteActivity()
+
+        let token = swarmConfig?.effectiveToken
+        let destination = settings.resolvedVideoOutputDirectory
+            .appendingPathComponent("Photoreal", isDirectory: true)
+        let name = persona.name
+        let runtime = videoRuntime
+
+        Task {
+            do {
+                let file = try await runtime.animatePortrait(
+                    portrait: portrait, driving: driving, node: base, token: token,
+                    outputDirectory: destination
+                ) { stage in
+                    Task { @MainActor in
+                        self.portraitAnimationState = .running(stage: stage, progress: 0.5)
+                    }
+                }
+                videoResults.insert(
+                    VideoResult(
+                        file: file, modelName: "\(name) (on \(node.name))",
                         prompt: "Driven by \(driving.lastPathComponent)", elapsed: 0
                     ),
                     at: 0

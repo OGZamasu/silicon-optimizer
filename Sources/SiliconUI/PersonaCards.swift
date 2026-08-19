@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct PersonaCards: View {
     @Environment(AppModel.self) private var model
     @State private var editing: Persona?
+    @State private var recorder = TakeRecorder()
 
     var body: some View {
         VStack(spacing: 16) {
@@ -230,33 +231,72 @@ struct PersonaCards: View {
                     .lineLimit(2)
                     .truncationMode(.middle)
             }
-        } else if model.portraitAnimatorInstallation.isInstalled {
-            HStack(spacing: 8) {
-                Button("Animate from a video…") {
-                    if let driving = model.pickDrivingVideo() {
-                        model.animatePortrait(with: driving)
+        } else if model.portraitAnimatorInstallation.isInstalled
+                    || model.portraitAnimationNode != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                if let session = recorder.session {
+                    CameraPreview(session: session)
+                        .frame(height: 150)
+                        .clipShape(.rect(cornerRadius: 8))
+                        .overlay(alignment: .topLeading) {
+                            if recorder.isRecording {
+                                HStack(spacing: 5) {
+                                    Circle().fill(.red).frame(width: 7, height: 7)
+                                    Text(recorder.elapsedLabel)
+                                        .font(.caption2.monospacedDigit())
+                                }
+                                .padding(6)
+                                .background(.black.opacity(0.55), in: Capsule())
+                                .padding(8)
+                            }
+                        }
+                }
+
+                HStack(spacing: 8) {
+                    Button(recorder.isRecording ? "Stop and animate" : "Record a take…") {
+                        if recorder.isRecording {
+                            recorder.stop()
+                        } else {
+                            Task { await recordTake() }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(recorder.isRecording ? .red : nil)
+                    .disabled(model.isAnimatingPortrait)
+
+                    Button("Use a video…") {
+                        if let driving = model.pickDrivingVideo() {
+                            model.animatePortrait(with: driving)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.isAnimatingPortrait || recorder.isRecording)
+
+                    if model.isAnimatingPortrait {
+                        ProgressView().controlSize(.small)
+                        Text(model.portraitAnimationStage)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Button("Stop") { model.cancelPortraitAnimation() }
+                            .buttonStyle(.borderless)
+                            .font(.caption2)
                     }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(model.isAnimatingPortrait)
 
-                if model.isAnimatingPortrait {
-                    ProgressView().controlSize(.small)
-                    Text(model.portraitAnimationStage)
+                if case .failed(let message) = recorder.state {
+                    Text(message)
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Button("Stop") { model.cancelPortraitAnimation() }
-                        .buttonStyle(.borderless)
-                        .font(.caption2)
-                } else {
-                    Text("Photoreal — copies a real performance onto the portrait. "
-                        + "Minutes per clip on this Mac.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                Text(photorealNote)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } else {
             HStack(spacing: 8) {
@@ -271,6 +311,28 @@ struct PersonaCards: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// Records a performance, then animates the character with it as soon as the
+    /// file lands — the two halves of one intention, not two chores.
+    private func recordTake() async {
+        await recorder.prepare(cameraIndex: model.selectedCameraIndex)
+        guard recorder.session != nil else { return }
+        let directory = model.settings.resolvedVideoOutputDirectory
+            .appendingPathComponent("Takes", isDirectory: true)
+        recorder.start(into: directory) { url in
+            recorder.close()
+            model.animatePortrait(with: url)
+        }
+    }
+
+    private var photorealNote: String {
+        if let node = model.portraitAnimationNode {
+            return "Photoreal — copies a real performance onto the portrait. Renders "
+                + "on \(node.name), which is far faster than this Mac."
+        }
+        return "Photoreal — copies a real performance onto the portrait. About a "
+            + "minute of rendering per second of video on this Mac."
     }
 
     /// What the animator is actually working with — said out loud, because guessing

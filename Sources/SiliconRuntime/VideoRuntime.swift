@@ -145,6 +145,68 @@ public actor NodeVideoRuntime {
         throw VideoRuntimeError.failed("The job didn't finish within an hour.")
     }
 
+    /// Sends a portrait and a performance to a node that can animate one with the
+    /// other, and brings back the clip. Same submit-poll-download shape as video
+    /// generation, because it is the same jobs API on the other end.
+    public func animatePortrait(
+        portrait: URL,
+        driving: URL,
+        node baseURL: URL,
+        token: String?,
+        outputDirectory: URL,
+        onStage: @escaping @Sendable (String) -> Void
+    ) async throws -> URL {
+        cancelled = false
+        onStage("Sending the job")
+        guard let portraitData = try? Data(contentsOf: portrait),
+              let drivingData = try? Data(contentsOf: driving)
+        else { throw VideoRuntimeError.failed("The portrait or the take could not be read.") }
+
+        let body: [String: Any] = [
+            "image_b64": portraitData.base64EncodedString(),
+            "image_name": portrait.lastPathComponent,
+            "driving_b64": drivingData.base64EncodedString(),
+            "driving_name": driving.lastPathComponent,
+        ]
+        var submit = URLRequest(url: baseURL.appendingPathComponent("v1/portrait-animate"))
+        submit.httpMethod = "POST"
+        submit.timeoutInterval = 300
+        submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        submit.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let jobID = try await submitJob(submit, nodeName: baseURL.host ?? "the node")
+        let deadline = Date().addingTimeInterval(1800)
+        while Date() < deadline {
+            if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
+            try? await Task.sleep(for: .seconds(3))
+
+            var poll = URLRequest(url: baseURL.appendingPathComponent("v1/jobs/\(jobID)"))
+            poll.timeoutInterval = 30
+            if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+            guard let (data, _) = try? await session.data(for: poll),
+                  let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+
+            if let stage = Self.stageDescription(from: status) { onStage(stage) }
+            let state = (status["status"] as? String ?? "").lowercased()
+            if ["failed", "error", "cancelled"].contains(state) {
+                let detail = status["error"] as? String ?? status["detail"] as? String
+                throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
+            }
+            if ["done", "completed", "succeeded", "finished"].contains(state) {
+                onStage("Downloading the clip")
+                guard let remote = Self.videoURLs(in: status, base: baseURL).first else {
+                    throw VideoRuntimeError.failed(
+                        "The job finished but the node listed no video file."
+                    )
+                }
+                return try await download(remote, token: token, into: outputDirectory)
+            }
+        }
+        throw VideoRuntimeError.failed("The job didn't finish in time.")
+    }
+
     private func submitJob(_ request: URLRequest, nodeName: String) async throws -> String {
         let (data, response): (Data, URLResponse)
         do {

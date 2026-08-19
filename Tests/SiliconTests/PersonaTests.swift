@@ -468,3 +468,33 @@ struct PortraitAnimatorTests {
         if !installation.isInstalled { #expect(!installation.detail.isEmpty) }
     }
 }
+
+@Suite("Take recorder")
+struct TakeRecorderTests {
+
+    @Test @MainActor func takeNamesSortAndDoNotCollide() {
+        let a = TakeRecorder.filename()
+        let b = TakeRecorder.filename()
+        #expect(a != b)
+        #expect(a.hasPrefix("silicon-take-"))
+        #expect(a.hasSuffix(".mov"))
+    }
+
+    @Test @MainActor func startsIdleWithNoCameraHeld() {
+        let recorder = TakeRecorder()
+        #expect(recorder.state == .idle)
+        #expect(recorder.session == nil)
+        #expect(!recorder.isRecording)
+        #expect(recorder.elapsedLabel.isEmpty)
+        // Closing an unopened recorder must be harmless — the UI calls it on teardown.
+        recorder.close()
+        #expect(recorder.session == nil)
+    }
+
+    @Test @MainActor func showsElapsedTimeWhileRecording() {
+        // The label is what tells someone a take is actually running.
+        let recorder = TakeRecorder()
+        #expect(recorder.elapsedLabel.isEmpty)
+        #expect(TakeRecorder.State.recording(seconds: 75) != .idle)
+    }
+}

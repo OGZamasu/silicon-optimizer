@@ -1818,7 +1818,7 @@ public final class AppModel {
     public var videoSeconds = 5
     public var videoResolution = "720p"
 
-    private let videoRuntime = NodeVideoRuntime()
+    let videoRuntime = NodeVideoRuntime()
     public private(set) var isGeneratingVideo = false
     public private(set) var videoStage: String?
     public internal(set) var videoResults: [VideoResult] = []
