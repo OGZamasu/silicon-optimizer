@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import SiliconControl
+@testable import SiliconRuntime
 @testable import SiliconUI
 
 /// Integration proof that this Mac can see what a real node advertises.
@@ -55,6 +56,59 @@ struct SwarmLiveTests {
             #expect(peer.capabilities.contains {
                 ["portrait-animate", "talking-head"].contains($0.kind) && $0.ready
             })
+        }
+    }
+}
+
+/// A node that refuses a job explains why in the body. The app used to report only
+/// the status code, which turned a fix-it instruction into a dead end.
+@Suite("Node refusals are readable")
+struct NodeRefusalTests {
+
+    @Test func readsTheReasonOutOfWhateverShapeTheBodyTakes() {
+        let plain = Data(#"{"error":"This node serves Wan 2.2 TI2V-5B; ltx2-distilled isn't installed yet."}"#.utf8)
+        #expect(NodeVideoRuntime.reason(in: plain)?.contains("Wan 2.2") == true)
+
+        let detail = Data(#"{"detail":"vertex budget must be between 200 and 5000"}"#.utf8)
+        #expect(NodeVideoRuntime.reason(in: detail)?.contains("vertex budget") == true)
+
+        // FastAPI's validation errors arrive as a list under `detail`.
+        let validation = Data(#"{"detail":[{"loc":["body","seconds"],"msg":"input should be a valid integer"}]}"#.utf8)
+        #expect(NodeVideoRuntime.reason(in: validation)?.contains("valid integer") == true)
+
+        // A bare string body is still worth reading.
+        #expect(NodeVideoRuntime.reason(in: Data("model not installed".utf8)) == "model not installed")
+
+        // An HTML error page is noise, not an explanation.
+        #expect(NodeVideoRuntime.reason(in: Data("<html><body>502</body></html>".utf8)) == nil)
+        #expect(NodeVideoRuntime.reason(in: Data()) == nil)
+    }
+
+    /// End to end against the real node, using a request it is guaranteed to refuse —
+    /// a rejection costs the GPU nothing, so this is safe to run every time.
+    @Test func aRealRefusalArrivesAsWordsNotAStatusCode() async throws {
+        guard let config = SwarmConfig.load(), let peer = config.peers.first,
+              let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+        else { return }
+
+        let runtime = NodeVideoRuntime()
+        let request = VideoRequest(
+            entryID: "ltx2-distilled",          // catalogued here, not installed there
+            prompt: "a refusal, on purpose",
+            seconds: 3,
+            outputDirectory: FileManager.default.temporaryDirectory
+        )
+        do {
+            _ = try await runtime.generate(
+                request, node: base, token: config.effectiveToken
+            ) { _ in }
+            // Some other node might actually have it; that is not a failure.
+        } catch let error as VideoRuntimeError {
+            let message = error.errorDescription ?? ""
+            print("node refusal surfaced as: \(message)")
+            #expect(!message.isEmpty)
+            // The thing that was broken: a bare status code with no explanation.
+            #expect(!message.contains("without saying why"))
         }
     }
 }

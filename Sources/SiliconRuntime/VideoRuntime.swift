@@ -218,12 +218,20 @@ public actor NodeVideoRuntime {
             throw VideoRuntimeError.noNode("Could not reach \(nodeName).")
         }
         guard (200..<300).contains(http.statusCode) else {
+            // The node explains itself in the body — which model it actually has, what
+            // it could not read. Reporting only the status code threw that away and
+            // left a dead end where there was a fix-it instruction.
+            if let reason = Self.reason(in: data) {
+                throw VideoRuntimeError.failed(reason)
+            }
             if http.statusCode == 404 {
                 throw VideoRuntimeError.noNode(
-                    "\(nodeName) doesn't offer video generation yet."
+                    "\(nodeName) doesn't offer this yet."
                 )
             }
-            throw VideoRuntimeError.failed("\(nodeName) answered \(http.statusCode).")
+            throw VideoRuntimeError.failed(
+                "\(nodeName) refused the job (\(http.statusCode)) without saying why."
+            )
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let jobID = (json["job_id"] as? String) ?? (json["id"] as? String)
@@ -231,6 +239,25 @@ public actor NodeVideoRuntime {
             throw VideoRuntimeError.failed("\(nodeName) accepted the job but sent no job id.")
         }
         return jobID
+    }
+
+    /// Whatever the other end wrote to explain itself. Different services name the
+    /// field differently, and a plain string body is worth reading too.
+    static func reason(in data: Data) -> String? {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["error", "detail", "message", "reason"] {
+                if let text = json[key] as? String, !text.isEmpty { return text }
+                // FastAPI nests validation errors under `detail` as a list.
+                if let items = json[key] as? [[String: Any]] {
+                    let joined = items.compactMap { $0["msg"] as? String }.joined(separator: "; ")
+                    if !joined.isEmpty { return joined }
+                }
+            }
+        }
+        let text = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count < 400, !text.hasPrefix("<") else { return nil }
+        return text
     }
 
     private func download(_ remote: URL, token: String?, into directory: URL) async throws -> URL {
