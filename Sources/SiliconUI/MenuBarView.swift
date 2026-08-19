@@ -172,6 +172,14 @@ struct MenuBarView: View {
                 Text("No model loaded")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                // Distinct from "Switch model" below: that reloads with default settings,
+                // this restores the exact configuration — context length included — that was
+                // unloaded, which "Switch model" has no way to know was ever chosen.
+                if let lastLoaded = model.lastLoaded {
+                    Button("Reload \(lastLoaded.model.name)") { model.reloadLastModel() }
+                        .font(.caption)
+                        .buttonStyle(.link)
+                }
             }
 
             if !model.installedModels.isEmpty {

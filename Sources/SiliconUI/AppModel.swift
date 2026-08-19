@@ -43,6 +43,11 @@ public final class AppModel {
     public private(set) var selector = RuntimeSelector(available: [:])
     public internal(set) var lastGeneration: GenerationMetrics?
     public private(set) var runtimeLog: String = ""
+    /// What was loaded before the most recent unload — idle timeout or otherwise — so the
+    /// exact same model and settings (context length included) can be brought back with one
+    /// click rather than reconfigured from scratch. Cleared once something is loaded again;
+    /// this describes a gap, not a history.
+    public private(set) var lastLoaded: (model: InstalledModel, configuration: LoadConfiguration)?
 
     // MARK: - Benchmark
 
@@ -2658,6 +2663,15 @@ public final class AppModel {
         Task { await loadAsync(model, configuration: configuration) }
     }
 
+    /// Loads exactly what was unloaded most recently, settings included — the idle timeout is
+    /// the common case, but this covers any unload. Silently does nothing if there is nothing
+    /// to reload, or if that model has since been removed from the library.
+    public func reloadLastModel() {
+        guard let lastLoaded, installedModels.contains(where: { $0.id == lastLoaded.model.id })
+        else { return }
+        load(lastLoaded.model, configuration: lastLoaded.configuration)
+    }
+
     public func loadAsync(_ model: InstalledModel, configuration: LoadConfiguration? = nil) async {
         await unload()
         noteActivity()
@@ -2694,6 +2708,7 @@ public final class AppModel {
             ))
             loadedModel = model
             activeConfiguration = resolved
+            lastLoaded = nil
             // The harness reads its settings document per request, so telling it the new
             // model's name and true context takes effect from the next message.
             refreshHarnessProviderIfNeeded()
@@ -2712,6 +2727,9 @@ public final class AppModel {
 
     public func unload() async {
         guard let runtime else { return }
+        if let loadedModel, let activeConfiguration {
+            lastLoaded = (loadedModel, activeConfiguration)
+        }
         await runtime.stop()
         self.runtime = nil
         loadedModel = nil
