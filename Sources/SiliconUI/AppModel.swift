@@ -1922,6 +1922,11 @@ public final class AppModel {
     /// Whether fingers are tracked — another model per frame, so it is opt-in.
     public var trackHands = false
 
+    // MARK: - Photoreal portrait animation
+
+    var portraitAnimator: PortraitAnimator?
+    public internal(set) var portraitAnimationState: PortraitAnimator.State = .idle
+
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {
         guard let runtime = activeMeshRuntime else { return }

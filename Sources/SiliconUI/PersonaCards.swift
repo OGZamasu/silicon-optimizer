@@ -168,6 +168,7 @@ struct PersonaCards: View {
                                 + "matching mouth-open drawing")
                         }
                     }
+                    photorealRow
                     if model.routeNextImageToPersonaMouth != nil {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small)
@@ -212,6 +213,62 @@ struct PersonaCards: View {
                             .font(.caption)
                     }
                 }
+            }
+        }
+    }
+
+    /// The high-fidelity path: LivePortrait moving the portrait's real features
+    /// from a recorded performance, rather than the puppet's warp.
+    @ViewBuilder
+    private var photorealRow: some View {
+        if let job = model.repairs["portrait-animator-install"] {
+            HStack(spacing: 8) {
+                if job.error == nil { ProgressView().controlSize(.small) }
+                Text(job.error ?? job.stage)
+                    .font(.caption2)
+                    .foregroundStyle(job.error == nil ? .secondary : Color.orange)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+        } else if model.portraitAnimatorInstallation.isInstalled {
+            HStack(spacing: 8) {
+                Button("Animate from a video…") {
+                    if let driving = model.pickDrivingVideo() {
+                        model.animatePortrait(with: driving)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.isAnimatingPortrait)
+
+                if model.isAnimatingPortrait {
+                    ProgressView().controlSize(.small)
+                    Text(model.portraitAnimationStage)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Button("Stop") { model.cancelPortraitAnimation() }
+                        .buttonStyle(.borderless)
+                        .font(.caption2)
+                } else {
+                    Text("Photoreal — copies a real performance onto the portrait. "
+                        + "Minutes per clip on this Mac.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                Button("Set up photoreal animation") {
+                    model.installPortraitAnimator()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption2)
+                Text(model.portraitAnimatorInstallation.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

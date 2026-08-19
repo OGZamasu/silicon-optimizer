@@ -441,3 +441,30 @@ struct OverlayBroadcastTests {
         #expect(!broadcast.state.hasClosedEyes)
     }
 }
+
+@Suite("Photoreal portrait animation")
+struct PortraitAnimatorTests {
+
+    /// tqdm bars are the only progress LivePortrait gives; misreading them shows the
+    /// user a frozen dialog through a render that takes minutes.
+    @Test func readsProgressOutOfATqdmBar() {
+        #expect(PortraitAnimator.progressPercentage(in: " 42%|████      | 42/100") == 0.42)
+        #expect(PortraitAnimator.progressPercentage(in: "100%|██████████| 100/100") == 0.94)
+        #expect(PortraitAnimator.progressPercentage(in: "  0%|          | 0/100") == 0.0)
+        #expect(PortraitAnimator.progressPercentage(in: "no bar here") == nil)
+    }
+
+    @Test func mapsFailuresToSomethingActionable() {
+        #expect(PortraitAnimator.diagnosis(from: "RuntimeError: No face detected in the source image!")
+            .contains("nothing to animate"))
+        #expect(PortraitAnimator.diagnosis(from: "MPS backend out of memory (MPS allocated 30GB)")
+            .contains("shorter driving video"))
+    }
+
+    @Test func knowsWhereItsPartsLive() {
+        #expect(PortraitAnimator.repository.lastPathComponent == "LivePortrait")
+        #expect(PortraitAnimator.python.path.hasSuffix("venv/bin/python3"))
+        let installation = PortraitAnimator.installation()
+        if !installation.isInstalled { #expect(!installation.detail.isEmpty) }
+    }
+}
