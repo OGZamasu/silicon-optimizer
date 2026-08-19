@@ -146,6 +146,36 @@ struct PersonaCards: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if let note = animationNote {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let persona = model.selectedPersona,
+                           persona.openMouthPortraitPath.isEmpty,
+                           !persona.portraitPath.isEmpty {
+                            Button("Draw them talking") {
+                                model.generateOpenMouthDrawing(for: persona)
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption2)
+                            .disabled(model.isGenerating
+                                || model.routeNextImageToPersonaMouth != nil)
+                            .help("Reworks the portrait through the image model into a "
+                                + "matching mouth-open drawing")
+                        }
+                    }
+                    if model.routeNextImageToPersonaMouth != nil {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Drawing the talking version…")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 HStack(spacing: 10) {
                     Button {
                         model.performLine(model.personaLine)
@@ -182,6 +212,20 @@ struct PersonaCards: View {
                 }
             }
         }
+    }
+
+    /// What the animator is actually working with — said out loud, because guessing
+    /// wrong is what made a character talk out of its forehead.
+    private var animationNote: String? {
+        guard let persona = model.selectedPersona else { return nil }
+        if !persona.openMouthPortraitPath.isEmpty {
+            return "Talking crosses between your two drawings."
+        }
+        guard let geometry = model.personaGeometry else { return nil }
+        return geometry.detected
+            ? "Found their mouth — the jaw moves from there."
+            : "No face detected in this portrait, so the mouth is a guess. A "
+                + "mouth-open drawing would be exact."
     }
 
     // MARK: - Live
@@ -265,6 +309,9 @@ struct PersonaEditor: View {
                 Section("Who they are") {
                     TextField("Name", text: $persona.name, prompt: Text("Character name"))
                     portraitRow
+                    if !persona.portraitPath.isEmpty && persona.openMouthPortraitPath.isEmpty {
+                        mouthLineRow
+                    }
                     TextField(
                         "Brief", text: $persona.brief,
                         prompt: Text("How they talk and behave — used when an agent speaks as them"),
@@ -337,23 +384,122 @@ struct PersonaEditor: View {
             .clipShape(.rect(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 3) {
-                Button("Choose portrait…") {
-                    let panel = NSOpenPanel()
-                    panel.allowedContentTypes = [.image]
-                    panel.allowsMultipleSelection = false
-                    NSApp.activate(ignoringOtherApps: true)
-                    if panel.runModal() == .OK, let url = panel.url {
-                        persona.portraitPath = url.path
+                HStack(spacing: 6) {
+                    Button("Choose portrait…") {
+                        if let url = pickImage() { persona.portraitPath = url.path }
+                    }
+                    Button(persona.openMouthPortraitPath.isEmpty
+                        ? "Add mouth-open drawing…" : "Replace mouth-open…") {
+                        if let url = pickImage() { persona.openMouthPortraitPath = url.path }
+                    }
+                    if !persona.openMouthPortraitPath.isEmpty {
+                        Button {
+                            persona.openMouthPortraitPath = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                Text("Facing forward works best — the jaw moves at a fixed line.")
+                Text(persona.openMouthPortraitPath.isEmpty
+                    ? "A second drawing with the mouth open gives the best result — it "
+                        + "is how PNGTuber avatars work. Without one the jaw is warped "
+                        + "at the mouth line below, which stretches a closed mouth "
+                        + "rather than opening it."
+                    : "Talking crosses between the two drawings.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
         }
+    }
+
+    /// Setting the mouth by eye. Vision reads photographic faces well and drawn ones
+    /// badly, so anything stylized needs the line placed by the person who can see it.
+    private var mouthLineRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let url = persona.portraitURL, let image = NSImage(contentsOf: url) {
+                GeometryReader { proxy in
+                    ZStack(alignment: .topLeading) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                        Rectangle()
+                            .fill(Color.accentColor)
+                            .frame(height: 2)
+                            .offset(y: proxy.size.height * effectiveMouthLine)
+                            .shadow(color: .black.opacity(0.6), radius: 2)
+                    }
+                    .contentShape(.rect)
+                    .gesture(
+                        DragGesture(minimumDistance: 0).onChanged { value in
+                            persona.mouthLineOverride = max(
+                                0.2, min(0.92, value.location.y / proxy.size.height)
+                            )
+                        }
+                    )
+                }
+                .frame(height: 170)
+                .clipShape(.rect(cornerRadius: 8))
+            }
+            HStack {
+                Text("Mouth line")
+                Slider(
+                    value: Binding(
+                        get: { effectiveMouthLine },
+                        set: { persona.mouthLineOverride = $0 }
+                    ),
+                    in: 0.2...0.92
+                )
+                Text(String(format: "%.0f%%", effectiveMouthLine * 100))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                if persona.mouthLineOverride > 0 {
+                    Button("Auto") { persona.mouthLineOverride = 0 }
+                        .buttonStyle(.borderless)
+                }
+            }
+            .font(.caption)
+            Text(detectionNote)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The line in use: the one set by hand, else whatever Vision found, else the guess.
+    private var effectiveMouthLine: Double {
+        if persona.mouthLineOverride > 0 { return persona.mouthLineOverride }
+        return detectedGeometry.mouthTop
+    }
+
+    private var detectedGeometry: FaceGeometry {
+        guard let url = persona.portraitURL, let image = NSImage(contentsOf: url),
+              let frame = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        else { return .fallback }
+        return FaceGeometry.detect(in: frame)
+    }
+
+    private var detectionNote: String {
+        if persona.mouthLineOverride > 0 {
+            return "Drag the line onto their mouth. Everything below it moves when they talk."
+        }
+        return detectedGeometry.detected
+            ? "Found the mouth automatically. Drag the line if it looks off."
+            : "No face found automatically — drawn characters usually need the line "
+                + "placed by hand. Drag it onto their mouth."
+    }
+
+    private func pickImage() -> URL? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        return panel.runModal() == .OK ? panel.url : nil
     }
 
     private func referenceRow(required: Bool) -> some View {

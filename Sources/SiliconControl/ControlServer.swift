@@ -138,6 +138,11 @@ public actor ControlServer {
                     return .error(404, "No persona portrait is set.")
                 }
                 return HTTPResponse(status: 200, body: portrait, contentType: "image/png")
+            case "/overlay/portrait-open":
+                guard let portrait = OverlayBroadcast.shared.openMouthPortrait else {
+                    return .error(404, "This persona has no mouth-open drawing.")
+                }
+                return HTTPResponse(status: 200, body: portrait, contentType: "image/png")
             default:
                 return .error(404, "Unknown endpoint \(request.method) \(request.path)")
             }

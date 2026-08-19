@@ -56,19 +56,68 @@ extension AppModel {
               let frame = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
         else {
             OverlayBroadcast.shared.setPortrait(nil, name: selectedPersona?.name ?? "")
+            personaGeometry = nil
             return
         }
-        let representation = NSBitmapImageRep(cgImage: frame)
-        let data = representation.representation(using: .png, properties: [:])
-        OverlayBroadcast.shared.setPortrait(data, name: persona.name)
+        let geometry = persona.mouthLineOverride > 0
+            ? FaceGeometry.manual(mouthTop: persona.mouthLineOverride)
+            : FaceGeometry.detect(in: frame)
+        personaGeometry = geometry
+        OverlayBroadcast.shared.setPortrait(
+            png(frame), name: persona.name,
+            mouthTop: geometry.mouthTop,
+            openMouth: persona.openMouthPortraitURL
+                .flatMap { NSImage(contentsOf: $0) }
+                .flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+                .flatMap(png)
+        )
+    }
+
+    private func png(_ frame: CGImage) -> Data? {
+        NSBitmapImageRep(cgImage: frame).representation(using: .png, properties: [:])
     }
 
     /// The address to paste into OBS as a Browser Source.
+    ///
+    /// The server binds a moment after launch, and this view usually appears first, so
+    /// a single ask lands on a server with no port yet and the card sits on "waiting"
+    /// forever. Keep asking briefly instead.
     public func refreshOverlayURL() {
         Task {
-            let url = await controlServer?.overlayURL
-            await MainActor.run { self.overlayURL = url }
+            for _ in 0..<20 {
+                if let url = await controlServer?.overlayURL {
+                    overlayURL = url
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
         }
+    }
+
+    /// Draws the same character with their mouth open, by reworking the portrait
+    /// through the image model — the second drawing is what makes talking look right,
+    /// and asking someone to go and paint one is a poor answer when the app can.
+    ///
+    /// A high influence keeps the face, hair and framing; only the mouth is asked to
+    /// change. The result is claimed by the character rather than left in the gallery.
+    public func generateOpenMouthDrawing(for persona: Persona) {
+        guard let portrait = persona.portraitURL else {
+            personaError = "\(persona.name) needs a portrait first."
+            return
+        }
+        guard imageRuntime != nil else {
+            personaError = "The image tools aren't installed yet — the Images tab has "
+                + "a button for that."
+            return
+        }
+        let description = persona.brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        imagePrompt = (description.isEmpty ? "the same character" : description)
+            + ", mouth open mid-speech, same pose, same style, same framing"
+        imageConfiguration.initImage = portrait
+        // Cling to the original: this is the same drawing with one thing changed.
+        imageConfiguration.initImageInfluence = 0.75
+        routeNextImageToPersonaMouth = persona.id
+        generateImage()
     }
 
     // MARK: - Performing
@@ -159,7 +208,9 @@ extension AppModel {
             )
         let caption = includeCaptions ? line : nil
         let file = try await TalkingClipRenderer.render(
-            portrait: portrait, audio: audio, destination: destination, caption: caption
+            portrait: portrait, audio: audio, destination: destination,
+            openMouth: persona.openMouthPortraitURL,
+            mouthLine: persona.mouthLineOverride, caption: caption
         ) { fraction in
             Task { @MainActor in
                 self.performanceStage = "Animating — \(Int(fraction * 100))%"

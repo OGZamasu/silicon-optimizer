@@ -40,9 +40,13 @@ enum OverlayPage {
             background-size: contain;
             will-change: transform, clip-path;
           }
-          /* The head above the mouth line stays put; the jaw below it moves. */
-          #head { clip-path: inset(0 0 38% 0); }
-          #jaw  { clip-path: inset(62% 0 0 0); transform-origin: 50% 62%; }
+          /* Everything below the lips stretches about the lip line; everything above
+             is drawn over it untouched. They share the anchor row exactly, so the join
+             never shows — slicing the face into two slabs left a visible hairline. */
+          #jaw  { z-index: 1; }
+          #head { z-index: 2; }
+          /* The second drawing, when the artist made one, simply crosses in. */
+          #open { z-index: 3; opacity: 0; }
           #blink {
             position: absolute; left: 0; right: 0;
             top: 34%; height: 7%;
@@ -71,8 +75,9 @@ enum OverlayPage {
         <body>
           <div id="stage">
             <div id="character">
-              <div class="layer" id="head"></div>
               <div class="layer" id="jaw"></div>
+              <div class="layer" id="head"></div>
+              <div class="layer" id="open"></div>
               <div id="blink"></div>
             </div>
             <div id="placeholder">No persona selected</div>
@@ -84,12 +89,14 @@ enum OverlayPage {
         const character = document.getElementById('character');
         const head = document.getElementById('head');
         const jaw = document.getElementById('jaw');
+        const open = document.getElementById('open');
         const blink = document.getElementById('blink');
         const caption = document.getElementById('caption');
         const placeholder = document.getElementById('placeholder');
 
         let target = 0, level = 0, speaking = false;
         let portraitVersion = -1, hasPortrait = false;
+        let mouthTop = 0.66, hasOpenMouth = false;
         let nextBlink = performance.now() + 2000 + Math.random() * 3000;
 
         async function poll() {
@@ -101,9 +108,18 @@ enum OverlayPage {
               speaking = !!state.speaking;
               if (state.portraitVersion !== portraitVersion) {
                 portraitVersion = state.portraitVersion;
+                mouthTop = state.mouthTop || 0.66;
+                hasOpenMouth = !!state.hasOpenMouth;
                 const url = 'url("/overlay/portrait?token=' + TOKEN + '&v=' + portraitVersion + '")';
                 head.style.backgroundImage = url;
                 jaw.style.backgroundImage = url;
+                open.style.backgroundImage = hasOpenMouth
+                  ? 'url("/overlay/portrait-open?token=' + TOKEN + '&v=' + portraitVersion + '")'
+                  : 'none';
+                // The head is clipped at the lips; the jaw is the whole image, stretched
+                // about that same line, so the two always meet on an identical row.
+                head.style.clipPath = 'inset(0 0 ' + ((1 - mouthTop) * 100) + '% 0)';
+                jaw.style.transformOrigin = '50% ' + (mouthTop * 100) + '%';
                 hasPortrait = portraitVersion > 0;
                 placeholder.style.display = hasPortrait ? 'none' : 'block';
                 placeholder.textContent = state.name || 'No persona selected';
@@ -123,14 +139,22 @@ enum OverlayPage {
           level += (target - level) * speed;
           if (!speaking) level *= 0.85;
 
-          const drop = level * 5.5;                     // percent of the frame
-          jaw.style.transform =
-            'translateY(' + drop + '%) scaleY(' + (1 + level * 0.06) + ')';
+          if (hasOpenMouth) {
+            open.style.opacity = Math.min(1, level * 1.4);
+            jaw.style.transform = 'none';
+          } else {
+            // Stretch the lower face about the lip line: the chin travels, the mouth
+            // opens, and the anchor row stays put.
+            const stretch = 1 + level * 0.09 / Math.max(0.1, 1 - mouthTop);
+            jaw.style.transform = 'scaleY(' + stretch + ')';
+          }
 
-          const sway = Math.sin(now / 1400) * 0.7 + level * 1.2;
+          // Idle breathing only — tying the body to loudness makes a character lurch
+          // on every syllable. Speech belongs in the mouth.
+          const sway = Math.sin(now / 1400) * 0.7;
           const breath = Math.sin(now / 2600) * 0.5;
           character.style.transform =
-            'translateY(' + (breath - level * 0.8) + '%) rotate(' + sway * 0.25 + 'deg)';
+            'translateY(' + breath + '%) rotate(' + sway * 0.25 + 'deg)';
 
           if (now > nextBlink) {
             blink.style.opacity = 1;

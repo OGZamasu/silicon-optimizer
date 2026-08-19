@@ -20,11 +20,18 @@ public final class OverlayBroadcast: @unchecked Sendable {
         public var name: String = ""
         /// Changes whenever the portrait does, so the page reloads the image only then.
         public var portraitVersion: Int = 0
+        /// Where the lips are, as a fraction of the portrait's height from the top —
+        /// found by Vision rather than assumed, so the jaw hinges at the mouth and not
+        /// at whatever a fixed line happened to land on.
+        public var mouthTop: Double = 0.66
+        /// Whether a second, mouth-open drawing is available to cross to.
+        public var hasOpenMouth: Bool = false
     }
 
     private let lock = NSLock()
     private var _state = State()
     private var _portrait: Data?
+    private var _openMouthPortrait: Data?
 
     public var state: State {
         get { lock.lock(); defer { lock.unlock() }; return _state }
@@ -37,11 +44,22 @@ public final class OverlayBroadcast: @unchecked Sendable {
         return _portrait
     }
 
+    public var openMouthPortrait: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _openMouthPortrait
+    }
+
     /// Replaces the portrait and bumps the version so open overlays pick it up.
-    public func setPortrait(_ data: Data?, name: String) {
+    public func setPortrait(
+        _ data: Data?, name: String, mouthTop: Double = 0.66, openMouth: Data? = nil
+    ) {
         lock.lock()
         _portrait = data
+        _openMouthPortrait = openMouth
         _state.name = name
+        _state.mouthTop = mouthTop
+        _state.hasOpenMouth = openMouth != nil
         _state.portraitVersion += 1
         lock.unlock()
     }

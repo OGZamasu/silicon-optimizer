@@ -4,11 +4,15 @@ import CoreGraphics
 
 /// Turns a portrait and a spoken line into a video of the character saying it.
 ///
-/// Two layers, like the live overlay: the head above the mouth line holds still while
-/// the jaw below it drops with the voice. It is a puppet, not a face model — which is
-/// the point. It runs in seconds on any Mac, it never invents a expression the
-/// performer did not give, and the high-fidelity path (a real lip-sync model on the
-/// CUDA node) can slot in beside it later without changing anything the user does.
+/// Two ways to talk, both puppetry rather than a face model. With a second drawing of
+/// the character mouth-open, the two cross — the PNGTuber technique, and the one that
+/// looks right on stylized art because an artist drew both states. Without one, the
+/// face below the lips stretches about the line Vision found, so the jaw travels and
+/// the mouth opens without any seam.
+///
+/// Both run in seconds on any Mac and never invent an expression the performer did not
+/// give. The high-fidelity path — a real lip-sync or face-swap model — slots in beside
+/// this without changing anything the user does.
 enum TalkingClipRenderer {
 
     enum RenderError: LocalizedError {
@@ -26,16 +30,29 @@ enum TalkingClipRenderer {
     }
 
     /// Renders `audio` over `portrait` and writes an MP4 to `destination`.
+    ///
+    /// - Parameter openMouth: a second drawing of the same character with their mouth
+    ///   open. When supplied it drives the talking directly — the PNGTuber technique,
+    ///   and the only one that looks truly right on stylized art. Without it the jaw
+    ///   is warped, anchored at the mouth Vision found.
     static func render(
         portrait: URL,
         audio: URL,
         destination: URL,
+        openMouth: URL? = nil,
+        mouthLine: Double = 0,
         caption: String? = nil,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard let image = NSImage(contentsOf: portrait),
               let portraitFrame = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
         else { throw RenderError.unreadablePortrait }
+        let openFrame = openMouth
+            .flatMap { NSImage(contentsOf: $0) }
+            .flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+        let geometry = mouthLine > 0
+            ? FaceGeometry.manual(mouthTop: mouthLine)
+            : FaceGeometry.detect(in: portraitFrame)
 
         let (samples, sampleRate) = try readSamples(audio)
         let levels = PersonaAnimator.smoothed(
@@ -49,7 +66,8 @@ enum TalkingClipRenderer {
         defer { try? FileManager.default.removeItem(at: silent) }
 
         try await writeVideo(
-            frame: portraitFrame, levels: levels, size: size,
+            frame: portraitFrame, openFrame: openFrame, geometry: geometry,
+            levels: levels, size: size,
             caption: caption, to: silent, onProgress: onProgress
         )
         return try await mux(video: silent, audio: audio, to: destination)
@@ -94,6 +112,8 @@ enum TalkingClipRenderer {
 
     private static func writeVideo(
         frame portrait: CGImage,
+        openFrame: CGImage?,
+        geometry: FaceGeometry,
         levels: [Double],
         size: CGSize,
         caption: String?,
@@ -136,7 +156,8 @@ enum TalkingClipRenderer {
                 throw RenderError.writerFailed("The video writer ran out of buffers.")
             }
             draw(
-                portrait: portrait, level: level, frameIndex: index,
+                portrait: portrait, openMouth: openFrame, geometry: geometry,
+                level: level, frameIndex: index,
                 caption: caption, size: size, into: buffer
             )
             adaptor.append(
@@ -157,9 +178,43 @@ enum TalkingClipRenderer {
         }
     }
 
-    /// One frame: still head, dropped jaw, idle sway, optional caption.
+    /// One frame as an image, for previewing and for the tests that check *which*
+    /// part of the face moves — the first version animated the forehead, and nothing
+    /// in the suite noticed.
+    static func frame(
+        portrait: CGImage, openMouth: CGImage? = nil,
+        geometry: FaceGeometry, level: Double, frameIndex: Int = 0,
+        size: CGSize? = nil
+    ) -> CGImage? {
+        let size = size ?? renderSize(for: portrait)
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(
+            nil, Int(size.width), Int(size.height), kCVPixelFormatType_32ARGB,
+            [kCVPixelBufferCGImageCompatibilityKey: true] as CFDictionary, &buffer
+        )
+        guard let buffer else { return nil }
+        draw(
+            portrait: portrait, openMouth: openMouth, geometry: geometry,
+            level: level, frameIndex: frameIndex, caption: nil,
+            size: size, into: buffer
+        )
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else { return nil }
+        return context.makeImage()
+    }
+
+    /// One frame: the character at this loudness, plus idle sway and any caption.
     private static func draw(
         portrait: CGImage,
+        openMouth: CGImage?,
+        geometry: FaceGeometry,
         level: Double,
         frameIndex: Int,
         caption: String?,
@@ -181,27 +236,55 @@ enum TalkingClipRenderer {
         context.setFillColor(CGColor(gray: 0.06, alpha: 1))
         context.fill(CGRect(origin: .zero, size: size))
 
+        // Idle breathing only. Tying the whole body to loudness made the character
+        // lurch on every syllable — speech belongs in the mouth.
         let idle = PersonaAnimator.idleOffset(frame: frameIndex)
-        let bob = idle.bob * size.height - level * 0.008 * size.height
+        let bob = idle.bob * size.height
         let full = CGRect(origin: CGPoint(x: 0, y: bob), size: size)
 
-        // Core Graphics counts from the bottom, so the head is the *upper* slice and
-        // the jaw the lower one — the mouth line measured from the top.
-        let headHeight = size.height * (1 - PersonaAnimator.mouthLine)
-        let jawHeight = size.height - headHeight
+        if let openMouth {
+            // The artist drew both states; just cross between them. This is what every
+            // PNGTuber setup does, and nothing synthesized beats it on stylized art.
+            context.draw(portrait, in: full)
+            if level > 0.02 {
+                context.saveGState()
+                context.setAlpha(min(1, level * 1.4))
+                context.draw(openMouth, in: full)
+                context.restoreGState()
+            }
+        } else {
+            // No second drawing: stretch the face below the lips instead of slicing it.
+            // Core Graphics counts from the bottom, so the mouth line measured from the
+            // top of the image sits this far up from the bottom.
+            let mouthY = size.height * (1 - geometry.mouthTop)
+            let drop = PersonaAnimator.jawDrop(level: level, geometry: geometry) * size.height
 
-        context.saveGState()
-        context.clip(to: CGRect(
-            x: 0, y: bob + jawHeight, width: size.width, height: headHeight
-        ))
-        context.draw(portrait, in: full)
-        context.restoreGState()
+            // Everything below the lips, scaled vertically about the lip line so the
+            // chin travels and the mouth opens. The anchor row is shared with the
+            // still upper half exactly, so no seam can appear — the earlier version
+            // cut the face into two slabs and the join showed on every frame.
+            // The lower half is drawn a couple of pixels past the line and the upper
+            // half painted over it. Two clips that merely abut leave both their
+            // antialiased edges half-covered, which reads as a hairline across the
+            // whole frame — visible even where the picture is plain background.
+            context.saveGState()
+            context.clip(to: CGRect(
+                x: 0, y: bob - drop, width: size.width, height: mouthY + drop + 2
+            ))
+            context.translateBy(x: 0, y: bob + mouthY)
+            context.scaleBy(x: 1, y: (mouthY + drop) / max(1, mouthY))
+            context.translateBy(x: 0, y: -(bob + mouthY))
+            context.draw(portrait, in: full)
+            context.restoreGState()
 
-        let drop = PersonaAnimator.jawDrop(level: level) * size.height
-        context.saveGState()
-        context.clip(to: CGRect(x: 0, y: bob - drop, width: size.width, height: jawHeight))
-        context.draw(portrait, in: full.offsetBy(dx: 0, dy: -drop))
-        context.restoreGState()
+            // Everything above the lips, untouched.
+            context.saveGState()
+            context.clip(to: CGRect(
+                x: 0, y: bob + mouthY, width: size.width, height: size.height - mouthY
+            ))
+            context.draw(portrait, in: full)
+            context.restoreGState()
+        }
 
         if let caption, !caption.isEmpty {
             drawCaption(caption, in: context, size: size)

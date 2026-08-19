@@ -97,7 +97,15 @@ public final class AppModel {
 
     // MARK: - UI state
 
-    public var selectedTab: Tab = .dashboard
+    /// The tab on screen, restored from last launch so reopening the window lands
+    /// where the work was left.
+    public var selectedTab: Tab = .dashboard {
+        didSet {
+            guard selectedTab != oldValue, settings.lastTab != selectedTab.rawValue else { return }
+            settings.lastTab = selectedTab.rawValue
+            settings.save()
+        }
+    }
     public var alert: AlertContent?
     /// Sidebar visibility for the main window, so the harness chat can take the whole
     /// window over and give it back.
@@ -445,6 +453,16 @@ public final class AppModel {
                             // The 3D flow sets revision state per click; leaving it set
                             // would quietly turn the Images tab into revision mode too.
                             imageConfiguration.initImage = nil
+                        }
+                        if let personaID = routeNextImageToPersonaMouth {
+                            routeNextImageToPersonaMouth = nil
+                            imageConfiguration.initImage = nil
+                            if var persona = settings.personas.first(
+                                where: { $0.id == personaID }
+                            ) {
+                                persona.openMouthPortraitPath = result.image.path
+                                updatePersona(persona)
+                            }
                         }
                     }
                 }
@@ -1204,6 +1222,9 @@ public final class AppModel {
     /// Set while a "describe it" draft from the 3D tab is rendering: the next finished image
     /// becomes the 3D source, so the two tools chain without the user ferrying files.
     public private(set) var routeNextImageToMesh = false
+    /// Set while a character's mouth-open drawing is being generated, so the finished
+    /// image goes to that character instead of sitting in the gallery.
+    public internal(set) var routeNextImageToPersonaMouth: String?
 
     /// Drafts an image from the composer prompt and routes the result to the 3D tab's
     /// source slot. Same queue and models as the Images tab — one pipeline, two doors.
@@ -1872,6 +1893,9 @@ public final class AppModel {
     /// Held while a take plays so its meter can drive the overlay, and so stopping
     /// mid-line is possible.
     var livePlayer: AVAudioPlayer?
+    /// Where Vision found the selected character's mouth, so the UI can say whether it
+    /// found one at all rather than silently animating the wrong part of the picture.
+    public internal(set) var personaGeometry: FaceGeometry?
 
     /// Same teardown discipline as `cancelImage()`: state clears when the stream ends.
     public func cancelMesh() {
@@ -1908,6 +1932,7 @@ public final class AppModel {
     public func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
         selector = RuntimeSelector.discover()
         imageRuntime = MFluxRuntime.locate()
         RuntimeLocator.customPaths = settings.customRuntimePaths

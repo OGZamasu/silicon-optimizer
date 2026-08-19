@@ -60,6 +60,26 @@ struct PersonaTests {
         #expect(PersonaAnimator.jawDrop(level: -3) == 0)
     }
 
+    /// Travel scales to the face that was found: a small face in a big frame moves a
+    /// small amount, and a face with no room moves barely at all.
+    @Test func travelScalesToTheFaceThatWasFound() {
+        let tight = FaceGeometry(mouthTop: 0.70, chin: 0.74, detected: true)
+        let roomy = FaceGeometry(mouthTop: 0.55, chin: 0.90, detected: true)
+        #expect(tight.travel < roomy.travel)
+        #expect(tight.travel >= 0.01)
+        #expect(roomy.travel <= 0.09)
+    }
+
+    @Test func overlayCarriesTheMouthLineItFound() {
+        let broadcast = OverlayBroadcast.shared
+        broadcast.setPortrait(Data([1]), name: "X", mouthTop: 0.71, openMouth: Data([2]))
+        #expect(broadcast.state.mouthTop == 0.71)
+        #expect(broadcast.state.hasOpenMouth)
+        #expect(broadcast.openMouthPortrait?.count == 1)
+        broadcast.setPortrait(nil, name: "")
+        #expect(!broadcast.state.hasOpenMouth)
+    }
+
     @Test func idleMotionStaysSubtleAndKeepsMoving() {
         let offsets = (0..<90).map { PersonaAnimator.idleOffset(frame: $0) }
         #expect(offsets.allSatisfy { abs($0.bob) <= 0.006 && abs($0.tilt) <= 0.3 })
@@ -187,6 +207,51 @@ struct TalkingClipTests {
         #expect(duration > 1.7 && duration < 2.4)
     }
 
+    /// The regression that shipped: the animator hinged the *forehead* because the
+    /// slices were inverted, and every test passed because none looked at the picture.
+    /// This one does — everything above the mouth must be pixel-identical between a
+    /// silent frame and a loud one, and something below it must have moved.
+    @Test func onlyTheFaceBelowTheMouthMoves() throws {
+        let portrait = TestImages.stripes(width: 256, height: 256)
+        let geometry = FaceGeometry(mouthTop: 0.66, chin: 0.85, detected: true)
+
+        let quiet = try #require(TalkingClipRenderer.frame(
+            portrait: portrait, geometry: geometry, level: 0, size: CGSize(width: 256, height: 256)
+        ))
+        let loud = try #require(TalkingClipRenderer.frame(
+            portrait: portrait, geometry: geometry, level: 1, size: CGSize(width: 256, height: 256)
+        ))
+
+        // Rows are counted from the top, like the geometry.
+        let mouthRow = Int(0.66 * 256)
+        var movedBelow = false
+        for row in 0..<256 {
+            let same = TestImages.row(row, of: quiet) == TestImages.row(row, of: loud)
+            if row < mouthRow - 4 {
+                #expect(same, "row \(row) is above the mouth and must not move")
+            } else if !same {
+                movedBelow = true
+            }
+        }
+        #expect(movedBelow, "nothing below the mouth moved")
+    }
+
+    @Test func aSecondDrawingIsWhatTalksWhenItExists() throws {
+        let closed = TestImages.solid(width: 128, height: 128)
+        let open = TestImages.stripes(width: 128, height: 128)
+        let geometry = FaceGeometry(mouthTop: 0.66, chin: 0.85, detected: true)
+        let size = CGSize(width: 128, height: 128)
+
+        let quiet = try #require(TalkingClipRenderer.frame(
+            portrait: closed, openMouth: open, geometry: geometry, level: 0, size: size
+        ))
+        let loud = try #require(TalkingClipRenderer.frame(
+            portrait: closed, openMouth: open, geometry: geometry, level: 1, size: size
+        ))
+        // Silent shows the closed drawing; loud shows the open one, all the way up.
+        #expect(TestImages.row(20, of: quiet) != TestImages.row(20, of: loud))
+    }
+
     @Test @MainActor func namesTheProblemWhenThePortraitIsNotAnImage() async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("persona-bad-\(UUID().uuidString.prefix(6))")
@@ -208,6 +273,35 @@ struct TalkingClipTests {
 }
 
 enum TestImages {
+    /// Horizontal bands, so a moved row is obvious in the pixels.
+    static func stripes(width: Int, height: Int) -> CGImage {
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        )!
+        for band in 0..<16 {
+            context.setFillColor(CGColor(
+                red: Double(band) / 16, green: 1 - Double(band) / 16, blue: 0.5, alpha: 1
+            ))
+            let bandHeight = Double(height) / 16
+            context.fill(CGRect(
+                x: 0, y: Double(band) * bandHeight,
+                width: Double(width), height: bandHeight
+            ))
+        }
+        return context.makeImage()!
+    }
+
+    /// One row of pixels, counted from the top.
+    static func row(_ index: Int, of image: CGImage) -> [UInt8] {
+        guard let data = image.dataProvider?.data as Data? else { return [] }
+        let bytesPerRow = image.bytesPerRow
+        let start = index * bytesPerRow
+        guard start + bytesPerRow <= data.count else { return [] }
+        return Array(data[start..<(start + bytesPerRow)])
+    }
+
     static func solid(width: Int, height: Int) -> CGImage {
         let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8,

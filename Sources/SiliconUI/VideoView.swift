@@ -53,6 +53,13 @@ struct VideoView: View {
         VideoCatalog.entry(id: model.selectedVideoModel)
     }
 
+    /// What the player shows: a clip picked from recents, else this session's newest,
+    /// else the newest on disk — coming back to the tab should show your last clip
+    /// rather than an empty state contradicted by the recents pane below it.
+    private var displayedClip: URL? {
+        selectedClip ?? model.videoResults.first?.file ?? recentClips.first
+    }
+
     // MARK: - Composer
 
     private var composerCard: some View {
@@ -210,8 +217,8 @@ struct VideoView: View {
 
     private var resultCard: some View {
         Card(title: "Result", systemImage: "play.rectangle") {
-            if let clip = selectedClip ?? model.videoResults.first?.file {
-                VideoPlayer(player: AVPlayer(url: clip))
+            if let clip = displayedClip {
+                ClipPlayer(url: clip)
                     .frame(maxWidth: .infinity, minHeight: 320)
                     .background(.background.secondary, in: .rect(cornerRadius: 8))
 
@@ -286,6 +293,40 @@ struct VideoView: View {
             }
             .prefix(60)
             .map { $0 }
+    }
+}
+
+/// The clip player.
+///
+/// AppKit's `AVPlayerView` rather than SwiftUI's `VideoPlayer`: the SwiftUI wrapper
+/// aborted this app on first display, inside its own representable's generic metadata
+/// (`_AVKit_SwiftUI` → `getSuperclassMetadata` → fatalError), taking the whole app down
+/// the moment a rendered clip appeared. The AppKit view is the same player without the
+/// wrapper, and it brings real transport controls with it.
+struct ClipPlayer: NSViewRepresentable {
+    var url: URL
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.player = AVPlayer(url: url)
+        context.coordinator.url = url
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        // Only a different file replaces the player; anything else would restart
+        // playback on every unrelated state change.
+        guard context.coordinator.url != url else { return }
+        context.coordinator.url = url
+        view.player = AVPlayer(url: url)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var url: URL?
     }
 }
 

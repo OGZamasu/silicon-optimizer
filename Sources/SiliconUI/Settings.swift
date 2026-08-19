@@ -203,6 +203,9 @@ public struct Settings: Codable, Sendable, Equatable {
             ?? FileManager.default.temporaryDirectory
     }
 
+    /// The tab the window was last on, so reopening lands where you left off.
+    public var lastTab: String = ""
+
     // Personas
 
     /// The characters this app can speak and perform as.
@@ -317,6 +320,7 @@ public struct Settings: Codable, Sendable, Equatable {
         meshOutputDirectory = try value(.meshOutputDirectory, fallback.meshOutputDirectory)
         voiceOutputDirectory = try value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
         videoOutputDirectory = try value(.videoOutputDirectory, fallback.videoOutputDirectory)
+        lastTab = try value(.lastTab, fallback.lastTab)
         personas = try value(.personas, fallback.personas)
         selectedPersonaID = try value(.selectedPersonaID, fallback.selectedPersonaID)
         modelLibraryDirectory = try value(

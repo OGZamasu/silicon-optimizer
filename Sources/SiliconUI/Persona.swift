@@ -17,6 +17,15 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
     public var voiceModelID: String
     /// The preset voice, for models that ship a shelf of them.
     public var presetVoice: String
+    /// An optional second portrait with the mouth open. When present it is what makes
+    /// the character talk — the technique every PNGTuber uses, and the only one that
+    /// looks truly right on stylized art, because the artist drew both states rather
+    /// than the software inventing one.
+    public var openMouthPortraitPath: String = ""
+    /// Where the mouth is, as a fraction of the portrait's height from the top.
+    /// Zero means "work it out" — Vision finds photographic faces reliably but not
+    /// stylized art, so drawn characters get a line the artist sets by eye.
+    public var mouthLineOverride: Double = 0
     /// The reference recording, for models that clone.
     public var referenceAudioPath: String
     /// Who the voice belongs to and under what permission — the performer's name, the
@@ -29,6 +38,8 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
         id: String = UUID().uuidString,
         name: String = "",
         portraitPath: String = "",
+        openMouthPortraitPath: String = "",
+        mouthLineOverride: Double = 0,
         voiceModelID: String = "kokoro",
         presetVoice: String = "af_heart",
         referenceAudioPath: String = "",
@@ -38,6 +49,8 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.portraitPath = portraitPath
+        self.openMouthPortraitPath = openMouthPortraitPath
+        self.mouthLineOverride = mouthLineOverride
         self.voiceModelID = voiceModelID
         self.presetVoice = presetVoice
         self.referenceAudioPath = referenceAudioPath
@@ -51,6 +64,10 @@ public struct Persona: Codable, Identifiable, Hashable, Sendable {
 
     public var referenceAudioURL: URL? {
         referenceAudioPath.isEmpty ? nil : URL(fileURLWithPath: referenceAudioPath)
+    }
+
+    public var openMouthPortraitURL: URL? {
+        openMouthPortraitPath.isEmpty ? nil : URL(fileURLWithPath: openMouthPortraitPath)
     }
 }
 
@@ -105,13 +122,11 @@ public enum PersonaAnimator {
         }
     }
 
-    /// How far the jaw drops at this level, as a fraction of the portrait's height.
-    public static func jawDrop(level: Double) -> Double {
-        max(0, min(1, level)) * 0.055
+    /// How far the jaw travels at this level, as a fraction of the portrait's height,
+    /// scaled to the face the geometry actually found.
+    public static func jawDrop(level: Double, geometry: FaceGeometry = .fallback) -> Double {
+        max(0, min(1, level)) * geometry.travel
     }
-
-    /// Where the face is cut into a still head and a moving jaw.
-    public static let mouthLine = 0.62
 
     /// Idle motion so a silent character still breathes, in fractions of the frame.
     public static func idleOffset(frame: Int, fps: Int = fps) -> (bob: Double, tilt: Double) {
