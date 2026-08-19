@@ -253,6 +253,12 @@ struct VideoView: View {
                     .frame(maxWidth: .infinity, minHeight: 320)
                     .background(.background.secondary, in: .rect(cornerRadius: 8))
 
+                if let receipt = receipt(for: clip) {
+                    Text(receipt)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack(spacing: 8) {
                     Button {
                         NSWorkspace.shared.activateFileViewerSelecting([clip])
@@ -301,6 +307,17 @@ struct VideoView: View {
         } onSelect: { item in
             selectedClip = item.url
         }
+    }
+
+    /// Where a clip came from: the model, the machine, and how long it took. Only for
+    /// clips made this session — a file picked out of the recents carries no such record.
+    private func receipt(for clip: URL) -> String? {
+        guard let result = model.videoResults.first(where: { $0.file == clip })
+        else { return nil }
+        var parts = [result.modelName]
+        if let node = result.node { parts.append("on \(node)") }
+        if result.elapsed >= 1 { parts.append(NodeJobProgress.durationText(result.elapsed)) }
+        return parts.joined(separator: " · ")
     }
 
     private struct ClipFile: Identifiable {

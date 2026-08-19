@@ -31,12 +31,19 @@ public struct VideoResult: Sendable, Identifiable {
     public var modelName: String
     public var prompt: String
     public var elapsed: TimeInterval
+    /// Which machine produced it. Nil means this Mac; a name means the work was delegated,
+    /// and a clip that took eleven minutes deserves to say where those minutes went.
+    public var node: String?
 
-    public init(file: URL, modelName: String, prompt: String, elapsed: TimeInterval) {
+    public init(
+        file: URL, modelName: String, prompt: String, elapsed: TimeInterval,
+        node: String? = nil
+    ) {
         self.file = file
         self.modelName = modelName
         self.prompt = prompt
         self.elapsed = elapsed
+        self.node = node
     }
 }
 
@@ -157,7 +164,8 @@ public actor NodeVideoRuntime {
                 Self.log.notice("video job \(jobID, privacy: .public): wrote \(file.path, privacy: .public)")
                 return VideoResult(
                     file: file, modelName: entry.name, prompt: request.prompt,
-                    elapsed: Date().timeIntervalSince(started)
+                    elapsed: Date().timeIntervalSince(started),
+                    node: baseURL.host
                 )
             }
         }

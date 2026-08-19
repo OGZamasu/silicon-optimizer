@@ -90,6 +90,8 @@ public struct NodeJobProgress: Sendable, Equatable {
 
     /// h:mm:ss past an hour, m:ss below it. Zero-padded minutes so the number stops jittering
     /// as it counts down.
+    public static func durationText(_ seconds: TimeInterval) -> String { duration(seconds) }
+
     static func duration(_ seconds: TimeInterval) -> String {
         let total = Int(seconds.rounded())
         let (hours, minutes, remainder) = (total / 3600, (total % 3600) / 60, total % 60)

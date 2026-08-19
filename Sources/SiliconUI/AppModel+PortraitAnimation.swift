@@ -112,6 +112,7 @@ extension AppModel {
             .appendingPathComponent("Photoreal", isDirectory: true)
         let name = persona.name
         let runtime = videoRuntime
+        let started = Date()
 
         Task {
             do {
@@ -129,8 +130,9 @@ extension AppModel {
                 }
                 videoResults.insert(
                     VideoResult(
-                        file: file, modelName: "\(name) (on \(node.name))",
-                        prompt: "Driven by \(driving.lastPathComponent)", elapsed: 0
+                        file: file, modelName: name,
+                        prompt: "Driven by \(driving.lastPathComponent)",
+                        elapsed: Date().timeIntervalSince(started), node: node.name
                     ),
                     at: 0
                 )
