@@ -417,3 +417,60 @@ struct QuantizationLabelTests {
         #expect(Quantization.inferred(fromFilename: "m-Q4_K_M.gguf") == .q4_K_M)
     }
 }
+
+@Suite("Sharp chat template")
+struct SharpTemplateTests {
+
+    private func consecutive(_ arguments: [String], _ flag: String, _ value: String) -> Bool {
+        guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count
+        else { return false }
+        return arguments[index + 1] == value
+    }
+
+    /// The template is handed over as a path, so a switched-on setting whose file is
+    /// missing must not produce a flag — llama-server exits on an unreadable one.
+    @Test func onlyPassesATemplateThatIsOnDisk() throws {
+        let present = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sharp-\(UUID().uuidString).jinja")
+        try "{% for message in messages %}{% endfor %}".write(
+            to: present, atomically: true, encoding: .utf8
+        )
+        defer { try? FileManager.default.removeItem(at: present) }
+
+        let withTemplate = LlamaArguments(
+            model: makeModel(), configuration: LoadConfiguration(), port: 1,
+            chatTemplateFile: present
+        ).build()
+        #expect(consecutive(withTemplate, "--chat-template-file", present.path))
+        // After --jinja: that is the flag whose renderer the template replaces.
+        let jinja = withTemplate.firstIndex(of: "--jinja")
+        let file = withTemplate.firstIndex(of: "--chat-template-file")
+        #expect(jinja != nil && file != nil && jinja! < file!)
+
+        let missing = LlamaArguments(
+            model: makeModel(), configuration: LoadConfiguration(), port: 1,
+            chatTemplateFile: URL(fileURLWithPath: "/nowhere/qwen-sharp.jinja")
+        ).build()
+        #expect(!missing.contains("--chat-template-file"))
+
+        let none = LlamaArguments(
+            model: makeModel(), configuration: LoadConfiguration(), port: 1
+        ).build()
+        #expect(!none.contains("--chat-template-file"))
+    }
+
+    @Test func recognisesTheModelsItWasWrittenFor() {
+        #expect(SharpTemplate.suits(modelName: "Qwen3.5-32B-Instruct"))
+        #expect(SharpTemplate.suits(modelName: "qwen3-6-14b"))
+        #expect(SharpTemplate.suits(modelName: "Qwen3_8-27B"))
+        // Older Qwen, other families: their own template stays.
+        #expect(!SharpTemplate.suits(modelName: "Qwen3-30B-A3B"))
+        #expect(!SharpTemplate.suits(modelName: "Qwen2.5-7B"))
+        #expect(!SharpTemplate.suits(modelName: "Llama-3.5-8B"))
+        #expect(!SharpTemplate.suits(modelName: "gpt-oss-20b"))
+        // The catalog id names the same model, and for an install whose filename is
+        // uninformative it is the only thing that does.
+        #expect(SharpTemplate.suits(modelName: "model", identifier: "qwen3.8-27b"))
+        #expect(!SharpTemplate.suits(modelName: "model", identifier: "qwen3-32b"))
+    }
+}

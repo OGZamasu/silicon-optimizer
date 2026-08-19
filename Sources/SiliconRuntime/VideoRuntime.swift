@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SiliconCatalog
 import SiliconCore
 
@@ -59,6 +60,13 @@ public enum VideoRuntimeError: LocalizedError {
 /// to; the honest answer without a capable node is "not yet", said in the UI.
 public actor NodeVideoRuntime {
 
+    /// Delegated jobs run on another machine and fail in ways nothing local can see.
+    /// This logs the whole conversation — submit, each status, the artifact, the
+    /// download — so a job that vanishes can be traced with `log show` instead of
+    /// guessed at. Read it with:
+    ///   log show --last 30m --predicate 'subsystem == "dev.siliconoptimizer"'
+    public static let log = Logger(subsystem: "dev.siliconoptimizer", category: "delegated-jobs")
+
     /// The capability kind a node advertises when it can make video.
     public static let capabilityKind = "video"
 
@@ -104,6 +112,7 @@ public actor NodeVideoRuntime {
         submit.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let jobID = try await submitJob(submit, nodeName: baseURL.host ?? "the node")
+        Self.log.notice("video job \(jobID, privacy: .public) submitted to \(baseURL.absoluteString, privacy: .public)")
 
         // Poll until the node says it is done. Video is minutes, not seconds, so the
         // interval is generous and the cap is a full hour.
@@ -115,20 +124,29 @@ public actor NodeVideoRuntime {
             var poll = URLRequest(url: baseURL.appendingPathComponent("v1/jobs/\(jobID)"))
             poll.timeoutInterval = 30
             if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-            guard let (data, _) = try? await session.data(for: poll),
-                  let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { continue }
+            guard let (data, _) = try? await session.data(for: poll) else {
+                Self.log.notice("video job \(jobID, privacy: .public): poll failed, retrying")
+                continue
+            }
+            guard let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                Self.log.notice("video job \(jobID, privacy: .public): unreadable status body")
+                continue
+            }
 
             if let stage = Self.stageDescription(from: status) { onStage(stage) }
 
             let state = (status["status"] as? String ?? "").lowercased()
+            Self.log.notice("video job \(jobID, privacy: .public): status=\(state, privacy: .public)")
             if ["failed", "error", "cancelled"].contains(state) {
                 let detail = status["error"] as? String ?? status["detail"] as? String
                 throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
                 onStage("Downloading the clip")
-                guard let remote = Self.videoURLs(in: status, base: baseURL).first else {
+                let found = Self.videoURLs(in: status, base: baseURL)
+                Self.log.notice("video job \(jobID, privacy: .public): artifacts=\(found.map(\.absoluteString).joined(separator: ", "), privacy: .public)")
+                guard let remote = found.first else {
                     throw VideoRuntimeError.failed(
                         "The job finished but the node listed no video file."
                     )
@@ -136,12 +154,14 @@ public actor NodeVideoRuntime {
                 let file = try await download(
                     remote, token: token, into: request.outputDirectory
                 )
+                Self.log.notice("video job \(jobID, privacy: .public): wrote \(file.path, privacy: .public)")
                 return VideoResult(
                     file: file, modelName: entry.name, prompt: request.prompt,
                     elapsed: Date().timeIntervalSince(started)
                 )
             }
         }
+        Self.log.error("video job \(jobID, privacy: .public): gave up waiting")
         throw VideoRuntimeError.failed("The job didn't finish within an hour.")
     }
 

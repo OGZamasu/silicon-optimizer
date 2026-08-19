@@ -1874,8 +1874,16 @@ public final class AppModel {
                     Task { @MainActor in self.videoStage = stage }
                 }
                 videoResults.insert(result, at: 0)
+                NodeVideoRuntime.log.notice(
+                    "video result added: \(result.file.path, privacy: .public)"
+                )
             } catch {
+                // Both places, deliberately: the banner is for the person, the log is
+                // for whoever has to work out why a job vanished without one.
                 videoError = error.localizedDescription
+                NodeVideoRuntime.log.error(
+                    "video job failed: \(error.localizedDescription, privacy: .public)"
+                )
             }
         }
     }
@@ -2673,7 +2681,8 @@ public final class AppModel {
                 // A stable port rather than an ephemeral one, so the harness's generated
                 // provider config keeps pointing at a live server across model switches.
                 port: harnessPorts().inference,
-                extraArguments: extraArguments
+                extraArguments: extraArguments,
+                chatTemplateFile: sharpTemplate(for: model)
             ))
             loadedModel = model
             activeConfiguration = resolved
@@ -2741,6 +2750,16 @@ public final class AppModel {
         imageRuntime = MFluxRuntime.locate()
     }
 
+    /// The sharp chat template, when it is switched on, downloaded, and the model is
+    /// one it was written for. Nil in every other case — silently rendering a Qwen
+    /// template over some other family would be a quality regression nobody could see.
+    public func sharpTemplate(for model: InstalledModel) -> URL? {
+        guard settings.useSharpChatTemplate, SharpTemplate.isDownloaded,
+              SharpTemplate.suits(modelName: model.name, identifier: model.catalogID)
+        else { return nil }
+        return SharpTemplate.localURL
+    }
+
     /// The exact command the app would run for the current model, shown in Advanced mode so a
     /// power user can reproduce or report it.
     public var currentLaunchCommand: String? {
@@ -2749,7 +2768,8 @@ public final class AppModel {
         else { return nil }
         return LlamaArguments(
             model: model, configuration: configuration, port: 8080,
-            installation: installation, extraArguments: extraArguments
+            installation: installation, extraArguments: extraArguments,
+            chatTemplateFile: sharpTemplate(for: model)
         ).displayCommand(executable: installation.executable)
     }
 

@@ -7,6 +7,8 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @State private var templateStatus = ""
+    @State private var fetchingTemplate = false
 
     var body: some View {
         @Bindable var model = model
@@ -86,6 +88,34 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Chat template") {
+                Toggle("Use the sharp template for Qwen", isOn: sharpTemplateBinding)
+                Text(
+                    "A replacement chat template that tells Qwen to lead with the answer "
+                    + "and skip the preamble — the published claim is fewer thinking "
+                    + "tokens for the same accuracy. It changes nothing about the weights, "
+                    + "and it only applies to Qwen 3.5, 3.6 and 3.8; every other model "
+                    + "keeps its own template. Reload the model to apply a change."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button(SharpTemplate.isDownloaded ? "Update template" : "Download template") {
+                        downloadSharpTemplate()
+                    }
+                    .disabled(fetchingTemplate)
+                    if fetchingTemplate { ProgressView().controlSize(.small) }
+                    Text(templateStatus.isEmpty ? defaultTemplateStatus : templateStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Link("Source", destination: URL(
+                        string: "https://huggingface.co/\(SharpTemplate.repository)"
+                    )!)
+                    .font(.caption)
+                }
+            }
+
             Section("Generation") {
                 LabeledContent("Temperature") {
                     HStack {
@@ -129,6 +159,23 @@ struct SettingsView: View {
 
             Section("Updates") {
                 LabeledContent("Version", value: model.updates.currentVersion)
+                if let pending = model.updates.pendingUpdateVersion {
+                    HStack {
+                        Label("Version \(pending) is ready to install", systemImage: "sparkles")
+                        Spacer()
+                        Button("Show update") { model.updates.checkForUpdates() }
+                    }
+                }
+                if let problem = model.updates.startupError {
+                    // Deliberately a row and not an alert. The usual cause is the app bundle
+                    // being replaced while this copy runs, and reopening the app fixes it.
+                    Label(
+                        "Updates are off for this session: \(problem) Reopen the app to try again.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                }
                 if model.updates.feedURL != nil {
                     Toggle("Check automatically", isOn: Binding(
                         get: { model.updates.automaticallyChecks },
@@ -505,6 +552,41 @@ struct SettingsView: View {
     /// A row label with its default value underneath in a quieter voice. The caption lives
     /// in the label column's whitespace, where there is room for a whole path on one line —
     /// instead of word-wrapping into three beside the field.
+    /// Switching this on with no template on disk would silently do nothing at the
+    /// next load, so the toggle fetches it.
+    private var sharpTemplateBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.useSharpChatTemplate },
+            set: { newValue in
+                model.settings.useSharpChatTemplate = newValue
+                if newValue, !SharpTemplate.isDownloaded { downloadSharpTemplate() }
+            }
+        )
+    }
+
+    private var defaultTemplateStatus: String {
+        guard SharpTemplate.isDownloaded else { return "Not downloaded yet." }
+        guard let model = model.loadedModel else { return "Ready." }
+        return SharpTemplate.suits(modelName: model.name, identifier: model.catalogID)
+            ? "In use by \(model.name)."
+            : "Ready — \(model.name) is not a Qwen it was written for."
+    }
+
+    private func downloadSharpTemplate() {
+        fetchingTemplate = true
+        templateStatus = "Downloading…"
+        let token = model.settings.huggingFaceToken
+        Task {
+            do {
+                _ = try await SharpTemplate.download(token: token)
+                templateStatus = "Downloaded. Reload the model to apply it."
+            } catch {
+                templateStatus = error.localizedDescription
+            }
+            fetchingTemplate = false
+        }
+    }
+
     private func fieldLabel(_ title: String, caption: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)

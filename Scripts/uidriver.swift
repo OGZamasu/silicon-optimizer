@@ -11,6 +11,7 @@
 //        uidriver <app> press <path>
 //        uidriver <app> pick  <path> <menu item title>
 //        uidriver <app> read  <path>
+//        uidriver <app> text  <path>
 
 import ApplicationServices
 import AppKit
@@ -139,6 +140,19 @@ case "pos":
     if let positionValue { AXValueGetValue(positionValue as! AXValue, .cgPoint, &point) }
     if let sizeValue { AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) }
     print("\(Int(point.x + size.width / 2)) \(Int(point.y + size.height / 2)) \(Int(size.width))x\(Int(size.height))")
+
+case "text":
+    // The whole value, untruncated. `read` summarises for a dump; a launch command or
+    // an error message is exactly the case where the tail is the part that matters.
+    guard arguments.count > 3, let target = element(at: arguments[3], from: root) else {
+        print("no element at path"); exit(5)
+    }
+    for name in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+        if let value = string(target, name as String), !value.isEmpty {
+            print(value)
+            break
+        }
+    }
 
 case "read":
     guard arguments.count > 3, let target = element(at: arguments[3], from: root) else {

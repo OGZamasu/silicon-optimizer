@@ -393,7 +393,8 @@ struct AdvancedView: View {
         LlamaArguments(
             model: installed, configuration: configuration, port: 8080,
             installation: model.selector.available[.llamaCpp],
-            extraArguments: LlamaArguments.split(extraArguments)
+            extraArguments: LlamaArguments.split(extraArguments),
+            chatTemplateFile: model.sharpTemplate(for: installed)
         )
     }
 

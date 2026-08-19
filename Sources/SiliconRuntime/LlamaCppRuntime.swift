@@ -52,7 +52,8 @@ public actor LlamaCppRuntime: InferenceRuntime {
         let arguments = LlamaArguments(
             model: request.model, configuration: request.configuration,
             port: port, installation: installation,
-            extraArguments: request.extraArguments
+            extraArguments: request.extraArguments,
+            chatTemplateFile: request.chatTemplateFile
         )
 
         let problems = arguments.validate()

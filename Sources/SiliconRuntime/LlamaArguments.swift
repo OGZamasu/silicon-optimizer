@@ -17,17 +17,20 @@ public struct LlamaArguments: Sendable {
     public var installation: RuntimeInstallation?
     /// Flags supplied by the user in Advanced mode, appended verbatim.
     public var extraArguments: [String]
+    /// A chat template to use instead of the one baked into the model file.
+    public var chatTemplateFile: URL?
 
     public init(
         model: InstalledModel, configuration: LoadConfiguration,
         port: Int, installation: RuntimeInstallation? = nil,
-        extraArguments: [String] = []
+        extraArguments: [String] = [], chatTemplateFile: URL? = nil
     ) {
         self.model = model
         self.configuration = configuration
         self.port = port
         self.installation = installation
         self.extraArguments = extraArguments
+        self.chatTemplateFile = chatTemplateFile
     }
 
     /// Splits a command-line string into arguments, honouring quotes so a path with a space
@@ -92,6 +95,13 @@ public struct LlamaArguments: Sendable {
         // Jinja templating enables the model's own chat template and tool-call grammar, which
         // is what makes function calling work without per-model special cases.
         arguments += ["--jinja"]
+
+        // A replacement template, when one is chosen and actually on disk. It goes after
+        // --jinja because it is the template that engine renders.
+        if let chatTemplateFile,
+           FileManager.default.fileExists(atPath: chatTemplateFile.path) {
+            arguments += ["--chat-template-file", chatTemplateFile.path]
+        }
 
         // The /slots endpoint is how the app asks "are you busy?" before an idle unload.
         // External clients such as the harness talk to the server directly, so the server

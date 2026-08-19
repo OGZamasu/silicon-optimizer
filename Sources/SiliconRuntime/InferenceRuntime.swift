@@ -60,15 +60,18 @@ public struct LoadRequest: Sendable {
     public var port: Int
     /// Flags from Advanced mode, appended after everything the app generates.
     public var extraArguments: [String]
+    /// A chat template to render with instead of the model's own.
+    public var chatTemplateFile: URL?
 
     public init(
         model: InstalledModel, configuration: LoadConfiguration,
-        port: Int = 0, extraArguments: [String] = []
+        port: Int = 0, extraArguments: [String] = [], chatTemplateFile: URL? = nil
     ) {
         self.model = model
         self.configuration = configuration
         self.port = port
         self.extraArguments = extraArguments
+        self.chatTemplateFile = chatTemplateFile
     }
 }
 

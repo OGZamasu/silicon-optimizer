@@ -217,6 +217,11 @@ public struct Settings: Codable, Sendable, Equatable {
     /// The port VSeeFace and friends listen on by convention.
     public var vmcPort: Int = 39539
 
+    /// Render Qwen chat with the "sharp" template — answers that lead with the
+    /// answer, and fewer thinking tokens to get there. Off by default: it changes how
+    /// a model replies, which is not a decision to make for someone silently.
+    public var useSharpChatTemplate = false
+
     // Personas
 
     /// The characters this app can speak and perform as.
@@ -340,6 +345,7 @@ public struct Settings: Codable, Sendable, Equatable {
         videoOutputDirectory = value(.videoOutputDirectory, fallback.videoOutputDirectory)
         lastTab = value(.lastTab, fallback.lastTab)
         faceCamPort = value(.faceCamPort, fallback.faceCamPort)
+        useSharpChatTemplate = value(.useSharpChatTemplate, fallback.useSharpChatTemplate)
         trackerPort = value(.trackerPort, fallback.trackerPort)
         sendVMC = value(.sendVMC, fallback.sendVMC)
         vmcHost = value(.vmcHost, fallback.vmcHost)
