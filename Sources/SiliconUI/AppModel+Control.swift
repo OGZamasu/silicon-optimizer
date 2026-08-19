@@ -215,14 +215,19 @@ extension AppModel: ControlHost {
         )
 
         // MCP tool calls are request/response, so the stream is collected before returning.
+        // `whileGenerating` is what makes that visible: there is no `generationTask` on this
+        // path, so without it a long answer reads as idleness and the idle timer unloads the
+        // model — or the Mac sleeps — halfway through writing it.
         var content = ""
         var reasoning = ""
         var metrics = GenerationMetrics()
-        for try await event in try await runtime.chat(chatRequest) {
-            switch event {
-            case .token(let token): content += token
-            case .reasoningToken(let token): reasoning += token
-            case .finished(let final): metrics = final
+        try await whileGenerating {
+            for try await event in try await runtime.chat(chatRequest) {
+                switch event {
+                case .token(let token): content += token
+                case .reasoningToken(let token): reasoning += token
+                case .finished(let final): metrics = final
+                }
             }
         }
         lastGeneration = metrics
@@ -684,7 +689,7 @@ extension AppModel {
 
         let queueDepth = imageQueue.count + meshQueue.count
             + (currentImageJob != nil ? 1 : 0) + (currentMeshJob != nil ? 1 : 0)
-            + (isGenerating ? 1 : 0)
+            + (hasWorkInFlight ? 1 : 0)
         let resident = loadedModel != nil ? estimatedResidentBytes : .zero
         let headroom = max(
             0, Double((profile.safeModelBudget - resident).rawValue) / 1e9

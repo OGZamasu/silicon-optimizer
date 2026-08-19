@@ -2033,6 +2033,7 @@ public final class AppModel {
         if history.count > Self.historyLength {
             history.removeFirst(history.count - Self.historyLength)
         }
+        syncWakeAssertion()
         enforceIdleUnload()
     }
 
@@ -2206,6 +2207,40 @@ public final class AppModel {
         }
     }
 
+    // MARK: - Work in flight
+
+    /// Generations the app is driving that are not the Chat tab's `generationTask` — the MCP
+    /// bridge above all, which answers request/response and so never sets one.
+    ///
+    /// Without this counter those requests are invisible to everything that asks "is anything
+    /// running?", and a model would be unloaded, or the Mac allowed to sleep, in the middle of
+    /// answering one.
+    private var detachedGenerations = 0
+
+    /// Marks a generation as in flight for as long as `body` runs.
+    ///
+    /// Use this for any generation started from outside the Chat tab. It both holds off the
+    /// idle unload and stamps the activity clock at each end, so the interval a long answer
+    /// occupies is never mistaken for idleness once it finishes.
+    func whileGenerating<T>(_ body: () async throws -> T) async rethrows -> T {
+        detachedGenerations += 1
+        noteActivity()
+        defer {
+            detachedGenerations -= 1
+            noteActivity()
+        }
+        return try await body()
+    }
+
+    /// Anything this app is driving that must not be interrupted, whatever started it: the Chat
+    /// tab, the MCP bridge, a benchmark, or a load still in progress.
+    ///
+    /// `isGenerating` deliberately stays narrower — it drives the Chat tab's own controls — so
+    /// every non-UI decision about whether the machine is busy asks this instead.
+    var hasWorkInFlight: Bool {
+        isGenerating || detachedGenerations > 0 || benchmarkPhase != nil || runtimeState.isBusy
+    }
+
     // MARK: - Idle unload
 
     /// When the user last did something that needed the model.
@@ -2214,27 +2249,57 @@ public final class AppModel {
     /// Records activity so an idle unload does not fire out from under someone.
     func noteActivity() { lastActivityAt = Date() }
 
+    /// Held while something is running that an idle sleep would destroy.
+    private var wakeAssertion: PowerAssertion?
+
+    /// Work that cannot survive the machine sleeping under it.
+    ///
+    /// Broader than `hasWorkInFlight`, which only governs the language model: an image or mesh
+    /// job is minutes of GPU work in a child process and loses just as much to a sleep, and a
+    /// video job loses its connection to the node running it. Model downloads are deliberately
+    /// absent — those resume.
+    private var mustStayAwake: Bool {
+        hasWorkInFlight || isGeneratingImage || isGeneratingMesh
+            || isGeneratingVideo || isSpeaking || isTranscribing
+    }
+
+    /// Takes or releases the sleep assertion to match what is running.
+    ///
+    /// Driven from the one-second metrics tick rather than from each call site: converging from
+    /// a single place cannot leak an assertion down an error path, and a second of lag is
+    /// nothing against macOS's one-minute floor on the idle sleep timer.
+    private func syncWakeAssertion() {
+        if mustStayAwake, wakeAssertion == nil {
+            wakeAssertion = PowerAssertion(reason: "Silicon Optimizer is running a model")
+        } else if !mustStayAwake, wakeAssertion != nil {
+            wakeAssertion?.release()
+            wakeAssertion = nil
+        }
+    }
+
     /// Releases the model after a period of inactivity.
     ///
     /// A loaded model holds tens of gigabytes of wired memory that macOS cannot reclaim on its
     /// own, so leaving one loaded overnight quietly costs the user their whole machine.
     private func enforceIdleUnload() {
-        guard settings.unloadWhenIdle, loadedModel != nil, !isGenerating else { return }
+        guard settings.unloadWhenIdle, loadedModel != nil, !hasWorkInFlight else { return }
         let idleSeconds = Date().timeIntervalSince(lastActivityAt)
         guard idleSeconds >= Double(settings.idleUnloadMinutes) * 60 else { return }
 
         Task {
-            // App-side accounting cannot see clients that talk to the server directly over
-            // HTTP — the harness above all. A 29-minute agent turn looks exactly like 29
-            // minutes of idleness from here, so the server itself gets the last word.
+            // `hasWorkInFlight` covers everything the app itself drives, the MCP bridge
+            // included, but not clients that talk to the server directly over HTTP — the
+            // harness above all. A 29-minute agent turn looks exactly like 29 minutes of
+            // idleness from here, so the server itself gets the last word.
             switch await serverBusyVerdict() {
             case .some(true):
                 noteActivity()
                 return
             case .none:
-                // Could not tell (no /slots on this backend, or the server was too busy to
-                // answer). While the harness is up, killing a possibly-active generation is
-                // the worse mistake; without it, this is the same dead server it always was.
+                // Could not tell: no /slots on this backend (MLX, mesh peers), or the server
+                // was too busy to answer. While the harness is up, killing a possibly-active
+                // generation is the worse mistake; without it, this is the same dead server
+                // it always was.
                 if settings.chatEngine == .harness, case .ready = harnessState {
                     noteActivity()
                     return
@@ -2243,7 +2308,7 @@ public final class AppModel {
                 break
             }
             // Re-check after the hops: the user may have started generating in the meantime.
-            guard !isGenerating, loadedModel != nil else { return }
+            guard !hasWorkInFlight, loadedModel != nil else { return }
             await unload()
             runtimeState = .idle
         }
@@ -2254,7 +2319,9 @@ public final class AppModel {
     /// Asks the running server whether a generation is in flight. Returns nil when the
     /// question cannot be answered — an unreachable server, or a backend without `/slots`.
     private func serverBusyVerdict() async -> Bool? {
-        guard case .ready(let endpoint) = runtimeState else { return false }
+        // A server still starting or stopping cannot answer, and "cannot answer" is not the
+        // same as "free" — mid-load is one of the worst moments to pull a model away.
+        guard case .ready(let endpoint) = runtimeState else { return nil }
         var request = URLRequest(url: endpoint.appendingPathComponent("slots"))
         request.timeoutInterval = 3
 
