@@ -150,7 +150,9 @@ struct SettingsView: View {
                         "After \(model.settings.idleUnloadMinutes) minutes",
                         value: $model.settings.idleUnloadMinutes, in: 5...240, step: 5
                     )
-                    Text("A loaded model holds wired memory that macOS cannot reclaim on its own.")
+                    Text("A loaded model holds wired memory that macOS cannot reclaim on its "
+                         + "own. You get a warning five minutes before, in the menu bar and as "
+                         + "a notification, with a button to keep it loaded.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
