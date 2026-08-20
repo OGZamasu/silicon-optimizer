@@ -168,10 +168,12 @@ extension AppModel {
     public func chatEngineDidChange() {
         if settings.chatEngine != .harness { stopHarness() }
         if settings.chatEngine != .codex { stopCodex() }
+        if settings.chatEngine != .qwenCode { stopQwen() }
         guard selectedTab == .chat else { return }
         switch settings.chatEngine {
         case .harness: startHarnessIfNeeded()
         case .codex: startCodexIfNeeded()
+        case .qwenCode: startQwenIfNeeded()
         case .legacy: break
         }
     }

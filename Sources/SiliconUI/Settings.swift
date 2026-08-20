@@ -40,6 +40,8 @@ public enum ChatEngine: String, Codable, Sendable, CaseIterable {
     case harness
     /// OpenAI's Codex agent, driven natively over its app-server protocol.
     case codex
+    /// Qwen Code's `serve` daemon and its embedded Web Shell.
+    case qwenCode
     /// The built-in native chat, talking straight to the local server.
     case legacy
 }
@@ -96,6 +98,9 @@ public struct Settings: Codable, Sendable, Equatable {
     /// reach and serves them to external harnesses. Stable because the harness plugin and
     /// Codex provider configs both carry its URL.
     public var gatewayPort: Int?
+
+    /// Port the Qwen Code Web Shell binds; stable for the same reasons as the harness's.
+    public var qwenWebPort: Int?
 
     // Codex engine
     /// The gateway model id the Codex chat last used.
@@ -395,6 +400,7 @@ public struct Settings: Codable, Sendable, Equatable {
         )
         nodeBinaryPath = try? container.decodeIfPresent(String.self, forKey: .nodeBinaryPath)
         gatewayPort = try? container.decodeIfPresent(Int.self, forKey: .gatewayPort)
+        qwenWebPort = try? container.decodeIfPresent(Int.self, forKey: .qwenWebPort)
         codexModel = try? container.decodeIfPresent(String.self, forKey: .codexModel)
         codexWorkingDirectory = try? container.decodeIfPresent(
             String.self, forKey: .codexWorkingDirectory

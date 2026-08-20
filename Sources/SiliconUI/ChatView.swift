@@ -21,6 +21,8 @@ struct ChatView: View {
             HarnessChatView()
         case .codex:
             CodexChatView()
+        case .qwenCode:
+            QwenChatView()
         case .legacy:
             legacyChat
         }

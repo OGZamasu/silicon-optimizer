@@ -38,6 +38,7 @@ struct SettingsView: View {
                 Picker("Chat engine", selection: $model.settings.chatEngine) {
                     Text("DeepSeek Harness — agent with tools").tag(ChatEngine.harness)
                     Text("Codex — OpenAI's agent, on your models").tag(ChatEngine.codex)
+                    Text("Qwen Code — Qwen's agent, on your models").tag(ChatEngine.qwenCode)
                     Text("Built-in — plain chat (legacy)").tag(ChatEngine.legacy)
                 }
                 if model.settings.chatEngine == .harness {
@@ -108,6 +109,18 @@ struct SettingsView: View {
                             }
                         }
                     }
+                } else if model.settings.chatEngine == .qwenCode {
+                    Text(
+                        "Qwen Code is the Qwen team's open-source agent; its Web Shell is "
+                        + "embedded here like the harness. Every model in this app and on "
+                        + "your swarm nodes is in its picker — no Qwen account. Its model "
+                        + "list is written when it starts, so use Restart after installing "
+                        + "new models."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    qwenStatusRow
                 } else {
                     Text("The built-in chat streams straight from the local server. "
                          + "No tools, no web access.")
@@ -565,6 +578,31 @@ struct SettingsView: View {
                 }
                 if case .ready = model.codexState {
                     Button("Restart") { model.restartCodex() }
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    private var qwenStatusRow: some View {
+        LabeledContent("Qwen Code") {
+            HStack(spacing: 8) {
+                switch model.qwenState {
+                case .idle:
+                    Badge(text: "Starts with the Chat tab", systemImage: "moon", tint: .secondary)
+                case .starting:
+                    ProgressView().controlSize(.small)
+                    Text("Starting…").font(.caption).foregroundStyle(.secondary)
+                case .ready:
+                    Badge(text: "Running", systemImage: "checkmark.circle.fill", tint: .green)
+                case .stopping:
+                    ProgressView().controlSize(.small)
+                    Text("Stopping…").font(.caption).foregroundStyle(.secondary)
+                case .failed:
+                    Badge(text: "Failed", systemImage: "xmark.circle", tint: .orange)
+                }
+                if case .ready = model.qwenState {
+                    Button("Restart") { model.restartQwen() }
                         .controlSize(.small)
                 }
             }

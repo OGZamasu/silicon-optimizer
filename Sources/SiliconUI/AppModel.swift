@@ -94,6 +94,15 @@ public final class AppModel {
     /// Gateway-triggered local loads run one at a time through here.
     var gatewayEnsureTask: Task<Void, Never>?
 
+    // MARK: - Qwen Code chat
+
+    /// State of the Qwen Code sidecar behind the Chat tab's Qwen engine.
+    public internal(set) var qwenState: RuntimeState = .idle
+    var qwenRuntime: QwenCodeRuntime?
+    var resolvedQwenPort: Int?
+    var qwenProcessID: Int32?
+    var qwenTerminationRegistered = false
+
     // MARK: - Codex chat
 
     /// State of the Codex sidecar behind the Chat tab's Codex engine.
