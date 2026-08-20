@@ -340,6 +340,8 @@ struct HTTPResponse {
     var status: Int
     var body: Data
     var contentType = "application/json"
+    /// Additional headers, for the responses that need them (media ranges).
+    var extraHeaders: [String: String] = [:]
 
     static func encode(_ value: some Encodable) throws -> HTTPResponse {
         let encoder = JSONEncoder()
@@ -362,14 +364,17 @@ struct HTTPResponse {
     }
 
     func write(to connection: NWConnection) async throws {
-        let head = """
-            HTTP/1.1 \(status) \(Self.reason(status))\r
-            Content-Type: \(contentType)\r
-            Cache-Control: no-store\r
-            Content-Length: \(body.count)\r
-            Connection: close\r
-            \r\n
-            """
+        var headerLines = [
+            "HTTP/1.1 \(status) \(Self.reason(status))",
+            "Content-Type: \(contentType)",
+            "Cache-Control: no-store",
+            "Content-Length: \(body.count)",
+            "Connection: close",
+        ]
+        for (name, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+            headerLines.append("\(name): \(value)")
+        }
+        let head = headerLines.joined(separator: "\r\n") + "\r\n\r\n"
         var payload = Data(head.utf8)
         payload.append(body)
 
@@ -387,8 +392,10 @@ struct HTTPResponse {
     private static func reason(_ status: Int) -> String {
         switch status {
         case 200: "OK"
+        case 206: "Partial Content"
         case 400: "Bad Request"
         case 401: "Unauthorized"
+        case 403: "Forbidden"
         case 404: "Not Found"
         default: "Error"
         }

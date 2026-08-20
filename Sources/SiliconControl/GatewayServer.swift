@@ -23,6 +23,13 @@ public protocol GatewayHost: AnyObject, Sendable {
     func gatewayEnsureReady(
         modelID: String, onStage: @escaping @Sendable (String) -> Void
     ) async throws -> GatewayReadyBackend
+    /// Folders whose media the chat surfaces may play and reveal — the app's own
+    /// output directories, nothing wider.
+    func gatewayMediaRoots() async -> [String]
+    /// Shows the file in Finder.
+    func gatewayReveal(path: String) async
+    /// Jumps the app to the 3D tab, where the newest mesh is already showing.
+    func gatewayOpenMeshViewer() async
 }
 
 /// The model gateway: one loopback OpenAI-compatible server over every model this app and
@@ -92,6 +99,13 @@ public actor GatewayServer {
             await serveChat(request, on: connection)
         case ("POST", "/v1/responses"), ("POST", "/responses"):
             await serveResponses(request, on: connection)
+        case ("GET", "/ui/media"):
+            await serveMedia(request, on: connection)
+        case ("POST", "/ui/reveal"):
+            await serveReveal(request, on: connection)
+        case ("POST", "/ui/open3d"):
+            await host.gatewayOpenMeshViewer()
+            try? await HTTPResponse.json(["status": "ok"]).write(to: connection)
         default:
             try? await HTTPResponse.error(
                 404, "Unknown endpoint \(request.method) \(request.path)"
@@ -247,6 +261,68 @@ public actor GatewayServer {
                     .write(to: connection)
             }
         }
+    }
+
+    // MARK: - Media for the chat surfaces
+
+    /// Serves a media file to the embedded chat pages, with the single-range support
+    /// WebKit's players insist on. Only known media types inside the app's own output
+    /// folders are served; everything else is a 403, loopback or not.
+    private func serveMedia(_ request: HTTPRequest, on connection: NWConnection) async {
+        guard let path = request.query["path"]?.removingPercentEncoding else {
+            try? await HTTPResponse.error(400, "No path given.").write(to: connection)
+            return
+        }
+        let roots = await host.gatewayMediaRoots()
+        guard GatewayAPI.isAllowedMediaPath(path, roots: roots) else {
+            try? await HTTPResponse.error(
+                403, "Only media inside the app's output folders is served."
+            ).write(to: connection)
+            return
+        }
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        guard let data = try? Data(contentsOf: url) else {
+            try? await HTTPResponse.error(404, "The file is gone.").write(to: connection)
+            return
+        }
+        let type = GatewayAPI.mediaContentTypes[url.pathExtension.lowercased()]
+            ?? "application/octet-stream"
+
+        if let range = GatewayAPI.byteRange(
+            header: request.headers["range"], fileSize: data.count
+        ) {
+            var response = HTTPResponse(
+                status: 206, body: data.subdata(in: range), contentType: type
+            )
+            response.extraHeaders = [
+                "Content-Range": "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(data.count)",
+                "Accept-Ranges": "bytes",
+            ]
+            try? await response.write(to: connection)
+        } else {
+            var response = HTTPResponse(status: 200, body: data, contentType: type)
+            response.extraHeaders = ["Accept-Ranges": "bytes"]
+            try? await response.write(to: connection)
+        }
+    }
+
+    private func serveReveal(_ request: HTTPRequest, on connection: NWConnection) async {
+        guard let json = try? JSONSerialization.jsonObject(with: request.body)
+                as? [String: Any],
+              let path = json["path"] as? String
+        else {
+            try? await HTTPResponse.error(400, "No path given.").write(to: connection)
+            return
+        }
+        let roots = await host.gatewayMediaRoots()
+        guard GatewayAPI.isAllowedMediaPath(path, roots: roots) else {
+            try? await HTTPResponse.error(
+                403, "Only media inside the app's output folders can be revealed."
+            ).write(to: connection)
+            return
+        }
+        await host.gatewayReveal(path: path)
+        try? await HTTPResponse.json(["status": "ok"]).write(to: connection)
     }
 
     /// The `data:` payloads inside one SSE frame. Comments and other fields are dropped.

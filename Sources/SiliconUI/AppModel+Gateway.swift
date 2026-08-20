@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SiliconCatalog
 import SiliconControl
@@ -241,6 +242,25 @@ extension AppModel: GatewayHost {
         // The peer's base already ends in /v1, and the request goes out under the engine's
         // own spelling of the name — engines 404 anything else.
         return GatewayReadyBackend(baseURL: base, backendModel: served)
+    }
+
+    // MARK: - Media for the chat surfaces
+
+    public func gatewayMediaRoots() async -> [String] {
+        [
+            settings.resolvedVideoOutputDirectory.path,
+            settings.resolvedImageOutputDirectory.path,
+            settings.resolvedMeshOutputDirectory.path,
+        ]
+    }
+
+    public func gatewayReveal(path: String) async {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    public func gatewayOpenMeshViewer() async {
+        selectedTab = .threeD
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Context for agents

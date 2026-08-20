@@ -329,9 +329,16 @@ private struct CodexItemRow: View {
                     .background(Color.accentColor.opacity(0.18), in: .rect(cornerRadius: 12))
             }
         case .assistant(let text):
-            Text(LocalizedStringKey(text))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(LocalizedStringKey(text))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                // A mentioned clip or picture is worth more played than pasted: any media
+                // path in the reply gets a real card under it.
+                ForEach(GatewayAPI.mediaPaths(in: text), id: \.self) { path in
+                    MediaResultCard(path: path)
+                }
+            }
         case .reasoning(let text):
             foldCard(
                 title: "Thinking", systemImage: "brain",

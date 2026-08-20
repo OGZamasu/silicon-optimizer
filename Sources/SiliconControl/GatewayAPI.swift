@@ -338,4 +338,76 @@ public enum GatewayAPI {
         else { return false }
         return json["stream"] as? Bool ?? false
     }
+
+    // MARK: - Media serving
+
+    /// File types the chat surfaces may embed. Anything else is refused — the media
+    /// endpoint exists to play results, not to read files.
+    public static let mediaContentTypes: [String: String] = [
+        "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
+        "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "webp": "image/webp", "gif": "image/gif",
+        "wav": "audio/wav", "mp3": "audio/mpeg", "m4a": "audio/mp4",
+        "aiff": "audio/aiff", "flac": "audio/flac",
+        "glb": "model/gltf-binary", "obj": "text/plain",
+    ]
+
+    /// Whether a path may be served or revealed: a real file, a known media type, and
+    /// inside one of the app's own output folders. Symlinks are resolved first so a link
+    /// inside an allowed root cannot reach outside it.
+    public static func isAllowedMediaPath(_ path: String, roots: [String]) -> Bool {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        guard mediaContentTypes[resolved.pathExtension.lowercased()] != nil else {
+            return false
+        }
+        let canonical = resolved.path
+        return roots.contains { root in
+            let cleanRoot = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
+            return canonical == cleanRoot
+                || canonical.hasPrefix(cleanRoot.hasSuffix("/") ? cleanRoot : cleanRoot + "/")
+        }
+    }
+
+    /// One parsed `Range: bytes=` header — WebKit probes media with `bytes=0-1` and then
+    /// seeks, so a media endpoint without ranges plays nothing.
+    public static func byteRange(header: String?, fileSize: Int) -> Range<Int>? {
+        guard let header, header.hasPrefix("bytes="), fileSize > 0 else { return nil }
+        let spec = header.dropFirst("bytes=".count)
+        // Only the first range of a multi-range request; players never send more.
+        guard let piece = spec.split(separator: ",").first,
+              let dash = piece.firstIndex(of: "-") else { return nil }
+        let startText = piece[..<dash].trimmingCharacters(in: .whitespaces)
+        let endText = piece[piece.index(after: dash)...].trimmingCharacters(in: .whitespaces)
+
+        if startText.isEmpty {
+            // Suffix form: the last N bytes.
+            guard let suffix = Int(endText), suffix > 0 else { return nil }
+            return max(0, fileSize - suffix)..<fileSize
+        }
+        guard let start = Int(startText), start >= 0, start < fileSize else { return nil }
+        let end = Int(endText).map { min($0, fileSize - 1) } ?? (fileSize - 1)
+        guard end >= start else { return nil }
+        return start..<(end + 1)
+    }
+
+    /// Media file paths mentioned in a piece of text — how the chat surfaces find
+    /// something playable in a tool result or an assistant message.
+    ///
+    /// Path segments may contain single spaces ("Movies/Silicon Optimizer" is the
+    /// default output folder), which is why this is not a simple no-whitespace match;
+    /// the lookbehind keeps it from biting into URLs.
+    public static let mediaPathPattern =
+        #"(?<![:/\w])(/(?:[\w.\-]+(?: [\w.\-]+)*/)*[\w.\-]+(?: [\w.\-]+)*"#
+        + #"\.(?i:mp4|mov|webm|png|jpe?g|webp|gif|wav|mp3|m4a|aiff|flac|glb|obj))\b"#
+
+    public static func mediaPaths(in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: mediaPathPattern) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        var seen = Set<String>()
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard let matchRange = Range(match.range(at: 1), in: text) else { return nil }
+            let path = String(text[matchRange])
+            return seen.insert(path).inserted ? path : nil
+        }
+    }
 }

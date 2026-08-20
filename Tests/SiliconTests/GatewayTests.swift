@@ -65,6 +65,54 @@ struct GatewayModelIDTests {
     }
 }
 
+@Suite("Chat media serving")
+struct GatewayMediaTests {
+
+    @Test func findsMediaPathsInProse() {
+        let text = """
+        Done. Your clip is at /Users/mbp/Movies/Silicon Optimizer/clip-1.mp4 — I also \
+        made /tmp/picture.png earlier, plus `/out/mesh.glb` and /out/a.wav or /out/b.mp3. \
+        Not media: /etc/hosts, example.mp4 without a path, and http://example.com/x.mp4 \
+        stays a URL. Mention /Users/mbp/Movies/Silicon Optimizer/clip-1.mp4 twice, list once.
+        """
+        let paths = GatewayAPI.mediaPaths(in: text)
+        // The default output folder has a space in it; the whole path must survive.
+        #expect(paths.contains("/Users/mbp/Movies/Silicon Optimizer/clip-1.mp4"))
+        #expect(paths.filter { $0.hasSuffix("clip-1.mp4") }.count == 1)
+        #expect(paths.contains("/tmp/picture.png"))
+        #expect(paths.contains("/out/mesh.glb"))
+        #expect(paths.contains("/out/a.wav"))
+        #expect(paths.contains("/out/b.mp3"))
+        #expect(!paths.contains("/etc/hosts"))
+        // URL tails must not become fake local paths.
+        #expect(!paths.contains { $0.contains("example.com") })
+    }
+
+    @Test func allowsOnlyKnownTypesInsideKnownRoots() {
+        let roots = ["/Users/me/Movies/Out", "/Users/me/Pictures/Out"]
+        #expect(GatewayAPI.isAllowedMediaPath("/Users/me/Movies/Out/a.mp4", roots: roots))
+        #expect(GatewayAPI.isAllowedMediaPath("/Users/me/Pictures/Out/deep/b.png", roots: roots))
+        // Wrong root, wrong type, and prefix-shadowing roots are all refused.
+        #expect(!GatewayAPI.isAllowedMediaPath("/Users/me/Documents/a.mp4", roots: roots))
+        #expect(!GatewayAPI.isAllowedMediaPath("/Users/me/Movies/Out/secrets.txt", roots: roots))
+        #expect(!GatewayAPI.isAllowedMediaPath("/Users/me/Movies/Outside/a.mp4", roots: roots))
+    }
+
+    @Test func parsesTheRangesPlayersActuallySend() {
+        // WebKit's opening probe.
+        #expect(GatewayAPI.byteRange(header: "bytes=0-1", fileSize: 100) == 0..<2)
+        // Open-ended seek.
+        #expect(GatewayAPI.byteRange(header: "bytes=50-", fileSize: 100) == 50..<100)
+        // Suffix form.
+        #expect(GatewayAPI.byteRange(header: "bytes=-10", fileSize: 100) == 90..<100)
+        // Ends clamp to the file; nonsense is nil rather than a crash.
+        #expect(GatewayAPI.byteRange(header: "bytes=0-500", fileSize: 100) == 0..<100)
+        #expect(GatewayAPI.byteRange(header: "bytes=200-", fileSize: 100) == nil)
+        #expect(GatewayAPI.byteRange(header: nil, fileSize: 100) == nil)
+        #expect(GatewayAPI.byteRange(header: "bytes=", fileSize: 100) == nil)
+    }
+}
+
 @Suite("Responses request translation")
 struct GatewayResponsesRequestTests {
 
