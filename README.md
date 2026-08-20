@@ -38,14 +38,21 @@ can actually run at a useful speed. You can always override it and choose your o
 
 ### Chats like a real assistant, not just a text box
 
-The Chat tab runs [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), an
-open-source agent framework, on top of your local model. A harness is the wrapper that turns
-a bare model into something useful: your chats can fetch web pages, search, read and edit
-files in a project folder, and run commands (it asks first). It needs Node.js
-(`brew install node`) — the app handles the rest and starts it on demand. Web search needs a
-free API key from a search provider, added inside the chat's own settings; fetching pages
-works with no key at all. If you just want plain chat, Settings → Chat switches to the
-built-in one.
+The Chat tab runs a real agent harness on top of your models — pick which one in Settings.
+A harness is the wrapper that turns a bare model into something useful: your chats can
+fetch web pages, search, read and edit files in a folder, and run commands (it asks first).
+
+- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** — the default:
+  a full web UI with sessions, tools, web fetch and search. (Search needs a free provider
+  key, added in its own settings; fetching pages doesn't.)
+- **[Codex](https://github.com/openai/codex)** — OpenAI's open-source coding agent, running
+  entirely on your own models. No OpenAI account; commands and file edits ask for your
+  approval right in the app.
+- **Built-in** — plain chat, nothing else, if that's all you want.
+
+Both harnesses see every model you have: everything installed on the Mac *and* every model
+your other machines offer (see the swarm below). Pick any of them from the chat's model
+picker — if it isn't running yet, sending a message is what starts it.
 
 ### Runs models that look too big for your Mac
 
