@@ -123,16 +123,20 @@ extension AppModel: GatewayHost {
         }
 
         // Serialize gateway-triggered loads: two harness tabs asking for two models at once
-        // must not fight over the runtime. Each waiter chains on the previous ensure.
-        while let inFlight = gatewayEnsureTask {
-            _ = await inFlight.value
-        }
+        // must not fight over the runtime. Each caller chains its work after whatever is
+        // already queued and cleans up its own slot — never a wait-and-recheck loop, which
+        // spun the main actor forever when a caller vanished (client disconnect mid-load)
+        // without clearing the shared slot, wedging the gateway and the UI with it.
+        let previous = gatewayEnsureTask
         let task = Task { [weak self] in
+            _ = await previous?.value
             _ = await self?.ensureLocalLoaded(target, onStage: onStage)
         }
         gatewayEnsureTask = task
+        defer {
+            if gatewayEnsureTask == task { gatewayEnsureTask = nil }
+        }
         _ = await task.value
-        gatewayEnsureTask = nil
 
         guard loadedModel?.id == target.id, case .ready(let endpoint) = runtimeState,
               (activeConfiguration?.contextLength ?? 0) >= Self.harnessContextMinimum
