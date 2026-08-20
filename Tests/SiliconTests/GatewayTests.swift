@@ -98,19 +98,7 @@ struct GatewayMediaTests {
         #expect(!GatewayAPI.isAllowedMediaPath("/Users/me/Movies/Outside/a.mp4", roots: roots))
     }
 
-    /// The stopgap for the node engine dying on big prefills (hub #11): oversized
-    /// requests to node models are refused with words; local models are never gated.
-    @Test func oversizedNodePromptsAreRefusedLocalOnesAreNot() {
-        let big = GatewayAPI.nodePromptLimitBytes + 1
-        #expect(GatewayAPI.exceedsNodePromptLimit(
-            modelID: "node/silicon-node/qwen3.8-27b", bodyBytes: big
-        ))
-        #expect(!GatewayAPI.exceedsNodePromptLimit(
-            modelID: "node/silicon-node/qwen3.8-27b", bodyBytes: 2_000
-        ))
-        #expect(!GatewayAPI.exceedsNodePromptLimit(
-            modelID: "local/hf:unsloth/Qwen3.8-27B-GGUF@Q6_K", bodyBytes: big
-        ))
+    @Test func doneSentinelIsRecognizedInFrames() {
         #expect(GatewayAPI.frameCarriesDone(Data("data: [DONE]".utf8)))
         #expect(!GatewayAPI.frameCarriesDone(Data("data: {\"choices\":[]}".utf8)))
     }

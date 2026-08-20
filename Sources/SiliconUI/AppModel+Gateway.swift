@@ -213,6 +213,13 @@ extension AppModel: GatewayHost {
             throw GatewayHostError.peerUnreachable(peer.name)
         }
 
+        // A GPU job preempts the node's LLM on purpose — the card belongs to the render
+        // until the queue drains, and the LLM restores itself a couple of minutes later.
+        // Arbitration deserves an honest sentence, not a start attempt that stalls.
+        if (peer.queueDepth ?? 0) > 0 {
+            throw GatewayHostError.peerRendering(peer.name)
+        }
+
         onStage("starting \(model) on \(peer.name)")
         await setPeerLLM(peer, running: true, model: model)
 
@@ -316,6 +323,7 @@ enum GatewayHostError: Error, LocalizedError {
     case loadFailed(String, String)
     case modelBusy(String)
     case contextWontFit(String)
+    case peerRendering(String)
 
     var errorDescription: String? {
         switch self {
@@ -336,6 +344,9 @@ enum GatewayHostError: Error, LocalizedError {
         case .contextWontFit(let name):
             "Agent chat needs \(name) loaded with at least an 8K context, and there isn't "
             + "enough free memory for that right now. Close some apps and try again."
+        case .peerRendering(let name):
+            "\(name)'s GPU is busy rendering right now; its chat model comes back a "
+            + "couple of minutes after the job finishes."
         }
     }
 }

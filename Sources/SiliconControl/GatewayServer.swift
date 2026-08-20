@@ -120,13 +120,6 @@ public actor GatewayServer {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
-        // Refused before the SSE head goes out, so the caller gets a plain HTTP error
-        // it can show — and the node engine is not fed the request that kills it.
-        if GatewayAPI.exceedsNodePromptLimit(modelID: modelID, bodyBytes: request.body.count) {
-            try? await HTTPResponse.error(400, GatewayAPI.nodePromptLimitMessage)
-                .write(to: connection)
-            return
-        }
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
 
         if wantsStream {
@@ -196,11 +189,6 @@ public actor GatewayServer {
     private func serveResponses(_ request: HTTPRequest, on connection: NWConnection) async {
         guard let modelID = GatewayAPI.requestedModel(inBody: request.body) else {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
-            return
-        }
-        if GatewayAPI.exceedsNodePromptLimit(modelID: modelID, bodyBytes: request.body.count) {
-            try? await HTTPResponse.error(400, GatewayAPI.nodePromptLimitMessage)
-                .write(to: connection)
             return
         }
         let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)

@@ -344,26 +344,6 @@ public enum GatewayAPI {
         return json["stream"] as? Bool ?? false
     }
 
-    // MARK: - Node prompt ceiling
-
-    /// STOPGAP for the node engine dying on large prefills (hub issue #11): requests to
-    /// node models above roughly seven thousand tokens are refused with words instead of
-    /// being allowed to kill the engine. Agent chats carry ~23K tokens of preamble, so in
-    /// practice this routes agent chat to local models until the node is fixed — remove
-    /// the ceiling when #11 closes.
-    public static let nodePromptLimitBytes = 28_000
-
-    public static func exceedsNodePromptLimit(modelID: String, bodyBytes: Int) -> Bool {
-        guard case .node = parseModelID(modelID) else { return false }
-        return bodyBytes > nodePromptLimitBytes
-    }
-
-    public static let nodePromptLimitMessage =
-        "silicon-node's engine currently dies on prompts this large (about 7K tokens is "
-        + "its ceiling — agent chat needs ~23K), so this request was refused before "
-        + "crashing it. Pick a model on This Mac for agent chat; the node still handles "
-        + "video and short requests."
-
     // MARK: - Media serving
 
     /// File types the chat surfaces may embed. Anything else is refused — the media
