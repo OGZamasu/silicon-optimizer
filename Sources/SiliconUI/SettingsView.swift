@@ -37,6 +37,7 @@ struct SettingsView: View {
             Section("Chat") {
                 Picker("Chat engine", selection: $model.settings.chatEngine) {
                     Text("DeepSeek Harness — agent with tools").tag(ChatEngine.harness)
+                    Text("Codex — OpenAI's agent, on your models").tag(ChatEngine.codex)
                     Text("Built-in — plain chat (legacy)").tag(ChatEngine.legacy)
                 }
                 if model.settings.chatEngine == .harness {
@@ -75,6 +76,33 @@ struct SettingsView: View {
                                     .lineLimit(1)
                                 Button("Reveal") {
                                     NSWorkspace.shared.open(HarnessRuntime.homeDirectory)
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                } else if model.settings.chatEngine == .codex {
+                    Text(
+                        "Codex is OpenAI's open-source coding agent. It runs here on your "
+                        + "own models — every model in this app and on your swarm nodes is "
+                        + "in its picker, no OpenAI account needed. It reads and edits files "
+                        + "in a folder you choose and runs commands with your approval."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    codexStatusRow
+
+                    if model.settings.showAdvancedControls {
+                        LabeledContent("Codex home") {
+                            HStack(spacing: 8) {
+                                Text(CodexRuntime.homeDirectory.path)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .truncationMode(.middle)
+                                    .lineLimit(1)
+                                Button("Reveal") {
+                                    NSWorkspace.shared.open(CodexRuntime.homeDirectory)
                                 }
                                 .controlSize(.small)
                             }
@@ -512,6 +540,31 @@ struct SettingsView: View {
                 }
                 if case .ready = model.harnessState {
                     Button("Restart") { model.restartHarness() }
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    private var codexStatusRow: some View {
+        LabeledContent("Codex") {
+            HStack(spacing: 8) {
+                switch model.codexState {
+                case .idle:
+                    Badge(text: "Starts with the Chat tab", systemImage: "moon", tint: .secondary)
+                case .starting:
+                    ProgressView().controlSize(.small)
+                    Text("Starting…").font(.caption).foregroundStyle(.secondary)
+                case .ready:
+                    Badge(text: "Running", systemImage: "checkmark.circle.fill", tint: .green)
+                case .stopping:
+                    ProgressView().controlSize(.small)
+                    Text("Stopping…").font(.caption).foregroundStyle(.secondary)
+                case .failed:
+                    Badge(text: "Failed", systemImage: "xmark.circle", tint: .orange)
+                }
+                if case .ready = model.codexState {
+                    Button("Restart") { model.restartCodex() }
                         .controlSize(.small)
                 }
             }

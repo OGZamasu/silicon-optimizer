@@ -38,6 +38,8 @@ public struct ConfigurationPreset: Codable, Sendable, Equatable, Identifiable {
 public enum ChatEngine: String, Codable, Sendable, CaseIterable {
     /// The DeepSeek Harness web UI: an agent with tools, web fetch and search.
     case harness
+    /// OpenAI's Codex agent, driven natively over its app-server protocol.
+    case codex
     /// The built-in native chat, talking straight to the local server.
     case legacy
 }
@@ -89,6 +91,23 @@ public struct Settings: Codable, Sendable, Equatable {
     public var harnessInferencePort: Int?
     /// Manual Node.js path for setups the automatic search cannot see.
     public var nodeBinaryPath: String?
+
+    /// Port of the model gateway — the loopback server that lists every model this app can
+    /// reach and serves them to external harnesses. Stable because the harness plugin and
+    /// Codex provider configs both carry its URL.
+    public var gatewayPort: Int?
+
+    // Codex engine
+    /// The gateway model id the Codex chat last used.
+    public var codexModel: String?
+    /// The folder Codex works in. Empty means the user's home folder.
+    public var codexWorkingDirectory: String?
+    /// Codex approval policy wire value ("on-request", "untrusted", "never").
+    /// Nil or unrecognized means on-request.
+    public var codexApprovalPolicy: String?
+    /// Codex sandbox wire value ("read-only", "workspace-write", "danger-full-access").
+    /// Nil or unrecognized means workspace-write.
+    public var codexSandbox: String?
 
     /// Saved load-settings presets, applied from the advanced sheet.
     public var configurationPresets: [ConfigurationPreset] = []
@@ -375,6 +394,15 @@ public struct Settings: Codable, Sendable, Equatable {
             Int.self, forKey: .harnessInferencePort
         )
         nodeBinaryPath = try? container.decodeIfPresent(String.self, forKey: .nodeBinaryPath)
+        gatewayPort = try? container.decodeIfPresent(Int.self, forKey: .gatewayPort)
+        codexModel = try? container.decodeIfPresent(String.self, forKey: .codexModel)
+        codexWorkingDirectory = try? container.decodeIfPresent(
+            String.self, forKey: .codexWorkingDirectory
+        )
+        codexApprovalPolicy = try? container.decodeIfPresent(
+            String.self, forKey: .codexApprovalPolicy
+        )
+        codexSandbox = try? container.decodeIfPresent(String.self, forKey: .codexSandbox)
         configurationPresets = value(.configurationPresets, fallback.configurationPresets)
     }
 

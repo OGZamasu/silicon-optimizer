@@ -110,6 +110,25 @@ if [[ -x Vendor/node ]]; then
     fi
 fi
 
+# The MCP bridge rides along so the Codex engine can offer the app's tools without a
+# separate install step. install-mcp.sh remains the way to give Claude and ChatGPT a copy.
+MCP_BINARY="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/silicon-mcp"
+if [[ -x "$MCP_BINARY" ]]; then
+    echo "==> Embedding silicon-mcp"
+    mkdir -p "$BUNDLE/Contents/Resources/bin"
+    cp "$MCP_BINARY" "$BUNDLE/Contents/Resources/bin/"
+    codesign --force --sign - "$BUNDLE/Contents/Resources/bin/silicon-mcp"
+fi
+
+# The DeepSeek Harness plugin that puts every local and swarm model in its picker. Plain
+# source files, installed into DSH_HOME by the app at harness start.
+if [[ -f Resources/dsh-llm-silicon/lib/index.js ]]; then
+    echo "==> Embedding dsh-llm-silicon plugin"
+    mkdir -p "$BUNDLE/Contents/Resources/dsh-llm-silicon/lib"
+    cp Resources/dsh-llm-silicon/package.json "$BUNDLE/Contents/Resources/dsh-llm-silicon/"
+    cp Resources/dsh-llm-silicon/lib/index.js "$BUNDLE/Contents/Resources/dsh-llm-silicon/lib/"
+fi
+
 # The live face camera's driver: a script the app hands to Deep-Live-Cam's own
 # environment. It lives in Resources rather than being generated at runtime so it can
 # be read, diffed and fixed like any other source file.

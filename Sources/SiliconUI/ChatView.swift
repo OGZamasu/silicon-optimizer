@@ -16,9 +16,12 @@ struct ChatView: View {
     @State private var folderName = ""
 
     var body: some View {
-        if model.settings.chatEngine == .harness {
+        switch model.settings.chatEngine {
+        case .harness:
             HarnessChatView()
-        } else {
+        case .codex:
+            CodexChatView()
+        case .legacy:
             legacyChat
         }
     }

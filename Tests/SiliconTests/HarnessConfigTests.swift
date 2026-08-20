@@ -131,86 +131,110 @@ struct HarnessConfigTests {
         #expect(document.contains("name: \"A \\\"quoted\\\" model\""))
     }
 
-    // MARK: - Swarm providers
+    // MARK: - Swarm provider retirement
 
-    private let node = HarnessRuntime.SwarmProvider(
-        peerName: "silicon-node",
-        baseURL: "http://100.118.191.121:8081/v1",
-        modelID: "qwen3.8-27b",
-        displayName: "qwen3.8-27b on silicon-node"
-    )
+    /// A settings document as this app used to write it: the local provider plus one
+    /// managed per-peer entry, and a remembered pick pointing at the peer.
+    private let legacySwarmDocument = """
+    llm-pi-ai:
+      providers:
+        silicon-swarm-silicon-node:
+          apiKeyEnv: SILICON_LOCAL_API_KEY
+          api: openai-completions
+          baseURL: http://100.118.191.121:8081/v1
+          models:
+            - id: qwen3.8-27b
+              name: "qwen3.8-27b on silicon-node"
+        silicon-local:
+          apiKeyEnv: SILICON_LOCAL_API_KEY
+          api: openai-completions
+          baseURL: http://127.0.0.1:9131/v1
+          models:
+            - id: silicon-local
+    agent-default-model:
+      provider: silicon-swarm-silicon-node
+      model: qwen3.8-27b
+    other-default:
+      provider: someone-elses
+      model: qwen3.8-27b
+    """
 
-    @Test func addsAPeerProviderBesideTheLocalOne() {
-        let local = HarnessRuntime.providerConfiguration(existing: nil, inferencePort: 9131)
-        let document = HarnessRuntime.swarmConfiguration(existing: local, providers: [node])
+    @Test func retirementRemovesManagedSwarmProvidersOnly() {
+        let document = HarnessRuntime.retiringSwarmProviders(existing: legacySwarmDocument)
 
-        let sections = (document ?? "").components(separatedBy: "llm-pi-ai:").count - 1
-        #expect(sections == 1)
+        #expect(document?.contains("silicon-swarm-silicon-node:") == false)
+        #expect(document?.contains("100.118.191.121") == false)
+        // The local provider and everything foreign survive untouched.
         #expect(document?.contains("    silicon-local:") == true)
-        #expect(document?.contains("    silicon-swarm-silicon-node:") == true)
-        #expect(document?.contains("      baseURL: http://100.118.191.121:8081/v1") == true)
-        #expect(document?.contains("        - id: qwen3.8-27b") == true)
-        #expect(document?.contains("name: \"qwen3.8-27b on silicon-node\"") == true)
-    }
-
-    @Test func removesTheProviderWhenThePeerLeaves() {
-        let local = HarnessRuntime.providerConfiguration(existing: nil, inferencePort: 9131)
-        let added = HarnessRuntime.swarmConfiguration(existing: local, providers: [node])
-        let removed = HarnessRuntime.swarmConfiguration(existing: added, providers: [])
-
-        #expect(removed?.contains("silicon-swarm-silicon-node") == false)
-        // The local provider and its section survive untouched.
-        #expect(removed?.contains("    silicon-local:") == true)
-        #expect(removed?.contains("baseURL: http://127.0.0.1:9131/v1") == true)
-    }
-
-    @Test func updatesAPeerProviderInPlace() {
-        let first = HarnessRuntime.swarmConfiguration(existing: nil, providers: [node])
-        var moved = node
-        moved.baseURL = "http://192.168.4.23:8081/v1"
-        let second = HarnessRuntime.swarmConfiguration(existing: first, providers: [moved])
-
-        #expect(second?.contains("http://192.168.4.23:8081/v1") == true)
-        #expect(second?.contains("100.118.191.121") == false)
-        let entries = (second ?? "").components(separatedBy: "silicon-swarm-silicon-node:").count - 1
-        #expect(entries == 1)
-    }
-
-    @Test func swarmSyncWithNothingToSayTouchesNothing() {
-        #expect(HarnessRuntime.swarmConfiguration(existing: nil, providers: []) == nil)
-    }
-
-    /// The exact failure from the wild: the node renamed its model ("qwen3.8.27b" →
-    /// "qwen3.8-27b"), the harness's remembered pick still said the old spelling, and
-    /// every request 404ed. The sync must repair its own provider's dangling reference —
-    /// and only its own.
-    @Test func repairsTheHarnessesRememberedPickWhenTheModelIDChanges() {
-        let existing = """
-        agent-default-model:
-          provider: silicon-swarm-silicon-node
-          model: qwen3.8.27b
-        other-default:
-          provider: someone-elses
-          model: qwen3.8.27b
-        """
-        let document = HarnessRuntime.swarmConfiguration(existing: existing, providers: [node])
-
-        #expect(document?.contains("  model: qwen3.8-27b") == true)
-        // The foreign block keeps its value — it is not ours to correct.
-        let stale = (document ?? "").components(separatedBy: "model: qwen3.8.27b").count - 1
-        #expect(stale == 1)
+        #expect(document?.contains("baseURL: http://127.0.0.1:9131/v1") == true)
         #expect(document?.contains("provider: someone-elses") == true)
     }
 
-    @Test func peerNamesBecomeSafeProviderIDs() {
-        #expect(
-            HarnessRuntime.SwarmProvider.providerID(peerName: "My PC #2")
-                == "silicon-swarm-my-pc--2"
+    /// Saved picks must keep working across the migration: the pair
+    /// (silicon-swarm-<peer>, <model>) is exactly (silicon, node/<peer>/<model>) in the
+    /// plugin's world, so the rewrite is mechanical.
+    @Test func retirementRewritesRememberedPicksToGatewayIDs() {
+        let document = HarnessRuntime.retiringSwarmProviders(existing: legacySwarmDocument)
+
+        #expect(document?.contains("  provider: silicon\n") == true)
+        #expect(document?.contains("  model: node/silicon-node/qwen3.8-27b") == true)
+        // The foreign block keeps both its provider and its model — not ours to correct.
+        #expect(document?.contains("provider: someone-elses") == true)
+        let foreign = (document ?? "").components(separatedBy: "model: qwen3.8-27b").count - 1
+        #expect(foreign == 1)
+    }
+
+    @Test func retirementIsIdempotent() {
+        let once = HarnessRuntime.retiringSwarmProviders(existing: legacySwarmDocument)
+        let twice = HarnessRuntime.retiringSwarmProviders(existing: once)
+        #expect(once == twice)
+        #expect(HarnessRuntime.retiringSwarmProviders(existing: nil) == nil)
+        // A document with nothing to retire comes back byte-identical.
+        let clean = "llm-pi-ai:\n  providers:\n    mine:\n      baseURL: http://x/v1\n"
+        #expect(HarnessRuntime.retiringSwarmProviders(existing: clean) == clean)
+    }
+
+    // MARK: - The silicon models plugin
+
+    @Test func overlayLoadsThePluginAgainstTheGateway() {
+        let overlay = HarnessRuntime.siliconOverlay(
+            pluginIndexPath: "/Users/o'brien/Library/dsh/plugins/dsh-llm-silicon/lib/index.js",
+            gatewayPort: 9414
         )
-        #expect(
-            HarnessRuntime.SwarmProvider.providerID(peerName: "silicon-node")
-                == "silicon-swarm-silicon-node"
+        #expect(overlay.contains("- insert:"))
+        #expect(overlay.contains("id: silicon-models"))
+        // Single-quoted with the apostrophe doubled, per YAML.
+        #expect(overlay.contains("name: '/Users/o''brien/Library/dsh/plugins/dsh-llm-silicon/lib/index.js'"))
+        #expect(overlay.contains("baseURL: http://127.0.0.1:9414/v1"))
+    }
+
+    @Test func pluginInstallCopiesOnceAndUpdatesOnChange() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("plugin-install-\(UUID().uuidString)")
+        let source = base.appendingPathComponent("source")
+        let home = base.appendingPathComponent("home")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try FileManager.default.createDirectory(
+            at: source.appendingPathComponent("lib"), withIntermediateDirectories: true
         )
+        try "{\"version\":\"1.0.0\"}".write(
+            to: source.appendingPathComponent("package.json"), atomically: true, encoding: .utf8
+        )
+        try "export const name = 'llm-silicon'".write(
+            to: source.appendingPathComponent("lib/index.js"), atomically: true, encoding: .utf8
+        )
+
+        let installed = try HarnessRuntime.ensureSiliconPluginInstalled(home: home, source: source)
+        #expect(installed.path.hasSuffix("profiles/plugins/dsh-llm-silicon/lib/index.js"))
+        #expect(try String(contentsOf: installed, encoding: .utf8).contains("llm-silicon"))
+
+        // A changed source lands on the next ensure; an unchanged one is left alone.
+        try "export const name = 'llm-silicon' // v2".write(
+            to: source.appendingPathComponent("lib/index.js"), atomically: true, encoding: .utf8
+        )
+        _ = try HarnessRuntime.ensureSiliconPluginInstalled(home: home, source: source)
+        #expect(try String(contentsOf: installed, encoding: .utf8).contains("// v2"))
     }
 
     @Test func parsesNodeVersions() {

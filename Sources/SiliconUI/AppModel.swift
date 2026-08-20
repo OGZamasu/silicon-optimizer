@@ -30,7 +30,7 @@ public final class AppModel {
     // MARK: - Library
 
     public private(set) var installedModels: [InstalledModel] = []
-    public private(set) var libraryError: String?
+    public internal(set) var libraryError: String?
     public private(set) var downloads: [String: DownloadTask] = [:]
 
     private let library = ModelLibrary()
@@ -83,6 +83,33 @@ public final class AppModel {
     /// The harness process id, kept here so app termination can reach it synchronously.
     var harnessProcessID: Int32?
     var harnessTerminationRegistered = false
+
+    // MARK: - Model gateway
+
+    /// The loopback server that lists every model this app can reach and routes external
+    /// harness requests to whichever machine serves the one they named.
+    var gatewayServer: GatewayServer?
+    /// Resolved once per session from the persisted choice, like the harness ports.
+    var resolvedGatewayPort: Int?
+    /// Gateway-triggered local loads run one at a time through here.
+    var gatewayEnsureTask: Task<Void, Never>?
+
+    // MARK: - Codex chat
+
+    /// State of the Codex sidecar behind the Chat tab's Codex engine.
+    public internal(set) var codexState: RuntimeState = .idle
+    var codexRuntime: CodexRuntime?
+    /// The rendered conversation: agent prose, commands, file changes, tool calls.
+    public internal(set) var codexItems: [CodexChatItem] = []
+    /// Approvals Codex is waiting on, oldest first.
+    public internal(set) var codexApprovals: [CodexApproval] = []
+    var codexThreadID: String?
+    /// Whether a turn is streaming right now (drives the stop button and the input state).
+    public internal(set) var codexTurnActive = false
+    /// Running token totals for the thread, human-formatted.
+    public internal(set) var codexTokenLabel: String?
+    var codexProcessID: Int32?
+    var codexTerminationRegistered = false
 
     // MARK: - Chat
 
@@ -1998,6 +2025,7 @@ public final class AppModel {
         prepareIdleUnloadNotices()
         beginSampling()
         startControlServer()
+        startGatewayServer()
         measureStorageIfNeeded()
 
         Task {

@@ -371,113 +371,45 @@ public actor HarnessRuntime {
         return end
     }
 
-    // MARK: - Swarm providers
+    // MARK: - Swarm provider retirement
 
-    /// A swarm peer's chat model, described the way the settings document needs it. The
-    /// provider id is derived from the peer's name and carries a reserved prefix so the
-    /// app can tell its own managed swarm entries from anything the user wrote by hand.
-    public struct SwarmProvider: Sendable, Equatable {
-        public var peerName: String
-        public var baseURL: String
-        public var modelID: String
-        public var displayName: String
-        public var contextLength: Int?
-
-        public init(
-            peerName: String, baseURL: String, modelID: String,
-            displayName: String, contextLength: Int? = nil
-        ) {
-            self.peerName = peerName
-            self.baseURL = baseURL
-            self.modelID = modelID
-            self.displayName = displayName
-            self.contextLength = contextLength
-        }
-
-        public var providerID: String { Self.providerID(peerName: peerName) }
-
-        public static func providerID(peerName: String) -> String {
-            let slug = String(peerName.lowercased().map { character in
-                character.isLetter || character.isNumber ? character : "-"
-            })
-            return "silicon-swarm-\(slug)"
-        }
-    }
-
+    /// The prefix of the per-peer providers this app used to write into the settings
+    /// document. The `silicon` plugin provider now lists every node model live, so managed
+    /// entries with this prefix are removed on sight — after repairing anything that
+    /// still points at them.
     static let swarmProviderPrefix = "silicon-swarm-"
 
-    private static func swarmProviderLines(
-        indent: Int, provider: SwarmProvider
-    ) -> [String] {
-        let pad = String(repeating: " ", count: indent)
-        let escaped = provider.displayName
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        var lines = [
-            "\(pad)\(provider.providerID):",
-            "\(pad)  apiKeyEnv: \(apiKeyVariable)",
-            "\(pad)  api: openai-completions",
-            "\(pad)  baseURL: \(provider.baseURL)",
-            "\(pad)  models:",
-            "\(pad)    - id: \(provider.modelID)",
-            "\(pad)      name: \"\(escaped)\"",
-        ]
-        if let context = provider.contextLength {
-            lines.append("\(pad)      contextWindow: \(context)")
-        }
-        return lines
-    }
-
-    /// Returns the settings document with exactly the given swarm providers present: stale
-    /// entries updated, entries for peers no longer offering a model removed, everything
-    /// the user or the local provider wrote left untouched.
-    static func swarmConfiguration(
-        existing: String?, providers: [SwarmProvider]
-    ) -> String? {
-        guard existing != nil || !providers.isEmpty else { return nil }
-
-        let wanted = Set(providers.map(\.providerID))
-        var document = existing ?? ""
-
-        for id in managedSwarmIDs(in: document) where !wanted.contains(id) {
+    /// Removes every managed `silicon-swarm-*` provider from the settings document,
+    /// first rewriting stored model references so saved defaults keep working: the pair
+    /// `provider: silicon-swarm-<peer>` / `model: <m>` becomes `provider: silicon` /
+    /// `model: node/<peer>/<m>` — exactly the id the plugin's gateway knows the model by.
+    /// Everything the user wrote stays untouched.
+    static func retiringSwarmProviders(existing: String?) -> String? {
+        guard let existing, !existing.isEmpty else { return existing }
+        var document = rewritingSwarmReferences(in: existing)
+        for id in managedSwarmIDs(in: document) {
             document = removingProvider(id: id, from: document)
-        }
-        for provider in providers {
-            document = upserting(
-                providerID: provider.providerID,
-                into: document.isEmpty ? nil : document,
-                header: """
-                # Managed by Silicon Optimizer: the 'silicon-swarm-*' providers below are chat
-                # models running on your other Silicon nodes. Other settings here are yours.
-                """
-            ) { indent in
-                swarmProviderLines(indent: indent, provider: provider)
-            }
-            document = repairingDefaultModelReference(in: document, provider: provider)
         }
         return document
     }
 
-    /// The harness remembers the user's picked model as a provider/model pair it writes
-    /// itself. When a node renames its model, that stored reference dangles — every
-    /// request 404s until the user re-picks. A dangling reference to one of our own
-    /// managed providers is ours to repair; anything else in the file stays untouched.
-    private static func repairingDefaultModelReference(
-        in document: String, provider: SwarmProvider
-    ) -> String {
+    private static func rewritingSwarmReferences(in document: String) -> String {
         var lines = document.components(separatedBy: "\n")
         for index in lines.indices {
-            guard lines[index].trimmingCharacters(in: .whitespaces)
-                == "provider: \(provider.providerID)" else { continue }
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("provider: \(swarmProviderPrefix)") else { continue }
+            let slug = String(trimmed.dropFirst("provider: \(swarmProviderPrefix)".count))
+            guard !slug.isEmpty, !slug.contains(" ") else { continue }
             for neighbor in [index + 1, index - 1] where lines.indices.contains(neighbor) {
-                let trimmed = lines[neighbor].trimmingCharacters(in: .whitespaces)
-                guard trimmed.hasPrefix("model: ") else { continue }
-                let current = String(trimmed.dropFirst("model: ".count))
-                if current != provider.modelID {
-                    let indent = String(lines[neighbor].prefix { $0 == " " })
-                    lines[neighbor] = "\(indent)model: \(provider.modelID)"
-                }
+                let neighborTrimmed = lines[neighbor].trimmingCharacters(in: .whitespaces)
+                guard neighborTrimmed.hasPrefix("model: ") else { continue }
+                let model = String(neighborTrimmed.dropFirst("model: ".count))
+                guard !model.hasPrefix("node/") else { continue }
+                let indent = String(lines[neighbor].prefix { $0 == " " })
+                lines[neighbor] = "\(indent)model: node/\(slug)/\(model)"
             }
+            let indent = String(lines[index].prefix { $0 == " " })
+            lines[index] = "\(indent)provider: silicon"
         }
         return lines.joined(separator: "\n")
     }
@@ -502,17 +434,91 @@ public actor HarnessRuntime {
         return lines.joined(separator: "\n")
     }
 
-    /// Writes the swarm peers' provider entries to disk; skipped when nothing changed.
-    public static func ensureSwarmProvidersConfigured(
-        home: URL, providers: [SwarmProvider]
-    ) throws {
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    /// Applies the retirement to disk; skipped when there is nothing to retire.
+    public static func ensureSwarmProvidersRetired(home: URL) throws {
         let settingsURL = home.appendingPathComponent("settings.yaml")
         let existing = try? String(contentsOf: settingsURL, encoding: .utf8)
-        guard let updated = swarmConfiguration(existing: existing, providers: providers),
-              updated != existing
+        guard let updated = retiringSwarmProviders(existing: existing), updated != existing
         else { return }
         try updated.write(to: settingsURL, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - The silicon models plugin
+
+    /// Where the vendored `dsh-llm-silicon` plugin lives at runtime: inside the app bundle
+    /// for installed copies, beside the sources for `swift run` during development.
+    public static func siliconPluginSource() -> URL? {
+        let manager = FileManager.default
+        if let bundled = Bundle.main.resourceURL?
+            .appendingPathComponent("dsh-llm-silicon", isDirectory: true),
+           manager.fileExists(atPath: bundled.appendingPathComponent("lib/index.js").path) {
+            return bundled
+        }
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // SiliconRuntime
+            .deletingLastPathComponent()   // Sources
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("Resources/dsh-llm-silicon", isDirectory: true)
+        if manager.fileExists(atPath: repo.appendingPathComponent("lib/index.js").path) {
+            return repo
+        }
+        return nil
+    }
+
+    /// Files that make up the plugin, copied verbatim.
+    static let siliconPluginFiles = ["package.json", "lib/index.js"]
+
+    /// Installs (or updates) the plugin inside the profile tree. The location matters:
+    /// under `profiles/` the plugin's bare `@deepseek-ai/dsh-llm` import resolves through
+    /// `profiles/node_modules` — the same physical tree the running harness loads from, so
+    /// both sides share one module instance and `instanceof` checks hold.
+    @discardableResult
+    public static func ensureSiliconPluginInstalled(home: URL, source: URL) throws -> URL {
+        let destination = home.appendingPathComponent(
+            "profiles/plugins/dsh-llm-silicon", isDirectory: true
+        )
+        let manager = FileManager.default
+        for file in siliconPluginFiles {
+            let fromData = try Data(contentsOf: source.appendingPathComponent(file))
+            let to = destination.appendingPathComponent(file)
+            if let existing = try? Data(contentsOf: to), existing == fromData { continue }
+            try manager.createDirectory(
+                at: to.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try fromData.write(to: to, options: .atomic)
+        }
+        return destination.appendingPathComponent("lib/index.js")
+    }
+
+    /// The `--patch` overlay that loads the plugin. A file this app owns outright —
+    /// regenerated every start, never merged — which is what keeps the user's own
+    /// `cordis.patch.yml` theirs.
+    static func siliconOverlay(pluginIndexPath: String, gatewayPort: Int) -> String {
+        let escaped = pluginIndexPath.replacingOccurrences(of: "'", with: "''")
+        return """
+        # Managed by Silicon Optimizer: loads the dsh-llm-silicon plugin, which lists every
+        # model this Mac and its swarm nodes can serve. Regenerated at each harness start —
+        # edits here are overwritten. Your profile's own cordis.patch.yml is untouched.
+        - insert:
+            - id: silicon-models
+              name: '\(escaped)'
+              config:
+                baseURL: http://127.0.0.1:\(gatewayPort)/v1
+
+        """
+    }
+
+    /// Writes the overlay next to the settings document and returns its path.
+    public static func writeSiliconOverlay(
+        home: URL, pluginIndexPath: String, gatewayPort: Int
+    ) throws -> URL {
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let url = home.appendingPathComponent("silicon-overlay.patch.yml")
+        let content = siliconOverlay(pluginIndexPath: pluginIndexPath, gatewayPort: gatewayPort)
+        if (try? String(contentsOf: url, encoding: .utf8)) != content {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        }
+        return url
     }
 
     /// Writes the provider configuration to disk. Called before the harness starts and again
@@ -536,11 +542,16 @@ public actor HarnessRuntime {
 
     /// Starts the harness and reports progress through `onState`, ending in `.ready` with the
     /// web UI's URL or `.failed` with a diagnosis worth reading.
+    ///
+    /// With a `gatewayPort`, the silicon models plugin is installed into the profile tree and
+    /// loaded through a `--patch` overlay, putting every local and swarm model in the
+    /// harness's picker. Without one the harness still runs on the `silicon-local` provider.
     public func start(
         webPort: Int,
         inferencePort: Int,
         nodePath: String = "",
         advertising model: AdvertisedModel = AdvertisedModel(),
+        gatewayPort: Int? = nil,
         onState: @escaping @Sendable (RuntimeState) -> Void
     ) async {
         await stop()
@@ -574,9 +585,29 @@ public actor HarnessRuntime {
             return
         }
 
+        // The plugin is a nicety, never a gatekeeper: any failure here leaves the harness
+        // to boot exactly as it did before the gateway existed.
+        var overlayPath: String?
+        if let gatewayPort, let source = Self.siliconPluginSource() {
+            if let pluginIndex = try? Self.ensureSiliconPluginInstalled(home: home, source: source),
+               let overlay = try? Self.writeSiliconOverlay(
+                   home: home, pluginIndexPath: pluginIndex.path, gatewayPort: gatewayPort
+               ) {
+                overlayPath = overlay.path
+            }
+        }
+
         onState(.starting(stage:
             "Starting DeepSeek Harness… the first run downloads it and can take a few minutes."
         ))
+
+        // The `--profile web` root form rather than the `web` subcommand: `--patch` is a
+        // launcher flag, and the launcher only accepts it ahead of profile arguments.
+        var arguments = ["--yes", Self.packageSpec, "--profile", "web"]
+        if let overlayPath {
+            arguments += ["--patch", overlayPath]
+        }
+        arguments += ["--port", String(webPort)]
 
         let process = ServerProcess()
         self.process = process
@@ -586,7 +617,7 @@ public actor HarnessRuntime {
             let path = "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin"
             try await process.start(
                 executable: npx,
-                arguments: ["--yes", Self.packageSpec, "web", "--port", String(webPort)],
+                arguments: arguments,
                 environment: [
                     "DSH_HOME": home.path,
                     "PATH": path,

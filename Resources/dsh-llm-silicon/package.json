@@ -1,0 +1,11 @@
+{
+  "name": "dsh-llm-silicon",
+  "description": "DeepSeek Harness adapter for Silicon Optimizer's model gateway: every local and swarm model in one provider",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7"
+  }
+}

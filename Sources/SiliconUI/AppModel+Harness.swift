@@ -99,29 +99,13 @@ extension AppModel {
         )
     }
 
-    /// Every peer chat model becomes a provider in the harness settings, so the Chat
-    /// tab's model picker lists the swarm right next to the local model. Entries follow
-    /// the swarm: a peer that leaves the registry takes its provider with it. Stopped
-    /// models stay listed — jobs preempt a peer's LLM and it auto-restores, and a picker
-    /// entry that flickered with every preemption would be worse than one that briefly
-    /// errors.
+    /// Swarm models used to be written into the harness settings as one provider per peer.
+    /// The `silicon` plugin provider now lists them live from the gateway — every node
+    /// model, loaded or not — so the old managed entries are retired on sight, with any
+    /// saved default that referenced one rewritten to its gateway id first.
     func syncSwarmChatProviders() {
         guard settings.chatEngine == .harness else { return }
-        let providers = swarmPeers.compactMap { peer -> HarnessRuntime.SwarmProvider? in
-            guard let llm = peer.llm, llm.installed,
-                  let base = llm.openAIBase, let modelID = llm.model
-            else { return nil }
-            return HarnessRuntime.SwarmProvider(
-                peerName: peer.name,
-                baseURL: base,
-                modelID: modelID,
-                displayName: "\(modelID) on \(peer.name)",
-                contextLength: llm.contextLength
-            )
-        }
-        try? HarnessRuntime.ensureSwarmProvidersConfigured(
-            home: HarnessRuntime.homeDirectory, providers: providers
-        )
+        try? HarnessRuntime.ensureSwarmProvidersRetired(home: HarnessRuntime.homeDirectory)
     }
 
     /// Starts the harness unless it is already running or on its way.
@@ -143,10 +127,11 @@ extension AppModel {
 
         let nodePath = settings.nodeBinaryPath ?? ""
         let advertised = advertisedModel
+        let gateway = gatewayPort()
         Task {
             await runtime.start(
                 webPort: ports.web, inferencePort: ports.inference, nodePath: nodePath,
-                advertising: advertised
+                advertising: advertised, gatewayPort: gateway
             ) { [weak self] state in
                 Task { @MainActor in self?.harnessState = state }
             }
@@ -178,13 +163,16 @@ extension AppModel {
         }
     }
 
-    /// Reacts to the chat engine toggle: the harness has no business running when the user
-    /// has switched back to the built-in chat.
+    /// Reacts to the chat engine picker: a sidecar only runs while it is the chosen engine,
+    /// and the chosen one starts as soon as the Chat tab is showing.
     public func chatEngineDidChange() {
-        if settings.chatEngine == .legacy {
-            stopHarness()
-        } else if selectedTab == .chat {
-            startHarnessIfNeeded()
+        if settings.chatEngine != .harness { stopHarness() }
+        if settings.chatEngine != .codex { stopCodex() }
+        guard selectedTab == .chat else { return }
+        switch settings.chatEngine {
+        case .harness: startHarnessIfNeeded()
+        case .codex: startCodexIfNeeded()
+        case .legacy: break
         }
     }
 
