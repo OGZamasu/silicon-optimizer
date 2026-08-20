@@ -120,6 +120,13 @@ public actor GatewayServer {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
+        // Refused before the SSE head goes out, so the caller gets a plain HTTP error
+        // it can show — and the node engine is not fed the request that kills it.
+        if GatewayAPI.exceedsNodePromptLimit(modelID: modelID, bodyBytes: request.body.count) {
+            try? await HTTPResponse.error(400, GatewayAPI.nodePromptLimitMessage)
+                .write(to: connection)
+            return
+        }
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
 
         if wantsStream {
@@ -154,15 +161,29 @@ public actor GatewayServer {
 
     /// Streams the backend's SSE bytes through untouched, frame by frame. The harness's
     /// adapter parses them exactly as it would parse llama-server directly.
+    ///
+    /// One thing is added: a backend that hangs up without `[DONE]` — the node engine
+    /// dying mid-prefill does exactly this — gets its death narrated as an in-stream
+    /// error the client can show, instead of a bare "stream closed".
     private func pipeChatStream(
         body: Data, backend: GatewayReadyBackend, to stream: SSEConnection
     ) async {
+        var sawDone = false
         do {
             let frames = try await BackendClient.streamFrames(
                 path: "chat/completions", body: body, to: backend.baseURL
             )
             for try await frame in frames {
+                if !sawDone, GatewayAPI.frameCarriesDone(frame) { sawDone = true }
                 await stream.send(frame + Data("\n\n".utf8))
+            }
+            if !sawDone {
+                await stream.send(GatewayAPI.sseErrorPayload(
+                    "The model's server closed the connection mid-answer — on "
+                    + "silicon-node this usually means its engine died on a large prompt "
+                    + "(a known node issue). Try a model on This Mac."
+                ))
+                await stream.send(GatewayAPI.sseDone)
             }
         } catch {
             await stream.send(GatewayAPI.sseErrorPayload(error.localizedDescription))
@@ -175,6 +196,11 @@ public actor GatewayServer {
     private func serveResponses(_ request: HTTPRequest, on connection: NWConnection) async {
         guard let modelID = GatewayAPI.requestedModel(inBody: request.body) else {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
+            return
+        }
+        if GatewayAPI.exceedsNodePromptLimit(modelID: modelID, bodyBytes: request.body.count) {
+            try? await HTTPResponse.error(400, GatewayAPI.nodePromptLimitMessage)
+                .write(to: connection)
             return
         }
         let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)

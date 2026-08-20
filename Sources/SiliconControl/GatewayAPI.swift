@@ -157,6 +157,11 @@ public enum GatewayAPI {
 
     public static let sseDone = Data("data: [DONE]\n\n".utf8)
 
+    /// Whether an SSE frame carries the terminal sentinel.
+    public static func frameCarriesDone(_ frame: Data) -> Bool {
+        frame.range(of: Data("data: [DONE]".utf8)) != nil
+    }
+
     /// The in-stream error shape OpenAI-compatible servers use once the SSE head is out and
     /// a plain HTTP status is no longer possible.
     public static func sseErrorPayload(_ message: String) -> Data {
@@ -338,6 +343,26 @@ public enum GatewayAPI {
         else { return false }
         return json["stream"] as? Bool ?? false
     }
+
+    // MARK: - Node prompt ceiling
+
+    /// STOPGAP for the node engine dying on large prefills (hub issue #11): requests to
+    /// node models above roughly seven thousand tokens are refused with words instead of
+    /// being allowed to kill the engine. Agent chats carry ~23K tokens of preamble, so in
+    /// practice this routes agent chat to local models until the node is fixed — remove
+    /// the ceiling when #11 closes.
+    public static let nodePromptLimitBytes = 28_000
+
+    public static func exceedsNodePromptLimit(modelID: String, bodyBytes: Int) -> Bool {
+        guard case .node = parseModelID(modelID) else { return false }
+        return bodyBytes > nodePromptLimitBytes
+    }
+
+    public static let nodePromptLimitMessage =
+        "silicon-node's engine currently dies on prompts this large (about 7K tokens is "
+        + "its ceiling — agent chat needs ~23K), so this request was refused before "
+        + "crashing it. Pick a model on This Mac for agent chat; the node still handles "
+        + "video and short requests."
 
     // MARK: - Media serving
 
