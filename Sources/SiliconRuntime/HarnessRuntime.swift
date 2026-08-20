@@ -493,9 +493,16 @@ public actor HarnessRuntime {
     /// The `--patch` overlay that loads the plugin. A file this app owns outright —
     /// regenerated every start, never merged — which is what keeps the user's own
     /// `cordis.patch.yml` theirs.
-    static func siliconOverlay(pluginIndexPath: String, gatewayPort: Int) -> String {
+    ///
+    /// With an `mcpServerPath`, a second row wires this app's MCP bridge in through the
+    /// harness's bundled MCP client, so the chat can also *do* things — generate images
+    /// and 3D on this Mac, render video on the swarm's node, load models. Tools appear
+    /// to the model as `mcp__silicon__<name>`.
+    static func siliconOverlay(
+        pluginIndexPath: String, gatewayPort: Int, mcpServerPath: String? = nil
+    ) -> String {
         let escaped = pluginIndexPath.replacingOccurrences(of: "'", with: "''")
-        return """
+        var document = """
         # Managed by Silicon Optimizer: loads the dsh-llm-silicon plugin, which lists every
         # model this Mac and its swarm nodes can serve. Regenerated at each harness start —
         # edits here are overwritten. Your profile's own cordis.patch.yml is untouched.
@@ -506,15 +513,33 @@ public actor HarnessRuntime {
                 baseURL: http://127.0.0.1:\(gatewayPort)/v1
 
         """
+        if let mcpServerPath {
+            let escapedServer = mcpServerPath.replacingOccurrences(of: "'", with: "''")
+            document += """
+                - id: silicon-tools
+                  name: '@deepseek-ai/dsh-mcp-client'
+                  config:
+                    serverName: silicon
+                    transport: stdio
+                    command: '\(escapedServer)'
+                    # The longest tool renders a video clip on the node for ~10 minutes.
+                    toolCallTimeoutMs: 1800000
+
+            """
+        }
+        return document
     }
 
     /// Writes the overlay next to the settings document and returns its path.
     public static func writeSiliconOverlay(
-        home: URL, pluginIndexPath: String, gatewayPort: Int
+        home: URL, pluginIndexPath: String, gatewayPort: Int, mcpServerPath: String? = nil
     ) throws -> URL {
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let url = home.appendingPathComponent("silicon-overlay.patch.yml")
-        let content = siliconOverlay(pluginIndexPath: pluginIndexPath, gatewayPort: gatewayPort)
+        let content = siliconOverlay(
+            pluginIndexPath: pluginIndexPath, gatewayPort: gatewayPort,
+            mcpServerPath: mcpServerPath
+        )
         if (try? String(contentsOf: url, encoding: .utf8)) != content {
             try content.write(to: url, atomically: true, encoding: .utf8)
         }
@@ -591,7 +616,8 @@ public actor HarnessRuntime {
         if let gatewayPort, let source = Self.siliconPluginSource() {
             if let pluginIndex = try? Self.ensureSiliconPluginInstalled(home: home, source: source),
                let overlay = try? Self.writeSiliconOverlay(
-                   home: home, pluginIndexPath: pluginIndex.path, gatewayPort: gatewayPort
+                   home: home, pluginIndexPath: pluginIndex.path, gatewayPort: gatewayPort,
+                   mcpServerPath: CodexRuntime.locateMCPServer()
                ) {
                 overlayPath = overlay.path
             }

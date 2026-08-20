@@ -1856,11 +1856,13 @@ public final class AppModel {
     public var videoResolution = "720p"
 
     let videoRuntime = NodeVideoRuntime()
-    public private(set) var isGeneratingVideo = false
-    public private(set) var videoStage: String?
+    // internal(set), not private(set): the control API renders clips through the same
+    // state so a chat-requested clip shows its progress in the Video tab too.
+    public internal(set) var isGeneratingVideo = false
+    public internal(set) var videoStage: String?
     /// How far into the render the node says it is, when it says. Nil means a spinner,
     /// which is the honest answer for a stage nobody can measure.
-    public private(set) var videoProgress: Double?
+    public internal(set) var videoProgress: Double?
     public internal(set) var videoResults: [VideoResult] = []
     public var videoError: String?
 

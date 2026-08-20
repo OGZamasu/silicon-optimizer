@@ -611,6 +611,66 @@ public enum ControlAPI {
         }
     }
 
+    /// One video model, with whether any swarm node can serve it right now. Video is the
+    /// one capability with no local backend, so availability is a claim about the swarm.
+    public struct VideoModel: Codable, Sendable {
+        public var id: String
+        public var name: String
+        public var summary: String
+        public var typicalDuration: String
+        public var supportsImageInput: Bool
+        public var available: Bool
+        /// The node that would run it, when one is ready.
+        public var node: String?
+
+        public init(
+            id: String, name: String, summary: String, typicalDuration: String,
+            supportsImageInput: Bool, available: Bool, node: String?
+        ) {
+            self.id = id
+            self.name = name
+            self.summary = summary
+            self.typicalDuration = typicalDuration
+            self.supportsImageInput = supportsImageInput
+            self.available = available
+            self.node = node
+        }
+    }
+
+    public struct VideoGenerateRequest: Codable, Sendable {
+        public var prompt: String
+        public var modelID: String?
+        public var seconds: Int?
+        public var resolution: String?
+        /// Optional still to animate (image-to-video), as an absolute path.
+        public var imagePath: String?
+
+        public init(
+            prompt: String, modelID: String? = nil, seconds: Int? = nil,
+            resolution: String? = nil, imagePath: String? = nil
+        ) {
+            self.prompt = prompt
+            self.modelID = modelID
+            self.seconds = seconds
+            self.resolution = resolution
+            self.imagePath = imagePath
+        }
+    }
+
+    public struct VideoResponse: Codable, Sendable {
+        public var file: String
+        public var node: String
+        public var model: String
+        public var elapsedSeconds: Double
+
+        public init(file: String, node: String, model: String, elapsedSeconds: Double) {
+            self.file = file
+            self.node = node
+            self.model = model
+            self.elapsedSeconds = elapsedSeconds
+        }
+    }
+
     public struct ErrorResponse: Codable, Sendable {
         public var error: String
         public init(error: String) { self.error = error }
@@ -687,5 +747,9 @@ public protocol ControlHost: AnyObject, Sendable {
     func meshModels() async -> [ControlAPI.MeshModel]
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse
+    func videoModels() async -> [ControlAPI.VideoModel]
+    func generateVideo(
+        _ request: ControlAPI.VideoGenerateRequest
+    ) async throws -> ControlAPI.VideoResponse
     func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement
 }

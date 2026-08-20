@@ -22,7 +22,9 @@ public struct ControlClient: Sendable {
     public init() {
         let configuration = URLSessionConfiguration.ephemeral
         // Loading a large model can legitimately take minutes.
-        configuration.timeoutIntervalForRequest = 900
+        // Long enough for the longest tool: a cinematic video clip renders for about ten
+        // minutes on the node before the file comes back.
+        configuration.timeoutIntervalForRequest = 1800
         self.session = URLSession(configuration: configuration)
     }
 

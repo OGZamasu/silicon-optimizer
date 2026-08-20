@@ -206,10 +206,12 @@ public actor CodexRuntime {
         if let mcpServerPath {
             document += """
 
-            # This app's own MCP bridge: gives Codex the app's tools (load models, generate
-            # images, reach the swarm) next to its built-in shell.
+            # This app's own MCP bridge: gives Codex the app's tools (generate images and
+            # 3D here, render video on the swarm's node, load models) next to its shell.
+            # The timeout covers the longest of them — a ~10 minute cinematic video clip.
             [mcp_servers.silicon-optimizer]
             command = "\(tomlEscaped(mcpServerPath))"
+            tool_timeout_sec = 1800
 
             """
         }

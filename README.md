@@ -148,7 +148,9 @@ more capable. Settings shows what it found.
 ## Use from Claude or ChatGPT
 
 The bundled `silicon-mcp` bridge lets a cloud assistant drive the model you already have
-loaded, instead of starting a second copy and doubling the memory cost.
+loaded, instead of starting a second copy and doubling the memory cost. The same twenty
+tools are wired into the app's own chat: ask either harness to generate an image, turn it
+into a 3D mesh, or render a video clip on your paired PC, and it calls the app to do it.
 
 ```bash
 Scripts/install-mcp.sh

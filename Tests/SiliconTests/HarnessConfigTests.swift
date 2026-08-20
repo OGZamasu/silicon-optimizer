@@ -206,6 +206,35 @@ struct HarnessConfigTests {
         // Single-quoted with the apostrophe doubled, per YAML.
         #expect(overlay.contains("name: '/Users/o''brien/Library/dsh/plugins/dsh-llm-silicon/lib/index.js'"))
         #expect(overlay.contains("baseURL: http://127.0.0.1:9414/v1"))
+        // Without a bridge on disk there is no tools row at all.
+        #expect(!overlay.contains("silicon-tools"))
+    }
+
+    /// The tools row rides the same insert list as the models row, so the harness's model
+    /// can call the app — images, 3D, video on the node — under mcp__silicon__* names.
+    @Test func overlayWiresTheToolBridgeWhenPresent() {
+        let overlay = HarnessRuntime.siliconOverlay(
+            pluginIndexPath: "/plugins/dsh-llm-silicon/lib/index.js",
+            gatewayPort: 9414,
+            mcpServerPath: "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp"
+        )
+        #expect(overlay.contains("id: silicon-tools"))
+        #expect(overlay.contains("name: '@deepseek-ai/dsh-mcp-client'"))
+        #expect(overlay.contains("serverName: silicon"))
+        #expect(overlay.contains(
+            "command: '/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp'"
+        ))
+        // A video render holds the tool call for up to ten minutes; the default 60s
+        // timeout would kill every clip.
+        #expect(overlay.contains("toolCallTimeoutMs: 1800000"))
+        // One insert list, two rows: both dashes sit at the same indentation.
+        let modelsIndent = overlay.range(of: "- id: silicon-models").map {
+            overlay[..<$0.lowerBound].reversed().prefix { $0 == " " }.count
+        }
+        let toolsIndent = overlay.range(of: "- id: silicon-tools").map {
+            overlay[..<$0.lowerBound].reversed().prefix { $0 == " " }.count
+        }
+        #expect(modelsIndent == toolsIndent)
     }
 
     @Test func pluginInstallCopiesOnceAndUpdatesOnChange() throws {

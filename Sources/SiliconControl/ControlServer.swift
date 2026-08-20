@@ -205,6 +205,12 @@ public actor ControlServer {
                 return try .encode(await host.nodeAdvertisement())
             case ("GET", "/mesh/models"):
                 return try .encode(await host.meshModels())
+            case ("GET", "/video/models"):
+                return try .encode(await host.videoModels())
+            case ("POST", "/video/generate"):
+                return try .encode(await host.generateVideo(
+                    try request.decode(ControlAPI.VideoGenerateRequest.self)
+                ))
             case ("POST", "/mesh/plan"):
                 return try .encode(await host.planMesh(
                     try request.decode(ControlAPI.MeshRequest.self)

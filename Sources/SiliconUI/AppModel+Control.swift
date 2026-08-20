@@ -357,6 +357,7 @@ public enum ControlHostError: Error, LocalizedError {
     case notInstalled(String)
     case noModelLoaded
     case loadFailed(String)
+    case badRequest(String)
 
     public var errorDescription: String? {
         switch self {
@@ -368,6 +369,8 @@ public enum ControlHostError: Error, LocalizedError {
             "No model is loaded. Use load_model first."
         case .loadFailed(let reason):
             "The model failed to load: \(reason)"
+        case .badRequest(let reason):
+            reason
         }
     }
 }
@@ -649,6 +652,107 @@ extension AppModel {
         }
         configuration.seed = request.seed
         return (entry, configuration)
+    }
+
+    // MARK: - Video
+
+    /// The video catalog, with the honest availability answer per entry: video has no
+    /// local backend, so "available" means a reachable swarm node advertises the
+    /// capability ready right now.
+    public func videoModels() async -> [ControlAPI.VideoModel] {
+        await refreshSwarmIfStale()
+        let node = videoCapableNode
+        return VideoCatalog.all.map { entry in
+            ControlAPI.VideoModel(
+                id: entry.id,
+                name: entry.name,
+                summary: entry.summary,
+                typicalDuration: entry.typicalDuration,
+                supportsImageInput: entry.supportsImageInput,
+                available: node != nil,
+                node: node?.name
+            )
+        }
+    }
+
+    /// Renders a clip on the video-capable node, exactly the way the Video tab does —
+    /// same runtime, same state, same Recent clips list — so a clip asked for in chat
+    /// appears in the app like any other.
+    public func generateVideo(
+        _ request: ControlAPI.VideoGenerateRequest
+    ) async throws -> ControlAPI.VideoResponse {
+        let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { throw ControlHostError.badRequest("The prompt is empty.") }
+        guard !isGeneratingVideo else {
+            throw ControlHostError.badRequest(
+                "A clip is already rendering; wait for it to finish."
+            )
+        }
+        await refreshSwarmIfStale()
+        guard let node = videoCapableNode,
+              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+        else {
+            throw ControlHostError.badRequest(
+                "No swarm node offers video right now — the node may be off or still "
+                + "setting video up."
+            )
+        }
+
+        let entryID = request.modelID ?? selectedVideoModel
+        guard VideoCatalog.entry(id: entryID) != nil else {
+            let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
+            throw ControlHostError.badRequest("Unknown video model \(entryID). Known: \(known)")
+        }
+
+        let videoRequest = VideoRequest(
+            entryID: entryID,
+            prompt: prompt,
+            image: request.imagePath.map { URL(fileURLWithPath: $0) },
+            seconds: max(1, min(10, request.seconds ?? videoSeconds)),
+            resolution: request.resolution ?? videoResolution,
+            outputDirectory: settings.resolvedVideoOutputDirectory
+        )
+
+        isGeneratingVideo = true
+        videoStage = "Starting"
+        videoProgress = nil
+        videoError = nil
+        noteActivity()
+        defer {
+            isGeneratingVideo = false
+            videoStage = nil
+            videoProgress = nil
+        }
+
+        let started = Date()
+        let token = swarmConfig?.effectiveToken
+        do {
+            let result = try await videoRuntime.generate(
+                videoRequest, node: base, token: token
+            ) { progress in
+                Task { @MainActor in
+                    self.videoStage = progress.line(fallback: "Rendering on the node")
+                    self.videoProgress = progress.fraction
+                }
+            }
+            videoResults.insert(result, at: 0)
+            return ControlAPI.VideoResponse(
+                file: result.file.path,
+                node: node.name,
+                model: entryID,
+                elapsedSeconds: Date().timeIntervalSince(started)
+            )
+        } catch {
+            videoError = error.localizedDescription
+            throw error
+        }
+    }
+
+    /// A swarm answer older than the poll interval is re-fetched before it backs a
+    /// claim like "no node offers video".
+    private func refreshSwarmIfStale() async {
+        let age = lastSwarmPoll.map { Date().timeIntervalSince($0) } ?? .infinity
+        if age > 20 { await refreshSwarm() }
     }
 
     /// The Mac's `/v1/node` advertisement — the frozen swarm shape. Capability figures

@@ -286,6 +286,36 @@ enum Tools {
             required: ["image_path"]
         ),
         Tool(
+            name: "list_video_models",
+            description: """
+                Video generation models and whether a swarm node can serve them right now. \
+                Video is the one capability with no local backend: clips render on a paired \
+                machine with an NVIDIA card, so "available" is a claim about the swarm, not \
+                this Mac.
+                """,
+            properties: [:], required: []
+        ),
+        Tool(
+            name: "generate_video",
+            description: """
+                Render a short video clip from a prompt on the swarm's video node and return \
+                the file path. Long-running: the fast model (ltx2-distilled) takes one to \
+                three minutes per clip, the cinematic one (wan22-ti2v-5b) around ten — call \
+                list_video_models first if unsure which is available. The finished clip also \
+                appears in the app's Video tab under Recent clips.
+                """,
+            properties: [
+                "prompt": property("string", "What happens in the clip."),
+                "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min) "
+                    + "or ltx2-distilled (fast, 1-3 min). Defaults to the app's selection."),
+                "seconds": property("number", "Clip length in seconds, 1-10. Default 5."),
+                "resolution": property("string", "e.g. 720p. Defaults to the app's setting."),
+                "image_path": property("string", "Optional still to animate (image-to-video): "
+                    + "absolute path, e.g. something from generate_image."),
+            ],
+            required: ["prompt"]
+        ),
+        Tool(
             name: "get_status",
             description: "What is loaded right now, at what settings, and its last measured speed.",
             properties: [:], required: []
@@ -467,6 +497,37 @@ enum Tools {
                 lines.append("\nWarning: \(warning)")
             }
             return lines.joined(separator: "\n")
+
+        case "list_video_models":
+            let models: [ControlAPI.VideoModel] = try await client.get("/video/models")
+            return models.map { model in
+                var line = "- \(model.name) [\(model.id)] — \(model.typicalDuration)"
+                if model.supportsImageInput { line += ", can animate a still image" }
+                line += model.available
+                    ? "\n  available now on \(model.node ?? "a node")"
+                    : "\n  NOT available — no reachable node offers video right now"
+                line += "\n  \(model.summary)"
+                return line
+            }.joined(separator: "\n")
+
+        case "generate_video":
+            guard let prompt = arguments["prompt"]?.stringValue else {
+                throw ToolError.missing("prompt")
+            }
+            let request = ControlAPI.VideoGenerateRequest(
+                prompt: prompt,
+                modelID: arguments["model_id"]?.stringValue,
+                seconds: arguments["seconds"]?.intValue,
+                resolution: arguments["resolution"]?.stringValue,
+                imagePath: arguments["image_path"]?.stringValue
+            )
+            let clip: ControlAPI.VideoResponse = try await client.post(
+                "/video/generate", request
+            )
+            return "Rendered on \(clip.node) with \(clip.model) in "
+                + String(format: "%.0fs", clip.elapsedSeconds)
+                + ".\n  file: \(clip.file)"
+                + "\nThe clip is also in the app's Video tab under Recent clips."
 
         case "run_benchmark":
             let result: ControlAPI.BenchmarkResult = try await client.postEmpty("/benchmark")
