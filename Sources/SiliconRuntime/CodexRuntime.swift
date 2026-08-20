@@ -92,6 +92,36 @@ extension JSONValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral,
     public init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
 }
 
+/// Accumulates pipe bytes and cuts complete lines. Locked because the readability
+/// handler's type is Sendable-annotated; in practice Foundation invokes it serially,
+/// and the lock makes that assumption unnecessary.
+private final class LineBuffer: @unchecked Sendable {
+    private var bytes: [UInt8] = []
+    private let lock = NSLock()
+
+    func append(_ data: Data) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes.append(contentsOf: data)
+        var lines: [String] = []
+        while let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) {
+            let line = String(decoding: bytes[0..<newline], as: UTF8.self)
+            bytes.removeSubrange(0...newline)
+            if !line.isEmpty { lines.append(line) }
+        }
+        return lines
+    }
+
+    func drainRemainder() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !bytes.isEmpty else { return nil }
+        let line = String(decoding: bytes, as: UTF8.self)
+        bytes.removeAll()
+        return line
+    }
+}
+
 /// What the app-server connection surfaces to the app.
 public enum CodexEvent: Sendable {
     /// A notification: streamed items, deltas, turn lifecycle, token counts.
@@ -311,21 +341,22 @@ public actor CodexRuntime {
             Task { await self?.handleTermination() }
         }
 
+        // Plain readabilityHandler reading, not FileHandle.bytes: AsyncBytes on these pipes
+        // stalled mid-stream in the app — reproducibly, the moment another child process
+        // (a model reload's llama-server) was spawned — while the same code ran fine in a
+        // test runner. Codex kept writing, the iterator never delivered another byte, and
+        // the chat hung on "Working…" forever. The callback reader has no such moods.
         readTask = Task { [weak self] in
-            do {
-                for try await line in stdout.fileHandleForReading.bytes.lines {
-                    await self?.handleLine(line)
-                }
-            } catch {
-                // Termination handling reports the exit; a broken pipe adds nothing.
+            Self.debugLog("-- read loop started")
+            for await line in Self.lines(from: stdout.fileHandleForReading) {
+                await self?.handleLine(line)
             }
+            Self.debugLog("-- read loop ended at EOF")
         }
         stderrTask = Task { [weak self] in
-            do {
-                for try await line in stderr.fileHandleForReading.bytes.lines {
-                    await self?.noteStderr(line)
-                }
-            } catch {}
+            for await line in Self.lines(from: stderr.fileHandleForReading) {
+                await self?.noteStderr(line)
+            }
         }
 
         // The handshake proves the binary is really up — npx may spend minutes
@@ -392,6 +423,33 @@ public actor CodexRuntime {
     private func noteStderr(_ line: String) {
         recentStderr.append(line)
         if recentStderr.count > 40 { recentStderr.removeFirst(recentStderr.count - 40) }
+    }
+
+    /// Newline-delimited UTF-8 lines from a pipe, via readabilityHandler. The handler is
+    /// invoked serially on Foundation's own queue; the buffer lives in the closure and is
+    /// touched nowhere else.
+    static func lines(from handle: FileHandle) -> AsyncStream<String> {
+        AsyncStream { continuation in
+            let buffer = LineBuffer()
+            handle.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    // EOF. A final unterminated line still counts.
+                    if let last = buffer.drainRemainder() {
+                        continuation.yield(last)
+                    }
+                    handle.readabilityHandler = nil
+                    continuation.finish()
+                    return
+                }
+                for line in buffer.append(data) {
+                    continuation.yield(line)
+                }
+            }
+            continuation.onTermination = { _ in
+                handle.readabilityHandler = nil
+            }
+        }
     }
 
     private func diagnosticSuffix() -> String {

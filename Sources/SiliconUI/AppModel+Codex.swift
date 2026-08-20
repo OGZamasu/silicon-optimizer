@@ -233,8 +233,16 @@ extension AppModel {
     public func answerCodexApproval(_ approval: CodexApproval, accept: Bool) {
         guard let runtime = codexRuntime else { return }
         codexApprovals.removeAll { $0.id == approval.id }
+        // The result is an object, not a bare string — the protocol schema's
+        // `{ decision: accept | acceptForSession | decline | cancel }`. A bare string
+        // deserializes as an error on Codex's side, which the model then narrates as a
+        // failed approval and retries.
         let decision = accept ? "accept" : "decline"
-        Task { await runtime.respond(id: approval.rpcID, result: .string(decision)) }
+        Task {
+            await runtime.respond(
+                id: approval.rpcID, result: .object(["decision": .string(decision)])
+            )
+        }
     }
 
     // MARK: - Event handling
