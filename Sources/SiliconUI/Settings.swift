@@ -206,6 +206,11 @@ public struct Settings: Codable, Sendable, Equatable {
     /// The tab the window was last on, so reopening lands where you left off.
     public var lastTab: String = ""
 
+    /// Which panels of the Video tab are open. Only the clip composer to begin with — the
+    /// rest of that tab is six panels of tools nobody needs all at once. Stored rather than
+    /// held in the view so switching tabs, or quitting, keeps the arrangement someone chose.
+    public var expandedVideoPanels: [String] = [VideoPanel.clip.rawValue]
+
     /// Port the live face camera serves its picture on. Fixed rather than ephemeral
     /// so an OBS source keeps working across restarts.
     public var faceCamPort: Int = 8791
@@ -344,6 +349,7 @@ public struct Settings: Codable, Sendable, Equatable {
         voiceOutputDirectory = value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
         videoOutputDirectory = value(.videoOutputDirectory, fallback.videoOutputDirectory)
         lastTab = value(.lastTab, fallback.lastTab)
+        expandedVideoPanels = value(.expandedVideoPanels, fallback.expandedVideoPanels)
         faceCamPort = value(.faceCamPort, fallback.faceCamPort)
         useSharpChatTemplate = value(.useSharpChatTemplate, fallback.useSharpChatTemplate)
         trackerPort = value(.trackerPort, fallback.trackerPort)

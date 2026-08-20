@@ -38,7 +38,11 @@ struct PersonaCards: View {
     // MARK: - Cast
 
     private var castCard: some View {
-        Card(title: "Characters", systemImage: "theatermasks") {
+        CollapsibleCard(
+            title: "Characters", systemImage: "theatermasks",
+            badge: model.selectedPersona?.name,
+            isExpanded: model.videoPanel(.cast)
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 if model.personas.isEmpty {
                     EmptyStateView(
@@ -125,7 +129,10 @@ struct PersonaCards: View {
     private var performCard: some View {
         @Bindable var model = model
         let persona = model.selectedPersona
-        return Card(title: "Perform", systemImage: "waveform.circle") {
+        return CollapsibleCard(
+            title: "Perform", systemImage: "waveform.circle",
+            isExpanded: model.videoPanel(.perform)
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 TextEditor(text: $model.personaLine)
                     .font(.body)
@@ -358,7 +365,10 @@ struct PersonaCards: View {
     // MARK: - Live
 
     private var liveCard: some View {
-        Card(title: "Live on stream", systemImage: "dot.radiowaves.left.and.right") {
+        CollapsibleCard(
+            title: "Live on stream", systemImage: "dot.radiowaves.left.and.right",
+            isExpanded: model.videoPanel(.live)
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Add a Browser Source in OBS pointed at this address. The "
                     + "character appears on a transparent background and their mouth "

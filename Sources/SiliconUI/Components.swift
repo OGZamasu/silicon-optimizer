@@ -59,6 +59,65 @@ struct Card<Content: View>: View {
     }
 }
 
+/// A `Card` that folds away.
+///
+/// The Video tab is six panels deep — characters, performance, stream, tracking, camera,
+/// clips — and all of them open at once is a wall to scroll past before reaching the one
+/// you came for. Folded, the tab is a list of what it can do; opened, it is the tool you
+/// picked. The header is the control, so the whole strip is a click target rather than a
+/// chevron you have to aim at.
+struct CollapsibleCard<Content: View>: View {
+    var title: String
+    var systemImage: String?
+    /// A word or two shown beside the title while folded — a state worth seeing without
+    /// opening the panel, like "live" or "3 characters".
+    var badge: String?
+    @Binding var isExpanded: Bool
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.snappy(duration: 0.22)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Label {
+                        Text(title).font(.headline)
+                    } icon: {
+                        if let systemImage { Image(systemName: systemImage) }
+                    }
+                    if let badge, !badge.isEmpty {
+                        Text(badge)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .foregroundStyle(.secondary)
+                // Without this the gaps between title and chevron are not part of the
+                // button, and clicking the obvious place — the empty middle — does nothing.
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityValue(isExpanded ? "expanded" : "collapsed")
+            .accessibilityAddTraits(.isButton)
+
+            if isExpanded { content }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background.secondary, in: .rect(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator.opacity(0.5), lineWidth: 0.5)
+        }
+    }
+}
+
 // MARK: - Readouts
 
 /// A labelled number. Monospaced digits keep the layout from jittering as values update once a

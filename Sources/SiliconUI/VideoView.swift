@@ -19,8 +19,8 @@ struct VideoView: View {
                 if proxy.size.width >= 900 {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(spacing: 16) {
-                            PersonaCards()
                             composerCard
+                            PersonaCards()
                         }
                         .frame(width: 400)
                         VStack(spacing: 16) {
@@ -31,8 +31,8 @@ struct VideoView: View {
                     .padding(20)
                 } else {
                     VStack(spacing: 16) {
-                        PersonaCards()
                         composerCard
+                        PersonaCards()
                         resultCard
                         recentsPane
                     }
@@ -46,7 +46,11 @@ struct VideoView: View {
             await model.refreshSwarm()
             refreshRecents()
         }
-        .onChange(of: model.videoResults.count) { refreshRecents() }
+        .onChange(of: model.videoResults.count) {
+            refreshRecents()
+            model.revealVideoPanel(.result)
+        }
+        .onChange(of: selectedClip) { model.revealVideoPanel(.result) }
     }
 
     private var selectedEntry: VideoEntry? {
@@ -64,7 +68,11 @@ struct VideoView: View {
 
     private var composerCard: some View {
         @Bindable var model = model
-        return Card(title: "Make a clip", systemImage: "film") {
+        return CollapsibleCard(
+            title: "Make a clip", systemImage: "film",
+            badge: model.videoCapableNode.map { "on \($0.name)" },
+            isExpanded: model.videoPanel(.clip)
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 nodeRow
 
@@ -247,7 +255,12 @@ struct VideoView: View {
     // MARK: - Result
 
     private var resultCard: some View {
-        Card(title: "Result", systemImage: "play.rectangle") {
+        CollapsibleCard(
+            title: "Result", systemImage: "play.rectangle",
+            badge: displayedClip?.lastPathComponent
+                .replacingOccurrences(of: "silicon-video-", with: ""),
+            isExpanded: model.videoPanel(.result)
+        ) {
             if let clip = displayedClip {
                 ClipPlayer(url: clip)
                     .frame(maxWidth: .infinity, minHeight: 320)

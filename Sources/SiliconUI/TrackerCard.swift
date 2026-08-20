@@ -9,7 +9,14 @@ struct TrackerCard: View {
 
     var body: some View {
         @Bindable var model = model
-        Card(title: "Motion tracking", systemImage: "figure.wave") {
+        // The badge is the reason to fold this at all: someone can see tracking is
+        // running without opening the panel that says so.
+        CollapsibleCard(
+            title: "Motion tracking", systemImage: "figure.wave",
+            badge: model.trackerIsRunning
+                ? String(format: "live · %.0f fps", model.trackerFPS) : nil,
+            isExpanded: model.videoPanel(.tracking)
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Reads your head position, blinks, mouth and eyebrows from the "
                     + "camera. Your character follows them instead of just reacting "

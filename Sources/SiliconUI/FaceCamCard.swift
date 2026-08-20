@@ -9,7 +9,12 @@ struct FaceCamCard: View {
 
     var body: some View {
         @Bindable var model = model
-        Card(title: "Face camera", systemImage: "video.badge.waveform") {
+        CollapsibleCard(
+            title: "Face camera", systemImage: "video.badge.waveform",
+            badge: model.faceCamIsLive
+                ? String(format: "live · %.0f fps", model.faceCamFPS) : nil,
+            isExpanded: model.videoPanel(.camera)
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Wear your character's face on camera. Your expressions drive it, "
                     + "so it looks around and reacts the way you do — and nothing "
