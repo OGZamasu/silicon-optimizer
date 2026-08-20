@@ -6,9 +6,6 @@ import WebKit
 /// embedded, with the app supplying the model underneath it.
 struct HarnessChatView: View {
     @Environment(AppModel.self) private var model
-    @State private var isHoveringCollapse = false
-
-    private var isExpanded: Bool { model.chatColumnVisibility == .detailOnly }
 
     var body: some View {
         Group {
@@ -58,9 +55,6 @@ struct HarnessChatView: View {
                     // The banner's claims about peers must be as fresh as the page.
                     await model.refreshSwarm()
                 }
-                .overlay(alignment: .topTrailing) {
-                    if isExpanded { collapseButton }
-                }
             case .starting(let stage):
                 startingView(stage: stage)
             case .idle:
@@ -71,27 +65,10 @@ struct HarnessChatView: View {
                 failureView(message: message)
             }
         }
-        // Expanded means the whole window: the toolbar goes away and the content extends up
-        // into the title bar area, leaving only the floating collapse button as the way back.
-        .toolbar(isExpanded ? .hidden : .automatic, for: .windowToolbar)
-        .ignoresSafeArea(edges: isExpanded ? .top : [])
+        .chatWindowExpansion(help: "Give the harness the whole window")
         .navigationTitle("Chat")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    model.chatColumnVisibility =
-                        model.chatColumnVisibility == .detailOnly ? .all : .detailOnly
-                } label: {
-                    Label(
-                        model.chatColumnVisibility == .detailOnly ? "Show Sidebar" : "Expand",
-                        systemImage: model.chatColumnVisibility == .detailOnly
-                            ? "arrow.down.right.and.arrow.up.left"
-                            : "arrow.up.left.and.arrow.down.right"
-                    )
-                }
-                .help(model.chatColumnVisibility == .detailOnly
-                    ? "Bring the sidebar back"
-                    : "Give the harness the whole window")
                 if case .ready(let endpoint) = model.harnessState {
                     Button {
                         NSWorkspace.shared.open(endpoint)
@@ -109,26 +86,6 @@ struct HarnessChatView: View {
             }
         }
         .task { model.startHarnessIfNeeded() }
-    }
-
-    /// The way back from full-window mode: a translucent button floating over the page, kept
-    /// faint until hovered so it does not sit visibly on top of the harness UI.
-    private var collapseButton: some View {
-        Button {
-            model.chatColumnVisibility = .all
-        } label: {
-            Image(systemName: "arrow.down.right.and.arrow.up.left")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(7)
-                .background(.black.opacity(0.55), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .opacity(isHoveringCollapse ? 1.0 : 0.3)
-        .animation(.easeOut(duration: 0.15), value: isHoveringCollapse)
-        .onHover { isHoveringCollapse = $0 }
-        .padding(10)
-        .help("Exit full window")
     }
 
     /// A loaded model whose context cannot hold the harness's preamble fails on the very

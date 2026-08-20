@@ -27,6 +27,7 @@ struct CodexChatView: View {
                 failureView(message: message)
             }
         }
+        .chatWindowExpansion(help: "Give Codex the whole window")
         .navigationTitle("Chat")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {

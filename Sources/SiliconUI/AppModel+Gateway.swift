@@ -60,7 +60,10 @@ extension AppModel: GatewayHost {
             let serving = loadedModel?.id == installed.id && runtimeState.isRunning
             models.append(GatewayAPI.Model(
                 id: GatewayAPI.modelID(local: installed.id),
-                displayName: "\(installed.name) (\(installed.quantization.rawValue))",
+                // An em dash, not parentheses: Qwen Code's picker drops a parenthetical
+                // suffix from the name, and two quantizations of one model then read as
+                // identical twins. The dash form displays whole in every engine.
+                displayName: "\(installed.name) — \(installed.quantization.rawValue)",
                 where_: "This Mac",
                 // A not-yet-loaded model advertises the context a gateway load will
                 // actually give it (the agent floor), not its training maximum — a

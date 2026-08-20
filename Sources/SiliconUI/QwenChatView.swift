@@ -24,6 +24,7 @@ struct QwenChatView: View {
                 failureView(message: message)
             }
         }
+        .chatWindowExpansion(help: "Give Qwen Code the whole window")
         .navigationTitle("Chat")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
