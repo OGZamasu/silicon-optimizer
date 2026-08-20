@@ -48,6 +48,8 @@ fetch web pages, search, read and edit files in a folder, and run commands (it a
 - **[Codex](https://github.com/openai/codex)** — OpenAI's open-source coding agent, running
   entirely on your own models. No OpenAI account; commands and file edits ask for your
   approval right in the app.
+- **[Qwen Code](https://github.com/QwenLM/qwen-code)** — the Qwen team's open-source
+  agent, embedded the same way. No Qwen account.
 - **Built-in** — plain chat, nothing else, if that's all you want.
 
 Both harnesses see every model you have: everything installed on the Mac *and* every model
