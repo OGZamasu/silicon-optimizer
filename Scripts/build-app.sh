@@ -7,6 +7,13 @@
 #
 # Usage:
 #   Scripts/build-app.sh [--release] [--sign "Developer ID Application: ..."] [--dmg]
+#                        [--install [DIR]]
+#
+# --install puts the finished bundle somewhere stable — ~/Applications by default — replacing
+# whatever was there. Without it the only copy lives in build/, which is gitignored and easy to
+# clean away, so anything pointing at it (a login item, the Dock, a second copy someone dragged
+# to /Applications months ago) drifts out of date silently. Installing every build to one place
+# is what keeps "the app" and "the build" the same thing.
 
 set -euo pipefail
 
@@ -15,12 +22,19 @@ cd "$(dirname "$0")/.."
 CONFIGURATION="debug"
 SIGN_IDENTITY=""
 MAKE_DMG=0
+INSTALL=0
+INSTALL_DIR="$HOME/Applications"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --release) CONFIGURATION="release"; shift ;;
         --sign) SIGN_IDENTITY="$2"; shift 2 ;;
         --dmg) MAKE_DMG=1; shift ;;
+        --install)
+            INSTALL=1
+            # The directory is optional, so only consume the next token if it is not a flag.
+            if [[ $# -gt 1 && "$2" != -* ]]; then INSTALL_DIR="$2"; shift 2; else shift; fi
+            ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -193,6 +207,33 @@ else
 fi
 
 echo "==> Built $BUNDLE"
+
+if [[ "$INSTALL" == "1" ]]; then
+    echo "==> Installing to $INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
+    DEST="$INSTALL_DIR/${APP_NAME}.app"
+    STAGE="$INSTALL_DIR/.${APP_NAME}.app.incoming"
+    PREVIOUS="$INSTALL_DIR/.${APP_NAME}.app.previous"
+
+    rm -rf "$STAGE" "$PREVIOUS"
+    # ditto rather than cp -R: it carries the code signature and extended attributes across
+    # intact, where a cp-ed bundle can fail its signature check and refuse to launch.
+    ditto "$BUNDLE" "$STAGE"
+
+    # Swap rather than overwrite in place. A running copy holds its files open through the
+    # rename, so replacing the app underneath a live process is safe, and a failure part-way
+    # through leaves the previous install whole instead of a half-written bundle.
+    [[ -e "$DEST" ]] && mv "$DEST" "$PREVIOUS"
+    mv "$STAGE" "$DEST"
+    rm -rf "$PREVIOUS"
+
+    # Tell Launch Services about it, so Spotlight and the Dock resolve this copy rather than
+    # some stale one they indexed earlier.
+    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$DEST" 2>/dev/null || true
+
+    echo "==> Installed $DEST"
+fi
 
 if [[ "$MAKE_DMG" == "1" ]]; then
     echo "==> Creating disk image"

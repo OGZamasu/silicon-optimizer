@@ -123,9 +123,12 @@ Or build it yourself:
 ```bash
 git clone https://github.com/OGZamasu/silicon-optimizer
 cd silicon-optimizer
-Scripts/build-app.sh --release
-cp -R "build/Silicon Optimizer.app" /Applications/
+Scripts/build-app.sh --release --install
 ```
+
+`--install` puts the app in `~/Applications` and replaces it there on every later build, so the
+copy you launch is always the one you just built. Pass a directory to put it somewhere else —
+`--install /Applications` needs the usual permission to write there.
 
 After that the app keeps itself updated. Updates are signed and checked, so a tampered one
 gets refused.
@@ -354,9 +357,10 @@ it fails.
 ## Development
 
 ```bash
-swift build           # build everything
-swift test            # run the suite
-Scripts/build-app.sh  # assemble Silicon Optimizer.app
+swift build                     # build everything
+swift test                      # run the suite
+Scripts/build-app.sh            # assemble Silicon Optimizer.app into build/
+Scripts/build-app.sh --install  # ...and replace the copy in ~/Applications
 ```
 
 The tests pin the planner to published benchmark numbers, so a regression in the memory
