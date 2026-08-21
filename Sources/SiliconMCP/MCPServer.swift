@@ -45,8 +45,8 @@ struct MCPServer {
                 ]),
             ])))
 
-        case "notifications/initialized", "notifications/cancelled":
-            break   // notifications carry no id and take no response
+        case let method where method.hasPrefix("notifications/"):
+            break   // notifications carry no id and take no response — any of them
 
         case "ping":
             emit(RPCResponse(id: request.id, result: .object([:])))
@@ -114,9 +114,21 @@ struct MCPServer {
 // MARK: - JSON-RPC types
 
 struct RPCRequest: Decodable {
-    var id: JSONValue = .null
+    var id: JSONValue
     var method: String
     var params: JSONValue?
+
+    private enum CodingKeys: String, CodingKey { case id, method, params }
+
+    // Synthesized decoding would demand an `id` key even with a default value,
+    // which made every id-less notification a "Parse error" on the wire —
+    // exactly the noise a strict client (Claude Desktop) logs at the user.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(JSONValue.self, forKey: .id) ?? .null
+        method = try container.decode(String.self, forKey: .method)
+        params = try container.decodeIfPresent(JSONValue.self, forKey: .params)
+    }
 }
 
 struct RPCResponse: Encodable {
