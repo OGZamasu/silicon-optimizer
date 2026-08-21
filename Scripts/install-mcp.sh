@@ -70,11 +70,16 @@ Claude Desktop
   Or re-run this script with --configure-claude to do it automatically.
 
 Claude Code
-  claude mcp add silicon-optimizer $TARGET
+  claude mcp add --scope user silicon-optimizer $TARGET
 
 ChatGPT
-  Settings -> Connectors -> Advanced -> Developer mode,
-  then add a local MCP server with command: $TARGET
+  The ChatGPT desktop app only accepts internet-hosted connectors, so there
+  is no local hook. ChatGPT plans include Codex, which connects fully:
+
+  codex mcp add silicon-optimizer -- $TARGET
+
+Or skip the terminal entirely: the app's Settings pane has a "Your other AIs"
+section with one-click Connect buttons for everything it finds.
 EOF
 fi
 

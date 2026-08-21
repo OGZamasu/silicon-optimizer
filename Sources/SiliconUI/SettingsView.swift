@@ -142,6 +142,38 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Your other AIs") {
+                if model.agentBridgeEnvironment == nil {
+                    Text(
+                        "This build has no bridge binary, so there's nothing to connect. "
+                        + "Builds made with Scripts/build-app.sh include it."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if model.agentBridgeRows.isEmpty {
+                    Text(
+                        "No other AI apps found on this Mac. This looks for Claude "
+                        + "Desktop, Claude Code, Codex and ChatGPT — install one and a "
+                        + "Connect button appears here."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(
+                        "Connect an AI you already use and it gets every tool in this "
+                        + "app — chat on your local models, images, 3D, voice, the swarm. "
+                        + "The heavy work runs here instead of spending your "
+                        + "subscription's tokens."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    ForEach(model.agentBridgeRows) { row in
+                        agentBridgeRow(row)
+                    }
+                }
+            }
+
             Section("Chat template") {
                 Toggle("Use the sharp template for Qwen", isOn: sharpTemplateBinding)
                 Text(
@@ -554,6 +586,63 @@ struct SettingsView: View {
         }
         .onChange(of: model.settings.chatEngineRaw) {
             model.chatEngineDidChange()
+        }
+        .task { model.refreshAgentBridges() }
+    }
+
+    /// One assistant found on this Mac: name, where it stands, and the one button.
+    @ViewBuilder
+    private func agentBridgeRow(_ row: AgentBridge.Row) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.client.displayName)
+                Text(agentBridgeCaption(for: row))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let note = model.agentBridgeNotes[row.client.id] {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer()
+            if model.agentBridgeBusy == row.client {
+                ProgressView().controlSize(.small)
+            } else {
+                switch row.status {
+                case .connected:
+                    Badge(text: "Connected", systemImage: "checkmark.circle.fill",
+                          tint: .green)
+                case .notConnected:
+                    Button("Connect") {
+                        Task { await model.connectAgentBridge(row.client) }
+                    }
+                case .outdated:
+                    Button("Update") {
+                        Task { await model.connectAgentBridge(row.client) }
+                    }
+                case .manualOnly:
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    private func agentBridgeCaption(for row: AgentBridge.Row) -> String {
+        if case .manualOnly(let reason) = row.status { return reason }
+        if case .outdated(let path) = row.status {
+            return "Connected, but pointing at an old copy of the bridge (\(path))."
+        }
+        switch row.client {
+        case .claudeDesktop:
+            return "The Claude app. One click adds this app's tools to every chat."
+        case .claudeCode:
+            return "Claude in the terminal. Connects for every project at once."
+        case .codex:
+            return "OpenAI's coding agent — included with ChatGPT plans."
+        case .chatGPTDesktop:
+            return "The ChatGPT app."
         }
     }
 

@@ -141,6 +141,12 @@ public final class AppModel {
     var piEventTask: Task<Void, Never>?
     var piStreamingItem: PiItem?
     var piThinkingItem: PiItem?
+
+    // Agent bridges: other AIs on this Mac and their connect state
+    // (see AppModel+AgentBridge)
+    public internal(set) var agentBridgeRows: [AgentBridge.Row] = []
+    public internal(set) var agentBridgeBusy: AgentBridge.Client?
+    public internal(set) var agentBridgeNotes: [String: String] = [:]
     var codexRuntime: CodexRuntime?
     /// The rendered conversation: agent prose, commands, file changes, tool calls.
     public internal(set) var codexItems: [CodexChatItem] = []

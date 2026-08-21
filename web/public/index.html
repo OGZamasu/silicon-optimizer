@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Silicon Optimizer — your own AI, on your own Mac</title>
-<meta name="description" content="A free Mac app that runs ChatGPT-style AI on your own computer. No subscription, no cloud, no one reading your chats — and it checks what your Mac can handle before you download anything.">
+<title>Silicon Optimizer — run AI like you own the place</title>
+<meta name="description" content="A free Mac app that turns Apple Silicon into your own AI: chat, images, voice, video, 3D — no meter, no cloud, no account. Connect Claude or ChatGPT and stop spending subscription tokens on the heavy work.">
 <link rel="icon" href="/favicon.png" type="image/png">
 <meta name="theme-color" content="#0B0E14">
 <meta property="og:title" content="Silicon Optimizer">
-<meta property="og:description" content="Your own AI, on your own Mac. Free, private, no subscription — and it knows what your Mac can handle before you download anything.">
+<meta property="og:description" content="Run AI like you own the place. Your Mac does the work — no meter, no cloud, no account. And your Claude or ChatGPT subscription stops burning tokens on the heavy stuff.">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -304,38 +304,6 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 section { padding: clamp(56px, 8vw, 96px) 0; border-top: 1px solid var(--rule); }
 .section-head { max-width: 62ch; margin-bottom: clamp(28px, 4vw, 44px); }
 
-/* --- Measurement tables ------------------------------------------------ */
-
-/* Every data block sits on the same card surface — nothing lies naked on the
-   grid, so table rules never blend into the die lines behind them. */
-.table-wrap {
-  overflow-x: auto; -webkit-overflow-scrolling: touch;
-  background: linear-gradient(180deg, var(--substrate-2), var(--substrate));
-  border: 1px solid var(--rule);
-  border-radius: 12px;
-  padding: 18px 22px 10px;
-}
-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13.5px; }
-caption {
-  text-align: left; color: var(--wafer-faint); font-size: 11.5px;
-  letter-spacing: 0.13em; text-transform: uppercase; padding-bottom: 12px;
-}
-th, td { text-align: right; padding: 11px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
-th:first-child, td:first-child { text-align: left; padding-left: 0; }
-th {
-  color: var(--wafer-faint); font-weight: 500; font-size: 11px;
-  letter-spacing: 0.1em; text-transform: uppercase;
-}
-td { color: var(--wafer-dim); transition: background-color 160ms ease; }
-tbody tr:hover td { background: rgba(201,207,218,.03); }
-td.p { color: var(--predict); }
-td.m { color: var(--measure); }
-td.subject { color: var(--wafer); }
-tbody tr:last-child td { border-bottom: none; }
-/* The summary row is the whole point of the table, so it is ruled off like one. */
-tbody tr.total td { border-top: 1px solid var(--rule-bright); padding-top: 14px; font-size: 15px; }
-tbody tr.total td.subject { color: var(--wafer); }
-
 /* --- The collapse ------------------------------------------------------ */
 
 .collapse { display: grid; gap: 18px; margin-top: 8px; }
@@ -414,24 +382,6 @@ tbody tr.total td.subject { color: var(--wafer); }
 .tools span { color: var(--wafer-dim); font-size: 15px; }
 @media (max-width: 560px) { .tools li { grid-template-columns: 1fr; } }
 
-/* --- Status ------------------------------------------------------------ */
-
-.status { padding: 0; }
-.status ul {
-  margin: clamp(28px, 4vw, 44px) 0 0; padding: 0; list-style: none;
-  display: grid; gap: 1px; background: var(--rule);
-  border: 1px solid var(--rule); border-radius: 12px; overflow: hidden;
-}
-.status li {
-  display: grid; grid-template-columns: 18px 1fr; gap: 12px;
-  background: var(--substrate); padding: 18px 22px;
-  color: var(--wafer-dim); font-size: 15px; line-height: 1.55;
-  transition: background-color 200ms ease;
-}
-.status li:hover { background: #0D1119; }
-.status li::before { content: "—"; color: var(--flag); font-family: var(--mono); }
-.status strong { color: var(--wafer); font-weight: 600; }
-
 /* --- Install ----------------------------------------------------------- */
 
 pre {
@@ -481,7 +431,7 @@ footer {
     <span class="wordmark">Silicon Optimizer</span>
     <span class="spacer"></span>
     <nav class="nav" aria-label="Sections">
-      <a href="#proof">Proof</a>
+      <a href="#save">Save tokens</a>
       <a href="#features">Features</a>
       <a href="#install">Install</a>
     </nav>
@@ -493,12 +443,13 @@ footer {
 
 <div class="shell">
   <div class="hero">
-    <p class="eyebrow reveal">A free Mac app</p>
-    <h1 class="reveal" style="--d:.06s">Your own AI, on your own Mac. <em>Free. Private. No subscription.</em></h1>
+    <p class="eyebrow reveal">A free app for Apple Silicon</p>
+    <h1 class="reveal" style="--d:.06s">Run AI like you <em>own the place.</em></h1>
     <p class="lede reveal" style="--d:.14s">
-      Chat, code, images, voice, video, 3D — all running on your Mac instead of someone's
-      cloud. No account, no monthly fee, nothing leaves your machine. And it checks what
-      your Mac can handle <em>before</em> you download anything.
+      Because you do. Chat, images, voice, video, 3D — running on your Mac, not somebody's
+      cloud. No account. No meter. No "come back in three hours." And before you download a
+      single model, the app checks what your Mac can really handle — so you get the good
+      stuff, not the guesswork.
     </p>
 
     <!-- Signature: the receipts. Predicted in indigo, measured in teal, everywhere. -->
@@ -516,7 +467,7 @@ footer {
     <div class="ledger reveal" style="--d:.3s">
       <div class="ledger-head">
         <strong>Receipts</strong>
-        <span>The app predicted what a big coding AI would need — before loading it. Then we measured.</span>
+        <span>We asked it to load a 30-billion-parameter coding model. It called its shot first.</span>
         <span>MacBook Pro · M3 Max</span>
       </div>
       <div class="ledger-body">
@@ -545,51 +496,40 @@ footer {
   </div>
 </div>
 
-<section id="proof">
+<section id="save">
   <div class="shell">
     <div class="section-head reveal">
-      <p class="eyebrow">Why trust it</p>
-      <h2>It doesn't guess. It does the math — and shows its work.</h2>
+      <p class="eyebrow">The subscription saver</p>
+      <h2>Keep Claude for the thinking. Your Mac does the sweating.</h2>
       <p class="lede">
-        Most tools guess how much memory an AI needs, and you find out they guessed wrong
-        after the download — when your Mac crawls. This one does the arithmetic first. Every
-        number below was predicted before loading, then checked against what really happened.
+        If you pay for Claude or ChatGPT, you know the feeling: halfway through something
+        good, and you've hit your limit. Connect your assistant to this app and it can hand
+        the heavy work — images, 3D, video, whole side-quests of chat — to the models on
+        your Mac. That work costs nothing, stays on your machine, and your subscription goes
+        back to what it's actually for: the hard thinking.
+      </p>
+      <p class="lede">
+        No config files, no docs to read. Open Settings and the app shows a Connect button
+        for every AI it finds on your Mac — Claude Desktop, Claude Code, Codex. One click each.
       </p>
     </div>
 
-    <div class="table-wrap reveal">
-      <table>
-        <caption>Memory — a big coding AI (Qwen3-Coder 30B)</caption>
-        <thead>
-          <tr><th>What</th><th>Predicted</th><th>Measured</th><th>Off by</th></tr>
-        </thead>
-        <tbody>
-          <tr><td class="subject">The AI model itself</td><td class="p">18.50 GB</td><td class="m">18.56 GB</td><td>0.3%</td></tr>
-          <tr><td class="subject">Its working memory</td><td class="p">1.81 GB</td><td class="m">1.68 GB</td><td>7.7%</td></tr>
-          <tr class="total"><td class="subject">Everything, loaded</td><td class="p">20.30 GB</td><td class="m">20.24 GB</td><td>0.31%</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <ul class="tools reveal">
+      <li><code>chat</code><span>Hand a whole conversation to your local model — costs nothing</span></li>
+      <li><code>generate_image</code><span>Pictures made on your Mac, not on your plan</span></li>
+      <li><code>generate_3d</code><span>A photo in, a spinning mesh out</span></li>
+      <li><code>generate_video</code><span>Real clips, rendered on your paired PC</span></li>
+      <li><code>recommend_model</code><span>"What should this Mac run?" — answered</span></li>
+      <li><code>load_model</code><span>Your assistant loads and unloads models itself</span></li>
+      <li><code>run_benchmark</code><span>Time this Mac once, get honest predictions after</span></li>
+      <li><code>get_status</code><span>What's loaded and what's busy, right now</span></li>
+    </ul>
 
-    <div class="table-wrap reveal" style="margin-top:40px">
-      <table>
-        <caption>Speed — same Mac (tokens per second; a token is about ¾ of a word)</caption>
-        <thead>
-          <tr><th>Model</th><th>Doing what</th><th>Predicted</th><th>Measured</th></tr>
-        </thead>
-        <tbody>
-          <tr><td class="subject">Qwen3-Coder 30B — big coding AI</td><td>writing</td><td class="p">89</td><td class="m">89</td></tr>
-          <tr><td class="subject">Qwen3-Coder 30B</td><td>reading</td><td class="p">896</td><td class="m">895</td></tr>
-          <tr><td class="subject">Qwen3 1.7B — small and fast</td><td>reading</td><td class="p">2344</td><td class="m">2374</td></tr>
-          <tr><td class="subject">Qwen2.5-VL 7B — understands images</td><td>writing</td><td class="p">39</td><td class="m">57</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div class="notes reveal" style="margin-top:28px">
+    <div class="notes reveal" style="margin-top:26px">
       <p>
-        That last row misses, which is why there's a built-in speed test. Run it once — about a
-        minute — and predictions for that model are tuned to your Mac instead of a spec sheet.
+        Twenty tools in all. ChatGPT's desktop app only takes internet-hosted connectors so
+        far — but every ChatGPT plan includes <a href="https://github.com/openai/codex">Codex</a>,
+        and Codex hooks straight in.
       </p>
     </div>
   </div>
@@ -620,13 +560,9 @@ footer {
 
     <div class="notes reveal" style="margin-top:30px">
       <p>
-        The trade-off is speed: disk is slower than memory, and long prompts feel it most. The
-        app tells you how much slower <em>before</em> you turn it on.
-      </p>
-      <p>
-        It needs a special build of the llama.cpp engine, which ships inside the app. Point the
-        app at your own engine and it checks first, then hides the option rather than failing
-        halfway.
+        The catch is speed — disk is slower than memory — and the app tells you exactly how
+        much slower <em>before</em> you flip it on. The special engine build it needs ships
+        inside the app.
       </p>
     </div>
   </div>
@@ -644,14 +580,14 @@ footer {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
         </div>
         <h3>Knows what your Mac can handle</h3>
-        <p>It reads your chip, memory and storage, then says what fits before you download. If something doesn't fit, it lists what to change and how much each change saves.</p>
+        <p>It reads your chip, memory and storage, and tells you what fits before you download 20 GB of disappointment. If a model doesn't fit, it lists what to change and what each change buys you.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
         <h3>Picks the AI for you</h3>
-        <p>One button ranks every model against your Mac and takes the strongest one that still runs fast. On a 36 GB Mac that's Qwen3.8 27B. Override it whenever you like.</p>
+        <p>One button ranks every model against your Mac and takes the strongest one that still feels quick. On a 36 GB Mac that's Qwen3.8 27B. Override it whenever you like.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
@@ -686,7 +622,7 @@ footer {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </div>
         <h3>Any model, not just a menu</h3>
-        <p>Search all of Hugging Face. The app reads a slice of any model's file and gives you a verdict before you download gigabytes.</p>
+        <p>Search all of Hugging Face from inside the app. It reads a slice of any model's file and gives you a verdict before you commit gigabytes.</p>
       </div>
       <div class="cell">
         <div class="cell-icon" aria-hidden="true">
@@ -734,56 +670,6 @@ footer {
   </div>
 </section>
 
-<section>
-  <div class="shell">
-    <div class="section-head reveal">
-      <p class="eyebrow">For power users</p>
-      <h2>Already use Claude or ChatGPT? Connect them.</h2>
-      <p class="lede">
-        Plug the app into Claude or ChatGPT and the assistant you already use can drive the AI
-        on your Mac — pick a model, load it, hand it the private work. The chat inside the app
-        gets the same twenty tools; these are the ones you'll notice.
-      </p>
-    </div>
-    <ul class="tools reveal">
-      <li><code>get_hardware_profile</code><span>What is this Mac, and what can it hold?</span></li>
-      <li><code>recommend_model</code><span>What should I run?</span></li>
-      <li><code>plan_memory</code><span>Will this fit — and what do I change if not?</span></li>
-      <li><code>install_model</code><span>Download it, after a disk-space check</span></li>
-      <li><code>load_model</code> <span>Load it into memory</span></li>
-      <li><code>chat</code><span>Ask the local AI — text or images</span></li>
-      <li><code>generate_image</code><span>Make a picture on this Mac</span></li>
-      <li><code>generate_3d</code><span>Turn a picture into a mesh</span></li>
-      <li><code>generate_video</code><span>Render a clip on your paired PC</span></li>
-      <li><code>run_benchmark</code><span>Time it here and tune future predictions</span></li>
-      <li><code>get_status</code><span>What's loaded and what's running right now</span></li>
-    </ul>
-  </div>
-</section>
-
-<section>
-  <div class="shell">
-    <div class="status">
-      <p class="eyebrow reveal">The fine print</p>
-      <h2 class="reveal">What's solid, and what's still rough.</h2>
-      <p class="lede reveal">
-        Every number on this page is measured, not marketing. Same deal here: what's still
-        rough, so you know where you stand.
-      </p>
-      <ul class="reveal">
-        <li><div><strong>Video clips need a second machine.</strong> Making a clip from a prompt runs on a paired Windows PC with an NVIDIA card. Everything else on this page — chat, images, voice, 3D, talking portraits — runs on the Mac alone.</div></li>
-        <li><div><strong>Voice, video and 3D download their own engines.</strong> Chat and images work out of the box. The first time you open one of the others, it fetches what it needs — a few gigabytes, once, and it tells you before it starts.</div></li>
-        <li><div><strong>Speed predictions start from one Mac.</strong> Tuned on an M3 Max; other chips use published specs until you run the built-in one-minute speed test, which tunes them to yours.</div></li>
-        <li><div><strong>macOS will complain once.</strong> The app isn't notarized by Apple yet, so the first launch needs one command to approve it (below). Building from source skips it.</div></li>
-        <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet. The build inside the app has it; point the app at your own engine and it checks, then hides the option if that build can't do it.</div></li>
-        <li><div><strong>MLX support is early.</strong> Apple's MLX engine works, but you point the app at a model folder yourself for now.</div></li>
-        <li><div><strong>Multi-part downloads are untested.</strong> Models split across several files are planned and checked correctly, but that download path hasn't been exercised yet.</div></li>
-        <li><div><strong>Swarm invites share one key for now.</strong> Letting a friend in hands their Mac the swarm's shared credential — kicking someone out later means rotating it. Individually revocable keys are already specced for the node.</div></li>
-      </ul>
-    </div>
-  </div>
-</section>
-
 <section id="install">
   <div class="shell">
     <div class="section-head reveal">
@@ -819,15 +705,21 @@ python3 -m venv ~/.silicon-mlx
       </div>
       <div class="reveal">
         <p class="step-label">5 · Optional: connect Claude or ChatGPT</p>
-<pre>Scripts/install-mcp.sh --configure-claude</pre>
+<pre><span class="c"># In the app: Settings → "Your other AIs" → Connect. That's the whole step.</span>
+<span class="c"># Prefer the terminal? Same result:</span>
+claude mcp add --scope user silicon-optimizer \
+  "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp"
+codex mcp add silicon-optimizer -- \
+  "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp"</pre>
       </div>
     </div>
     <div class="notes reveal" style="margin-top:26px">
       <p>
         Everything the chat needs ships inside the app — the llama.cpp engine and the Node.js
-        runtime are bundled, checksummed, and listed in the third-party licences file. If you
-        install your own copies the app finds those too, even inside a Python virtual
-        environment; Settings shows what it found and what each one can do.
+        runtime are bundled, checksummed, and listed in the third-party licences file. Voice,
+        video and 3D fetch their own engines the first time you open them, and tell you the
+        size before they start. If you install your own copies the app finds those too;
+        Settings shows what it found and what each one can do.
       </p>
     </div>
   </div>
@@ -835,8 +727,7 @@ python3 -m venv ~/.silicon-mlx
 
 <div class="shell">
   <footer>
-    <span><a href="https://github.com/OGZamasu/silicon-optimizer">github.com/OGZamasu/silicon-optimizer</a> · MIT</span>
-    <span>Measurements: llama.cpp b10280 · macOS 26.6 · M3 Max 38.7 GB</span>
+    <span><a href="https://github.com/OGZamasu/silicon-optimizer">github.com/OGZamasu/silicon-optimizer</a> · MIT · built by one person and a lot of silicon</span>
     <span class="spacer" style="flex:1"></span>
     <span>Models carry their own licences</span>
   </footer>

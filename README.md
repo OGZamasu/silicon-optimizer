@@ -149,16 +149,16 @@ more capable. Settings shows what it found.
 
 ## Use from Claude or ChatGPT
 
-The bundled `silicon-mcp` bridge lets a cloud assistant drive the model you already have
-loaded, instead of starting a second copy and doubling the memory cost. The same twenty
-tools are wired into the app's own chat: ask either harness to generate an image, turn it
-into a 3D mesh, or render a video clip on your paired PC, and it calls the app to do it.
+The bundled `silicon-mcp` bridge lets the assistant you already pay for drive the models on
+your Mac, instead of spending subscription tokens on work your own hardware does for free.
+The same twenty tools are wired into the app's own chat: ask for an image, a 3D mesh, or a
+video clip rendered on your paired PC, and the assistant calls this app to do it.
 
-```bash
-Scripts/install-mcp.sh
-```
+**The easy way:** open the app → Settings → **Your other AIs**. It detects Claude Desktop,
+Claude Code, Codex and ChatGPT on your Mac and shows a Connect button for each — one click
+writes the config, merging with whatever you already have there.
 
-That prints the exact config for your client. Or set it up by hand:
+By hand, the bridge lives inside the app bundle:
 
 **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
 
@@ -166,7 +166,7 @@ That prints the exact config for your client. Or set it up by hand:
 {
   "mcpServers": {
     "silicon-optimizer": {
-      "command": "/usr/local/bin/silicon-mcp"
+      "command": "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp"
     }
   }
 }
@@ -175,11 +175,21 @@ That prints the exact config for your client. Or set it up by hand:
 **Claude Code**
 
 ```bash
-claude mcp add silicon-optimizer /usr/local/bin/silicon-mcp
+claude mcp add --scope user silicon-optimizer \
+  "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp"
 ```
 
-**ChatGPT** — Settings → Connectors → Advanced → Developer mode, then add a local MCP server
-pointing at `/usr/local/bin/silicon-mcp`.
+**ChatGPT** — the desktop app only accepts internet-hosted connectors, so there is no local
+hook yet. But ChatGPT plans include [Codex](https://github.com/openai/codex), which
+connects fully:
+
+```bash
+codex mcp add silicon-optimizer -- \
+  "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp"
+```
+
+Building from source instead? `Scripts/install-mcp.sh` compiles the bridge, installs it to
+`/usr/local/bin`, and prints the same configs pointed there.
 
 ### What the assistant can do with it
 
