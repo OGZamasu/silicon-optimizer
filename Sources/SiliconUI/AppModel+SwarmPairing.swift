@@ -20,12 +20,11 @@ extension AppModel {
         }
         let config = SwarmConfig.ensureExists()
         guard config.effectiveToken != nil else {
-            return "The swarm config has no token to share. Delete swarm.json and "
+            return "The swarm config has no admin token. Delete swarm.json and "
                 + "reopen this sheet to regenerate it."
         }
         let server = PairingServer(
-            hostName: Host.current().localizedName ?? "This Mac",
-            release: config
+            hostName: Host.current().localizedName ?? "This Mac"
         )
         Task { [weak self] in
             do {
@@ -45,6 +44,7 @@ extension AppModel {
         pairingAddress = address
         pairingRequest = nil
         pairingDelivered = false
+        pairingLegacyShared = []
         startPairingPoll()
         return nil
     }
@@ -59,9 +59,150 @@ extension AppModel {
         Task { await server?.stop() }
     }
 
+    /// Approval mints the joiner their OWN credential on every node that can issue one
+    /// (per-client tokens, node work order #125) and delivers a config carrying those —
+    /// never the shared admin token, unless a legacy node leaves no choice. The nodes'
+    /// activity logs then name the member on every job, and one member can be revoked
+    /// without rotating everyone.
     func approvePairing(_ id: String) {
-        guard let server = pairingServer else { return }
-        Task { await server.approve(id) }
+        guard let server = pairingServer,
+              let joinerName = pairingRequest?.name,
+              let config = SwarmConfig.load()
+        else { return }
+        Task {
+            var released = SwarmConfig(swarmToken: nil, peers: [])
+            var legacyShared: [String] = []
+            for peer in config.peers {
+                if let minted = await self.mintClientToken(
+                    on: peer, clientName: joinerName, admin: config.effectiveToken
+                ) {
+                    released.peers.append(SwarmPeer(
+                        name: peer.name, baseURL: peer.baseURL, token: minted
+                    ))
+                } else {
+                    // A node without the client-token API (pre-#125) can only be
+                    // shared the old way. Named in the sheet so the owner knows.
+                    released.peers.append(SwarmPeer(
+                        name: peer.name, baseURL: peer.baseURL, token: config.effectiveToken
+                    ))
+                    legacyShared.append(peer.name)
+                }
+            }
+            self.pairingLegacyShared = legacyShared
+            await server.approve(id, releasing: released)
+        }
+    }
+
+    /// Mints a per-client token on one node using the admin credential. Returns nil
+    /// when the node cannot (missing endpoint, unreachable) — the caller decides the
+    /// fallback. A 409 means the name already has a token there; since only admins
+    /// reach this path, replace it (revoke, re-mint) so pairing the same machine
+    /// twice heals rather than fails.
+    func mintClientToken(
+        on peer: SwarmPeer, clientName: String, admin: String?
+    ) async -> String? {
+        guard let admin else { return nil }
+        func attempt() async -> (Int, String?) {
+            guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+            else { return (0, nil) }
+            var request = URLRequest(url: base.appendingPathComponent("swarm/clients"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 15
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(admin)", forHTTPHeaderField: "Authorization")
+            request.httpBody = try? JSONSerialization.data(
+                withJSONObject: ["name": clientName]
+            )
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else { return (0, nil) }
+            let token = (try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any])?["token"] as? String
+            return (http.statusCode, token)
+        }
+
+        let (status, token) = await attempt()
+        if (200..<300).contains(status), let token { return token }
+        if status == 409 {
+            _ = await revokeClientToken(on: peer, clientName: clientName, admin: admin)
+            let (retryStatus, retryToken) = await attempt()
+            if (200..<300).contains(retryStatus) { return retryToken }
+        }
+        return nil
+    }
+
+    @discardableResult
+    func revokeClientToken(
+        on peer: SwarmPeer, clientName: String, admin: String?
+    ) async -> Bool {
+        guard let admin,
+              let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
+              let encoded = clientName.addingPercentEncoding(
+                withAllowedCharacters: .urlPathAllowed
+              )
+        else { return false }
+        var request = URLRequest(
+            url: base.appendingPathComponent("swarm/clients").appendingPathComponent(encoded)
+        )
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(admin)", forHTTPHeaderField: "Authorization")
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200..<300).contains(http.statusCode)
+    }
+
+    /// The members a node knows (names and timestamps only — tokens never travel).
+    func listPeerClients(_ peer: PeerStatus) async -> [PeerClientInfo] {
+        guard let admin = swarmConfig?.effectiveToken,
+              let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+        else { return [] }
+        var request = URLRequest(url: base.appendingPathComponent("swarm/clients"))
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(admin)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return list.compactMap { entry in
+            guard let name = entry["name"] as? String else { return nil }
+            return PeerClientInfo(
+                name: name,
+                created: entry["created"] as? String,
+                lastSeen: entry["last_seen"] as? String
+            )
+        }
+    }
+
+    struct PeerClientInfo: Identifiable, Sendable, Equatable {
+        var name: String
+        var created: String?
+        var lastSeen: String?
+        var id: String { name }
+    }
+
+    /// Gives THIS Mac its own per-client identity on every node that can mint one, so
+    /// node activity logs attribute our jobs by name instead of "swarm (shared token)".
+    /// Runs after swarm refreshes, once per peer per app run; legacy nodes are skipped
+    /// silently and keep receiving the shared token.
+    func ensureOwnClientTokens() async {
+        guard var config = SwarmConfig.load(), let admin = config.effectiveToken
+        else { return }
+        let ourName = Host.current().localizedName ?? "This Mac"
+        var changed = false
+        for peer in config.peers {
+            guard peer.token == nil,
+                  !clientTokenAttempted.contains(peer.name),
+                  swarmPeers.first(where: { $0.name == peer.name })?.reachable == true
+            else { continue }
+            clientTokenAttempted.insert(peer.name)
+            if let minted = await mintClientToken(
+                on: peer, clientName: ourName, admin: admin
+            ) {
+                config.setToken(minted, forPeer: peer.name)
+                changed = true
+            }
+        }
+        if changed { config.save() }
     }
 
     func denyPairing(_ id: String) {

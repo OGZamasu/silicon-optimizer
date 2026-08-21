@@ -167,17 +167,18 @@ public actor PairingServer {
     private struct Slot {
         var request: PendingPairing
         var state: RequestState
+        /// Built at approval time — per-request, because each member gets their own
+        /// freshly minted credentials, never a stored blob.
+        var payload: SwarmConfig?
     }
 
     private let hostName: String
-    private let release: SwarmConfig
     private var listener: NWListener?
     private var slot: Slot?
     private let requestLifetime: TimeInterval
 
-    public init(hostName: String, release: SwarmConfig, requestLifetime: TimeInterval = 300) {
+    public init(hostName: String, requestLifetime: TimeInterval = 300) {
         self.hostName = hostName
-        self.release = release
         self.requestLifetime = requestLifetime
     }
 
@@ -213,9 +214,11 @@ public actor PairingServer {
         return slot.request
     }
 
-    public func approve(_ id: String) {
+    /// Approves one request, attaching exactly what this member receives.
+    public func approve(_ id: String, releasing payload: SwarmConfig) {
         guard var slot, slot.request.id == id, slot.state == .pending else { return }
         slot.state = .approved
+        slot.payload = payload
         self.slot = slot
     }
 
@@ -276,9 +279,11 @@ public actor PairingServer {
                     ?? HTTPResponse.error(500, "encode")
             case .approved:
                 // The one moment the credentials cross the wire — then the slot burns.
+                let payload = slot.payload
                 self.slot?.state = .delivered
+                self.slot?.payload = nil
                 return (try? HTTPResponse.encode(
-                    PairingStatus(state: "approved", swarm: release)
+                    PairingStatus(state: "approved", swarm: payload)
                 )) ?? HTTPResponse.error(500, "encode")
             case .denied:
                 self.slot = nil

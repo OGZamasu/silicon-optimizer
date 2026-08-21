@@ -105,6 +105,11 @@ public final class AppModel {
     /// Start, never by auto-starting the model (picking a size is a preference, not a
     /// launch command).
     var pendingNodeContext: [String: Int] = [:]
+    /// Peers that could not mint the last approved member their own token, so the
+    /// shared credential went out instead — named in the invite sheet.
+    var pairingLegacyShared: [String] = []
+    /// Peers already asked for this Mac's own client token this run.
+    var clientTokenAttempted: Set<String> = []
     /// Resolved once per session from the persisted choice, like the harness ports.
     var resolvedGatewayPort: Int?
     /// Gateway-triggered local loads run one at a time through here.
@@ -934,13 +939,16 @@ public final class AppModel {
 
         var statuses: [PeerStatus] = []
         for peer in config.peers {
-            statuses.append(await Self.poll(peer: peer, token: config.effectiveToken))
+            statuses.append(await Self.poll(peer: peer, token: config.bearer(forPeer: peer.name)))
         }
         swarmPeers = statuses.sorted {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
         lastSwarmPoll = Date()
         syncSwarmChatProviders()
+        // Give this Mac its own per-client identity wherever a node can mint one, so
+        // node activity logs name us instead of "swarm (shared token)".
+        await ensureOwnClientTokens()
     }
 
     private nonisolated static func poll(peer: SwarmPeer, token: String?) async -> PeerStatus {
@@ -1064,7 +1072,7 @@ public final class AppModel {
         )
         request.httpMethod = "POST"
         request.timeoutInterval = 30
-        if let token = swarmConfig?.effectiveToken {
+        if let token = swarmConfig?.bearer(forPeer: peer.name) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         if model != nil || contextLength != nil {
@@ -1100,7 +1108,7 @@ public final class AppModel {
         )
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
-        if let token = swarmConfig?.effectiveToken {
+        if let token = swarmConfig?.bearer(forPeer: peer.name) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         guard let (_, response) = try? await URLSession.shared.data(for: request),
@@ -1138,7 +1146,7 @@ public final class AppModel {
         if let enabled { payload["enabled"] = enabled }
         if let settings { payload["settings"] = settings }
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-        if let token = swarmConfig?.effectiveToken {
+        if let token = swarmConfig?.bearer(forPeer: peer.name) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         guard let (_, response) = try? await URLSession.shared.data(for: request),
@@ -1173,7 +1181,7 @@ public final class AppModel {
         request.httpBody = try? JSONSerialization.data(
             withJSONObject: ["scope": "pending"]
         )
-        if let token = swarmConfig?.effectiveToken {
+        if let token = swarmConfig?.bearer(forPeer: peer.name) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
@@ -2098,7 +2106,7 @@ public final class AppModel {
             resolution: videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory
         )
-        let token = swarmConfig?.effectiveToken
+        let token = swarmConfig?.bearer(forPeer: node.name)
         Task {
             defer {
                 isGeneratingVideo = false

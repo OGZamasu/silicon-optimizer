@@ -80,13 +80,27 @@ struct SwarmInviteSheet: View {
     }
 
     private var delivered: some View {
-        Label(
-            "They're in — the swarm config is on their Mac and its nodes should "
-            + "appear for them within a few seconds.",
-            systemImage: "checkmark.circle.fill"
-        )
-        .foregroundStyle(.green)
-        .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 8) {
+            Label(
+                "They're in — with their own key, minted per node. Their jobs show "
+                + "under their name in each machine's activity, and you can revoke "
+                + "just them from a node's Members list.",
+                systemImage: "checkmark.circle.fill"
+            )
+            .foregroundStyle(.green)
+            .fixedSize(horizontal: false, vertical: true)
+            if !model.pairingLegacyShared.isEmpty {
+                Label(
+                    "\(model.pairingLegacyShared.joined(separator: ", ")) couldn't mint "
+                    + "an individual key (node update #125 not installed there), so they "
+                    + "received the shared key for that machine.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 

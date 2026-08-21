@@ -322,6 +322,7 @@ struct SwarmView: View {
                     title: "Offered by \(peer.name)",
                     rows: peer.llm.map { peerModelRows(peer, llm: $0) } ?? []
                 )
+                PeerMembersList(peer: peer)
                 inFlightLine(forIDPrefix: "node/\(GatewayAPI.peerSlug(peer.name))/")
                 if let latency = peer.latency {
                     Text(String(format: "answers in %.0f ms", latency * 1000))
@@ -874,6 +875,79 @@ private struct CardFootnotes<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) { content }
+    }
+}
+
+/// Who holds a key to this node — named members with individual revocation, the
+/// payoff of per-client tokens. Loads on first expand; empty on nodes that predate
+/// the client API.
+private struct PeerMembersList: View {
+    @Environment(AppModel.self) private var model
+    var peer: AppModel.PeerStatus
+
+    @State private var members: [AppModel.PeerClientInfo] = []
+    @State private var loaded = false
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 3) {
+                if !loaded {
+                    ProgressView().controlSize(.small)
+                } else if members.isEmpty {
+                    Text("No individual members — or this node predates the "
+                         + "member API (update #125).")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(members) { member in
+                        HStack(spacing: 6) {
+                            Image(systemName: "person.crop.circle")
+                                .imageScale(.small)
+                                .foregroundStyle(.secondary)
+                            Text(member.name)
+                                .font(.caption)
+                            if let seen = member.lastSeen {
+                                Text("seen \(seen)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Button {
+                                Task {
+                                    guard let entry = model.swarmConfig?.peers
+                                        .first(where: { $0.name == peer.name })
+                                    else { return }
+                                    await model.revokeClientToken(
+                                        on: entry, clientName: member.name,
+                                        admin: model.swarmConfig?.effectiveToken
+                                    )
+                                    members = await model.listPeerClients(peer)
+                                }
+                            } label: {
+                                Image(systemName: "person.crop.circle.badge.xmark")
+                                    .imageScale(.small)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.red.opacity(0.8))
+                            .help("Revoke \(member.name)'s key to \(peer.name) — "
+                                  + "immediate, and only them")
+                        }
+                    }
+                }
+            }
+            .padding(.top, 2)
+            .task(id: expanded) {
+                guard expanded, !loaded else { return }
+                members = await model.listPeerClients(peer)
+                loaded = true
+            }
+        } label: {
+            Text("Members")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

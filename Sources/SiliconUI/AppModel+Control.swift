@@ -725,7 +725,7 @@ extension AppModel {
         }
 
         let started = Date()
-        let token = swarmConfig?.effectiveToken
+        let token = swarmConfig?.bearer(forPeer: node.name)
         do {
             let result = try await videoRuntime.generate(
                 videoRequest, node: base, token: token

@@ -107,7 +107,7 @@ extension AppModel {
         personaError = nil
         noteActivity()
 
-        let token = swarmConfig?.effectiveToken
+        let token = swarmConfig?.bearer(forPeer: node.name)
         let destination = settings.resolvedVideoOutputDirectory
             .appendingPathComponent("Photoreal", isDirectory: true)
         let name = persona.name

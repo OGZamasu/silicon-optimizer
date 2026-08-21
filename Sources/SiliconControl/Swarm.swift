@@ -10,17 +10,24 @@ import Foundation
 public struct SwarmPeer: Codable, Sendable, Identifiable, Hashable {
     public var name: String
     public var baseURL: String
+    /// This machine's own credential for that peer (a per-client token minted by the
+    /// peer's admin). Nil falls back to the shared swarm token. Per-client tokens are
+    /// what let a node's activity log say *which* machine asked — and let one member
+    /// be revoked without rotating everyone.
+    public var token: String?
 
     public var id: String { name }
 
     enum CodingKeys: String, CodingKey {
         case name
         case baseURL = "base_url"
+        case token
     }
 
-    public init(name: String, baseURL: String) {
+    public init(name: String, baseURL: String, token: String? = nil) {
         self.name = name
         self.baseURL = baseURL
+        self.token = token
     }
 }
 
@@ -49,6 +56,24 @@ public struct SwarmConfig: Codable, Sendable, Equatable {
         guard let token = swarmToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !token.isEmpty else { return nil }
         return token
+    }
+
+    /// The credential to present to one peer: its per-client token when this machine
+    /// holds one, else the shared swarm token. Admin operations (minting and revoking
+    /// client tokens) must keep using `effectiveToken` directly — a client token can
+    /// never administer.
+    public func bearer(forPeer name: String) -> String? {
+        if let token = peers.first(where: { $0.name == name })?.token?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            return token
+        }
+        return effectiveToken
+    }
+
+    /// Records a freshly minted per-client token for one peer.
+    public mutating func setToken(_ token: String?, forPeer name: String) {
+        guard let index = peers.firstIndex(where: { $0.name == name }) else { return }
+        peers[index].token = token
     }
 
     public static var configURL: URL {

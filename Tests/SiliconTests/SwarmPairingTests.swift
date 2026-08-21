@@ -79,10 +79,11 @@ struct SwarmPairingFlowTests {
     @Test("hello, knock, code, approve, deliver once")
     func approvedFlow() async throws {
         let release = SwarmConfig(
-            swarmToken: "tok-123",
-            peers: [SwarmPeer(name: "silicon-node", baseURL: "http://100.118.191.121:8790")]
+            swarmToken: nil,
+            peers: [SwarmPeer(name: "silicon-node", baseURL: "http://100.118.191.121:8790",
+                              token: "client-tok-abc")]
         )
-        let server = PairingServer(hostName: "Owner Mac", release: release)
+        let server = PairingServer(hostName: "Owner Mac")
         let port = freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
@@ -115,13 +116,14 @@ struct SwarmPairingFlowTests {
         )
         #expect(waiting.state == "pending")
 
-        await server.approve(receipt.requestID)
+        await server.approve(receipt.requestID, releasing: release)
         let approved = try await PairingClient.status(
             host: "127.0.0.1", requestID: receipt.requestID, port: port
         )
         #expect(approved.state == "approved")
-        #expect(approved.swarm?.effectiveToken == "tok-123")
+        #expect(approved.swarm?.effectiveToken == nil)
         #expect(approved.swarm?.peers.first?.name == "silicon-node")
+        #expect(approved.swarm?.peers.first?.token == "client-tok-abc")
 
         // The credentials cross the wire exactly once.
         let again = try await PairingClient.status(
@@ -134,9 +136,7 @@ struct SwarmPairingFlowTests {
 
     @Test("a denied knock stays denied and frees the door")
     func deniedFlow() async throws {
-        let server = PairingServer(
-            hostName: "Owner", release: SwarmConfig(swarmToken: "t", peers: [])
-        )
+        let server = PairingServer(hostName: "Owner")
         let port = freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
@@ -159,10 +159,7 @@ struct SwarmPairingFlowTests {
 
     @Test("stale requests expire on their own")
     func expiry() async throws {
-        let server = PairingServer(
-            hostName: "Owner", release: SwarmConfig(swarmToken: "t", peers: []),
-            requestLifetime: 0.2
-        )
+        let server = PairingServer(hostName: "Owner", requestLifetime: 0.2)
         let port = freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
@@ -175,5 +172,54 @@ struct SwarmPairingFlowTests {
         #expect(await server.pending() == nil)
         let hello = await PairingClient.hello(host: "127.0.0.1", port: port)
         #expect(hello?.accepting == true)
+    }
+}
+@Suite("Per-peer bearer resolution")
+struct SwarmBearerTests {
+
+    @Test("client token wins for its peer; shared covers the rest; admin ops stay shared")
+    func bearerResolution() {
+        var config = SwarmConfig(
+            swarmToken: "admin-secret",
+            peers: [
+                SwarmPeer(name: "silicon-node", baseURL: "http://n:1", token: "client-a"),
+                SwarmPeer(name: "old-node", baseURL: "http://o:1"),
+            ]
+        )
+        #expect(config.bearer(forPeer: "silicon-node") == "client-a")
+        #expect(config.bearer(forPeer: "old-node") == "admin-secret")
+        #expect(config.bearer(forPeer: "unknown") == "admin-secret")
+        #expect(config.effectiveToken == "admin-secret")
+
+        config.setToken("client-b", forPeer: "old-node")
+        #expect(config.bearer(forPeer: "old-node") == "client-b")
+        config.setToken(nil, forPeer: "old-node")
+        #expect(config.bearer(forPeer: "old-node") == "admin-secret")
+    }
+
+    @Test("a joiner keeps their own admin token and adopts per-peer client tokens")
+    func joinerAdoptionWithClientTokens() {
+        let mine = SwarmConfig(swarmToken: "my-own-admin", peers: [])
+        let received = SwarmConfig(
+            swarmToken: nil,
+            peers: [SwarmPeer(name: "silicon-node", baseURL: "http://n:1",
+                              token: "minted-for-me")]
+        )
+        let merged = mine.adopting(received)
+        #expect(merged.swarmToken == "my-own-admin")
+        #expect(merged.bearer(forPeer: "silicon-node") == "minted-for-me")
+    }
+
+    @Test("per-peer tokens survive the config round-trip")
+    func tokenCodable() throws {
+        let config = SwarmConfig(
+            swarmToken: "s",
+            peers: [SwarmPeer(name: "n", baseURL: "http://n:1", token: "t-1")]
+        )
+        let data = try JSONEncoder().encode(config)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"token\":\"t-1\""))
+        let back = try JSONDecoder().decode(SwarmConfig.self, from: data)
+        #expect(back.peers.first?.token == "t-1")
     }
 }
