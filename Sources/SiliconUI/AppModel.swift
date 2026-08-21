@@ -100,6 +100,11 @@ public final class AppModel {
     var pairingPollTask: Task<Void, Never>?
     /// The code shown on the joiner's screen while awaiting the owner's decision.
     var joinCode: String?
+
+    /// Context sizes chosen for stopped node models — applied on the next explicit
+    /// Start, never by auto-starting the model (picking a size is a preference, not a
+    /// launch command).
+    var pendingNodeContext: [String: Int] = [:]
     /// Resolved once per session from the persisted choice, like the harness ports.
     var resolvedGatewayPort: Int?
     /// Gateway-triggered local loads run one at a time through here.
@@ -808,6 +813,22 @@ public final class AppModel {
         public var peakGB: Double?
         public var typicalSeconds: Double?
         public var detail: String?
+        /// Fields below arrive once a node ships hub #129; absent means "not reported",
+        /// never "off".
+        public var description: String?
+        public var enabled: Bool?
+        public var settings: [String: String] = [:]
+    }
+
+    /// One GPU job on a peer, as its queue reports it (hub #128). `running` jobs carry
+    /// progress when the node knows it.
+    public struct PeerJob: Identifiable, Sendable {
+        public var id: String
+        public var kind: String
+        public var running: Bool
+        public var progress: Double?
+        public var startedAt: Date?
+        public var submittedBy: String?
     }
 
     /// A peer's chat model as `GET /v1/llm` reports it — the remote twin of this Mac's
@@ -847,6 +868,11 @@ public final class AppModel {
         public var latency: TimeInterval?
         public var llm: PeerLLM?
         public var error: String?
+        /// What the GPU is busy with, when the node says (hub #128): "job:<kind>",
+        /// "llm", "external", or nil for unreported.
+        public var gpuConsumer: String?
+        public var runningJob: PeerJob?
+        public var pendingJobs: [PeerJob] = []
 
         public var readyCapabilities: [String] {
             capabilities.filter(\.ready).map(\.id)
@@ -1063,6 +1089,74 @@ public final class AppModel {
         await refreshSwarm()
     }
 
+    /// Cancels one queued GPU job on a peer (hub #128's per-job endpoint). A node
+    /// without it answers 404, which is translated to that exact explanation.
+    public func cancelPeerJob(_ peer: PeerStatus, jobID: String) async {
+        guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
+              let encoded = jobID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        else { return }
+        var request = URLRequest(
+            url: base.appendingPathComponent("v1/queue").appendingPathComponent(encoded)
+        )
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 30
+        if let token = swarmConfig?.effectiveToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            peerLLMError = "\(peer.name) didn't answer."
+            return
+        }
+        switch http.statusCode {
+        case 200..<300:
+            await refreshSwarm()
+        case 404:
+            peerLLMError = "\(peer.name) can't cancel single jobs yet — that arrives "
+                + "with node update #128."
+        default:
+            peerLLMError = "\(peer.name) answered \(http.statusCode)."
+        }
+    }
+
+    /// Configures one of a peer's abilities — enable/disable or settings (hub #129).
+    public func configurePeerCapability(
+        _ peer: PeerStatus, id: String, enabled: Bool? = nil,
+        settings: [String: String]? = nil
+    ) async {
+        guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
+              let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        else { return }
+        var request = URLRequest(
+            url: base.appendingPathComponent("v1/capabilities")
+                .appendingPathComponent(encoded)
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = [:]
+        if let enabled { payload["enabled"] = enabled }
+        if let settings { payload["settings"] = settings }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        if let token = swarmConfig?.effectiveToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            peerLLMError = "\(peer.name) didn't answer."
+            return
+        }
+        switch http.statusCode {
+        case 200..<300:
+            await refreshSwarm()
+        case 404:
+            peerLLMError = "\(peer.name) can't configure abilities yet — that arrives "
+                + "with node update #129."
+        default:
+            peerLLMError = "\(peer.name) answered \(http.statusCode)."
+        }
+    }
+
     /// Asks a peer to drop its pending GPU jobs — the Swarm page's "Cancel Queue".
     /// The endpoint is new on the node side (hub request #126); until a node ships it,
     /// the 404 is translated into that exact explanation instead of a bare number.
@@ -1134,16 +1228,49 @@ public final class AppModel {
         if let capabilities = json["capabilities"] as? [[String: Any]] {
             status.capabilities = capabilities.compactMap { entry in
                 guard let id = entry["id"] as? String else { return nil }
+                var settings: [String: String] = [:]
+                for (key, value) in entry["settings"] as? [String: Any] ?? [:] {
+                    settings[key] = (value as? String) ?? number(value).map {
+                        $0 == $0.rounded() ? String(Int($0)) : String($0)
+                    } ?? String(describing: value)
+                }
                 return PeerCapability(
                     id: id,
                     kind: entry["kind"] as? String ?? "",
                     ready: entry["ready"] as? Bool ?? false,
                     peakGB: number(entry["peak_gb"]) ?? number(entry["peak_vram_gb"]),
                     typicalSeconds: number(entry["typical_seconds"]),
-                    detail: entry["detail"] as? String
+                    detail: entry["detail"] as? String,
+                    description: entry["description"] as? String,
+                    enabled: entry["enabled"] as? Bool,
+                    settings: settings
                 )
             }
         }
+        // The queue itself (hub #128): what runs, what waits. Absent on older nodes.
+        if let queue = json["queue"] as? [String: Any] {
+            status.runningJob = (queue["running"] as? [String: Any]).flatMap {
+                Self.parseJob($0, running: true)
+            }
+            status.pendingJobs = (queue["pending"] as? [[String: Any]] ?? [])
+                .compactMap { Self.parseJob($0, running: false) }
+        }
+        status.gpuConsumer = (json["metrics"] as? [String: Any])?["gpu_consumer"] as? String
+    }
+
+    private nonisolated static func parseJob(
+        _ json: [String: Any], running: Bool
+    ) -> PeerJob? {
+        guard let id = (json["id"] as? String) ?? number(json["id"]).map({ String(Int($0)) })
+        else { return nil }
+        return PeerJob(
+            id: id,
+            kind: json["kind"] as? String ?? "job",
+            running: running,
+            progress: number(json["progress"]),
+            startedAt: number(json["started_at"]).map(Date.init(timeIntervalSince1970:)),
+            submittedBy: json["submitted_by"] as? String
+        )
     }
 
     /// JSON numbers arrive as whatever the decoder felt like — NSNumber, Int, Double —

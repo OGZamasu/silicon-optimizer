@@ -349,7 +349,9 @@ extension AppModel: GatewayHost {
         var label: String { "\(tokens / 1024)K" }
     }
 
-    static let swarmContextPresets = [8192, 12_288, 16_384, 24_576, 32_768, 49_152, 65_536]
+    static let swarmContextPresets = [
+        8192, 16_384, 24_576, 32_768, 49_152, 65_536, 131_072, 262_144,
+    ]
 
     /// The preset menu for the local machine card: every size up to the model's
     /// training ceiling, judged against memory right now.

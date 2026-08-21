@@ -150,3 +150,70 @@ struct PeerParsingTests {
         #expect(status.capabilities.isEmpty)
     }
 }
+
+@Suite("Swarm peer parsing — #128/#129 extensions")
+struct PeerExtensionParsingTests {
+
+    @Test func readsQueueJobsGPUConsumerAndAbilityConfig() {
+        let json: [String: Any] = [
+            "platform": "windows-wsl2-cuda",
+            "metrics": [
+                "gpu_util_pct": 100, "queue_depth": 2,
+                "gpu_consumer": "job:portrait-animate",
+            ],
+            "queue": [
+                "running": [
+                    "id": "j-42", "kind": "portrait-animate",
+                    "progress": 0.65, "started_at": 1_787_300_000,
+                    "submitted_by": "chris-mac",
+                ],
+                "pending": [
+                    ["id": "j-43", "kind": "text-to-video", "submitted_by": "sam-mac"],
+                ],
+            ],
+            "capabilities": [
+                [
+                    "id": "text-to-video", "kind": "video", "ready": true,
+                    "description": "WAN 2.2 image+text to 720p clips.",
+                    "enabled": true,
+                    "settings": ["resolution": "720p", "steps": 30],
+                ],
+            ],
+        ]
+        var status = AppModel.PeerStatus(
+            name: "silicon-node", baseURL: "http://x", reachable: true
+        )
+        AppModel.parseNode(json, into: &status)
+
+        #expect(status.gpuConsumer == "job:portrait-animate")
+        #expect(status.runningJob?.id == "j-42")
+        #expect(status.runningJob?.running == true)
+        #expect(status.runningJob?.progress == 0.65)
+        #expect(status.runningJob?.submittedBy == "chris-mac")
+        #expect(status.pendingJobs.count == 1)
+        #expect(status.pendingJobs.first?.kind == "text-to-video")
+        #expect(status.pendingJobs.first?.running == false)
+
+        let capability = status.capabilities.first
+        #expect(capability?.description == "WAN 2.2 image+text to 720p clips.")
+        #expect(capability?.enabled == true)
+        #expect(capability?.settings["resolution"] == "720p")
+        #expect(capability?.settings["steps"] == "30")
+    }
+
+    @Test func oldNodesWithoutTheNewFieldsStayClean() {
+        let json: [String: Any] = [
+            "metrics": ["gpu_util_pct": 5, "queue_depth": 1],
+            "capabilities": [["id": "image-to-mesh", "kind": "mesh", "ready": true]],
+        ]
+        var status = AppModel.PeerStatus(
+            name: "silicon-node", baseURL: "http://x", reachable: true
+        )
+        AppModel.parseNode(json, into: &status)
+        #expect(status.gpuConsumer == nil)
+        #expect(status.runningJob == nil)
+        #expect(status.pendingJobs.isEmpty)
+        #expect(status.capabilities.first?.enabled == nil)
+        #expect(status.capabilities.first?.settings.isEmpty == true)
+    }
+}

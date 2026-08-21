@@ -2,11 +2,13 @@ import AppKit
 import SiliconControl
 import SwiftUI
 
-/// The Swarm tab: the command center for every machine in the swarm. A capacity strip,
-/// then one card per machine — meters, abilities with their real figures, the serving
-/// model with planner-gated context control and per-model visibility switches, a GPU
-/// queue spelled out in consequences, and a Test button that proves the whole path.
-/// Underneath, the gateway's request ledger with filters and an inspector.
+/// The Swarm tab: the command center for every machine in the swarm.
+///
+/// Layout thesis: machines lead. Each card reads identity → resources → the model
+/// (the actionable core, and the visual lead) → quiet footnotes. Summary numbers live
+/// in one prose line, not stat tiles; groups are separated by space, not boxes; every
+/// control shares one chrome. Activity is the page's second act, with filters and an
+/// inspector.
 struct SwarmView: View {
     @Environment(AppModel.self) private var model
 
@@ -17,7 +19,6 @@ struct SwarmView: View {
     @State private var showingJoin = false
     @State private var testing: Set<String> = []
 
-    // Activity filters
     @State private var filterMachine = "all"
     @State private var filterOutcome = "all"
     @State private var filterEngine = "all"
@@ -26,11 +27,8 @@ struct SwarmView: View {
     var body: some View {
         List(selection: $selectedEntryID) {
             Section {
-                capacityStrip
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 2, trailing: 12))
-                    .listRowSeparator(.hidden)
                 machineGrid
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 8, trailing: 12))
+                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 10, trailing: 12))
                     .listRowSeparator(.hidden)
                 if let feedback = model.peerLLMError {
                     Label(feedback, systemImage: "info.circle")
@@ -48,8 +46,8 @@ struct SwarmView: View {
                 let visible = filteredEntries
                 if visible.isEmpty {
                     Text(entries.isEmpty
-                         ? "No gateway traffic yet. Every request an engine routes through "
-                           + "the model gateway shows up here — pick a row for the full story."
+                         ? "Requests an engine sends through the model gateway appear "
+                           + "here — the Test button on any machine makes the first one."
                          : "Nothing matches these filters.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -61,7 +59,7 @@ struct SwarmView: View {
                     }
                 }
             } header: {
-                HStack {
+                HStack(spacing: 8) {
                     Text("Activity")
                     Spacer()
                     Button("Clear") {
@@ -71,9 +69,7 @@ struct SwarmView: View {
                             Task { await ledger.clear() }
                         }
                     }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                    .controlSize(.small)
                     .help("Empty the list — the log file on disk is left alone")
                 }
             }
@@ -148,10 +144,22 @@ struct SwarmView: View {
         )
     }
 
-    // MARK: - Capacity
+    // MARK: - Machines
 
-    /// One glance: what the whole swarm can do right now.
-    private var capacityStrip: some View {
+    /// The swarm's summary is one sentence, not a row of stat tiles.
+    private var machinesHeader: some View {
+        HStack {
+            Text("Machines")
+            Spacer()
+            Text(summaryLine)
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .textCase(nil)
+        }
+    }
+
+    private var summaryLine: String {
         let localTotal = model.profile.totalMemory.gibibytes
         let localUsed = model.metrics.memoryUsedFraction * localTotal
         let peers = model.swarmPeers.filter(\.reachable)
@@ -162,62 +170,18 @@ struct SwarmView: View {
         let queued = peers.compactMap(\.queueDepth).reduce(0, +)
         let flying = stats.values.reduce(0) { $0 + $1.inFlight }
 
-        return HStack(spacing: 10) {
-            capacityCell(
-                value: String(format: "%.0f of %.0f GB", memUsed, memTotal),
-                label: "memory across the swarm"
-            )
-            capacityCell(
-                value: "\(serving)",
-                label: serving == 1 ? "model serving" : "models serving"
-            )
-            capacityCell(
-                value: "\(queued)",
-                label: queued == 1 ? "GPU job queued" : "GPU jobs queued",
-                tint: queued > 0 ? .orange : nil
-            )
-            capacityCell(
-                value: "\(flying)",
-                label: flying == 1 ? "request in flight" : "requests in flight",
-                tint: flying > 0 ? .blue : nil
-            )
-        }
-    }
-
-    private func capacityCell(value: String, label: String, tint: Color? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value)
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(tint ?? .primary)
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    // MARK: - Machines
-
-    private var machinesHeader: some View {
-        HStack {
-            Text("Machines")
-            Spacer()
-            let reachable = model.swarmPeers.filter(\.reachable).count
-            Text("\(model.swarmPeers.count + 1) in the swarm · "
-                 + "\(reachable + 1) reachable")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textCase(nil)
-        }
+        var parts = [
+            String(format: "%.0f of %.0f GB in use", memUsed, memTotal),
+            "\(serving) serving",
+        ]
+        parts.append(queued == 0 ? "queue clear" : "\(queued) queued")
+        if flying > 0 { parts.append("\(flying) in flight") }
+        return parts.joined(separator: " · ")
     }
 
     private var machineGrid: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 380), spacing: 12, alignment: .top)],
+            columns: [GridItem(.adaptive(minimum: 390), spacing: 12, alignment: .top)],
             alignment: .leading, spacing: 12
         ) {
             MachineCard(
@@ -229,7 +193,7 @@ struct SwarmView: View {
                 MachineCard(
                     title: peer.name,
                     subtitle: peer.hardware ?? peer.platform ?? "node",
-                    reachable: peer.reachable
+                    reachable: peer.reachable || model.peerLLMBusy.contains(peer.name)
                 ) {
                     peerMachineBody(peer)
                 }
@@ -237,28 +201,29 @@ struct SwarmView: View {
         }
     }
 
+    // MARK: Local card
+
     @ViewBuilder
     private var localMachineBody: some View {
         let total = model.profile.totalMemory.gibibytes
-        MeterRow(
-            label: "Memory",
-            detail: String(format: "%.1f of %.0f GB",
-                           model.metrics.memoryUsedFraction * total, total),
-            fraction: model.metrics.memoryUsedFraction
-        )
-
-        Divider()
+        MeterGrid(rows: [
+            .init(label: "Memory",
+                  detail: String(format: "%.1f of %.0f GB",
+                                 model.metrics.memoryUsedFraction * total, total),
+                  fraction: model.metrics.memoryUsedFraction)
+        ])
 
         if let loaded = model.loadedModel {
-            LLMRow(
-                model: loaded.name,
+            ModelBlock(
+                name: loaded.name,
                 state: model.runtimeState.isRunning ? "serving" : model.runtimeState.label,
                 healthy: model.runtimeState.isRunning,
-                context: model.activeConfiguration?.contextLength,
-                rate: localRate
-            )
-            HStack(spacing: 8) {
-                Button("Unload \(loaded.name)") { Task { await model.unload() } }
+                sub: modelSubline(
+                    context: model.activeConfiguration?.contextLength, rate: localRate
+                )
+            ) {
+                Button("Unload") { Task { await model.unload() } }
+                    .help("Unload \(loaded.name) from memory")
                 localContextMenu
                 testButton(
                     machineKey: "local",
@@ -266,32 +231,32 @@ struct SwarmView: View {
                     ready: model.runtimeState.isRunning
                 )
             }
-            .controlSize(.small)
         } else {
-            LLMRow(model: "No model loaded", state: "idle", healthy: false,
-                   context: nil, rate: localRate)
-            HStack(spacing: 8) {
+            ModelBlock(
+                name: "No model loaded", state: "idle", healthy: false,
+                sub: localRate.map { String(format: "%.1f tok/s measured", $0) }
+            ) {
                 if model.lastLoaded != nil {
                     Button("Reload Last") { model.reloadLastModel() }
                 }
                 Button("Open Models") { model.selectedTab = .models }
             }
-            .controlSize(.small)
         }
 
-        modelSwitches(
-            title: "Offered by this Mac",
-            rows: model.installedModels.map { installed in
-                (id: GatewayAPI.modelID(local: installed.id),
-                 label: "\(installed.name) — \(installed.quantization.rawValue)")
-            }
-        )
-
-        inFlightLine(forIDPrefix: "local/")
+        CardFootnotes {
+            modelSwitches(
+                title: "Offered by this Mac",
+                rows: model.installedModels.map { installed in
+                    (id: GatewayAPI.modelID(local: installed.id),
+                     label: "\(installed.name) — \(installed.quantization.rawValue)")
+                }
+            )
+            inFlightLine(forIDPrefix: "local/")
+        }
     }
 
-    /// Planner-gated context presets: sizes that fit are one click; sizes that don't
-    /// say why they're off instead of failing later.
+    /// Planner-gated presets: only sizes this model supports, and only sizes memory
+    /// can hold are clickable — the rest say why they're off.
     private var localContextMenu: some View {
         Menu("Context") {
             ForEach(model.localContextChoices()) { choice in
@@ -301,7 +266,7 @@ struct SwarmView: View {
                     if choice.current {
                         Label(choice.label, systemImage: "checkmark")
                     } else if choice.fits {
-                        Text(choice.label)
+                        Text("Reload at \(choice.label)")
                     } else {
                         Text("\(choice.label) — \(choice.reason ?? "won't fit")")
                     }
@@ -309,196 +274,302 @@ struct SwarmView: View {
                 .disabled(!choice.fits || choice.current)
             }
         }
-        .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Reload the model at a different context window")
+        .help("Reload the model at a different context window — the menu only lists "
+              + "sizes this model was trained for")
     }
+
+    // MARK: Peer card
 
     @ViewBuilder
     private func peerMachineBody(_ peer: AppModel.PeerStatus) -> some View {
-        if !peer.reachable {
+        if model.peerLLMBusy.contains(peer.name), !peer.reachable {
+            // Mid start/stop the node's control server often pauses too; that is
+            // busy, not gone.
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Working on it — restarting the chat model usually takes "
+                     + "under a minute.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        } else if !peer.reachable {
             Label(peer.error ?? "Not answering right now.",
                   systemImage: "wifi.exclamationmark")
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.orange)
         } else {
-            if let total = peer.totalGB, let used = peer.usedGB {
-                MeterRow(
-                    label: "Memory",
-                    detail: String(format: "%.1f of %.0f GB", used, total),
-                    fraction: total > 0 ? used / total : 0
-                )
-            }
-            if let gpu = peer.gpuUtil {
-                MeterRow(label: "GPU", detail: "\(Int(gpu * 100))%", fraction: gpu)
-            }
+            MeterGrid(rows: peerMeterRows(peer))
 
-            queueRow(peer)
-
-            Divider()
+            queueBlock(peer)
 
             if let llm = peer.llm {
-                LLMRow(
-                    model: llm.model ?? "no model chosen",
+                ModelBlock(
+                    name: llm.model ?? "No model chosen",
                     state: llm.running ? (llm.healthy ? "serving" : "starting") : "stopped",
                     healthy: llm.running && llm.healthy,
-                    context: llm.contextLength,
-                    rate: peerRate(peer)
-                )
-                peerLLMButtons(peer, llm: llm)
+                    sub: peerModelSubline(peer, llm: llm)
+                ) {
+                    peerModelControls(peer, llm: llm)
+                }
+            }
+
+            CardFootnotes {
+                if !peer.capabilities.isEmpty {
+                    abilitiesBlock(peer)
+                }
                 modelSwitches(
                     title: "Offered by \(peer.name)",
-                    rows: peerModelRows(peer, llm: llm)
+                    rows: peer.llm.map { peerModelRows(peer, llm: $0) } ?? []
                 )
-            }
-
-            if !peer.capabilities.isEmpty {
-                abilities(peer)
-            }
-
-            inFlightLine(forIDPrefix: "node/\(GatewayAPI.peerSlug(peer.name))/")
-
-            if let latency = peer.latency {
-                Text(String(format: "answers in %.0f ms", latency * 1000))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
-
-    /// The abilities list, the way the Dashboard tells it: one row each, ready dot,
-    /// and the real figures — peak memory, typical duration — not a pile of chips.
-    private func abilities(_ peer: AppModel.PeerStatus) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Abilities")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ForEach(peer.capabilities) { capability in
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(capability.ready ? Color.green : Color.secondary.opacity(0.35))
-                        .frame(width: 5, height: 5)
-                    Text(capability.id)
-                        .font(.caption2)
-                    Spacer()
-                    Text(capabilityFigures(capability))
+                inFlightLine(forIDPrefix: "node/\(GatewayAPI.peerSlug(peer.name))/")
+                if let latency = peer.latency {
+                    Text(String(format: "answers in %.0f ms", latency * 1000))
                         .font(.caption2)
                         .monospacedDigit()
                         .foregroundStyle(.tertiary)
                 }
-                .help(capability.detail ?? capability.id)
             }
         }
     }
 
-    private func capabilityFigures(_ capability: AppModel.PeerCapability) -> String {
-        var parts: [String] = []
-        if let peak = capability.peakGB { parts.append(String(format: "%.0f GB", peak)) }
-        if let seconds = capability.typicalSeconds {
-            parts.append(seconds >= 60
-                         ? String(format: "%.0f min", seconds / 60)
-                         : String(format: "%.0fs", seconds))
+    private func peerMeterRows(_ peer: AppModel.PeerStatus) -> [MeterGrid.Row] {
+        var rows: [MeterGrid.Row] = []
+        if let total = peer.totalGB, let used = peer.usedGB {
+            rows.append(.init(
+                label: "Memory",
+                detail: String(format: "%.1f of %.0f GB", used, total),
+                fraction: total > 0 ? used / total : 0
+            ))
         }
-        return parts.joined(separator: " · ")
+        if let gpu = peer.gpuUtil {
+            rows.append(.init(
+                label: "GPU",
+                detail: "\(Int(gpu * 100))%",
+                fraction: gpu,
+                caption: gpuCaption(peer)
+            ))
+        }
+        return rows
+    }
+
+    /// Names what the GPU is doing when the node says — and says who can't when it
+    /// doesn't.
+    private func gpuCaption(_ peer: AppModel.PeerStatus) -> String? {
+        switch peer.gpuConsumer {
+        case "llm": return "busy with the chat model"
+        case "external": return "busy with something outside the swarm"
+        case let consumer? where consumer.hasPrefix("job:"):
+            return "busy with \(consumer.dropFirst(4))"
+        case _?: return nil
+        case nil:
+            let util = peer.gpuUtil ?? 0
+            let depth = peer.queueDepth ?? 0
+            if util > 0.9, depth == 0 {
+                return "busy — attribution arrives with node update #128"
+            }
+            return nil
+        }
+    }
+
+    /// The queue as jobs when the node lists them, as consequences either way.
+    @ViewBuilder
+    private func queueBlock(_ peer: AppModel.PeerStatus) -> some View {
+        let depth = peer.queueDepth ?? 0
+        let hasJobList = peer.runningJob != nil || !peer.pendingJobs.isEmpty
+        if depth > 0 || hasJobList {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "hourglass")
+                        .foregroundStyle(.orange)
+                        .imageScale(.small)
+                    Text("\(max(depth, peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1))) "
+                         + "GPU job\(depth == 1 ? "" : "s") — chat returns ~2 min after "
+                         + "the queue drains")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel Queue") {
+                        Task { await model.cancelPeerQueue(peer) }
+                    }
+                    .controlSize(.small)
+                    .help("Ask \(peer.name) to drop its pending GPU jobs")
+                }
+                if hasJobList {
+                    if let running = peer.runningJob {
+                        jobRow(peer, job: running)
+                    }
+                    ForEach(peer.pendingJobs) { job in
+                        jobRow(peer, job: job)
+                    }
+                } else {
+                    Text("Per-job detail arrives with node update #128.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 18)
+                }
+            }
+        }
+    }
+
+    private func jobRow(_ peer: AppModel.PeerStatus, job: AppModel.PeerJob) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(job.running ? Color.blue : Color.secondary.opacity(0.4))
+                .frame(width: 5, height: 5)
+            Text(job.kind)
+                .font(.caption)
+            if job.running, let progress = job.progress {
+                Text("\(Int(progress * 100))%")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            } else if !job.running {
+                Text("waiting")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            if let submitter = job.submittedBy {
+                Text("from \(submitter)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            Button {
+                Task { await model.cancelPeerJob(peer, jobID: job.id) }
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .imageScale(.small)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(job.running ? "Abort this job" : "Drop this job from the queue")
+        }
+        .padding(.leading, 18)
     }
 
     @ViewBuilder
-    private func queueRow(_ peer: AppModel.PeerStatus) -> some View {
-        let depth = peer.queueDepth ?? 0
-        HStack(spacing: 8) {
-            Image(systemName: depth > 0 ? "hourglass" : "checkmark.circle")
-                .foregroundStyle(depth > 0 ? .orange : .green)
-                .imageScale(.small)
-            if depth > 0 {
-                Text("\(depth) GPU job\(depth == 1 ? "" : "s") queued — chat returns "
-                     + "~2 min after the queue drains")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel Queue") {
-                    Task { await model.cancelPeerQueue(peer) }
-                }
-                .controlSize(.small)
-                .help("Ask \(peer.name) to drop its pending GPU jobs")
-            } else {
-                Text("GPU queue clear")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+    private func peerModelControls(_ peer: AppModel.PeerStatus, llm: AppModel.PeerLLM) -> some View {
+        if model.peerLLMBusy.contains(peer.name) {
+            ProgressView().controlSize(.small)
+        } else if llm.running {
+            Button("Stop \(llm.model ?? "chat model")") {
+                Task { await model.setPeerLLM(peer, running: false) }
             }
+            .help("Stop the chat model on \(peer.name) — renders are unaffected")
+        } else {
+            Button("Start \(llm.model ?? "chat model")") {
+                Task {
+                    await model.setPeerLLM(
+                        peer, running: true,
+                        contextLength: model.pendingNodeContext[peer.name]
+                    )
+                }
+            }
+            .help("Start the chat model on \(peer.name)")
         }
-    }
-
-    private func peerLLMButtons(_ peer: AppModel.PeerStatus, llm: AppModel.PeerLLM) -> some View {
-        HStack(spacing: 8) {
-            if model.peerLLMBusy.contains(peer.name) {
-                ProgressView().controlSize(.small)
-            } else if llm.running {
-                // Named, so there is no wondering what stops: the chat model, not
-                // the node and not its render queue.
-                Button("Stop \(llm.model ?? "chat model")") {
-                    Task { await model.setPeerLLM(peer, running: false) }
-                }
-                .help("Stop the chat model on \(peer.name) — renders are unaffected")
-            } else {
-                Button("Start \(llm.model ?? "chat model")") {
-                    Task { await model.setPeerLLM(peer, running: true) }
-                }
-                .help("Start the chat model on \(peer.name)")
-            }
-            if llm.availableModels.count > 1 {
-                Menu("Switch") {
-                    ForEach(llm.availableModels, id: \.self) { candidate in
-                        Button(candidate) {
-                            Task { await model.setPeerLLM(peer, running: true, model: candidate) }
-                        }
-                        .disabled(GatewayAPI.modelNamesMatch(candidate, llm.model ?? ""))
+        if llm.availableModels.count > 1 {
+            Menu("Switch") {
+                ForEach(llm.availableModels, id: \.self) { candidate in
+                    Button(candidate) {
+                        Task { await model.setPeerLLM(peer, running: true, model: candidate) }
                     }
+                    .disabled(GatewayAPI.modelNamesMatch(candidate, llm.model ?? ""))
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
             }
-            peerContextMenu(peer, llm: llm)
-            testButton(
-                machineKey: peer.name,
-                gatewayID: llm.model.map {
-                    GatewayAPI.modelID(peerSlug: GatewayAPI.peerSlug(peer.name), model: $0)
-                },
-                ready: llm.running && llm.healthy
-            )
+            .fixedSize()
         }
-        .controlSize(.small)
+        peerContextMenu(peer, llm: llm)
+        testButton(
+            machineKey: peer.name,
+            gatewayID: llm.model.map {
+                GatewayAPI.modelID(peerSlug: GatewayAPI.peerSlug(peer.name), model: $0)
+            },
+            ready: llm.running && llm.healthy
+        )
     }
 
+    /// Context choice never launches anything: a running model restarts at the size,
+    /// a stopped model remembers it for the next Start.
     private func peerContextMenu(_ peer: AppModel.PeerStatus, llm: AppModel.PeerLLM) -> some View {
         Menu("Context") {
             ForEach(AppModel.swarmContextPresets, id: \.self) { size in
                 Button {
-                    Task {
-                        await model.setPeerLLM(
-                            peer, running: true, model: llm.model, contextLength: size
-                        )
+                    if llm.running {
+                        Task {
+                            await model.setPeerLLM(
+                                peer, running: true, model: llm.model, contextLength: size
+                            )
+                        }
+                    } else {
+                        model.pendingNodeContext[peer.name] = size
                     }
                 } label: {
                     if size == llm.contextLength {
                         Label("\(size / 1024)K", systemImage: "checkmark")
                     } else {
-                        Text("\(size / 1024)K")
+                        Text(llm.running
+                             ? "Restart at \(size / 1024)K"
+                             : "Start next at \(size / 1024)K")
                     }
                 }
                 .disabled(size == llm.contextLength)
             }
             Divider()
-            Text("Restarts the model at that size — needs the node update (#127); "
-                 + "older nodes start at their own profile.")
+            Text("The node clamps to what its card can hold (node update #127); "
+                 + "the card shows what it actually serves.")
         }
-        .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Restart \(peer.name)'s chat model with a different context window")
+        .help("Choose the chat model's context window on \(peer.name)")
     }
 
-    /// Per-model visibility: switched-off models stay installed and startable from
-    /// Models, but vanish from the gateway and every engine picker.
+    private func modelSubline(context: Int?, rate: Double?) -> String? {
+        var parts: [String] = []
+        if let context { parts.append("\(context / 1024)K context") }
+        if let rate { parts.append(String(format: "%.1f tok/s measured", rate)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func peerModelSubline(
+        _ peer: AppModel.PeerStatus, llm: AppModel.PeerLLM
+    ) -> String? {
+        var parts: [String] = []
+        if let context = llm.contextLength { parts.append("\(context / 1024)K context") }
+        if let staged = model.pendingNodeContext[peer.name], !llm.running {
+            parts.append("starts at \(staged / 1024)K next launch")
+        }
+        if let rate = peerRate(peer) {
+            parts.append(String(format: "%.1f tok/s measured", rate))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The abilities list, Dashboard-told: a row each, ready dot, real figures —
+    /// and a click opens the full story with whatever configuration the node allows.
+    private func abilitiesBlock(_ peer: AppModel.PeerStatus) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Abilities")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(peer.capabilities) { capability in
+                AbilityRow(peer: peer, capability: capability)
+            }
+        }
+    }
+
+    private func peerModelRows(
+        _ peer: AppModel.PeerStatus, llm: AppModel.PeerLLM
+    ) -> [(id: String, label: String)] {
+        let slug = GatewayAPI.peerSlug(peer.name)
+        var names: [String] = []
+        if let current = llm.model { names.append(current) }
+        for candidate in llm.availableModels
+        where !names.contains(where: { GatewayAPI.modelNamesMatch($0, candidate) }) {
+            names.append(candidate)
+        }
+        return names.map { (GatewayAPI.modelID(peerSlug: slug, model: $0), $0) }
+    }
+
     @ViewBuilder
     private func modelSwitches(title: String, rows: [(id: String, label: String)]) -> some View {
         if rows.count > 1 {
@@ -523,24 +594,11 @@ struct SwarmView: View {
                 }
                 .padding(.top, 2)
             } label: {
-                Text("\(title) (\(rows.count) models)")
-                    .font(.caption.weight(.medium))
+                Text("\(title) · \(rows.count) models")
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private func peerModelRows(
-        _ peer: AppModel.PeerStatus, llm: AppModel.PeerLLM
-    ) -> [(id: String, label: String)] {
-        let slug = GatewayAPI.peerSlug(peer.name)
-        var names: [String] = []
-        if let current = llm.model { names.append(current) }
-        for candidate in llm.availableModels
-        where !names.contains(where: { GatewayAPI.modelNamesMatch($0, candidate) }) {
-            names.append(candidate)
-        }
-        return names.map { (GatewayAPI.modelID(peerSlug: slug, model: $0), $0) }
     }
 
     @ViewBuilder
@@ -589,7 +647,7 @@ struct SwarmView: View {
     // MARK: - Activity
 
     private var filterBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Picker("Machine", selection: $filterMachine) {
                 Text("All machines").tag("all")
                 Text("This Mac").tag("local")
@@ -612,11 +670,11 @@ struct SwarmView: View {
             .fixedSize()
             TextField("Search prompts and answers", text: $searchText)
                 .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 260)
+                .frame(maxWidth: 240)
             Spacer()
         }
+        .controlSize(.small)
         .labelsHidden()
-        .font(.caption)
     }
 
     private var filteredEntries: [GatewayLedgerEntry] {
@@ -703,9 +761,10 @@ struct SwarmView: View {
     }
 }
 
-// MARK: - Pieces
+// MARK: - Card anatomy
 
-/// One machine's card: header with reachability, then whatever the machine has to say.
+/// One machine. Groups separate by space, not boxes: identity, resources, the model
+/// (the lead), footnotes.
 private struct MachineCard<Content: View>: View {
     var title: String
     var subtitle: String
@@ -713,11 +772,11 @@ private struct MachineCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 7) {
                 Circle()
                     .fill(reachable ? Color.green : Color.orange)
-                    .frame(width: 9, height: 9)
+                    .frame(width: 8, height: 8)
                 Text(title)
                     .font(.headline)
                 Text(subtitle)
@@ -728,67 +787,248 @@ private struct MachineCard<Content: View>: View {
             }
             content
         }
-        .padding(12)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
-private struct MeterRow: View {
-    var label: String
-    var detail: String
-    var fraction: Double
+/// Meters as one aligned grid: labels share a column, bars share their width,
+/// values share the trailing edge.
+private struct MeterGrid: View {
+    struct Row {
+        var label: String
+        var detail: String
+        var fraction: Double
+        var caption: String?
+    }
+
+    var rows: [Row]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(label)
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 5) {
+            ForEach(rows, id: \.label) { row in
+                GridRow {
+                    Text(row.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .gridColumnAlignment(.leading)
+                    ProgressView(value: min(max(row.fraction, 0), 1))
+                        .progressViewStyle(.linear)
+                        .tint(Palette.pressure(row.fraction))
+                    Text(row.detail)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .gridColumnAlignment(.trailing)
+                }
+                if let caption = row.caption {
+                    GridRow {
+                        Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                        Text(caption)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .gridCellColumns(2)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The card's lead: what this machine serves, and everything you can do about it.
+private struct ModelBlock<Controls: View>: View {
+    var name: String
+    var state: String
+    var healthy: Bool
+    var sub: String?
+    @ViewBuilder var controls: Controls
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(name)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(state)
                     .font(.caption.weight(.medium))
-                Spacer()
-                Text(detail)
+                    .foregroundStyle(healthy ? .green : .secondary)
+            }
+            if let sub {
+                Text(sub)
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            ProgressView(value: min(max(fraction, 0), 1))
-                .progressViewStyle(.linear)
-                .tint(Palette.pressure(fraction))
+            HStack(spacing: 8) { controls }
+                .controlSize(.small)
         }
     }
 }
 
-private struct LLMRow: View {
-    var model: String
-    var state: String
-    var healthy: Bool
-    var context: Int?
-    var rate: Double?
+/// The quiet tail of a card — abilities, offered models, telemetry — grouped tight
+/// and set apart from the lead by space alone.
+private struct CardFootnotes<Content: View>: View {
+    @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 7) { content }
+    }
+}
+
+/// One ability row; clicking tells its full story and offers whatever configuration
+/// the node allows.
+private struct AbilityRow: View {
+    @Environment(AppModel.self) private var model
+    var peer: AppModel.PeerStatus
+    var capability: AppModel.PeerCapability
+
+    @State private var showingInfo = false
+    @State private var draftSettings: [String: String] = [:]
+
+    var body: some View {
+        Button {
+            draftSettings = capability.settings
+            showingInfo = true
+        } label: {
             HStack(spacing: 6) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                Text(model)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(state)
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 5, height: 5)
+                Text(capability.id)
                     .font(.caption)
-                    .foregroundStyle(healthy ? .green : .secondary)
+                Spacer()
+                Text(figures)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                Image(systemName: "info.circle")
+                    .imageScale(.small)
+                    .foregroundStyle(.quaternary)
             }
-            HStack(spacing: 10) {
-                if let context {
-                    Text("\(context / 1024)K context")
-                }
-                if let rate {
-                    Text(String(format: "%.1f tok/s measured", rate))
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingInfo, arrowEdge: .trailing) {
+            info
+        }
+    }
+
+    private var dotColor: Color {
+        if capability.enabled == false { return .secondary.opacity(0.35) }
+        return capability.ready ? .green : .orange
+    }
+
+    private var figures: String {
+        var parts: [String] = []
+        if let peak = capability.peakGB { parts.append(String(format: "%.0f GB", peak)) }
+        if let seconds = capability.typicalSeconds {
+            parts.append(seconds >= 60
+                         ? String(format: "%.0f min", seconds / 60)
+                         : String(format: "%.0fs", seconds))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var info: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(capability.id)
+                    .font(.headline)
+                if !capability.kind.isEmpty {
+                    Text(capability.kind)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(capability.ready ? "ready" : "not ready")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(capability.ready ? .green : .orange)
+            }
+
+            Text(capability.description ?? capability.detail
+                 ?? "No description from the node yet — richer ability info arrives "
+                 + "with node update #129.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
+                if let peak = capability.peakGB {
+                    GridRow {
+                        Text("Peak memory").foregroundStyle(.secondary)
+                        Text(String(format: "%.0f GB", peak)).monospacedDigit()
+                    }
+                }
+                if let seconds = capability.typicalSeconds {
+                    GridRow {
+                        Text("Typical run").foregroundStyle(.secondary)
+                        Text(seconds >= 60
+                             ? String(format: "%.0f min", seconds / 60)
+                             : String(format: "%.0f s", seconds)).monospacedDigit()
+                    }
+                }
+            }
+            .font(.caption)
+
+            if capability.enabled != nil || !capability.settings.isEmpty {
+                Divider()
+            }
+
+            if let enabled = capability.enabled {
+                Toggle("Enabled on \(peer.name)", isOn: Binding(
+                    get: { enabled },
+                    set: { newValue in
+                        Task {
+                            await model.configurePeerCapability(
+                                peer, id: capability.id, enabled: newValue
+                            )
+                        }
+                    }
+                ))
+                .controlSize(.small)
+            }
+
+            if !capability.settings.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Settings")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(capability.settings.keys.sorted(), id: \.self) { key in
+                        HStack(spacing: 6) {
+                            Text(key)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            TextField("", text: Binding(
+                                get: { draftSettings[key] ?? "" },
+                                set: { draftSettings[key] = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(width: 130)
+                        }
+                    }
+                    Button("Apply") {
+                        Task {
+                            await model.configurePeerCapability(
+                                peer, id: capability.id, settings: draftSettings
+                            )
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(draftSettings == capability.settings)
+                }
+            }
+
+            if capability.enabled == nil, capability.settings.isEmpty {
+                Text("On/off and settings arrive with node update #129.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
     }
 }
 
