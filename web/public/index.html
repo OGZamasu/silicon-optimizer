@@ -235,70 +235,6 @@ code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 }
 .secondary:hover { color: var(--wafer); border-color: var(--wafer-faint); }
 
-/* --- The receipts: the page's signature --------------------------------- */
-
-.ledger {
-  position: relative;
-  margin-top: clamp(34px, 5vw, 52px);
-  border: 1px solid var(--rule-bright);
-  border-radius: 12px;
-  background: linear-gradient(180deg, var(--substrate-2), var(--substrate));
-  overflow: hidden;
-  box-shadow: 0 30px 60px -40px rgba(0,0,0,.8);
-}
-/* A hairline of light along the top edge, like a screen catching the lamp. */
-.ledger::before {
-  content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(77,224,192,.45), rgba(110,139,200,.45), transparent);
-}
-.ledger-head {
-  display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--rule);
-  font-family: var(--mono); font-size: 11.5px; color: var(--wafer-faint);
-  letter-spacing: 0.04em;
-}
-.ledger-head strong { color: var(--wafer-dim); font-weight: 500; }
-
-.ledger-body { padding: 24px 20px 20px; display: grid; gap: 20px; }
-
-.row { display: grid; gap: 8px; }
-.row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
-.row-label {
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em;
-  text-transform: uppercase;
-}
-.row-value { font-family: var(--mono); font-size: clamp(20px, 3vw, 27px); font-weight: 500; }
-.row.predicted .row-label, .row.predicted .row-value { color: var(--predict); }
-.row.measured  .row-label, .row.measured  .row-value { color: var(--measure); }
-
-/* Bars are drawn to the same scale so the two lengths can be compared by eye.
-   They extend only once the ledger has scrolled into view. */
-.bar { height: 7px; border-radius: 100px; background: var(--rule); overflow: hidden; }
-.bar span {
-  display: block; height: 100%; border-radius: 100px;
-  transform: scaleX(0);
-  transform-origin: left center;
-}
-.in .bar span { animation: extend 1100ms var(--ease-out) both; }
-.row.predicted .bar span { background: var(--predict); }
-.row.measured  .bar span { background: var(--measure); }
-.in .row.measured .bar span { animation-delay: 180ms; }
-
-@keyframes extend { from { transform: scaleX(0); } to { transform: scaleX(1); } }
-
-.delta {
-  border-top: 1px solid var(--rule);
-  margin-top: 4px; padding-top: 16px;
-  display: flex; align-items: baseline; justify-content: space-between;
-  flex-wrap: wrap; gap: 8px 18px;
-}
-.delta dt {
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em;
-  text-transform: uppercase; color: var(--wafer-faint);
-}
-.delta dd { margin: 0; font-family: var(--mono); font-size: 22px; color: var(--wafer); }
-
 /* --- Sections ---------------------------------------------------------- */
 
 section { padding: clamp(56px, 8vw, 96px) 0; border-top: 1px solid var(--rule); }
@@ -414,7 +350,7 @@ footer {
   html { scroll-behavior: auto; }
   #fx, #fxo { display: none; }
   .reveal, .grid .cell { opacity: 1 !important; transform: none !important; transition: none !important; }
-  .bar span, .collapse-bar span { animation: none !important; transform: none !important; }
+  .collapse-bar span { animation: none !important; transform: none !important; }
   .cell::after { display: none; }
   * { transition: none !important; }
 }
@@ -435,7 +371,7 @@ footer {
       <a href="#features">Features</a>
       <a href="#install">Install</a>
     </nav>
-    <span class="chip spec">v0.3.0</span>
+    <span class="chip spec">v0.4.0</span>
     <span class="chip spec">M1 Macs and newer</span>
     <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
   </div>
@@ -452,47 +388,17 @@ footer {
       stuff, not the guesswork.
     </p>
 
-    <!-- Signature: the receipts. Predicted in indigo, measured in teal, everywhere. -->
     <div class="actions reveal" style="--d:.22s">
       <a class="download" href="https://github.com/OGZamasu/silicon-optimizer/releases/latest/download/Silicon.Optimizer.dmg">
         <span class="dl-row">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Download for Mac
         </span>
-        <span class="dl-sub">free · v0.3.0 · 56 MB · everything included · macOS 14+</span>
+        <span class="dl-sub">free · v0.4.0 · 57 MB · everything included · macOS 14+</span>
       </a>
       <a class="secondary" href="https://github.com/OGZamasu/silicon-optimizer">or build it from source</a>
     </div>
 
-    <div class="ledger reveal" style="--d:.3s">
-      <div class="ledger-head">
-        <strong>Receipts</strong>
-        <span>We asked it to load a 30-billion-parameter coding model. It called its shot first.</span>
-        <span>MacBook Pro · M3 Max</span>
-      </div>
-      <div class="ledger-body">
-        <div class="row predicted">
-          <div class="row-top">
-            <span class="row-label">The app said</span>
-            <span class="row-value"><span class="count" data-to="20.30" data-dec="2">20.30</span> GB</span>
-          </div>
-          <div class="bar"><span style="width:72.5%"></span></div>
-        </div>
-        <div class="row measured">
-          <div class="row-top">
-            <span class="row-label">It actually used</span>
-            <span class="row-value"><span class="count" data-to="20.24" data-dec="2">20.24</span> GB</span>
-          </div>
-          <div class="bar"><span style="width:72.3%"></span></div>
-        </div>
-        <dl class="delta">
-          <dt>How far off</dt>
-          <dd class="num"><span class="count" data-to="0.31" data-dec="2">0.31</span>%</dd>
-          <dt>Speed, promised vs real</dt>
-          <dd class="num">89 → 89 tokens/sec</dd>
-        </dl>
-      </div>
-    </div>
   </div>
 </div>
 
@@ -736,7 +642,7 @@ codex mcp add silicon-optimizer -- \
 <script>
 (() => {
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const revealed = document.querySelectorAll('.reveal, .ledger, .collapse, .grid');
+  const revealed = document.querySelectorAll('.reveal, .collapse, .grid');
 
   if (reduce || !('IntersectionObserver' in window)) {
     revealed.forEach(el => el.classList.add('in'));
@@ -750,33 +656,6 @@ codex mcp add silicon-optimizer -- \
       }
     }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
     revealed.forEach(el => io.observe(el));
-  }
-
-  // Count-up on the receipt numbers. The static markup already holds the final
-  // value, so no JS (or reduced motion) simply shows the truth immediately.
-  if (!reduce && 'IntersectionObserver' in window) {
-    const ease = t => 1 - Math.pow(1 - t, 3);
-    const run = el => {
-      const to = parseFloat(el.dataset.to);
-      const dec = +(el.dataset.dec || 0);
-      const t0 = performance.now();
-      const dur = 950;
-      const step = now => {
-        const p = Math.min(1, (now - t0) / dur);
-        el.textContent = (to * ease(p)).toFixed(dec);
-        if (p < 1) requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    };
-    const cio = new IntersectionObserver(entries => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          run(entry.target);
-          cio.unobserve(entry.target);
-        }
-      }
-    }, { threshold: 0.6 });
-    document.querySelectorAll('.count').forEach(el => cio.observe(el));
   }
 
   // Pointer-tracking spotlight on the feature cards.
