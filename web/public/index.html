@@ -485,7 +485,7 @@ footer {
       <a href="#features">Features</a>
       <a href="#install">Install</a>
     </nav>
-    <span class="chip spec">v0.2.1</span>
+    <span class="chip spec">v0.3.0</span>
     <span class="chip spec">M1 Macs and newer</span>
     <a class="chip link" href="https://github.com/OGZamasu/silicon-optimizer">Source</a>
   </div>
@@ -508,7 +508,7 @@ footer {
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Download for Mac
         </span>
-        <span class="dl-sub">free · v0.2.1 · 54 MB · everything included · macOS 14+</span>
+        <span class="dl-sub">free · v0.3.0 · 56 MB · everything included · macOS 14+</span>
       </a>
       <a class="secondary" href="https://github.com/OGZamasu/silicon-optimizer">or build it from source</a>
     </div>
@@ -714,7 +714,21 @@ footer {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg>
         </div>
         <h3>Bring your gaming PC into it</h3>
-        <p>Pair a Windows machine with an NVIDIA card and the heavy jobs go there — video, 3D, portrait animation — while your Mac stays free. You watch it work: stage, step, percent, time left.</p>
+        <p>Pair a Windows machine with an NVIDIA card and the heavy jobs go there — video, 3D, portrait animation — while your Mac stays free. You watch it work: stage, step, percent, time left. The node software is open source too: <a href="https://github.com/OGZamasu/silicon-node">silicon-node</a>.</p>
+      </div>
+      <div class="cell wide">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3"/><circle cx="19" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M7.5 8 10 15M16.5 8 14 15M8 6h8"/></svg>
+        </div>
+        <h3>A command center for all your machines</h3>
+        <p>The Swarm tab shows every machine on one screen — memory, GPU, what's serving, what's queued — with the controls right there: start or stop a model, grow its context window, fire a one-line test through the whole stack. Every request any engine makes is logged with its timing and token counts; click one and see exactly what was asked, what came back, and where the time went.</p>
+      </div>
+      <div class="cell wide">
+        <div class="cell-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+        </div>
+        <h3>Share it with a friend</h3>
+        <p>Someone else on your Tailscale network running the app can join your swarm the way you'd pair headphones: you open an invite, they scan and knock, the same six-digit code shows on both screens, you let them in. Their pickers fill with your machines' models — no config files, no copying keys around.</p>
       </div>
     </div>
   </div>
@@ -764,6 +778,7 @@ footer {
         <li><div><strong>The big-model trick needs a special engine.</strong> Expert streaming isn't in standard llama.cpp yet. The build inside the app has it; point the app at your own engine and it checks, then hides the option if that build can't do it.</div></li>
         <li><div><strong>MLX support is early.</strong> Apple's MLX engine works, but you point the app at a model folder yourself for now.</div></li>
         <li><div><strong>Multi-part downloads are untested.</strong> Models split across several files are planned and checked correctly, but that download path hasn't been exercised yet.</div></li>
+        <li><div><strong>Swarm invites share one key for now.</strong> Letting a friend in hands their Mac the swarm's shared credential — kicking someone out later means rotating it. Individually revocable keys are already specced for the node.</div></li>
       </ul>
     </div>
   </div>

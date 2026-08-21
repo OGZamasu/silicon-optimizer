@@ -6,15 +6,15 @@
     <description>Updates for Silicon Optimizer</description>
     <language>en</language>
     <item>
-      <title>Version 0.2.1</title>
-      <pubDate>Tue, 18 Aug 2026 17:11:21 +0000</pubDate>
-      <sparkle:version>49</sparkle:version>
-      <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+      <title>Version 0.3.0</title>
+      <pubDate>Fri, 21 Aug 2026 14:11:22 +0000</pubDate>
+      <sparkle:version>126</sparkle:version>
+      <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[Everything the app needs now ships in the box: the llama.cpp engine (with expert streaming) and the Node.js runtime for the harness chat are bundled, checksummed, and documented in THIRD_PARTY_LICENSES.md — a fresh Mac works with zero terminal commands. Plus: missing 3D model weights download with one click, every generated image gets a Make-it-3D button, the 3D tab can draft its source image from a text description, and all status messages are written in plain language.]]></description>
-      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.2.1/Silicon.Optimizer.dmg"
+      <description><![CDATA[The swarm grows up. A new Swarm tab is a command center for every machine — memory, GPU, what's serving, what's queued — with start/stop/switch controls, context windows up to 256K, per-model visibility switches, and a Test button that proves the whole path in one click. Every request any engine routes through the app is now logged with timings and token counts, inspectable down to where the time went. Friends on your Tailscale network can join your swarm with a six-digit code, like pairing headphones. Under the hood the model gateway learned to speak both thinking-control dialects, diagnose empty answers instead of shrugging, advertise itself in a discovery file, and queue behind a busy GPU when you ask it to. Plus: quantizations are named in every picker, and Codex and Qwen Code got the full-window button.]]></description>
+      <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.3.0/Silicon.Optimizer.dmg"
                  type="application/octet-stream"
-                 sparkle:edSignature="M2sw5m64RcHtiHJ6cbvI3WDg/UbpZBD+0X5NkKVp6tcpWHp/hjhkTaIwJwQTTuYDDqiPgNL7aohaAbkUJzKBDw==" length="56691215" />
+                 sparkle:edSignature="LpAeSULBkpqceQ2WPNsekeecIOw4Dn8zKU9SuyxhkW6imrKdmqgYQ7XiuA4I5vBd25Wtp/ott/Nb5MrER5qSDQ==" length="59170222" />
     </item>
   </channel>
 </rss>
