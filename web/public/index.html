@@ -599,8 +599,7 @@ xattr -d com.apple.quarantine "/Applications/Silicon Optimizer.app"</pre>
 <pre><span class="c"># Needs Xcode 16+ on an Apple Silicon Mac (macOS 14 or later)</span>
 git clone https://github.com/OGZamasu/silicon-optimizer
 cd silicon-optimizer
-Scripts/build-app.sh --release
-cp -R "build/Silicon Optimizer.app" /Applications/</pre>
+Scripts/build-app.sh --release --install</pre>
       </div>
       <div class="reveal">
         <p class="step-label">4 · Optional: image generation</p>
