@@ -171,7 +171,7 @@ public final class AppModel {
         case threeD = "3D"
         case audio = "Audio"
         case video = "Video"
-        case fleet = "Fleet"
+        case swarm = "Swarm"
         case settings = "Settings"
 
         public var id: String { rawValue }
@@ -185,7 +185,7 @@ public final class AppModel {
             case .threeD: "cube.transparent"
             case .audio: "waveform"
             case .video: "film"
-            case .fleet: "point.3.connected.trianglepath.dotted"
+            case .swarm: "point.3.connected.trianglepath.dotted"
             case .settings: "gearshape"
             }
         }
@@ -1053,6 +1053,48 @@ public final class AppModel {
             return
         }
         await refreshSwarm()
+    }
+
+    /// Asks a peer to drop its pending GPU jobs — the Swarm page's "Cancel Queue".
+    /// The endpoint is new on the node side (hub request #126); until a node ships it,
+    /// the 404 is translated into that exact explanation instead of a bare number.
+    public func cancelPeerQueue(_ peer: PeerStatus) async {
+        guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+        else { return }
+        peerLLMBusy.insert(peer.name)
+        defer { peerLLMBusy.remove(peer.name) }
+
+        var request = URLRequest(url: base.appendingPathComponent("v1/queue/cancel"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["scope": "pending"]
+        )
+        if let token = swarmConfig?.effectiveToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            peerLLMError = "\(peer.name) didn't answer."
+            return
+        }
+        switch http.statusCode {
+        case 200..<300:
+            let cancelled = (try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any])?["cancelled"] as? Int
+            if let cancelled {
+                peerLLMError = "\(peer.name) dropped \(cancelled) queued "
+                    + "job\(cancelled == 1 ? "" : "s")."
+            }
+            await refreshSwarm()
+        case 404:
+            peerLLMError = "\(peer.name) can't cancel its queue yet — that needs the "
+                + "node update tracked as hub request #126."
+        default:
+            peerLLMError = "\(peer.name) answered \(http.statusCode)."
+        }
     }
 
     /// The lenient half of peer polling, separated from the network so the wire shapes

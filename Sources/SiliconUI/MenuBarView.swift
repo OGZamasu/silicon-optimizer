@@ -392,8 +392,8 @@ struct MenuBarView: View {
                 model.selectedTab = .video
                 openMainWindow()
             }
-            menuButton("Fleet", systemImage: "point.3.connected.trianglepath.dotted") {
-                model.selectedTab = .fleet
+            menuButton("Swarm", systemImage: "point.3.connected.trianglepath.dotted") {
+                model.selectedTab = .swarm
                 openMainWindow()
             }
             Divider().padding(.vertical, 4)
