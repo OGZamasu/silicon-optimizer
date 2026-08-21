@@ -128,6 +128,19 @@ public final class AppModel {
 
     /// State of the Codex sidecar behind the Chat tab's Codex engine.
     public internal(set) var codexState: RuntimeState = .idle
+
+    // Pi engine (see AppModel+Pi)
+    public enum PiEngineState: Equatable {
+        case idle, starting(String), ready, stopping, failed(String)
+    }
+    public internal(set) var piState: PiEngineState = .idle
+    public internal(set) var piItems: [PiItem] = []
+    public internal(set) var piBusy = false
+    public internal(set) var piCurrentModel: String?
+    var piRuntime: PiRuntime?
+    var piEventTask: Task<Void, Never>?
+    var piStreamingItem: PiItem?
+    var piThinkingItem: PiItem?
     var codexRuntime: CodexRuntime?
     /// The rendered conversation: agent prose, commands, file changes, tool calls.
     public internal(set) var codexItems: [CodexChatItem] = []

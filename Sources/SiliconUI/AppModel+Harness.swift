@@ -169,11 +169,13 @@ extension AppModel {
         if settings.chatEngine != .harness { stopHarness() }
         if settings.chatEngine != .codex { stopCodex() }
         if settings.chatEngine != .qwenCode { stopQwen() }
+        if settings.chatEngine != .pi { stopPi() }
         guard selectedTab == .chat else { return }
         switch settings.chatEngine {
         case .harness: startHarnessIfNeeded()
         case .codex: startCodexIfNeeded()
         case .qwenCode: startQwenIfNeeded()
+        case .pi: startPiIfNeeded()
         case .legacy: break
         }
     }

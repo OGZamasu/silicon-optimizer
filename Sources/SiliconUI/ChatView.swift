@@ -23,6 +23,8 @@ struct ChatView: View {
             CodexChatView()
         case .qwenCode:
             QwenChatView()
+        case .pi:
+            PiChatView()
         case .legacy:
             legacyChat
         }

@@ -41,6 +41,7 @@ struct SettingsView: View {
                     Text("DeepSeek Harness — agent with tools").tag(ChatEngine.harness)
                     Text("Codex — OpenAI's agent, on your models").tag(ChatEngine.codex)
                     Text("Qwen Code — Qwen's agent, on your models").tag(ChatEngine.qwenCode)
+                    Text("Pi — earendil's agent, on your models").tag(ChatEngine.pi)
                     Text("Built-in — plain chat (legacy)").tag(ChatEngine.legacy)
                 }
                 if model.settings.chatEngine == .harness {
@@ -123,6 +124,16 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
 
                     qwenStatusRow
+                } else if model.settings.chatEngine == .pi {
+                    Text(
+                        "Pi is earendil-works' open-source coding agent, driven natively "
+                        + "over its RPC protocol. Every model in this app and on your "
+                        + "swarm nodes is in its picker, and the app's whole toolbox — "
+                        + "images, video, 3D, benchmarks — is bridged in as native Pi "
+                        + "tools. Media it produces plays right in the chat."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 } else {
                     Text("The built-in chat streams straight from the local server. "
                          + "No tools, no web access.")

@@ -42,6 +42,8 @@ public enum ChatEngine: String, Codable, Sendable, CaseIterable {
     case codex
     /// Qwen Code's `serve` daemon and its embedded Web Shell.
     case qwenCode
+    /// earendil-works' Pi agent, driven natively over its RPC mode.
+    case pi
     /// The built-in native chat, talking straight to the local server.
     case legacy
 }
@@ -109,6 +111,9 @@ public struct Settings: Codable, Sendable, Equatable {
     /// Gateway model ids the user has switched off on the Swarm page: still installed,
     /// still startable from Models, but absent from the gateway and every engine picker.
     public var hiddenGatewayModels: [String]?
+
+    /// The gateway model id the Pi chat last used.
+    public var piModel: String?
 
     // Codex engine
     /// The gateway model id the Codex chat last used.
@@ -415,6 +420,7 @@ public struct Settings: Codable, Sendable, Equatable {
         hiddenGatewayModels = try? container.decodeIfPresent(
             [String].self, forKey: .hiddenGatewayModels
         )
+        piModel = try? container.decodeIfPresent(String.self, forKey: .piModel)
         codexModel = try? container.decodeIfPresent(String.self, forKey: .codexModel)
         codexWorkingDirectory = try? container.decodeIfPresent(
             String.self, forKey: .codexWorkingDirectory

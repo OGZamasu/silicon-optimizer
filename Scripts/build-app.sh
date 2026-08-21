@@ -129,6 +129,14 @@ if [[ -f Resources/dsh-llm-silicon/lib/index.js ]]; then
     cp Resources/dsh-llm-silicon/lib/index.js "$BUNDLE/Contents/Resources/dsh-llm-silicon/lib/"
 fi
 
+# Pi's silicon extension: the gateway as a provider plus the MCP tool bridge. The app
+# writes it into Pi's workspace at start.
+if [[ -f Resources/pi-silicon/silicon.ts ]]; then
+    echo "==> Embedding pi-silicon extension"
+    mkdir -p "$BUNDLE/Contents/Resources/pi-silicon"
+    cp Resources/pi-silicon/silicon.ts "$BUNDLE/Contents/Resources/pi-silicon/"
+fi
+
 # The live face camera's driver: a script the app hands to Deep-Live-Cam's own
 # environment. It lives in Resources rather than being generated at runtime so it can
 # be read, diffed and fixed like any other source file.
