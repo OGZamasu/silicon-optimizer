@@ -102,8 +102,10 @@ extension AppModel: GatewayHost {
     /// one construction so the two can never disagree about ids.
     func gatewayModelSnapshot() -> [GatewayAPI.Model] {
         var models: [GatewayAPI.Model] = []
+        let hidden = Set(settings.hiddenGatewayModels ?? [])
 
-        for installed in installedModels {
+        for installed in installedModels
+        where !hidden.contains(GatewayAPI.modelID(local: installed.id)) {
             let serving = loadedModel?.id == installed.id && runtimeState.isRunning
             models.append(GatewayAPI.Model(
                 id: GatewayAPI.modelID(local: installed.id),
@@ -135,7 +137,8 @@ extension AppModel: GatewayHost {
             where !names.contains(where: { GatewayAPI.modelNamesMatch($0, candidate) }) {
                 names.append(candidate)
             }
-            for name in names {
+            for name in names
+            where !hidden.contains(GatewayAPI.modelID(peerSlug: slug, model: name)) {
                 let serving = llm.running && llm.model == name
                 models.append(GatewayAPI.Model(
                     id: GatewayAPI.modelID(peerSlug: slug, model: name),
@@ -318,6 +321,99 @@ extension AppModel: GatewayHost {
     public func gatewayOpenMeshViewer() async {
         selectedTab = .threeD
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Swarm page controls
+
+    /// Whether a gateway model is switched off for pickers and the gateway.
+    func isGatewayModelHidden(_ id: String) -> Bool {
+        settings.hiddenGatewayModels?.contains(id) ?? false
+    }
+
+    func setGatewayModel(_ id: String, hidden: Bool) {
+        var set = Set(settings.hiddenGatewayModels ?? [])
+        if hidden { set.insert(id) } else { set.remove(id) }
+        settings.hiddenGatewayModels = set.isEmpty ? nil : set.sorted()
+        settings.save()
+    }
+
+    /// One context-size choice for the Swarm page's preset menu, with the planner's
+    /// verdict attached so sizes that cannot fit are offered disabled, not discovered
+    /// broken.
+    struct ContextChoice: Identifiable {
+        var tokens: Int
+        var fits: Bool
+        var reason: String?
+        var current: Bool
+        var id: Int { tokens }
+        var label: String { "\(tokens / 1024)K" }
+    }
+
+    static let swarmContextPresets = [8192, 12_288, 16_384, 24_576, 32_768, 49_152, 65_536]
+
+    /// The preset menu for the local machine card: every size up to the model's
+    /// training ceiling, judged against memory right now.
+    func localContextChoices() -> [ContextChoice] {
+        guard let loaded = loadedModel else { return [] }
+        let active = activeConfiguration?.contextLength
+        guard let shape = loaded.shape else {
+            return Self.swarmContextPresets.map {
+                ContextChoice(tokens: $0, fits: true, reason: nil, current: $0 == active)
+            }
+        }
+        let planner = planner()
+        var configuration = defaultConfiguration(for: loaded)
+        return Self.swarmContextPresets
+            .filter { $0 <= shape.trainingContextLength }
+            .map { size in
+                configuration.contextLength = size
+                let verdict = planner.plan(
+                    shape: shape, quantization: loaded.quantization,
+                    configuration: configuration, otherAppsInUse: memoryUsedByOtherApps
+                ).verdict
+                return ContextChoice(
+                    tokens: size,
+                    fits: verdict.isUsable,
+                    reason: verdict.isUsable ? nil : "needs more free memory",
+                    current: size == active
+                )
+            }
+    }
+
+    /// Reloads the loaded model at a chosen context — the Swarm page's "make the
+    /// window larger" without a trip through Models.
+    func reloadLoadedModel(atContext tokens: Int) {
+        guard let loaded = loadedModel else { return }
+        var configuration = activeConfiguration ?? defaultConfiguration(for: loaded)
+        configuration.contextLength = tokens
+        Task { await loadAsync(loaded, configuration: configuration) }
+    }
+
+    /// Fires a one-line prompt through the gateway at a machine's serving model, so a
+    /// human can prove the whole path — gateway, routing, backend — with one click.
+    /// The request lands in the activity ledger like any other; the Swarm page is its
+    /// own witness.
+    func testMachine(gatewayModelID: String) async {
+        struct Body: Encodable {
+            var model: String
+            var stream = false
+            var max_tokens = 24
+            var enable_thinking = false
+            var messages: [[String: String]]
+        }
+        let body = Body(
+            model: gatewayModelID,
+            messages: [["role": "user", "content": "Reply with exactly: swarm test ok"]]
+        )
+        guard let encoded = try? JSONEncoder().encode(body),
+              let url = URL(string: "http://127.0.0.1:\(gatewayPort())/v1/chat/completions")
+        else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 300
+        request.httpBody = encoded
+        _ = try? await URLSession.shared.data(for: request)
     }
 
     // MARK: - Context for agents

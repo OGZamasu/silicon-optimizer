@@ -1023,7 +1023,10 @@ public final class AppModel {
     /// tray icon offers, reachable from this Mac's menu bar. Failures land briefly in
     /// `peerLLMError`. Passing a model asks for that one; nodes that cannot choose yet
     /// ignore the field and start what they have.
-    public func setPeerLLM(_ peer: PeerStatus, running: Bool, model: String? = nil) async {
+    public func setPeerLLM(
+        _ peer: PeerStatus, running: Bool, model: String? = nil,
+        contextLength: Int? = nil
+    ) async {
         guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
         else { return }
         peerLLMBusy.insert(peer.name)
@@ -1038,9 +1041,14 @@ public final class AppModel {
         if let token = swarmConfig?.effectiveToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        if let model {
+        if model != nil || contextLength != nil {
+            var payload: [String: Any] = [:]
+            if let model { payload["model"] = model }
+            // Honored once the node ships hub #127; older nodes ignore the field and
+            // start at their own profile — the card shows whatever they actually chose.
+            if let contextLength { payload["context_length"] = contextLength }
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
+            request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         }
 
         guard let (_, response) = try? await URLSession.shared.data(for: request),

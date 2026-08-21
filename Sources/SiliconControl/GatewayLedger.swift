@@ -81,6 +81,13 @@ public actor GatewayLedger {
         previews = enabled
     }
 
+    /// Empties the in-memory window — the view's Clear button. The JSONL on disk is
+    /// deliberately untouched (size rotation owns it), and the speed estimates keep
+    /// their learning.
+    public func clear() {
+        entries.removeAll()
+    }
+
     // MARK: - Lifecycle of one request
 
     public func begin(

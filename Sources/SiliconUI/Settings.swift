@@ -106,6 +106,10 @@ public struct Settings: Codable, Sendable, Equatable {
     /// metadata. Everything stays on this Mac either way; nil means yes.
     public var fleetPreviewsEnabled: Bool?
 
+    /// Gateway model ids the user has switched off on the Swarm page: still installed,
+    /// still startable from Models, but absent from the gateway and every engine picker.
+    public var hiddenGatewayModels: [String]?
+
     // Codex engine
     /// The gateway model id the Codex chat last used.
     public var codexModel: String?
@@ -407,6 +411,9 @@ public struct Settings: Codable, Sendable, Equatable {
         qwenWebPort = try? container.decodeIfPresent(Int.self, forKey: .qwenWebPort)
         fleetPreviewsEnabled = try? container.decodeIfPresent(
             Bool.self, forKey: .fleetPreviewsEnabled
+        )
+        hiddenGatewayModels = try? container.decodeIfPresent(
+            [String].self, forKey: .hiddenGatewayModels
         )
         codexModel = try? container.decodeIfPresent(String.self, forKey: .codexModel)
         codexWorkingDirectory = try? container.decodeIfPresent(
