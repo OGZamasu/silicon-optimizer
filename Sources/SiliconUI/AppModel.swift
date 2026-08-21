@@ -871,6 +871,9 @@ public final class AppModel {
         /// ("http://…:8081/v1 (tailnet)" arrives with the parenthetical attached).
         public var openAIBase: String?
         public var contextLength: Int?
+        /// Which serving engine backs the model ("ninfer", "freetoken", …) — nodes
+        /// that offer more than one started advertising it with #133.
+        public var engine: String?
         /// Models the peer could serve instead. Empty until nodes ship a list endpoint;
         /// the loaded model then stands alone in the switcher.
         public var availableModels: [String] = []
@@ -1054,6 +1057,7 @@ public final class AppModel {
             uptimeSeconds: number(json["uptime_s"]),
             contextLength: number(json["context_length"]).map { Int($0) }
         )
+        llm.engine = json["engine"] as? String
         if let api = json["api"] as? [String: Any], let raw = api["openai"] as? String {
             llm.openAIBase = raw.split(separator: " ").first.map(String.init)
         }

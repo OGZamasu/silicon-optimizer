@@ -736,7 +736,17 @@ struct SwarmView: View {
         where !names.contains(where: { GatewayAPI.modelNamesMatch($0, candidate) }) {
             names.append(candidate)
         }
-        return names.map { (GatewayAPI.modelID(peerSlug: slug, model: $0), $0) }
+        return names.map { name in
+            // Nodes with more than one serving engine say which one backs the
+            // loaded model (#133); a single-engine node sends nothing and the
+            // label stays plain.
+            var label = name
+            if let engine = llm.engine, let current = llm.model,
+               GatewayAPI.modelNamesMatch(name, current) {
+                label += " · via \(engine)"
+            }
+            return (GatewayAPI.modelID(peerSlug: slug, model: name), label)
+        }
     }
 
     @ViewBuilder

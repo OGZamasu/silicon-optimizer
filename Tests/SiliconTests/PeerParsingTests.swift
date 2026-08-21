@@ -253,3 +253,23 @@ struct SwarmMemberParsingTests {
         #expect(a.id != b.id)
     }
 }
+
+/// #133: nodes gaining a second serving engine (FreeToken beside ninfer) say which
+/// one backs the loaded model; single-engine nodes send nothing and nothing changes.
+@Suite("Swarm peer parsing — engine field")
+struct PeerEngineParsingTests {
+
+    @Test func readsEngineWhenAdvertised() {
+        let llm = AppModel.parseLLM([
+            "running": true, "model": "deepseek-v4-flash",
+            "context_length": 32768, "engine": "freetoken",
+        ])
+        #expect(llm.engine == "freetoken")
+        #expect(llm.model == "deepseek-v4-flash")
+    }
+
+    @Test func absentEngineStaysNil() {
+        let llm = AppModel.parseLLM(["running": true, "model": "qwen3.8-27b"])
+        #expect(llm.engine == nil)
+    }
+}
