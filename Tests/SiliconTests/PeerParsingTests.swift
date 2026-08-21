@@ -217,3 +217,39 @@ struct PeerExtensionParsingTests {
         #expect(status.capabilities.first?.settings.isEmpty == true)
     }
 }
+
+/// The People panel reads /swarm/clients; today's nodes send names and timestamps,
+/// and the #131 usage counters must slot in without a code change here.
+@Suite("Swarm member parsing")
+struct SwarmMemberParsingTests {
+
+    @Test("today's shape parses, tomorrow's counters ride along")
+    func parseClients() {
+        let list: [[String: Any]] = [
+            ["name": "Christopher’s MacBook Pro",
+             "created": "2026-08-21 10:30:42",
+             "last_seen": "2026-08-21 13:55:51"],
+            ["name": "Tristan’s MacBook Pro",
+             "created": "2026-08-21 13:46:43",
+             "last_seen": "2026-08-21 13:55:48",
+             "jobs_total": 7,
+             "jobs_by_kind": ["text-to-video": 5, "image-to-mesh": 2],
+             "llm_requests": 31],
+            ["no_name": "dropped"],
+        ]
+        let parsed = AppModel.parsePeerClients(list)
+        #expect(parsed.count == 2)
+        #expect(parsed[0].jobsTotal == nil)
+        #expect(parsed[1].jobsTotal == 7)
+        #expect(parsed[1].jobsByKind?["text-to-video"] == 5)
+        #expect(parsed[1].llmRequests == 31)
+    }
+
+    @Test("member ids stay unique across nodes sharing a person")
+    func memberIDs() {
+        let info = AppModel.PeerClientInfo(name: "Tristan’s MacBook Pro")
+        let a = AppModel.SwarmMember(peerName: "silicon-node", info: info)
+        let b = AppModel.SwarmMember(peerName: "attic-pc", info: info)
+        #expect(a.id != b.id)
+    }
+}

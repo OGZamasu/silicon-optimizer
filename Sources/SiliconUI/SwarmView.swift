@@ -41,6 +41,19 @@ struct SwarmView: View {
             }
 
             Section {
+                peopleRows
+            } header: {
+                HStack(spacing: 8) {
+                    Text("People")
+                    if model.swarmMembersLoaded, model.swarmMembers.count > 1 {
+                        Text("\(model.swarmMembers.count)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+            }
+
+            Section {
                 filterBar
                     .listRowSeparator(.hidden)
                 let visible = filteredEntries
@@ -109,10 +122,17 @@ struct SwarmView: View {
         .sheet(isPresented: $showingJoin) { SwarmJoinSheet() }
         .task {
             await model.refreshSwarm()
+            await model.refreshSwarmMembers()
+            var tick = 0
             while !Task.isCancelled {
                 if let ledger = model.gatewayLedger {
                     entries = await ledger.snapshot()
                     stats = await ledger.stats()
+                }
+                // Membership moves slowly; every ~30 s is plenty.
+                tick += 1
+                if tick.isMultiple(of: 15) {
+                    await model.refreshSwarmMembers()
                 }
                 try? await Task.sleep(for: .seconds(2))
             }
@@ -142,6 +162,155 @@ struct SwarmView: View {
                 }
             }
         )
+    }
+
+    // MARK: - People
+
+    /// Everyone holding a key to a node in this swarm, this Mac included. The nodes
+    /// are the source of truth; revocation is immediate and takes only that person.
+    @ViewBuilder
+    private var peopleRows: some View {
+        if model.swarmConfig?.effectiveToken == nil {
+            Text("The member list is the owner's view — it needs the swarm's master "
+                 + "key, which stays on the owner's Mac.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .listRowSeparator(.hidden)
+        } else if !model.swarmMembersLoaded {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Asking the nodes who holds keys…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .listRowSeparator(.hidden)
+        } else if model.swarmMembers.isEmpty {
+            Text(model.swarmPeers.contains(where: \.reachable)
+                 ? "Just you so far — Invite… in the toolbar lets a friend in. (A node "
+                   + "on an older silicon-node can't list members; update #125.)"
+                 : "Members are listed by your nodes, and none are reachable right now.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .listRowSeparator(.hidden)
+        } else {
+            ForEach(model.swarmMembers) { member in
+                memberRow(member)
+                    .listRowSeparator(.hidden)
+            }
+            if !model.swarmMembers.contains(where: {
+                $0.info.jobsTotal != nil || $0.info.llmRequests != nil
+            }) {
+                Text("Per-person usage counts arrive with node update #132.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .listRowSeparator(.hidden)
+            }
+        }
+    }
+
+    private func memberRow(_ member: AppModel.SwarmMember) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: member.info.name == model.localMachineName
+                  ? "laptopcomputer" : "person.crop.circle")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(member.info.name)
+                        .fontWeight(.medium)
+                    if member.info.name == model.localMachineName {
+                        Text("this Mac")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(memberFacts(member))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let usage = memberUsage(member) {
+                    Text(usage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                if let live = memberLiveActivity(member) {
+                    Text(live)
+                        .font(.caption)
+                        .foregroundStyle(.teal)
+                }
+            }
+            Spacer()
+            if member.info.name != model.localMachineName {
+                Button("Revoke") {
+                    Task { await revokeMember(member) }
+                }
+                .controlSize(.small)
+                .help("Take back \(member.info.name)'s key to \(member.peerName) — "
+                      + "immediate, and only them")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func memberFacts(_ member: AppModel.SwarmMember) -> String {
+        var parts = ["a key to \(member.peerName)"]
+        if let created = member.info.created {
+            parts.append("joined \(String(created.prefix(16)))")
+        }
+        if let seen = member.info.lastSeen {
+            parts.append("seen \(String(seen.prefix(16)))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func memberUsage(_ member: AppModel.SwarmMember) -> String? {
+        var parts: [String] = []
+        if let jobs = member.info.jobsTotal {
+            if let byKind = member.info.jobsByKind, !byKind.isEmpty {
+                let detail = byKind.sorted { $0.value > $1.value }
+                    .map { "\($0.value) \($0.key)" }
+                    .joined(separator: ", ")
+                parts.append("\(jobs) job\(jobs == 1 ? "" : "s") — \(detail)")
+            } else {
+                parts.append("\(jobs) job\(jobs == 1 ? "" : "s")")
+            }
+        }
+        if let chats = member.info.llmRequests {
+            parts.append("\(chats) chat request\(chats == 1 ? "" : "s")")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// What this member is putting through the node right now, read from the queue.
+    private func memberLiveActivity(_ member: AppModel.SwarmMember) -> String? {
+        guard let peer = model.swarmPeers.first(where: { $0.name == member.peerName })
+        else { return nil }
+        var parts: [String] = []
+        if let job = peer.runningJob, job.submittedBy == member.info.name {
+            if let progress = job.progress {
+                parts.append("rendering \(job.kind) — \(Int(progress * 100))%")
+            } else {
+                parts.append("rendering \(job.kind)")
+            }
+        }
+        let queued = peer.pendingJobs.filter { $0.submittedBy == member.info.name }.count
+        if queued > 0 {
+            parts.append("\(queued) queued")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func revokeMember(_ member: AppModel.SwarmMember) async {
+        guard let entry = model.swarmConfig?.peers
+            .first(where: { $0.name == member.peerName })
+        else { return }
+        await model.revokeClientToken(
+            on: entry, clientName: member.info.name,
+            admin: model.swarmConfig?.effectiveToken
+        )
+        await model.refreshSwarmMembers()
     }
 
     // MARK: - Machines
@@ -322,7 +491,6 @@ struct SwarmView: View {
                     title: "Offered by \(peer.name)",
                     rows: peer.llm.map { peerModelRows(peer, llm: $0) } ?? []
                 )
-                PeerMembersList(peer: peer)
                 inFlightLine(forIDPrefix: "node/\(GatewayAPI.peerSlug(peer.name))/")
                 if let latency = peer.latency {
                     Text(String(format: "answers in %.0f ms", latency * 1000))
@@ -875,79 +1043,6 @@ private struct CardFootnotes<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) { content }
-    }
-}
-
-/// Who holds a key to this node — named members with individual revocation, the
-/// payoff of per-client tokens. Loads on first expand; empty on nodes that predate
-/// the client API.
-private struct PeerMembersList: View {
-    @Environment(AppModel.self) private var model
-    var peer: AppModel.PeerStatus
-
-    @State private var members: [AppModel.PeerClientInfo] = []
-    @State private var loaded = false
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 3) {
-                if !loaded {
-                    ProgressView().controlSize(.small)
-                } else if members.isEmpty {
-                    Text("No individual members — or this node predates the "
-                         + "member API (update #125).")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ForEach(members) { member in
-                        HStack(spacing: 6) {
-                            Image(systemName: "person.crop.circle")
-                                .imageScale(.small)
-                                .foregroundStyle(.secondary)
-                            Text(member.name)
-                                .font(.caption)
-                            if let seen = member.lastSeen {
-                                Text("seen \(seen)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Button {
-                                Task {
-                                    guard let entry = model.swarmConfig?.peers
-                                        .first(where: { $0.name == peer.name })
-                                    else { return }
-                                    await model.revokeClientToken(
-                                        on: entry, clientName: member.name,
-                                        admin: model.swarmConfig?.effectiveToken
-                                    )
-                                    members = await model.listPeerClients(peer)
-                                }
-                            } label: {
-                                Image(systemName: "person.crop.circle.badge.xmark")
-                                    .imageScale(.small)
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.red.opacity(0.8))
-                            .help("Revoke \(member.name)'s key to \(peer.name) — "
-                                  + "immediate, and only them")
-                        }
-                    }
-                }
-            }
-            .padding(.top, 2)
-            .task(id: expanded) {
-                guard expanded, !loaded else { return }
-                members = await model.listPeerClients(peer)
-                loaded = true
-            }
-        } label: {
-            Text("Members")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
     }
 }
 

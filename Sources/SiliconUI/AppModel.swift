@@ -147,6 +147,10 @@ public final class AppModel {
     public internal(set) var agentBridgeRows: [AgentBridge.Row] = []
     public internal(set) var agentBridgeBusy: AgentBridge.Client?
     public internal(set) var agentBridgeNotes: [String: String] = [:]
+
+    // The Swarm page's People panel (see AppModel+SwarmPairing)
+    internal(set) var swarmMembers: [SwarmMember] = []
+    internal(set) var swarmMembersLoaded = false
     var codexRuntime: CodexRuntime?
     /// The rendered conversation: agent prose, commands, file changes, tool calls.
     public internal(set) var codexItems: [CodexChatItem] = []

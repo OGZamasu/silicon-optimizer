@@ -163,12 +163,21 @@ extension AppModel {
               (response as? HTTPURLResponse)?.statusCode == 200,
               let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return [] }
-        return list.compactMap { entry in
+        return Self.parsePeerClients(list)
+    }
+
+    /// Lenient, like all peer parsing: today's nodes send name/created/last_seen;
+    /// the usage counters (#132) appear here the moment a node starts sending them.
+    nonisolated static func parsePeerClients(_ list: [[String: Any]]) -> [PeerClientInfo] {
+        list.compactMap { entry in
             guard let name = entry["name"] as? String else { return nil }
             return PeerClientInfo(
                 name: name,
                 created: entry["created"] as? String,
-                lastSeen: entry["last_seen"] as? String
+                lastSeen: entry["last_seen"] as? String,
+                jobsTotal: entry["jobs_total"] as? Int,
+                jobsByKind: entry["jobs_by_kind"] as? [String: Int],
+                llmRequests: entry["llm_requests"] as? Int
             )
         }
     }
@@ -177,7 +186,59 @@ extension AppModel {
         var name: String
         var created: String?
         var lastSeen: String?
+        var jobsTotal: Int?
+        var jobsByKind: [String: Int]?
+        var llmRequests: Int?
         var id: String { name }
+
+        init(name: String, created: String? = nil, lastSeen: String? = nil,
+             jobsTotal: Int? = nil, jobsByKind: [String: Int]? = nil,
+             llmRequests: Int? = nil) {
+            self.name = name
+            self.created = created
+            self.lastSeen = lastSeen
+            self.jobsTotal = jobsTotal
+            self.jobsByKind = jobsByKind
+            self.llmRequests = llmRequests
+        }
+    }
+
+    /// One person's key to one node — a row in the Swarm page's People panel.
+    struct SwarmMember: Identifiable, Sendable, Equatable {
+        var peerName: String
+        var info: PeerClientInfo
+        var id: String { "\(peerName)/\(info.name)" }
+    }
+
+    /// This Mac's name as members see it — the same one `ensureOwnClientTokens` mints.
+    var localMachineName: String {
+        Host.current().localizedName ?? "This Mac"
+    }
+
+    /// Rebuilds the People panel: every keyholder on every reachable node. Only the
+    /// swarm owner holds the master token these listings need; members get an empty
+    /// list and the panel says so.
+    func refreshSwarmMembers() async {
+        guard swarmConfig?.effectiveToken != nil else {
+            swarmMembers = []
+            swarmMembersLoaded = true
+            return
+        }
+        var gathered: [SwarmMember] = []
+        for peer in swarmPeers where peer.reachable {
+            for info in await listPeerClients(peer) {
+                gathered.append(SwarmMember(peerName: peer.name, info: info))
+            }
+        }
+        // This Mac first, then the order people joined.
+        let mine = localMachineName
+        swarmMembers = gathered.sorted {
+            if ($0.info.name == mine) != ($1.info.name == mine) {
+                return $0.info.name == mine
+            }
+            return ($0.info.created ?? "") < ($1.info.created ?? "")
+        }
+        swarmMembersLoaded = true
     }
 
     /// Gives THIS Mac its own per-client identity on every node that can mint one, so
@@ -187,7 +248,7 @@ extension AppModel {
     func ensureOwnClientTokens() async {
         guard var config = SwarmConfig.load(), let admin = config.effectiveToken
         else { return }
-        let ourName = Host.current().localizedName ?? "This Mac"
+        let ourName = localMachineName
         var changed = false
         for peer in config.peers {
             guard peer.token == nil,
