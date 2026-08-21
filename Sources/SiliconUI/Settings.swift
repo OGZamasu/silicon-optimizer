@@ -102,6 +102,10 @@ public struct Settings: Codable, Sendable, Equatable {
     /// Port the Qwen Code Web Shell binds; stable for the same reasons as the harness's.
     public var qwenWebPort: Int?
 
+    /// Whether Fleet ledger entries keep short prompt/response excerpts alongside the
+    /// metadata. Everything stays on this Mac either way; nil means yes.
+    public var fleetPreviewsEnabled: Bool?
+
     // Codex engine
     /// The gateway model id the Codex chat last used.
     public var codexModel: String?
@@ -401,6 +405,9 @@ public struct Settings: Codable, Sendable, Equatable {
         nodeBinaryPath = try? container.decodeIfPresent(String.self, forKey: .nodeBinaryPath)
         gatewayPort = try? container.decodeIfPresent(Int.self, forKey: .gatewayPort)
         qwenWebPort = try? container.decodeIfPresent(Int.self, forKey: .qwenWebPort)
+        fleetPreviewsEnabled = try? container.decodeIfPresent(
+            Bool.self, forKey: .fleetPreviewsEnabled
+        )
         codexModel = try? container.decodeIfPresent(String.self, forKey: .codexModel)
         codexWorkingDirectory = try? container.decodeIfPresent(
             String.self, forKey: .codexWorkingDirectory

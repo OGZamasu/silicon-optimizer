@@ -42,11 +42,13 @@ public protocol GatewayHost: AnyObject, Sendable {
 public actor GatewayServer {
 
     private let host: any GatewayHost
+    private let ledger: GatewayLedger?
     private var listener: NWListener?
     public private(set) var port: Int = 0
 
-    public init(host: any GatewayHost) {
+    public init(host: any GatewayHost, ledger: GatewayLedger? = nil) {
         self.host = host
+        self.ledger = ledger
     }
 
     public func start(preferredPort: Int = 0) throws {
@@ -121,35 +123,87 @@ public actor GatewayServer {
             return
         }
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
+        let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
+        let isNode: Bool = {
+            if case .node = GatewayAPI.parseModelID(modelID) { return true }
+            return false
+        }()
+        let (preview, promptChars) = GatewayAPI.promptPreview(inBody: request.body)
+        let entry = await ledger?.begin(
+            endpoint: "chat", modelID: modelID, stream: wantsStream,
+            promptChars: promptChars, promptPreview: preview
+        )
 
         if wantsStream {
             let stream = SSEConnection(connection: connection)
-            guard await stream.sendHead() else { return }
+            guard await stream.sendHead() else {
+                await finishLedger(entry, ok: false, detail: "client gone before headers")
+                return
+            }
             let backend: GatewayReadyBackend
             do {
-                backend = try await ensureWithHeartbeat(modelID: modelID, stream: stream)
+                backend = try await ensureWithHeartbeat(
+                    modelID: modelID, waitBudget: waitBudget, stream: stream
+                )
+                if let entry { await ledger?.noteEnsured(entry, backendModel: backend.backendModel) }
             } catch {
                 await stream.send(GatewayAPI.sseErrorPayload(error.localizedDescription))
                 await stream.send(GatewayAPI.sseDone)
+                await finishLedger(entry, ok: false, detail: error.localizedDescription)
                 return
             }
-            let body = GatewayAPI.rewritingModel(inBody: request.body, to: backend.backendModel)
-            await pipeChatStream(body: body, backend: backend, to: stream)
+            var body = GatewayAPI.rewritingModel(inBody: request.body, to: backend.backendModel)
+            body = GatewayAPI.normalizingThinking(inBody: body, forNode: isNode)
+            await pipeChatStream(body: body, backend: backend, to: stream, ledgerEntry: entry)
         } else {
             do {
-                let backend = try await host.gatewayEnsureReady(modelID: modelID) { _ in }
-                let body = GatewayAPI.rewritingModel(
+                let backend = try await ensureRespectingWait(
+                    modelID: modelID, budget: waitBudget, onStage: { _ in }
+                )
+                if let entry { await ledger?.noteEnsured(entry, backendModel: backend.backendModel) }
+                var body = GatewayAPI.rewritingModel(
                     inBody: request.body, to: backend.backendModel
                 )
+                body = GatewayAPI.normalizingThinking(inBody: body, forNode: isNode)
                 let (status, data) = try await BackendClient.send(
                     path: "chat/completions", body: body, to: backend.baseURL
                 )
-                try? await HTTPResponse(status: status, body: data).write(to: connection)
+                let warning = status == 200
+                    ? GatewayAPI.emptyContentWarning(inResponseBody: data) : nil
+                let out = warning.map {
+                    GatewayAPI.attachingWarning(toResponseBody: data, warning: $0)
+                } ?? data
+                try? await HTTPResponse(status: status, body: out).write(to: connection)
+
+                let audit = GatewayStreamAudit()
+                if let compact = String(data: data, encoding: .utf8) {
+                    // The buffered body has the same shape as one stream payload —
+                    // the audit reads choices[0].message instead of a delta.
+                    audit.feed(payload: compact.replacingOccurrences(of: "\n", with: ""))
+                }
+                await finishLedger(
+                    entry, ok: status == 200,
+                    detail: status == 200 ? nil : "backend answered \(status)",
+                    warning: warning, audit: audit
+                )
             } catch {
                 try? await HTTPResponse.error(502, error.localizedDescription)
                     .write(to: connection)
+                await finishLedger(entry, ok: false, detail: error.localizedDescription)
             }
         }
+    }
+
+    private func finishLedger(
+        _ entry: String?, ok: Bool, detail: String? = nil,
+        warning: String? = nil, audit: GatewayStreamAudit? = nil
+    ) async {
+        guard let entry else { return }
+        await ledger?.finish(
+            entry, ok: ok, detail: detail, warning: warning,
+            responsePreview: audit?.responsePreview,
+            promptTokens: audit?.promptTokens, outputTokens: audit?.outputTokens
+        )
     }
 
     /// Streams the backend's SSE bytes through untouched, frame by frame. The harness's
@@ -159,15 +213,20 @@ public actor GatewayServer {
     /// dying mid-prefill does exactly this — gets its death narrated as an in-stream
     /// error the client can show, instead of a bare "stream closed".
     private func pipeChatStream(
-        body: Data, backend: GatewayReadyBackend, to stream: SSEConnection
+        body: Data, backend: GatewayReadyBackend, to stream: SSEConnection,
+        ledgerEntry: String? = nil
     ) async {
         var sawDone = false
+        let audit = GatewayStreamAudit()
         do {
             let frames = try await BackendClient.streamFrames(
                 path: "chat/completions", body: body, to: backend.baseURL
             )
             for try await frame in frames {
                 if !sawDone, GatewayAPI.frameCarriesDone(frame) { sawDone = true }
+                for payload in Self.dataPayloads(inFrame: frame) {
+                    audit.feed(payload: payload)
+                }
                 await stream.send(frame + Data("\n\n".utf8))
             }
             if !sawDone {
@@ -177,10 +236,25 @@ public actor GatewayServer {
                     + "(a known node issue). Try a model on This Mac."
                 ))
                 await stream.send(GatewayAPI.sseDone)
+                await finishLedger(
+                    ledgerEntry, ok: false, detail: "stream ended without [DONE]",
+                    audit: audit
+                )
+                return
             }
+            // An answer that streamed nothing but reasoning deserves its diagnosis on
+            // the wire (as a comment — invisible to parsers, visible to anyone looking)
+            // and in the ledger, where the Fleet tab makes it loud.
+            if let warning = audit.warning {
+                await stream.send(GatewayAPI.sseComment("silicon-warning: \(warning)"))
+            }
+            await finishLedger(ledgerEntry, ok: true, warning: audit.warning, audit: audit)
         } catch {
             await stream.send(GatewayAPI.sseErrorPayload(error.localizedDescription))
             await stream.send(GatewayAPI.sseDone)
+            await finishLedger(
+                ledgerEntry, ok: false, detail: error.localizedDescription, audit: audit
+            )
         }
     }
 
@@ -194,20 +268,37 @@ public actor GatewayServer {
         let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)
         let wantsStream = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any])
             .flatMap { $0?["stream"] as? Bool } ?? false
+        let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
+        let isNode: Bool = {
+            if case .node = GatewayAPI.parseModelID(modelID) { return true }
+            return false
+        }()
+        let entry = await ledger?.begin(
+            endpoint: "responses", modelID: modelID, stream: wantsStream,
+            promptChars: request.body.count, promptPreview: nil
+        )
 
         let stream = SSEConnection(connection: connection)
         if wantsStream {
-            guard await stream.sendHead() else { return }
+            guard await stream.sendHead() else {
+                await finishLedger(entry, ok: false, detail: "client gone before headers")
+                return
+            }
             await stream.send(translator.opening())
         }
 
         let backend: GatewayReadyBackend
         do {
             if wantsStream {
-                backend = try await ensureWithHeartbeat(modelID: modelID, stream: stream)
+                backend = try await ensureWithHeartbeat(
+                    modelID: modelID, waitBudget: waitBudget, stream: stream
+                )
             } else {
-                backend = try await host.gatewayEnsureReady(modelID: modelID) { _ in }
+                backend = try await ensureRespectingWait(
+                    modelID: modelID, budget: waitBudget, onStage: { _ in }
+                )
             }
+            if let entry { await ledger?.noteEnsured(entry, backendModel: backend.backendModel) }
         } catch {
             if wantsStream {
                 for frame in translator.failure(message: error.localizedDescription) {
@@ -217,9 +308,11 @@ public actor GatewayServer {
                 try? await HTTPResponse.error(502, error.localizedDescription)
                     .write(to: connection)
             }
+            await finishLedger(entry, ok: false, detail: error.localizedDescription)
             return
         }
 
+        let audit = GatewayStreamAudit()
         do {
             // The backend is always asked to stream: the translator consumes deltas, and a
             // non-streaming caller just gets the assembled response at the end.
@@ -231,6 +324,7 @@ public actor GatewayServer {
                 json["stream_options"] = ["include_usage": true]
                 chatBody = (try? JSONSerialization.data(withJSONObject: json)) ?? chatBody
             }
+            chatBody = GatewayAPI.normalizingThinking(inBody: chatBody, forNode: isNode)
 
             let frames = try await BackendClient.streamFrames(
                 path: "chat/completions", body: chatBody, to: backend.baseURL
@@ -239,6 +333,7 @@ public actor GatewayServer {
             for try await frame in frames {
                 for payload in Self.dataPayloads(inFrame: frame) {
                     sawPayload = true
+                    audit.feed(payload: payload)
                     for out in translator.translate(payload: payload) {
                         if wantsStream { await stream.send(out) }
                     }
@@ -253,6 +348,7 @@ public actor GatewayServer {
                 } else {
                     try? await HTTPResponse.error(502, message).write(to: connection)
                 }
+                await finishLedger(entry, ok: false, detail: message, audit: audit)
                 return
             }
             if wantsStream {
@@ -265,6 +361,7 @@ public actor GatewayServer {
                 try? await HTTPResponse(status: 200, body: translator.completedResponseBody())
                     .write(to: connection)
             }
+            await finishLedger(entry, ok: true, warning: audit.warning, audit: audit)
         } catch {
             if wantsStream {
                 for frame in translator.failure(message: error.localizedDescription) {
@@ -274,6 +371,9 @@ public actor GatewayServer {
                 try? await HTTPResponse.error(502, error.localizedDescription)
                     .write(to: connection)
             }
+            await finishLedger(
+                entry, ok: false, detail: error.localizedDescription, audit: audit
+            )
         }
     }
 
@@ -358,7 +458,7 @@ public actor GatewayServer {
     /// ignore comments but count them as transport activity, which is exactly what a
     /// minute-long model load needs.
     private func ensureWithHeartbeat(
-        modelID: String, stream: SSEConnection
+        modelID: String, waitBudget: TimeInterval, stream: SSEConnection
     ) async throws -> GatewayReadyBackend {
         let stage = StageBox()
         let heartbeat = Task {
@@ -370,8 +470,30 @@ public actor GatewayServer {
             }
         }
         defer { heartbeat.cancel() }
-        return try await host.gatewayEnsureReady(modelID: modelID) { line in
+        return try await ensureRespectingWait(modelID: modelID, budget: waitBudget) { line in
             Task { await stage.set(line) }
+        }
+    }
+
+    /// The host's ensure step, with the `X-Silicon-Wait` contract on top: a waitable
+    /// refusal (the node's GPU rendering, a model mid-answer) is retried until the
+    /// caller's budget runs out; everything else — and everyone without a budget —
+    /// gets the error at once.
+    private func ensureRespectingWait(
+        modelID: String, budget: TimeInterval,
+        onStage: @escaping @Sendable (String) -> Void
+    ) async throws -> GatewayReadyBackend {
+        let deadline = Date().addingTimeInterval(budget)
+        while true {
+            do {
+                return try await host.gatewayEnsureReady(modelID: modelID, onStage: onStage)
+            } catch {
+                guard budget > 0, (error as? GatewayWaitableError)?.isWaitable == true,
+                      Date().addingTimeInterval(10) <= deadline
+                else { throw error }
+                onStage("waiting it out (X-Silicon-Wait): \(error.localizedDescription)")
+                try? await Task.sleep(for: .seconds(10))
+            }
         }
     }
 }

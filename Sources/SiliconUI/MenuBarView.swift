@@ -392,6 +392,10 @@ struct MenuBarView: View {
                 model.selectedTab = .video
                 openMainWindow()
             }
+            menuButton("Fleet", systemImage: "point.3.connected.trianglepath.dotted") {
+                model.selectedTab = .fleet
+                openMainWindow()
+            }
             Divider().padding(.vertical, 4)
             menuButton("Settings…", systemImage: "gearshape") {
                 model.selectedTab = .settings

@@ -9,6 +9,8 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var templateStatus = ""
     @State private var fetchingTemplate = false
+    @State private var showingSwarmInvite = false
+    @State private var showingSwarmJoin = false
 
     var body: some View {
         @Bindable var model = model
@@ -451,6 +453,15 @@ struct SettingsView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+                // Bluetooth-style membership: the owner opens an invite, the new
+                // member scans and knocks, both screens show one code, one click
+                // admits them. Discoverable only while the invite sheet is open.
+                HStack(spacing: 10) {
+                    Button("Invite to the Swarm…") { showingSwarmInvite = true }
+                    Button("Join a Swarm…") { showingSwarmJoin = true }
+                    Spacer()
+                }
             }
 
             if model.settings.showAdvancedControls {
@@ -524,6 +535,8 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+        .sheet(isPresented: $showingSwarmInvite) { SwarmInviteSheet() }
+        .sheet(isPresented: $showingSwarmJoin) { SwarmJoinSheet() }
         .onChange(of: model.settings) {
             model.settings.save()
             model.settings.applyLaunchAtLogin()

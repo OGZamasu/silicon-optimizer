@@ -31,24 +31,71 @@ extension AppModel: GatewayHost {
     /// itself enforces that — and token-free, matching the posture of the inference server
     /// it fronts.
     func startGatewayServer() {
-        let server = GatewayServer(host: self)
+        let supportDirectory = SwarmConfig.configURL.deletingLastPathComponent()
+        let ledger = GatewayLedger(
+            directory: supportDirectory,
+            previews: settings.fleetPreviewsEnabled ?? true
+        )
+        gatewayLedger = ledger
+        let server = GatewayServer(host: self, ledger: ledger)
         gatewayServer = server
         let port = gatewayPort()
         Task {
             do {
                 try await server.start(preferredPort: port)
+                // The well-known file local agents read instead of running lsof against
+                // the app. No secrets in it — the gateway is loopback and token-free.
+                GatewayDiscovery.write(
+                    port: port,
+                    pid: ProcessInfo.processInfo.processIdentifier,
+                    version: Bundle.main.infoDictionary?["CFBundleShortVersionString"]
+                        as? String ?? "dev",
+                    directory: supportDirectory
+                )
             } catch {
                 // Not fatal: the app works without external harnesses; they will report
                 // the connection failure in their own words.
                 libraryError = "Model gateway unavailable: \(error.localizedDescription)"
             }
         }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            GatewayDiscovery.remove(directory: supportDirectory)
+        }
     }
 
     // MARK: - GatewayHost
 
     public func gatewayModels() async -> [GatewayAPI.Model] {
-        gatewayModelSnapshot()
+        var models = gatewayModelSnapshot()
+        let stats = await gatewayLedger?.stats() ?? [:]
+        for index in models.indices {
+            let id = models[index].id
+            switch GatewayAPI.parseModelID(id) {
+            case .local:
+                // llama-server reads the nested kwargs form; Qwen also honors the
+                // /no_think soft switch in the prompt.
+                models[index].thinkingControls = ["chat_template_kwargs", "no_think"]
+            case .node(let slug, _):
+                // The node engine takes a top-level enable_thinking and 400s on
+                // chat_template_kwargs — the gateway translates either way, but
+                // callers deserve to know the native dialect.
+                models[index].thinkingControls = ["enable_thinking"]
+                if let peer = swarmPeers.first(where: {
+                    GatewayAPI.peerSlug($0.name) == slug
+                }) {
+                    models[index].queueDepth = peer.queueDepth
+                }
+            case nil:
+                break
+            }
+            if let stat = stats[id] {
+                models[index].tokensPerSecond = stat.tokensPerSecond
+                if stat.inFlight > 0 { models[index].pendingRequests = stat.inFlight }
+            }
+        }
+        return models
     }
 
     /// The gateway's world view right now, also what the Codex model picker shows —
@@ -219,8 +266,8 @@ extension AppModel: GatewayHost {
         // A GPU job preempts the node's LLM on purpose — the card belongs to the render
         // until the queue drains, and the LLM restores itself a couple of minutes later.
         // Arbitration deserves an honest sentence, not a start attempt that stalls.
-        if (peer.queueDepth ?? 0) > 0 {
-            throw GatewayHostError.peerRendering(peer.name)
+        if let depth = peer.queueDepth, depth > 0 {
+            throw GatewayHostError.peerRendering(peer.name, queueDepth: depth)
         }
 
         onStage("starting \(model) on \(peer.name)")
@@ -317,7 +364,7 @@ extension AppModel: GatewayHost {
     }
 }
 
-enum GatewayHostError: Error, LocalizedError {
+enum GatewayHostError: Error, LocalizedError, GatewayWaitableError {
     case unknownModel(String)
     case unknownPeer(String)
     case peerUnreachable(String)
@@ -326,7 +373,16 @@ enum GatewayHostError: Error, LocalizedError {
     case loadFailed(String, String)
     case modelBusy(String)
     case contextWontFit(String)
-    case peerRendering(String)
+    case peerRendering(String, queueDepth: Int)
+
+    /// The states a caller's X-Silicon-Wait budget may sit out: machines that are
+    /// occupied, not machines that are wrong.
+    var isWaitable: Bool {
+        switch self {
+        case .peerRendering, .modelBusy: true
+        default: false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -343,13 +399,16 @@ enum GatewayHostError: Error, LocalizedError {
         case .loadFailed(let name, let state):
             "Could not load \(name): \(state)"
         case .modelBusy(let name):
-            "\(name) is busy answering right now; try again when it finishes."
+            "\(name) is busy answering right now; try again when it finishes, or send "
+            + "an X-Silicon-Wait: 180 header to wait in line."
         case .contextWontFit(let name):
             "Agent chat needs \(name) loaded with at least an 8K context, and there isn't "
             + "enough free memory for that right now. Close some apps and try again."
-        case .peerRendering(let name):
-            "\(name)'s GPU is busy rendering right now; its chat model comes back a "
-            + "couple of minutes after the job finishes."
+        case .peerRendering(let name, let depth):
+            "\(name)'s GPU is rendering (\(depth) job\(depth == 1 ? "" : "s") queued); "
+            + "its chat model comes back about two minutes after the queue drains — "
+            + "roughly \(depth * 2) minutes from now. Retry then, or send an "
+            + "X-Silicon-Wait: \(min(depth * 150, 600)) header to wait it out."
         }
     }
 }

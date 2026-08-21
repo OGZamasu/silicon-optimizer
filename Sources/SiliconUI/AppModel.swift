@@ -89,6 +89,17 @@ public final class AppModel {
     /// The loopback server that lists every model this app can reach and routes external
     /// harness requests to whichever machine serves the one they named.
     var gatewayServer: GatewayServer?
+    /// The gateway's request ledger — what the Fleet tab shows.
+    var gatewayLedger: GatewayLedger?
+
+    // Swarm pairing (Bluetooth-style membership; see AppModel+SwarmPairing)
+    var pairingServer: PairingServer?
+    var pairingAddress: String?
+    var pairingRequest: PendingPairing?
+    var pairingDelivered = false
+    var pairingPollTask: Task<Void, Never>?
+    /// The code shown on the joiner's screen while awaiting the owner's decision.
+    var joinCode: String?
     /// Resolved once per session from the persisted choice, like the harness ports.
     var resolvedGatewayPort: Int?
     /// Gateway-triggered local loads run one at a time through here.
@@ -160,6 +171,7 @@ public final class AppModel {
         case threeD = "3D"
         case audio = "Audio"
         case video = "Video"
+        case fleet = "Fleet"
         case settings = "Settings"
 
         public var id: String { rawValue }
@@ -173,6 +185,7 @@ public final class AppModel {
             case .threeD: "cube.transparent"
             case .audio: "waveform"
             case .video: "film"
+            case .fleet: "point.3.connected.trianglepath.dotted"
             case .settings: "gearshape"
             }
         }

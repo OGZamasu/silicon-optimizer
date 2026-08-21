@@ -90,10 +90,23 @@ public enum GatewayAPI {
         /// True when a request to this model would be answered without a load.
         public var serving: Bool
         public var quantization: String?
+        /// Which thinking-control spellings this model's backend honors —
+        /// ["enable_thinking"] for the node engine, ["chat_template_kwargs", "no_think"]
+        /// for llama.cpp. Callers stop guessing; the gateway translates either anyway.
+        public var thinkingControls: [String]?
+        /// Measured generation speed from recent gateway traffic, tokens per second.
+        public var tokensPerSecond: Double?
+        /// Gateway requests currently in flight against this model.
+        public var pendingRequests: Int?
+        /// The owning machine's GPU job queue — a nonzero depth means chat requests
+        /// fail fast (or wait, with X-Silicon-Wait) until the render finishes.
+        public var queueDepth: Int?
 
         public init(
             id: String, displayName: String, where_: String,
-            contextWindow: Int? = nil, serving: Bool = false, quantization: String? = nil
+            contextWindow: Int? = nil, serving: Bool = false, quantization: String? = nil,
+            thinkingControls: [String]? = nil, tokensPerSecond: Double? = nil,
+            pendingRequests: Int? = nil, queueDepth: Int? = nil
         ) {
             self.id = id
             self.displayName = displayName
@@ -101,6 +114,10 @@ public enum GatewayAPI {
             self.contextWindow = contextWindow
             self.serving = serving
             self.quantization = quantization
+            self.thinkingControls = thinkingControls
+            self.tokensPerSecond = tokensPerSecond
+            self.pendingRequests = pendingRequests
+            self.queueDepth = queueDepth
         }
     }
 
@@ -119,6 +136,12 @@ public enum GatewayAPI {
             ]
             if let context = model.contextWindow { silicon["contextWindow"] = context }
             if let quantization = model.quantization { silicon["quantization"] = quantization }
+            if let controls = model.thinkingControls { silicon["thinkingControls"] = controls }
+            if let rate = model.tokensPerSecond {
+                silicon["tokensPerSecond"] = (rate * 10).rounded() / 10
+            }
+            if let pending = model.pendingRequests { silicon["pendingRequests"] = pending }
+            if let depth = model.queueDepth { silicon["queueDepth"] = depth }
             return [
                 "id": model.id,
                 "object": "model",
@@ -319,6 +342,124 @@ public enum GatewayAPI {
         return ""
     }
 
+    // MARK: - Thinking control
+
+    /// Normalizes the two thinking-control dialects so either works against either backend.
+    /// Qwen-family models think by default; callers turn that off with
+    /// `chat_template_kwargs.enable_thinking` (the llama.cpp form) or a top-level
+    /// `enable_thinking` (the node engine's form — it 400s on `chat_template_kwargs`).
+    /// The ROUTE 85 production test burned entire token budgets on reasoning because
+    /// callers could not know which spelling a backend takes; after this, they send
+    /// either and the gateway speaks each backend's own dialect.
+    public static func normalizingThinking(inBody body: Data, forNode isNode: Bool) -> Data {
+        guard var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        else { return body }
+
+        let kwargs = json["chat_template_kwargs"] as? [String: Any]
+        let nested = kwargs?["enable_thinking"] as? Bool
+        let top = json["enable_thinking"] as? Bool
+        // Top-level wins when both are present: it is the more deliberate spelling here,
+        // and ties must resolve somehow.
+        let wanted = top ?? nested
+
+        if isNode {
+            // The node engine accepts top-level enable_thinking and rejects
+            // chat_template_kwargs outright — the whole field goes, preference or not,
+            // so a llama.cpp-dialect caller does not 400.
+            json["chat_template_kwargs"] = nil
+            if let wanted { json["enable_thinking"] = wanted }
+        } else if let wanted {
+            // llama-server reads the nested form and ignores unknown top-level keys;
+            // fold the preference into the form it honors.
+            var merged = kwargs ?? [:]
+            merged["enable_thinking"] = wanted
+            json["chat_template_kwargs"] = merged
+            json["enable_thinking"] = nil
+        }
+        return (try? JSONSerialization.data(withJSONObject: json)) ?? body
+    }
+
+    // MARK: - Request inspection for the ledger
+
+    /// The last user message's text, truncated — what a fleet-activity row shows as
+    /// "what was asked". Returns the preview and the full prompt's character count.
+    public static func promptPreview(inBody body: Data, limit: Int = 150) -> (String?, Int) {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return (nil, body.count) }
+        let messages = json["messages"] as? [[String: Any]] ?? []
+        let totalChars = messages.reduce(0) { sum, message in
+            sum + ((message["content"] as? String)?.count ?? 0)
+        }
+        let lastUser = messages.last { ($0["role"] as? String) == "user" }
+            ?? messages.last
+        guard let text = lastUser?["content"] as? String, !text.isEmpty else {
+            return (nil, totalChars)
+        }
+        return (String(text.prefix(limit)), totalChars)
+    }
+
+    /// Parses an `X-Silicon-Wait` header: how many seconds the caller is willing to wait
+    /// out a busy machine (a render hogging the node's GPU) before taking the error.
+    /// Absent or malformed means fail fast — the default the interactive engines want.
+    public static func waitBudget(fromHeader header: String?) -> TimeInterval {
+        guard let header, let seconds = Int(header.trimmingCharacters(in: .whitespaces)),
+              seconds > 0 else { return 0 }
+        return TimeInterval(min(seconds, 600))
+    }
+
+    // MARK: - Empty-content diagnostics
+
+    /// The warning for an answer whose content is empty while the model plainly worked —
+    /// the whole budget went to reasoning (Qwen models think by default), or generation
+    /// was cut off before any content. Nil when the response looks healthy.
+    public static func emptyContentWarning(
+        content: String, reasoningChars: Int, finishReason: String?
+    ) -> String? {
+        guard content.isEmpty else { return nil }
+        if reasoningChars > 0 {
+            return "The model spent its entire token budget thinking (\(reasoningChars) "
+                + "characters of reasoning, no answer). Disable thinking with "
+                + "enable_thinking: false, or raise max_tokens."
+        }
+        if finishReason == "length" {
+            return "Generation hit max_tokens before producing any content. "
+                + "Raise max_tokens."
+        }
+        return nil
+    }
+
+    /// Inspects one buffered (non-streaming) chat-completions response.
+    public static func emptyContentWarning(inResponseBody body: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let choice = (json["choices"] as? [[String: Any]])?.first,
+              let message = choice["message"] as? [String: Any]
+        else { return nil }
+        let content = message["content"] as? String ?? ""
+        let reasoning = message["reasoning_content"] as? String
+            ?? message["reasoning"] as? String ?? ""
+        return emptyContentWarning(
+            content: content, reasoningChars: reasoning.count,
+            finishReason: choice["finish_reason"] as? String
+        )
+    }
+
+    /// Adds a `silicon.warning` block to a buffered response so the caller sees the
+    /// diagnosis in-band, next to the empty answer it explains.
+    public static func attachingWarning(toResponseBody body: Data, warning: String) -> Data {
+        guard var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        else { return body }
+        var silicon = json["silicon"] as? [String: Any] ?? [:]
+        silicon["warning"] = warning
+        json["silicon"] = silicon
+        return (try? JSONSerialization.data(withJSONObject: json)) ?? body
+    }
+
+    /// The usage block of a chat response or final stream frame, when present.
+    public static func usage(inJSON json: [String: Any]) -> (prompt: Int?, output: Int?) {
+        guard let usage = json["usage"] as? [String: Any] else { return (nil, nil) }
+        return (usage["prompt_tokens"] as? Int, usage["completion_tokens"] as? Int)
+    }
+
     // MARK: - Model name extraction
 
     /// The one field the gateway needs from any inbound request before routing it.
@@ -414,5 +555,64 @@ public enum GatewayAPI {
             let path = String(text[matchRange])
             return seen.insert(path).inserted ? path : nil
         }
+    }
+}
+
+/// A caller-visible marker for gateway errors that may describe a machine being
+/// temporarily occupied (a render owning the GPU, a model mid-answer) — the states an
+/// `X-Silicon-Wait` header is allowed to wait out. Conforming types answer per value:
+/// an error enum marks only its transient cases waitable, never its terminal ones.
+public protocol GatewayWaitableError: Error {
+    var isWaitable: Bool { get }
+}
+
+/// Watches one streamed chat answer go by and keeps what the ledger and the
+/// empty-content diagnosis need: whether any content ever arrived, how much reasoning
+/// did, the finish reason, usage, and a short preview. Fed from a single stream-piping
+/// task; not thread-safe and does not need to be.
+public final class GatewayStreamAudit {
+    public private(set) var contentChars = 0
+    public private(set) var reasoningChars = 0
+    public private(set) var finishReason: String?
+    public private(set) var promptTokens: Int?
+    public private(set) var outputTokens: Int?
+    private var preview = ""
+    private let previewLimit: Int
+
+    public init(previewLimit: Int = 150) {
+        self.previewLimit = previewLimit
+    }
+
+    public func feed(payload: String) {
+        guard payload != "[DONE]",
+              let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8))
+                as? [String: Any]
+        else { return }
+        let usage = GatewayAPI.usage(inJSON: json)
+        if let prompt = usage.prompt { promptTokens = prompt }
+        if let output = usage.output { outputTokens = output }
+        guard let choice = (json["choices"] as? [[String: Any]])?.first else { return }
+        if let reason = choice["finish_reason"] as? String { finishReason = reason }
+        // Streams carry deltas; a buffered body piped through here carries a message.
+        let piece = choice["delta"] as? [String: Any] ?? choice["message"] as? [String: Any]
+        guard let piece else { return }
+        if let content = piece["content"] as? String, !content.isEmpty {
+            contentChars += content.count
+            if preview.count < previewLimit {
+                preview += String(content.prefix(previewLimit - preview.count))
+            }
+        }
+        if let reasoning = piece["reasoning_content"] as? String
+            ?? piece["reasoning"] as? String {
+            reasoningChars += reasoning.count
+        }
+    }
+
+    public var responsePreview: String? { preview.isEmpty ? nil : preview }
+
+    public var warning: String? {
+        GatewayAPI.emptyContentWarning(
+            content: preview, reasoningChars: reasoningChars, finishReason: finishReason
+        )
     }
 }
