@@ -610,7 +610,14 @@ python3 -m venv ~/.silicon-mlx
 ~/.silicon-mlx/bin/pip install mflux</pre>
       </div>
       <div class="reveal">
-        <p class="step-label">5 · Optional: connect Claude or ChatGPT</p>
+        <p class="step-label">5 · Optional: add a gaming PC</p>
+<pre><span class="c"># Got a Windows machine with an NVIDIA card? Make it your render farm —</span>
+<span class="c"># video, 3D and portrait jobs go there while your Mac stays free:</span>
+scoop bucket add silicon https://github.com/OGZamasu/silicon-node
+scoop install silicon-node</pre>
+      </div>
+      <div class="reveal">
+        <p class="step-label">6 · Optional: connect Claude or ChatGPT</p>
 <pre><span class="c"># In the app: Settings → "Your other AIs" → Connect. That's the whole step.</span>
 <span class="c"># Prefer the terminal? Same result:</span>
 claude mcp add --scope user silicon-optimizer \

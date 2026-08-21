@@ -7,14 +7,14 @@
     <language>en</language>
     <item>
       <title>Version 0.4.0</title>
-      <pubDate>Fri, 21 Aug 2026 15:32:05 +0000</pubDate>
-      <sparkle:version>130</sparkle:version>
+      <pubDate>Fri, 21 Aug 2026 15:41:51 +0000</pubDate>
+      <sparkle:version>132</sparkle:version>
       <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <description><![CDATA[Pi joins the engine roster — earendil's coding agent, running on your models with the app's whole toolbox bridged in. Settings grows Your other AIs: one-click Connect buttons that wire Claude Desktop, Claude Code and Codex to your local models, so your subscription stops burning tokens on the heavy work. Swarm invites now hand each person their own revocable key instead of the shared one.]]></description>
       <enclosure url="https://github.com/OGZamasu/silicon-optimizer/releases/download/v0.4.0/Silicon.Optimizer.dmg"
                  type="application/octet-stream"
-                 sparkle:edSignature="6PCj2aq5xRG/KlOTkLOWnB1SbdYCTVIS7obo0JT/HRjC9arwiaIdqJrrroOoYagunKJT+jypW+na3oBAt9xZAw==" length="59411708" />
+                 sparkle:edSignature="fzsw5yhI2MBW9AimtVLGALuL/IipnYvbZ2S7LeYphbYM6l66yEPaVNSPY31wyHwU+K1zeJpQp1ICLFE59XPEDQ==" length="59453822" />
     </item>
   </channel>
 </rss>
