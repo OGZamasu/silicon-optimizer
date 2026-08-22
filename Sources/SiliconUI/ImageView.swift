@@ -100,6 +100,18 @@ struct ImageView: View {
                     }
                 }
 
+                if let node = model.imageCapableNode {
+                    Picker("Render on", selection: renderLocationBinding) {
+                        Text("Auto — best available").tag("auto")
+                        Text("This Mac").tag("local")
+                        Text(node.name).tag("node")
+                    }
+                    Text(renderLocationCaption(node: node))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if let entry = currentEntry {
                     if entry.isGated {
                         VStack(alignment: .leading, spacing: 3) {
@@ -579,6 +591,30 @@ struct ImageView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// "auto" · "local" · "node" — stored so the choice survives relaunches.
+    private var renderLocationBinding: Binding<String> {
+        Binding(
+            get: { model.settings.imageRenderLocation ?? "auto" },
+            set: {
+                model.settings.imageRenderLocation = $0
+                model.settings.save()
+            }
+        )
+    }
+
+    private func renderLocationCaption(node: AppModel.PeerStatus) -> String {
+        switch model.settings.imageRenderLocation ?? "auto" {
+        case "local":
+            return "Images render on this Mac with MFLUX."
+        case "node":
+            return "Images render on \(node.name) with its own image models — "
+                + "this Mac's model picker doesn't apply there."
+        default:
+            return "Auto sends images to the strongest machine offering them — right now "
+                + "that's \(node.name). The result says where it ran."
         }
     }
 

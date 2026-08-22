@@ -411,10 +411,19 @@ extension AppModel {
     public func generateImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
+        let (entry, configuration) = try resolveImage(request)
+
+        // Routing before the MFLUX guard, deliberately: a Mac without MFLUX — or a
+        // weak one — is exactly the machine that should hand the job to a node.
+        if let node = imageRenderTarget {
+            return try await generateImageOnNode(
+                request, configuration: configuration, node: node
+            )
+        }
+
         guard let installation = imageRuntime ?? MFluxRuntime.locate() else {
             throw ImageRuntimeError.notInstalled
         }
-        let (entry, configuration) = try resolveImage(request)
         let predicted = diffusionPlan(for: entry, configuration: configuration)
 
         // Warn rather than refuse: the estimate is not always right, and a hard block leaves
@@ -472,6 +481,61 @@ extension AppModel {
             predictedPeakBytes: predicted.peak.rawValue,
             model: entry.name,
             warning: warning
+        )
+    }
+
+    /// The control-API image path, rendered by a node (#136): same response shape,
+    /// the model field names the machine so agents and ledgers see where it ran.
+    private func generateImageOnNode(
+        _ request: ControlAPI.ImageRequest,
+        configuration: ImageConfiguration,
+        node: PeerStatus
+    ) async throws -> ControlAPI.ImageResponse {
+        guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+        else {
+            throw ImageRuntimeError.generationFailed("\(node.name)'s address didn't parse.")
+        }
+        noteActivity()
+        imageState = .starting(stage: "Sending to \(node.name)…")
+        defer { imageState = .idle; imageProgress = nil }
+
+        let runtime = NodeImageRuntime()
+        let nodeRequest = NodeImageRequest(
+            prompt: request.prompt,
+            width: configuration.width,
+            height: configuration.height,
+            steps: configuration.steps,
+            seed: request.seed,
+            outputDirectory: settings.resolvedImageOutputDirectory
+        )
+        let nodeName = node.name
+        let result = try await runtime.generate(
+            nodeRequest, node: base, token: swarmConfig?.bearer(forPeer: node.name)
+        ) { progress in
+            Task { @MainActor [weak self] in
+                self?.imageState = .starting(
+                    stage: progress.line(fallback: "Rendering on \(nodeName)")
+                )
+            }
+        }
+        guard let first = result.images.first else {
+            throw ImageRuntimeError.noImageProduced
+        }
+        for url in result.images {
+            generatedImages.insert(
+                ImageResult(
+                    image: url, elapsed: result.elapsed,
+                    peakMemory: nil, stepsPerSecond: 0
+                ), at: 0
+            )
+        }
+        return ControlAPI.ImageResponse(
+            path: first.path,
+            elapsedSeconds: result.elapsed,
+            peakMemoryBytes: nil,
+            predictedPeakBytes: 0,
+            model: "text-to-image on \(node.name)",
+            warning: nil
         )
     }
 

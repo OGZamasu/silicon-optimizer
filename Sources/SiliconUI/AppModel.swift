@@ -288,6 +288,7 @@ public final class AppModel {
     /// process would keep running unseen while the next queued job starts a second one alongside
     /// it, fighting over the same memory budget.
     private var activeImageRuntime: MFluxRuntime?
+    private var activeNodeImageRuntime: NodeImageRuntime?
     private var imageWasCancelled = false
 
     public var isGeneratingImage: Bool { imageTask != nil }
@@ -486,7 +487,37 @@ public final class AppModel {
         runImageJob(job)
     }
 
+    // MARK: - Where images render
+
+    /// True for the ability a node advertises when it can take an image job (#136).
+    nonisolated static func isImageCapability(_ capability: PeerCapability) -> Bool {
+        capability.id == "text-to-image" || capability.kind == "image"
+    }
+
+    /// The node that can render an image right now, if any.
+    public var imageCapableNode: PeerStatus? {
+        swarmPeers.first { peer in
+            peer.reachable && peer.capabilities.contains {
+                Self.isImageCapability($0) && $0.ready && $0.enabled != false
+            }
+        }
+    }
+
+    /// Where the next image job runs, honoring the user's choice. Auto means the
+    /// strongest machine currently offering images — the fix for the swarm member
+    /// whose weak Mac rendered locally and looked broken.
+    var imageRenderTarget: PeerStatus? {
+        switch settings.imageRenderLocation ?? "auto" {
+        case "local": return nil
+        default: return imageCapableNode
+        }
+    }
+
     private func runImageJob(_ job: ImageJob) {
+        if let node = imageRenderTarget {
+            runImageJob(job, onNode: node)
+            return
+        }
         noteActivity()
         let output = nextImageOutputURL()
         // Diffusion runs as a standalone process, so an InstalledModel is only a carrier for
@@ -585,6 +616,93 @@ public final class AppModel {
         }
     }
 
+    /// The same job, rendered by a swarm node instead of this Mac (#136). The node
+    /// uses its own image models, so the local model choice doesn't travel; size,
+    /// steps and prompt do. Progress speaks the one line every swarm tool speaks.
+    private func runImageJob(_ job: ImageJob, onNode node: PeerStatus) {
+        noteActivity()
+        guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+        else {
+            imageState = .failed(message: "\(node.name)'s address didn't parse.")
+            currentImageJob = nil
+            advanceImageQueue()
+            return
+        }
+        let token = swarmConfig?.bearer(forPeer: node.name)
+        let request = NodeImageRequest(
+            prompt: job.prompt,
+            width: job.configuration.width,
+            height: job.configuration.height,
+            steps: job.configuration.steps,
+            outputDirectory: settings.resolvedImageOutputDirectory
+        )
+        let runtime = NodeImageRuntime()
+        activeNodeImageRuntime = runtime
+        imageState = .starting(stage: "Sending to \(node.name)…")
+        imageProgress = nil
+        imageWasCancelled = false
+
+        // Built while `self` is the method's own immutable reference — inside the task
+        // it becomes a captured weak var, which a @Sendable closure may not touch.
+        let nodeName = node.name
+        let onProgress: @Sendable (NodeJobProgress) -> Void = { [weak self] progress in
+            Task { @MainActor in
+                self?.imageState = .starting(
+                    stage: progress.line(fallback: "Rendering on \(nodeName)")
+                )
+            }
+        }
+
+        imageTask = Task { [weak self] in
+            // Mirrors the local path's defer: clear the machinery and advance the
+            // queue, but never touch imageState here — a failure set below must
+            // stay visible.
+            defer {
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.imageTask = nil
+                    self.activeNodeImageRuntime = nil
+                    self.currentImageJob = nil
+                    self.advanceImageQueue()
+                }
+            }
+            do {
+                let result = try await runtime.generate(
+                    request, node: base, token: token, onProgress: onProgress
+                )
+                guard let self else { return }
+                let elapsed = result.elapsed
+                for image in result.images {
+                    self.generatedImages.insert(
+                        ImageResult(
+                            image: image, elapsed: elapsed,
+                            peakMemory: nil, stepsPerSecond: 0
+                        ), at: 0
+                    )
+                }
+                self.imageState = .idle
+                self.imageProgress = nil
+            } catch {
+                guard let self else { return }
+                let wasCancel = self.imageWasCancelled || error is CancellationError
+                    || (error as? VideoRuntimeError).map {
+                        if case .cancelled = $0 { true } else { false }
+                    } == true
+                if wasCancel {
+                    self.imageWasCancelled = false
+                    self.imageState = .idle
+                    self.imageProgress = nil
+                    return
+                }
+                self.imageState = .failed(message: error.localizedDescription)
+                self.alert = AlertContent(
+                    title: "Could not generate \"\(job.prompt)\" on \(node.name)",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
     /// Gated-model guidance that respects what is already done: telling someone to add a
     /// token they already added sends them hunting in the wrong place, so the message
     /// changes depending on whether Settings holds one.
@@ -640,11 +758,17 @@ public final class AppModel {
     /// torn down — two runs fighting over the same memory budget, which is exactly what the plan
     /// this app shows before every run is trying to prevent.
     public func cancelImage() {
-        guard let runtime = activeImageRuntime else { return }
-        imageWasCancelled = true
-        imageTask?.cancel()
-        imageState = .starting(stage: "Stopping…")
-        Task { await runtime.cancel() }
+        if let runtime = activeImageRuntime {
+            imageWasCancelled = true
+            imageTask?.cancel()
+            imageState = .starting(stage: "Stopping…")
+            Task { await runtime.cancel() }
+        } else if let runtime = activeNodeImageRuntime {
+            imageWasCancelled = true
+            imageTask?.cancel()
+            imageState = .starting(stage: "Stopping…")
+            Task { await runtime.cancel() }
+        }
     }
 
     // MARK: - 3D generation

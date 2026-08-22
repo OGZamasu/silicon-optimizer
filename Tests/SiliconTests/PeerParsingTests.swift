@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import SiliconRuntime
 @testable import SiliconUI
 
 /// The swarm dashboard is only as truthful as this parser, and the two platforms name
@@ -271,5 +272,58 @@ struct PeerEngineParsingTests {
     @Test func absentEngineStaysNil() {
         let llm = AppModel.parseLLM(["running": true, "model": "qwen3.8-27b"])
         #expect(llm.engine == nil)
+    }
+}
+
+/// Image routing (#136): the capability match that decides a job leaves the Mac, and
+/// the wire body the node receives — pinned before the node exists, per the pattern.
+@Suite("Node image routing")
+struct NodeImageRoutingTests {
+
+    @Test func theCapabilityMatchAcceptsTheContractAndItsAliases() {
+        func capability(id: String, kind: String) -> AppModel.PeerCapability {
+            .init(id: id, kind: kind, ready: true, peakGB: nil,
+                  typicalSeconds: nil, detail: nil)
+        }
+        #expect(AppModel.isImageCapability(capability(id: "text-to-image", kind: "image")))
+        #expect(AppModel.isImageCapability(capability(id: "sdxl-turbo", kind: "image")))
+        #expect(!AppModel.isImageCapability(capability(id: "text-to-video", kind: "video")))
+        #expect(!AppModel.isImageCapability(capability(id: "image-to-mesh", kind: "mesh")))
+    }
+
+    @Test func theSubmissionBodyCarriesExactlyTheContractFields() {
+        let body = NodeImageRuntime.submissionBody(for: NodeImageRequest(
+            prompt: "a lighthouse at dusk", negativePrompt: "text",
+            width: 1024, height: 768, steps: 28, seed: 7,
+            model: "qwen-image",
+            outputDirectory: FileManager.default.temporaryDirectory
+        ))
+        #expect(body["prompt"] as? String == "a lighthouse at dusk")
+        #expect(body["width"] as? Int == 1024)
+        #expect(body["height"] as? Int == 768)
+        #expect(body["steps"] as? Int == 28)
+        #expect(body["seed"] as? Int == 7)
+        #expect(body["negative_prompt"] as? String == "text")
+        #expect(body["model"] as? String == "qwen-image")
+
+        // Optional means absent, not null — the node's defaults must win.
+        let minimal = NodeImageRuntime.submissionBody(for: NodeImageRequest(
+            prompt: "p", width: 512, height: 512,
+            outputDirectory: FileManager.default.temporaryDirectory
+        ))
+        #expect(minimal["steps"] == nil)
+        #expect(minimal["model"] == nil)
+        #expect(minimal["negative_prompt"] == nil)
+    }
+
+    @Test func resultURLsResolveRelativeAgainstTheNode() {
+        let base = URL(string: "http://100.64.0.9:8790")!
+        let urls = NodeImageRuntime.imageURLs(
+            in: ["result_urls": ["/v1/results/a.png", "http://elsewhere/b.png"]],
+            base: base
+        )
+        #expect(urls.count == 2)
+        #expect(urls[0].absoluteString == "http://100.64.0.9:8790/v1/results/a.png")
+        #expect(urls[1].host == "elsewhere")
     }
 }

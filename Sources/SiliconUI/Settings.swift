@@ -114,6 +114,10 @@ public struct Settings: Codable, Sendable, Equatable {
 
     /// The gateway model id the Pi chat last used.
     public var piModel: String?
+    /// Where image renders run: "auto" (strongest machine offering images — a capable
+    /// node when one is ready, local otherwise), "local", or "node". Auto is the fix
+    /// for the swarm member whose weak Mac rendered locally and looked broken.
+    public var imageRenderLocation: String?
 
     // Codex engine
     /// The gateway model id the Codex chat last used.
@@ -421,6 +425,8 @@ public struct Settings: Codable, Sendable, Equatable {
             [String].self, forKey: .hiddenGatewayModels
         )
         piModel = try? container.decodeIfPresent(String.self, forKey: .piModel)
+        imageRenderLocation = try? container.decodeIfPresent(
+            String.self, forKey: .imageRenderLocation)
         codexModel = try? container.decodeIfPresent(String.self, forKey: .codexModel)
         codexWorkingDirectory = try? container.decodeIfPresent(
             String.self, forKey: .codexWorkingDirectory
