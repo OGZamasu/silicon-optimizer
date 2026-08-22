@@ -1,8 +1,21 @@
 import Foundation
+import SiliconCatalog
 import Testing
 @testable import SiliconControl
 @testable import SiliconRuntime
 @testable import SiliconUI
+
+extension Trait where Self == ConditionTrait {
+    /// Live-node proofs are opt-in: `SILICON_LIVE_TESTS=1 swift test`. A default run
+    /// must not have its duration or its verdict depend on another machine's queue
+    /// (hub issue #10 — one of these once rode the node's backlog for five minutes).
+    static var liveNodeOptIn: ConditionTrait {
+        .enabled(
+            if: ProcessInfo.processInfo.environment["SILICON_LIVE_TESTS"] == "1",
+            "Set SILICON_LIVE_TESTS=1 to run the proofs against the configured node"
+        )
+    }
+}
 
 /// Integration proof that this Mac can see what a real node advertises.
 ///
@@ -10,7 +23,7 @@ import Testing
 /// itself, because "the contract is implemented" and "our client sees it" are separate
 /// claims and only one of them decides whether a button is enabled. Skips quietly when
 /// no node is configured or reachable.
-@Suite("Swarm, against the live node")
+@Suite("Swarm, against the live node", .liveNodeOptIn)
 struct SwarmLiveTests {
 
     private func liveNode() async -> AppModel.PeerStatus? {
@@ -84,25 +97,28 @@ struct NodeRefusalTests {
         #expect(NodeVideoRuntime.reason(in: Data()) == nil)
     }
 
-    /// End to end against the real node, using a request it is guaranteed to refuse —
-    /// a rejection costs the GPU nothing, so this is safe to run every time.
-    @Test func aRealRefusalArrivesAsWordsNotAStatusCode() async throws {
+    /// End to end against the real node, using a request it is guaranteed to refuse:
+    /// a deliberately wrong bearer token. The original version asked for a model the
+    /// node didn't serve — then the node installed it, and every test run queued a
+    /// real render and rode the GPU backlog for minutes (hub issue #10). A bad token
+    /// is refused instantly, forever, through the same words-not-status-codes path.
+    @Test(.liveNodeOptIn) func aRealRefusalArrivesAsWordsNotAStatusCode() async throws {
         guard let config = SwarmConfig.load(), let peer = config.peers.first,
               let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
         else { return }
 
         let runtime = NodeVideoRuntime()
         let request = VideoRequest(
-            entryID: "ltx2-distilled",          // catalogued here, not installed there
+            entryID: VideoCatalog.all.first?.id ?? "wan22-ti2v-5b",
             prompt: "a refusal, on purpose",
             seconds: 3,
             outputDirectory: FileManager.default.temporaryDirectory
         )
         do {
             _ = try await runtime.generate(
-                request, node: base, token: config.effectiveToken
+                request, node: base, token: "not-the-swarm-token-on-purpose"
             ) { _ in }
-            // Some other node might actually have it; that is not a failure.
+            Issue.record("the node accepted a bad token — that is a security bug, not a pass")
         } catch let error as VideoRuntimeError {
             let message = error.errorDescription ?? ""
             print("node refusal surfaced as: \(message)")

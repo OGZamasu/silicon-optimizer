@@ -13,7 +13,12 @@ import Foundation
 /// holding a model's worth of wired memory and its TCP port, reparented to launchd, for as long
 /// as the machine stays up. So the set is mirrored to a file, and the next launch reaps whatever
 /// the last one abandoned.
-public enum ChildProcessRegistry {
+///
+/// The app uses one process-wide instance through the static API below. The instance form
+/// exists for tests: registry state was process-global once, and every suite that asserted on
+/// `tracked` raced every other suite that spawned a child (hub issue #12). A test now builds
+/// its own registry and cannot see anyone else's children.
+public final class ChildProcessRegistry: @unchecked Sendable {
 
     /// Enough to recognise a process across launches without ever mistaking a recycled pid for
     /// one of ours.
@@ -34,16 +39,17 @@ public enum ChildProcessRegistry {
         }
     }
 
+    /// The one registry the app itself uses.
+    public static let shared = ChildProcessRegistry()
+
     /// The lock is the whole point: this is read from a `willTerminate` observer, from
     /// `Process.terminationHandler` on an arbitrary queue, and from actors. An actor could not
-    /// serve the first of those, so the mutable state lives in a box guarded by hand.
-    private final class Storage: @unchecked Sendable {
-        let lock = NSLock()
-        var entries: [Int32: Entry] = [:]
-        var storeURL: URL?
-    }
+    /// serve the first of those, so the mutable state is guarded by hand.
+    private let lock = NSLock()
+    private var entries: [Int32: Entry] = [:]
+    private var storeURL: URL?
 
-    private static let storage = Storage()
+    public init() {}
 
     // MARK: - Identity
 
@@ -78,27 +84,27 @@ public enum ChildProcessRegistry {
 
     /// Records a freshly spawned child. Called with the pid the moment `Process.run()` returns,
     /// so the window in which a child is running but untracked is as small as it can be.
-    public static func register(pid: Int32) {
-        guard let entry = identify(pid) else { return }
-        storage.lock.lock()
-        storage.entries[pid] = entry
-        storage.lock.unlock()
+    public func register(pid: Int32) {
+        guard let entry = Self.identify(pid) else { return }
+        lock.lock()
+        entries[pid] = entry
+        lock.unlock()
         persist()
     }
 
     /// Forgets a child that has exited or been terminated deliberately.
-    public static func unregister(pid: Int32) {
-        storage.lock.lock()
-        storage.entries[pid] = nil
-        storage.lock.unlock()
+    public func unregister(pid: Int32) {
+        lock.lock()
+        entries[pid] = nil
+        lock.unlock()
         persist()
     }
 
-    /// Everything currently tracked, newest membership order unspecified.
-    public static var tracked: [Entry] {
-        storage.lock.lock()
-        defer { storage.lock.unlock() }
-        return Array(storage.entries.values)
+    /// Everything currently tracked, membership order unspecified.
+    public var tracked: [Entry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(entries.values)
     }
 
     // MARK: - Termination
@@ -110,13 +116,13 @@ public enum ChildProcessRegistry {
     /// the server releases its Metal buffers itself — the kernel reclaiming tens of gigabytes
     /// stalls the whole machine for seconds.
     @discardableResult
-    public static func terminateAll() -> [Entry] {
-        storage.lock.lock()
-        let doomed = Array(storage.entries.values)
-        storage.entries.removeAll()
-        storage.lock.unlock()
+    public func terminateAll() -> [Entry] {
+        lock.lock()
+        let doomed = Array(entries.values)
+        entries.removeAll()
+        lock.unlock()
 
-        for entry in doomed where isStillAlive(entry) {
+        for entry in doomed where Self.isStillAlive(entry) {
             kill(entry.pid, SIGTERM)
         }
         persist()
@@ -131,10 +137,10 @@ public enum ChildProcessRegistry {
     /// Call once at startup, before anything allocates a port: `reap` clears the orphans that
     /// would otherwise still be holding them.
     @discardableResult
-    public static func open(at url: URL) -> [Entry] {
-        storage.lock.lock()
-        storage.storeURL = url
-        storage.lock.unlock()
+    public func open(at url: URL) -> [Entry] {
+        lock.lock()
+        storeURL = url
+        lock.unlock()
 
         guard let data = try? Data(contentsOf: url),
               let stored = try? JSONDecoder().decode([Entry].self, from: data)
@@ -142,14 +148,14 @@ public enum ChildProcessRegistry {
 
         // Anything still alive under its recorded identity is ours and was abandoned; anything
         // else is a pid that has already been reused or released, and must be left alone.
-        return stored.filter { isStillAlive($0) && $0.pid != getpid() }
+        return stored.filter { Self.isStillAlive($0) && $0.pid != getpid() }
     }
 
     /// Terminates orphans left by a previous launch. Returns the ones it killed.
     @discardableResult
-    public static func reap(_ orphans: [Entry]) -> [Entry] {
+    public func reap(_ orphans: [Entry]) -> [Entry] {
         var killed: [Entry] = []
-        for orphan in orphans where isStillAlive(orphan) {
+        for orphan in orphans where Self.isStillAlive(orphan) {
             kill(orphan.pid, SIGTERM)
             killed.append(orphan)
         }
@@ -158,10 +164,10 @@ public enum ChildProcessRegistry {
         // config keeps pointing at the corpse. Give SIGTERM a moment, then insist.
         guard !killed.isEmpty else { return killed }
         for _ in 0..<20 {
-            if !killed.contains(where: { isStillAlive($0) }) { break }
+            if !killed.contains(where: { Self.isStillAlive($0) }) { break }
             usleep(100_000)
         }
-        for orphan in killed where isStillAlive(orphan) {
+        for orphan in killed where Self.isStillAlive(orphan) {
             kill(orphan.pid, SIGKILL)
         }
         // Only now: until the reap has happened the file is the sole record of these processes,
@@ -174,11 +180,11 @@ public enum ChildProcessRegistry {
 
     /// Writes the current membership out, so a launch that never gets to run a handler still
     /// leaves its successor something to work from.
-    private static func persist() {
-        storage.lock.lock()
-        let url = storage.storeURL
-        let snapshot = Array(storage.entries.values)
-        storage.lock.unlock()
+    private func persist() {
+        lock.lock()
+        let url = storeURL
+        let snapshot = Array(entries.values)
+        lock.unlock()
 
         guard let url else { return }
         try? FileManager.default.createDirectory(
@@ -188,11 +194,18 @@ public enum ChildProcessRegistry {
         try? data.write(to: url, options: .atomic)
     }
 
-    /// Test seam: drops all membership and detaches the file.
-    static func resetForTesting() {
-        storage.lock.lock()
-        storage.entries.removeAll()
-        storage.storeURL = nil
-        storage.lock.unlock()
-    }
+    // MARK: - The app's process-wide face
+
+    // Call sites throughout the app address the shared instance through these; only tests
+    // construct registries of their own.
+
+    public static func register(pid: Int32) { shared.register(pid: pid) }
+    public static func unregister(pid: Int32) { shared.unregister(pid: pid) }
+    public static var tracked: [Entry] { shared.tracked }
+    @discardableResult
+    public static func terminateAll() -> [Entry] { shared.terminateAll() }
+    @discardableResult
+    public static func open(at url: URL) -> [Entry] { shared.open(at: url) }
+    @discardableResult
+    public static func reap(_ orphans: [Entry]) -> [Entry] { shared.reap(orphans) }
 }

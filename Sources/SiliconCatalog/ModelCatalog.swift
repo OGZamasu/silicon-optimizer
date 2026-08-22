@@ -10,9 +10,10 @@ import SiliconCore
 public enum ModelCatalog {
 
     public static let all: [ModelEntry] = [
-        qwen3Coder30B, qwen3_8_27B, qwen3_30B_A3B, qwen3_32B, qwen3_14B, qwen3_8B, qwen3_4B,
-        qwen3_1_7B, gptOSS20B, gptOSS120B, gemma3_27B, gemma3_12B, mistralSmall24B,
-        llama3_3_70B, phi4_14B, glm4_5Air, qwen2_5VL_7B, nomicEmbed,
+        qwen3Coder30B, qwen3_8_27B, qwen3_8_27B_mlx, qwen3_30B_A3B, qwen3_32B, qwen3_14B,
+        qwen3_8B, qwen3_4B, qwen3_4B_mlx, qwen3_1_7B, gptOSS20B, gptOSS120B, gemma3_27B,
+        gemma3_12B, mistralSmall24B, llama3_3_70B, phi4_14B, glm4_5Air, qwen2_5VL_7B,
+        nomicEmbed,
     ]
 
     public static func entry(id: String) -> ModelEntry? {
@@ -104,6 +105,39 @@ public enum ModelCatalog {
             repository: "unsloth/Qwen3.8-27B-GGUF", stem: "Qwen3.8-27B",
             parameters: 27_400_000_000
         ),
+        rating: 5, maxContext: 262_144
+    )
+
+    /// The flagship again, in Apple's own runtime. MLX reaches first token faster than
+    /// llama.cpp on dense models; the trade is a single 4-bit variant instead of the
+    /// GGUF quantization ladder. Sizes are the repo's real totals, and the weights ship
+    /// in three shards — the multi-file download path in production.
+    public static let qwen3_8_27B_mlx = ModelEntry(
+        id: "qwen3.8-27b-mlx",
+        name: "Qwen3.8 27B (MLX)",
+        author: "Qwen · mlx-community",
+        license: "Apache-2.0",
+        summary: """
+            The same flagship, running on Apple's MLX engine — noticeably quicker to the \
+            first word on dense models. Needs `mlx_lm.server`, which Settings can point \
+            at; the app tells you if it's missing before anything downloads.
+            """,
+        category: .general,
+        capabilities: [.reasoning, .toolCalling, .multilingual, .coding],
+        format: .mlx,
+        shape: ModelShape(
+            totalParameters: 27_400_000_000, blockCount: 65, embeddingLength: 5120,
+            feedForwardLength: 17_408, headCount: 24, headCountKV: 4,
+            trainingContextLength: 262_144, vocabSize: 248_320, headDimension: 256
+        ),
+        variants: [
+            ModelVariant(
+                quantization: .mlx4,
+                repository: "mlx-community/Qwen3.8-27B-4bit",
+                filename: "model-00001-of-00003.safetensors",
+                downloadSize: Bytes(16_080_000_000)
+            )
+        ],
         rating: 5, maxContext: 262_144
     )
 
@@ -220,6 +254,33 @@ public enum ModelCatalog {
             repository: "unsloth/Qwen3-4B-Instruct-2507-GGUF", stem: "Qwen3-4B-Instruct-2507",
             parameters: 4_020_000_000
         ),
+        rating: 4, maxContext: 262_144
+    )
+
+    /// The small MLX pick — 2.3 GB, quick everywhere, and the gentlest way to find out
+    /// what the MLX engine feels like before committing to the 16 GB flagship.
+    public static let qwen3_4B_mlx = ModelEntry(
+        id: "qwen3-4b-mlx",
+        name: "Qwen3 4B (MLX)",
+        author: "Qwen · mlx-community",
+        license: "Apache-2.0",
+        summary: "Qwen3 4B on Apple's MLX engine: small, quick to first token, 2.3 GB.",
+        category: .small,
+        capabilities: [.reasoning, .toolCalling, .multilingual],
+        format: .mlx,
+        shape: ModelShape(
+            totalParameters: 4_020_000_000, blockCount: 36, embeddingLength: 2560,
+            feedForwardLength: 9728, headCount: 32, headCountKV: 8,
+            trainingContextLength: 32_768, vocabSize: 151_936, headDimension: 128
+        ),
+        variants: [
+            ModelVariant(
+                quantization: .mlx4,
+                repository: "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+                filename: "model.safetensors",
+                downloadSize: Bytes(2_280_000_000)
+            )
+        ],
         rating: 4, maxContext: 262_144
     )
 

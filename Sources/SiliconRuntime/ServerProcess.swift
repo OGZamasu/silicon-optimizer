@@ -11,6 +11,13 @@ actor ServerProcess {
     private var process: Process?
     private var logBuffer: [String] = []
     private var logHandler: (@Sendable (String) -> Void)?
+    /// The app always supervises through the shared registry; tests inject their own so
+    /// their assertions never see another suite's children.
+    private let registry: ChildProcessRegistry
+
+    init(registry: ChildProcessRegistry = .shared) {
+        self.registry = registry
+    }
 
     /// Keeps the tail of the log bounded; a long generation session would otherwise grow it
     /// without limit.
@@ -60,8 +67,9 @@ actor ServerProcess {
         // a synchronous `willTerminate` observer — and the next launch, after a crash — can
         // find it. A server that exits on its own takes itself back out here, so the registry
         // never accumulates pids the kernel is free to reissue.
+        let registry = self.registry
         process.terminationHandler = { finished in
-            ChildProcessRegistry.unregister(pid: finished.processIdentifier)
+            registry.unregister(pid: finished.processIdentifier)
         }
 
         do {
@@ -69,7 +77,7 @@ actor ServerProcess {
         } catch {
             throw RuntimeError.launchFailed(error.localizedDescription)
         }
-        ChildProcessRegistry.register(pid: process.processIdentifier)
+        registry.register(pid: process.processIdentifier)
         self.process = process
     }
 
@@ -102,7 +110,7 @@ actor ServerProcess {
         if process.isRunning {
             kill(process.processIdentifier, SIGKILL)
         }
-        ChildProcessRegistry.unregister(pid: process.processIdentifier)
+        registry.unregister(pid: process.processIdentifier)
         self.process = nil
         self.logHandler = nil
     }

@@ -58,8 +58,11 @@ public actor ModelDownloader {
 
     private let configuration: URLSessionConfiguration
     private let token: String?
+    /// Test seam: a local server standing in for huggingface.co, so the multi-file and
+    /// resume paths can be exercised for real without moving gigabytes.
+    private let overrideBase: URL?
 
-    public init(token: String? = nil) {
+    public init(token: String? = nil, baseURL: URL? = nil) {
         let configuration = URLSessionConfiguration.default
         // Model downloads are long-lived; the default 7-day resource timeout is fine but the
         // per-request timeout must be generous enough for a slow first byte on a busy CDN.
@@ -68,6 +71,7 @@ public actor ModelDownloader {
         configuration.waitsForConnectivity = true
         self.configuration = configuration
         self.token = token
+        self.overrideBase = baseURL
     }
 
     /// Downloads a resolution into `directory`, reporting progress as it goes.
@@ -136,9 +140,10 @@ public actor ModelDownloader {
             existingBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         }
 
-        var request = URLRequest(url: HuggingFaceClient.downloadURL(
-            repository: repository, file: file.path
-        ))
+        let remote = overrideBase.map {
+            $0.appendingPathComponent(repository).appendingPathComponent(file.path)
+        } ?? HuggingFaceClient.downloadURL(repository: repository, file: file.path)
+        var request = URLRequest(url: remote)
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if existingBytes > 0 {
             request.setValue("bytes=\(existingBytes)-", forHTTPHeaderField: "Range")

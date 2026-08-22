@@ -33,6 +33,22 @@ public struct ModelResolver: Sendable {
         }
 
         let available = try await client.files(in: variant.repository)
+
+        // MLX models are directories, not files: the runtime wants the whole repo —
+        // weights shards, config, tokenizer — laid out together. Everything that isn't
+        // documentation comes along, weights first so the primary file registered from
+        // `files.first` sits inside the model's directory.
+        if entry.format == .mlx {
+            let wanted = Self.mlxModelFiles(in: available)
+            guard wanted.contains(where: { $0.path.lowercased().hasSuffix(".safetensors") })
+            else {
+                throw HuggingFaceClient.ClientError.fileNotFound(
+                    repository: variant.repository, quantization: quantization.rawValue
+                )
+            }
+            return Resolution(repository: variant.repository, files: wanted, projector: nil)
+        }
+
         let ggufFiles = available.filter { $0.path.lowercased().hasSuffix(".gguf") }
 
         let matched = try match(
@@ -46,6 +62,33 @@ public struct ModelResolver: Sendable {
             : nil
 
         return Resolution(repository: variant.repository, files: matched, projector: projector)
+    }
+
+    /// Everything an MLX model directory needs, weights first — so the first file
+    /// registered as primary sits inside the model's directory, which is all the MLX
+    /// server actually reads from it.
+    static func mlxModelFiles(
+        in available: [HuggingFaceClient.RepoFile]
+    ) -> [HuggingFaceClient.RepoFile] {
+        available
+            .filter { isMLXModelFile($0.path) }
+            .sorted { lhs, rhs in
+                let lhsWeights = lhs.path.lowercased().hasSuffix(".safetensors")
+                let rhsWeights = rhs.path.lowercased().hasSuffix(".safetensors")
+                if lhsWeights != rhsWeights { return lhsWeights }
+                return lhs.path < rhs.path
+            }
+    }
+
+    /// What an MLX model directory needs from its repo: the weights, every JSON
+    /// (config, index, tokenizer, generation defaults), and the classic tokenizer
+    /// sidecars. Documentation and repo housekeeping stay behind.
+    public static func isMLXModelFile(_ path: String) -> Bool {
+        guard !path.contains("/") else { return false }   // mlx-community repos are flat
+        let name = path.lowercased()
+        if name.hasSuffix(".safetensors") || name.hasSuffix(".json") { return true }
+        if name.hasSuffix(".jinja") || name.hasSuffix(".tiktoken") { return true }
+        return ["tokenizer.model", "merges.txt", "vocab.txt"].contains(name)
     }
 
     /// Files that live beside the weights but are not the model.
