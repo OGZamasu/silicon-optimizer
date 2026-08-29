@@ -1,0 +1,59 @@
+name: Wire contract
+
+# Pull requests included, unlike ci.yml: that job runs on a self-hosted Mac, where running a
+# stranger's pull request would hand them the machine. This one runs on a GitHub-hosted Linux
+# runner and only reads JSON — no build, no toolchain, nothing of ours to take.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The fixtures are a copy of silicon-node's canonical set. Editing them here without
+      # copying the directory over there is how a contract quietly becomes two contracts, so
+      # the digest both repositories record has to match what is on disk.
+      - name: The contract copy matches its recorded checksum
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, sys
+
+          directory = pathlib.Path("contract")
+          files = sorted(directory.glob("*.json"))
+          if len(files) != 6:
+              sys.exit(f"expected 6 fixtures in contract/, found {len(files)}")
+
+          digest = hashlib.sha256()
+          for path in files:
+              json.loads(path.read_text())  # a fixture that is not JSON is not a contract
+              digest.update(path.name.encode())
+              digest.update(path.read_bytes())
+
+          recorded = (directory / "VERSION.sha256").read_text().split()[0]
+          if digest.hexdigest() != recorded:
+              sys.exit(
+                  "contract/ does not match VERSION.sha256\n"
+                  f"  on disk:   {digest.hexdigest()}\n"
+                  f"  recorded:  {recorded}\n"
+                  "Copy the directory from silicon-node (or to it) and update both digests."
+              )
+          print(f"contract/ matches {recorded}")
+          PY
+
+      # Swift tests for these same files live in Tests/SiliconTests/ContractFixtureTests.swift
+      # and run in ci.yml on the Mac. Fail loudly if that file goes missing, so the fixtures
+      # cannot end up checked for their checksum and nothing else.
+      - name: The Swift side still tests them
+        run: test -f Tests/SiliconTests/ContractFixtureTests.swift

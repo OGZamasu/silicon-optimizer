@@ -1,0 +1,10 @@
+{
+  "elapsed_s": 214.7,
+  "job_id": "job-4f2c1a9b7d3e5f608a12",
+  "progress": 1.0,
+  "result_urls": [
+    "/v1/files/job-4f2c1a9b7d3e5f608a12-clip.mp4"
+  ],
+  "stage": "video-denoise",
+  "status": "done"
+}

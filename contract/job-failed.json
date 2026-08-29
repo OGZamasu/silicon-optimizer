@@ -1,0 +1,6 @@
+{
+  "elapsed_s": 12.1,
+  "error": "The GPU ran out of memory at 720p. Try 480p, or stop the chat model first.",
+  "job_id": "job-77dd88ee99ff00112233",
+  "status": "failed"
+}
