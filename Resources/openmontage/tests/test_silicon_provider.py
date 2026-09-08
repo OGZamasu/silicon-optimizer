@@ -248,8 +248,8 @@ def test_invalid_h3_window_prompts_do_not_submit_a_job(app, model, seconds, prom
 def test_video_timeout_covers_the_job_and_finite_transfer_budgets():
     # The control budget is pinned by VideoGenerationContractTests in the app;
     # this outer tool also covers delivery of the control response.
-    assert _client.VIDEO_CONTROL_TIMEOUT_SECONDS == 44100
-    assert _client.VIDEO_TIMEOUT_SECONDS == 44160
+    assert _client.VIDEO_CONTROL_TIMEOUT_SECONDS == 45060
+    assert _client.VIDEO_TIMEOUT_SECONDS == 45120
     assert _client.VIDEO_TIMEOUT_SECONDS > _client.VIDEO_CONTROL_TIMEOUT_SECONDS
 
 

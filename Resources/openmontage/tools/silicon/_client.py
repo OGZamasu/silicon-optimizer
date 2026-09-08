@@ -28,13 +28,14 @@ PROVIDER = "silicon_optimizer"
 
 #: Mirrors Sources/SiliconControl/VideoGenerationBudget.swift. The adapter bounds
 #: accepted jobs (including queue time) to twelve hours. Leave room for submission,
-#: a final in-flight status request, download, and the control response. This outer
-#: tool call then allows one more response margin, matching Harness and Codex.
+#: a final in-flight status request, download, and the control response. The node's
+#: resource cap accounts for a peer that sends bytes just before each idle timeout.
+#: This outer tool allows one more response margin, matching Harness and Codex.
 VIDEO_JOB_TIMEOUT_SECONDS = 12 * 60 * 60
-VIDEO_NODE_REQUEST_SECONDS = 120
+VIDEO_NETWORK_RESOURCE_SECONDS = 600
 VIDEO_DOWNLOAD_SECONDS = 600
 VIDEO_RESPONSE_OVERHEAD_SECONDS = 60
-VIDEO_CONTROL_TIMEOUT_SECONDS = (VIDEO_JOB_TIMEOUT_SECONDS + 2 * VIDEO_NODE_REQUEST_SECONDS
+VIDEO_CONTROL_TIMEOUT_SECONDS = (VIDEO_JOB_TIMEOUT_SECONDS + 2 * VIDEO_NETWORK_RESOURCE_SECONDS
                                  + VIDEO_DOWNLOAD_SECONDS + VIDEO_RESPONSE_OVERHEAD_SECONDS)
 VIDEO_TIMEOUT_SECONDS = VIDEO_CONTROL_TIMEOUT_SECONDS + VIDEO_RESPONSE_OVERHEAD_SECONDS
 IMAGE_TIMEOUT_SECONDS = 600

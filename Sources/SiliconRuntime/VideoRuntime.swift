@@ -100,24 +100,18 @@ public actor NodeVideoRuntime {
     private static let maximumArtifactURLs = 8
 
     private var session: URLSession
-    private var videoSession: URLSession
-    private var downloadSession: URLSession
     private var cancelled = false
 
     public init(session: URLSession? = nil) {
-        self.session = session ?? .shared
-        self.videoSession = session ?? URLSession(configuration: Self.sessionConfiguration(
-            resourceSeconds: VideoGenerationBudget.nodeRequestSeconds
-        ))
-        self.downloadSession = session ?? URLSession(configuration: Self.sessionConfiguration(
-            resourceSeconds: VideoGenerationBudget.downloadSeconds
-        ))
+        self.session = session ?? URLSession(configuration: Self.sessionConfiguration())
     }
 
-    static func sessionConfiguration(resourceSeconds: Int) -> URLSessionConfiguration {
+    static func sessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = TimeInterval(resourceSeconds)
-        configuration.timeoutIntervalForResource = TimeInterval(resourceSeconds)
+        // Per-request idle limits below are shorter for submit/status operations.
+        // A finite resource limit also bounds a server that keeps trickling bytes.
+        configuration.timeoutIntervalForRequest = TimeInterval(VideoGenerationBudget.networkResourceSeconds)
+        configuration.timeoutIntervalForResource = TimeInterval(VideoGenerationBudget.networkResourceSeconds)
         return configuration
     }
 
@@ -139,13 +133,13 @@ public actor NodeVideoRuntime {
         onProgress(.stage("Sending the job"))
         var submit = URLRequest(url: baseURL.appendingPathComponent("v1/text-to-video"))
         submit.httpMethod = "POST"
-        submit.timeoutInterval = TimeInterval(VideoGenerationBudget.nodeRequestSeconds)
+        submit.timeoutInterval = 120
         submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         submit.httpBody = try request.nodeBody()
 
         let jobID = try await submitJob(
-            submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL, using: videoSession
+            submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL
         )
         guard let statusURL = RemotePathIdentifier.appending(
             jobID, to: baseURL.appendingPathComponent("v1/jobs")
@@ -164,10 +158,10 @@ public actor NodeVideoRuntime {
             guard Date() < deadline else { break }
 
             var poll = URLRequest(url: statusURL)
-            poll.timeoutInterval = TimeInterval(VideoGenerationBudget.statusRequestSeconds)
+            poll.timeoutInterval = 30
             if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
             guard let (data, _) = try? await RemoteHTTP.data(
-                for: poll, session: videoSession, policy: .peerHost(baseURL),
+                for: poll, session: session, policy: .peerHost(baseURL),
                 credentialOrigin: baseURL
             ) else {
                 Self.log.notice("video job \(jobID, privacy: .public): poll failed, retrying")
@@ -291,13 +285,12 @@ public actor NodeVideoRuntime {
     }
 
     private func submitJob(
-        _ request: URLRequest, nodeName: String, baseURL: URL,
-        using operationSession: URLSession? = nil
+        _ request: URLRequest, nodeName: String, baseURL: URL
     ) async throws -> String {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await RemoteHTTP.data(
-                for: request, session: operationSession ?? session, policy: .peerHost(baseURL),
+                for: request, session: session, policy: .peerHost(baseURL),
                 credentialOrigin: baseURL
             )
         } catch {
@@ -366,7 +359,7 @@ public actor NodeVideoRuntime {
                 to: destination,
                 maximumBytes: Self.maximumArtifactBytes,
                 budget: RemoteByteBudget(limit: Self.maximumJobBytes),
-                timeout: TimeInterval(VideoGenerationBudget.downloadSeconds),
+                timeout: 600,
                 allowedContentTypes: ["video/*", "application/octet-stream"]
             )
         } catch {

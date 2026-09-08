@@ -67,18 +67,19 @@ struct VideoGenerationContractTests {
     @Test func timeoutLayersCoverTheAcceptedJobAndFiniteTransfers() {
         #expect(VideoGenerationBudget.nodeJobSeconds == 12 * 60 * 60)
         // Also pinned in the Python provider test so both clients share this contract.
-        #expect(VideoGenerationBudget.controlSeconds == 44100)
+        #expect(VideoGenerationBudget.controlSeconds == 45060)
         #expect(VideoGenerationBudget.toolSeconds > VideoGenerationBudget.controlSeconds)
         #expect(VideoGenerationBudget.toolMilliseconds == VideoGenerationBudget.toolSeconds * 1000)
         #expect(VideoGenerationBudget.controlSeconds > VideoGenerationBudget.nodeJobSeconds
-            + 2 * VideoGenerationBudget.nodeRequestSeconds + VideoGenerationBudget.downloadSeconds)
+            + 2 * VideoGenerationBudget.networkResourceSeconds + VideoGenerationBudget.downloadSeconds)
         let control = ControlClient.sessionConfiguration()
         #expect(control.timeoutIntervalForRequest == Double(VideoGenerationBudget.controlSeconds))
         #expect(control.timeoutIntervalForResource == Double(VideoGenerationBudget.controlSeconds))
         #expect(ControlClient.requestTimeout(for: "/video/generate") == control.timeoutIntervalForResource)
         #expect(ControlClient.requestTimeout(for: "/image/generate") == 1800)
-        let download = NodeVideoRuntime.sessionConfiguration(resourceSeconds: VideoGenerationBudget.downloadSeconds)
-        #expect(download.timeoutIntervalForResource == 600)
+        let node = NodeVideoRuntime.sessionConfiguration()
+        #expect(node.timeoutIntervalForResource == 600)
+        #expect(node.timeoutIntervalForResource == Double(VideoGenerationBudget.networkResourceSeconds))
     }
 
     @Test func aTimeoutDoesNotClaimTheAppQuit() {

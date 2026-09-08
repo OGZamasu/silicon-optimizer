@@ -646,18 +646,18 @@ enum Tools {
     }
 
     enum ToolError: Error, LocalizedError {
+        case invalid(String)
         case missing(String)
         case unknown(String)
         case unreadableImage(String)
         case tooManyImages(Int)
         case imagesTooLarge(Int)
-        case invalid(String)
 
         var errorDescription: String? {
             switch self {
+            case .invalid(let message): message
             case .missing(let field): "Required argument '\(field)' was not provided."
             case .unknown(let name): "Unknown tool '\(name)'."
-            case .invalid(let message): message
             case .unreadableImage(let path):
                 "Could not safely read an image at '\(path)'. Use an owner-readable regular "
                     + "PNG, JPEG, GIF, or WebP under \(Tools.maximumImageBytes / 1_048_576) "
