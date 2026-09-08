@@ -850,7 +850,9 @@ extension AppModel {
             entryID: entryID,
             prompt: prompt,
             image: request.imagePath.map { URL(fileURLWithPath: $0) },
-            seconds: max(1, min(10, request.seconds ?? videoSeconds)),
+            seconds: ControlAPI.VideoGenerateRequest.clampedSeconds(
+                request.seconds ?? videoSeconds
+            ),
             resolution: request.resolution ?? videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory
         )

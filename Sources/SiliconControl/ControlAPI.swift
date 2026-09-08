@@ -655,6 +655,16 @@ public enum ControlAPI {
     }
 
     public struct VideoGenerateRequest: Codable, Sendable {
+        /// The wire-level duration contract shared by the app UI and MCP bridge. Nodes may
+        /// offer fewer choices, but callers never send a value outside this range.
+        public static let minimumSeconds = 1
+        public static let maximumSeconds = 15
+        public static let pickerSeconds = [3, 5, 8, 10, 15]
+
+        public static func clampedSeconds(_ seconds: Int) -> Int {
+            max(minimumSeconds, min(maximumSeconds, seconds))
+        }
+
         public var prompt: String
         public var modelID: String?
         public var seconds: Int?

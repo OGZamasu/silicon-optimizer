@@ -1,5 +1,6 @@
 import AVKit
 import SiliconCatalog
+import SiliconControl
 import SiliconRuntime
 import SwiftUI
 import UniformTypeIdentifiers
@@ -105,9 +106,9 @@ struct VideoView: View {
 
                     HStack {
                         Picker("Length", selection: $model.videoSeconds) {
-                            Text("3 s").tag(3)
-                            Text("5 s").tag(5)
-                            Text("8 s").tag(8)
+                            ForEach(ControlAPI.VideoGenerateRequest.pickerSeconds, id: \.self) {
+                                Text("\($0) s").tag($0)
+                            }
                         }
                         Picker("Size", selection: $model.videoResolution) {
                             Text("480p").tag("480p")
