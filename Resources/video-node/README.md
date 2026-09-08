@@ -162,6 +162,9 @@ launchctl bootout "gui/$(id -u)/dev.siliconoptimizer.video-node"
 
 Reinstall with the same path/port flags and `--start`. It updates the installed
 script while retaining the token, persisted jobs, models and existing outputs.
+Custom string-valued LaunchAgent environment settings, such as
+`PHOSPHENE_H3_TURBO`, `SILICON_VIDEO_LTX_BIN` and `HF_HOME`, are preserved;
+installer-managed paths and program arguments are rebuilt from the supplied flags.
 The app bundle can be moved because the installer copies the script into the
 data directory. Models and the separately maintained Phosphene checkout are
 not copied into the Silicon Optimizer repository or app bundle.

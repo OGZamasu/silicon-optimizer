@@ -24,9 +24,16 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
+from xml.parsers.expat import ExpatError
 
 LABEL = "dev.siliconoptimizer.video-node"
 DEFAULT_SUPPORT = Path.home() / "Library/Application Support/SiliconOptimizer"
+MANAGED_ENVIRONMENT_KEYS = frozenset({
+    "PATH", "PYTHONUNBUFFERED", "SILICON_VIDEO_DATA_DIR", "SILICON_VIDEO_TOKEN_FILE",
+    "SILICON_SWARM_CONFIG", "SILICON_VIDEO_REVIEW_DIR", "PHOSPHENE_PANEL_URL",
+    "PHOSPHENE_OUTPUT_ROOTS", "SILICON_VIDEO_LTX_ROOT", "SILICON_VIDEO_MODEL_DIR",
+    "SILICON_VIDEO_GEMMA_DIR", "SILICON_VIDEO_LEGACY_HB_LAYOUT",
+})
 
 
 def path_arg(value: str) -> Path:
@@ -149,6 +156,29 @@ def make_plist(args: argparse.Namespace, python: str, launch_dir: Optional[Path]
     }
 
 
+def existing_custom_environment(path: Path) -> Dict[str, str]:
+    """Preserve manual engine settings while installer-owned paths stay authoritative."""
+    if path.is_symlink():
+        raise ValueError("existing LaunchAgent is a symlink; it has been left unchanged")
+    try:
+        original = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    try:
+        plist = plistlib.loads(original)
+    except (ValueError, TypeError, plistlib.InvalidFileException, ExpatError) as exc:
+        raise ValueError("existing LaunchAgent is unreadable; it has been left unchanged") from exc
+    if not isinstance(plist, dict):
+        raise ValueError("existing LaunchAgent must be a dictionary; it has been left unchanged")
+    environment = plist.get("EnvironmentVariables", {})
+    if not isinstance(environment, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in environment.items()
+    ):
+        raise ValueError("existing LaunchAgent environment must contain string keys and values")
+    return {key: value for key, value in environment.items() if key not in MANAGED_ENVIRONMENT_KEYS}
+
+
 def prerequisites(args: argparse.Namespace) -> list:
     issues = []
     if platform.system() != "Darwin" or platform.machine() != "arm64":
@@ -225,6 +255,10 @@ def write_install(args: argparse.Namespace, source: Path, launch_dir: Optional[P
     if original is None:
         merged["swarm_token"] = secrets.token_urlsafe(32)
     plist_path, plist = make_plist(args, sys.executable, launch_dir)
+    plist["EnvironmentVariables"] = {
+        **existing_custom_environment(plist_path),
+        **plist["EnvironmentVariables"],
+    }
     script = source.read_bytes()
     plist_bytes = plistlib.dumps(plist, sort_keys=True)
     registry = json.dumps(merged, indent=2, sort_keys=True).encode() + b"\n"
@@ -269,6 +303,7 @@ def main(argv: Optional[list] = None) -> int:
         issues = prerequisites(args)
         blockers = mutation_blockers(args) if platform.system() == "Darwin" else []
         plist_path, _ = make_plist(args, sys.executable)
+        existing_custom_environment(plist_path)
         print(f"Node data: {args.data_dir}\nRegistry: {args.swarm_config}\nLaunchAgent: {plist_path}\nEndpoint: http://127.0.0.1:{args.port}")
         for issue in issues + blockers:
             print(f"Required before install: {issue}")

@@ -122,6 +122,42 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(environment["SILICON_VIDEO_MODEL_DIR"], str(root / "legacy/models/ltx"))
             self.assertEqual(environment["SILICON_VIDEO_LEGACY_HB_LAYOUT"], "1")
 
+    def test_reinstall_preserves_custom_engine_environment_and_rebuilds_managed_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self.arguments(root)
+            source = root / "source.py"
+            source.write_text("node fixture")
+            plist_path, _ = install.write_install(args, source, root / "agents")
+            plist = plistlib.loads(plist_path.read_bytes())
+            custom = {"PHOSPHENE_H3_TURBO": "false", "SILICON_VIDEO_LTX_BIN": "/custom/ltx", "HF_HOME": "/custom/cache"}
+            plist["EnvironmentVariables"].update(custom)
+            plist["EnvironmentVariables"]["SILICON_VIDEO_DATA_DIR"] = "/stale/data"
+            plist["ProgramArguments"] = ["/stale/python", "/stale/script"]
+            plist_path.write_bytes(plistlib.dumps(plist))
+            install.write_install(args, source, root / "agents")
+            installed = plistlib.loads(plist_path.read_bytes())
+            for key, value in custom.items():
+                self.assertEqual(installed["EnvironmentVariables"][key], value)
+            self.assertEqual(installed["EnvironmentVariables"]["SILICON_VIDEO_DATA_DIR"], str(args.data_dir))
+            self.assertEqual(installed["ProgramArguments"], install.make_plist(args, install.sys.executable, root / "agents")[1]["ProgramArguments"])
+
+    def test_invalid_existing_launchagent_fails_before_install_writes(self):
+        for content in (b"not a plist", b'<?xml version="1.0"?><plist><broken', plistlib.dumps(["not-a-dictionary"]), plistlib.dumps({"EnvironmentVariables": {"PHOSPHENE_H3_TURBO": False}})):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = self.arguments(root)
+                source = root / "source.py"
+                source.write_text("node fixture")
+                plist_path, _ = install.make_plist(args, "/python", root / "agents")
+                plist_path.parent.mkdir()
+                plist_path.write_bytes(content)
+                with self.assertRaises(ValueError):
+                    install.write_install(args, source, root / "agents")
+                self.assertEqual(plist_path.read_bytes(), content)
+                self.assertFalse(args.data_dir.exists())
+                self.assertFalse(args.swarm_config.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
