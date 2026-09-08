@@ -2,6 +2,7 @@ import Foundation
 import OSLog
 import SiliconCatalog
 import SiliconCore
+import SiliconControl
 
 public struct VideoRequest: Sendable {
     public var entryID: String
@@ -10,18 +11,37 @@ public struct VideoRequest: Sendable {
     public var image: URL?
     public var seconds: Int
     public var resolution: String
+    public var h3ChainPrompts: [String]?
     public var outputDirectory: URL
 
     public init(
         entryID: String, prompt: String, image: URL? = nil,
-        seconds: Int = 5, resolution: String = "720p", outputDirectory: URL
+        seconds: Int = 5, resolution: String = "720p", h3ChainPrompts: [String]? = nil,
+        outputDirectory: URL
     ) {
         self.entryID = entryID
         self.prompt = prompt
         self.image = image
         self.seconds = seconds
         self.resolution = resolution
+        self.h3ChainPrompts = h3ChainPrompts
         self.outputDirectory = outputDirectory
+    }
+
+    /// Shared by UI and control requests; validate before submitting any node job.
+    func nodeBody() throws -> Data {
+        let chainPrompts = try ControlAPI.VideoGenerateRequest.validatedH3ChainPrompts(
+            h3ChainPrompts, modelID: entryID, seconds: seconds
+        )
+        var body: [String: Any] = [
+            "model": entryID, "prompt": prompt, "seconds": seconds, "resolution": resolution,
+        ]
+        if let chainPrompts { body["h3_chain_prompts"] = chainPrompts }
+        if let image, let data = try? Data(contentsOf: image) {
+            body["image_b64"] = data.base64EncodedString()
+            body["image_name"] = image.lastPathComponent
+        }
+        return try JSONSerialization.data(withJSONObject: body)
     }
 }
 
@@ -62,9 +82,8 @@ public enum VideoRuntimeError: LocalizedError {
 }
 
 /// Runs video generation on a swarm node — the same shape as the LATO.2 client: submit
-/// the job, poll its status, download what it produced. Local video generation on Apple
-/// Silicon is not worth pretending about yet, so there is no local branch to fall back
-/// to; the honest answer without a capable node is "not yet", said in the UI.
+/// the job, poll its status, download what it produced. A node can be a paired GPU
+/// machine or the local Apple Silicon adapter; both advertise exact model capabilities.
 public actor NodeVideoRuntime {
 
     /// Delegated jobs run on another machine and fail in ways nothing local can see.
@@ -81,10 +100,25 @@ public actor NodeVideoRuntime {
     private static let maximumArtifactURLs = 8
 
     private var session: URLSession
+    private var videoSession: URLSession
+    private var downloadSession: URLSession
     private var cancelled = false
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public init(session: URLSession? = nil) {
+        self.session = session ?? .shared
+        self.videoSession = session ?? URLSession(configuration: Self.sessionConfiguration(
+            resourceSeconds: VideoGenerationBudget.nodeRequestSeconds
+        ))
+        self.downloadSession = session ?? URLSession(configuration: Self.sessionConfiguration(
+            resourceSeconds: VideoGenerationBudget.downloadSeconds
+        ))
+    }
+
+    static func sessionConfiguration(resourceSeconds: Int) -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = TimeInterval(resourceSeconds)
+        configuration.timeoutIntervalForResource = TimeInterval(resourceSeconds)
+        return configuration
     }
 
     public func cancel() { cancelled = true }
@@ -103,26 +137,15 @@ public actor NodeVideoRuntime {
         let started = Date()
 
         onProgress(.stage("Sending the job"))
-        var body: [String: Any] = [
-            "model": entry.id,
-            "prompt": request.prompt,
-            "seconds": request.seconds,
-            "resolution": request.resolution,
-        ]
-        if let image = request.image, let data = try? Data(contentsOf: image) {
-            body["image_b64"] = data.base64EncodedString()
-            body["image_name"] = image.lastPathComponent
-        }
-
         var submit = URLRequest(url: baseURL.appendingPathComponent("v1/text-to-video"))
         submit.httpMethod = "POST"
-        submit.timeoutInterval = 120
+        submit.timeoutInterval = TimeInterval(VideoGenerationBudget.nodeRequestSeconds)
         submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        submit.httpBody = try JSONSerialization.data(withJSONObject: body)
+        submit.httpBody = try request.nodeBody()
 
         let jobID = try await submitJob(
-            submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL
+            submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL, using: videoSession
         )
         guard let statusURL = RemotePathIdentifier.appending(
             jobID, to: baseURL.appendingPathComponent("v1/jobs")
@@ -131,18 +154,20 @@ public actor NodeVideoRuntime {
         }
         Self.log.notice("video job \(jobID, privacy: .public) submitted to \(baseURL.absoluteString, privacy: .public)")
 
-        // Poll until the node says it is done. Video is minutes, not seconds, so the
-        // interval is generous and the cap is a full hour.
-        let deadline = Date().addingTimeInterval(3600)
+        // Includes time waiting behind other renders. Keep outer control/MCP timeouts
+        // longer than this budget plus submission and the final artifact transfer.
+        let deadline = Date().addingTimeInterval(TimeInterval(VideoGenerationBudget.nodeJobSeconds))
         while Date() < deadline {
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
             try? await Task.sleep(for: .seconds(5))
+            if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
+            guard Date() < deadline else { break }
 
             var poll = URLRequest(url: statusURL)
-            poll.timeoutInterval = 30
+            poll.timeoutInterval = TimeInterval(VideoGenerationBudget.statusRequestSeconds)
             if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
             guard let (data, _) = try? await RemoteHTTP.data(
-                for: poll, session: session, policy: .peerHost(baseURL),
+                for: poll, session: videoSession, policy: .peerHost(baseURL),
                 credentialOrigin: baseURL
             ) else {
                 Self.log.notice("video job \(jobID, privacy: .public): poll failed, retrying")
@@ -184,7 +209,10 @@ public actor NodeVideoRuntime {
             }
         }
         Self.log.error("video job \(jobID, privacy: .public): gave up waiting")
-        throw VideoRuntimeError.failed("The job didn't finish within an hour.")
+        throw VideoRuntimeError.failed(
+            "Video job \(jobID) did not finish within the 12-hour queue/render limit. "
+            + "Check the node's job status before submitting again; an older node may still be rendering."
+        )
     }
 
     /// Sends a portrait and a performance to a node that can animate one with the
@@ -263,12 +291,13 @@ public actor NodeVideoRuntime {
     }
 
     private func submitJob(
-        _ request: URLRequest, nodeName: String, baseURL: URL
+        _ request: URLRequest, nodeName: String, baseURL: URL,
+        using operationSession: URLSession? = nil
     ) async throws -> String {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await RemoteHTTP.data(
-                for: request, session: session, policy: .peerHost(baseURL),
+                for: request, session: operationSession ?? session, policy: .peerHost(baseURL),
                 credentialOrigin: baseURL
             )
         } catch {
@@ -337,7 +366,7 @@ public actor NodeVideoRuntime {
                 to: destination,
                 maximumBytes: Self.maximumArtifactBytes,
                 budget: RemoteByteBudget(limit: Self.maximumJobBytes),
-                timeout: 600,
+                timeout: TimeInterval(VideoGenerationBudget.downloadSeconds),
                 allowedContentTypes: ["video/*", "application/octet-stream"]
             )
         } catch {

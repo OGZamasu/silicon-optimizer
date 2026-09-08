@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SiliconControl
 @testable import SiliconRuntime
 @testable import SiliconUI
 
@@ -32,9 +33,7 @@ struct CodexConfigTests {
         #expect(document.contains(
             "command = \"/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp\""
         ))
-        // A video render holds the tool call for up to ten minutes; Codex's default
-        // tool timeout would kill every clip.
-        #expect(document.contains("tool_timeout_sec = 1800"))
+        #expect(document.contains("tool_timeout_sec = \(VideoGenerationBudget.toolSeconds)"))
     }
 
     /// Trusting the picked folder is load-bearing: without it, any working directory whose

@@ -196,6 +196,24 @@ if [[ -f Resources/openmontage/VERSION ]]; then
     find "$BUNDLE/Contents/Resources/openmontage" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 fi
 
+# Ship the local video adapter and installer with releases, so updating the app also
+# supplies the maintained source for an opt-in MLX video node. Models and runtimes stay
+# in Application Support; copying these files does not start a service or download them.
+if [[ -f Resources/video-node/install.py ]]; then
+    echo "==> Embedding local video node"
+    mkdir -p "$BUNDLE/Contents/Resources/video-node/examples"
+    for asset in silicon_video_node.py install.py README.md; do
+        cp "Resources/video-node/$asset" "$BUNDLE/Contents/Resources/video-node/"
+    done
+    for asset in Resources/video-node/examples/*; do
+        [[ -f "$asset" ]] || continue
+        case "$(basename "$asset")" in test_*) continue ;; esac
+        case "$asset" in
+            *.py|*.json|*.md) cp "$asset" "$BUNDLE/Contents/Resources/video-node/examples/" ;;
+        esac
+    done
+fi
+
 # The live face camera's driver: a script the app hands to Deep-Live-Cam's own
 # environment. It lives in Resources rather than being generated at runtime so it can
 # be read, diffed and fixed like any other source file.

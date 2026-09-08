@@ -866,6 +866,14 @@ extension AppModel {
                 ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
             )
         }
+        let chainPrompts: [String]?
+        do {
+            chainPrompts = try ControlAPI.VideoGenerateRequest.validatedH3ChainPrompts(
+                request.h3ChainPrompts, modelID: entry.id, seconds: seconds
+            )
+        } catch {
+            throw ControlHostError.badRequest(error.localizedDescription)
+        }
         guard let node = videoCapableNode(for: entry),
               let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
         else {
@@ -881,6 +889,7 @@ extension AppModel {
             image: request.imagePath.map { URL(fileURLWithPath: $0) },
             seconds: seconds,
             resolution: request.resolution ?? videoResolution,
+            h3ChainPrompts: chainPrompts,
             outputDirectory: settings.resolvedVideoOutputDirectory
         )
 

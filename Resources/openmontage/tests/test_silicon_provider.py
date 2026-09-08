@@ -217,6 +217,52 @@ def test_video_refuses_image_to_video_without_a_still(app):
     assert app.requests == [], "a request the app would reject is never sent"
 
 
+@pytest.mark.parametrize("seconds", [10, 15])
+def test_h3_window_prompts_are_forwarded_in_order(app, seconds):
+    prompts = [f" window {n}\n" for n in range(seconds // 5)]
+    result = SiliconVideo().execute({"prompt": "continuous shot", "model": "hailuo-h3",
+                                     "duration_seconds": seconds, "h3_chain_prompts": prompts})
+    assert result.success, result.error
+    _, body = app.requests[-1]
+    assert body["h3_chain_prompts"] == [p.strip() for p in prompts]
+    assert body["seconds"] == seconds
+    assert "h3_chain_prompts" in SiliconVideo.idempotency_key_fields
+
+
+@pytest.mark.parametrize("model,seconds,prompts", [
+    ("ltx2-distilled", 10, ["first", "second"]),
+    ("hailuo-h3", 5, ["first", "second"]),
+    ("hailuo-h3", 15, ["first", "second"]),
+    ("hailuo-h3", 10, ["first", " \n"]),
+    ("hailuo-h3", 10, ["x" * 4001, "second"]),
+    ("hailuo-h3", 10, ["first", 42]),
+    ("hailuo-h3", 10, "not an array"),
+])
+def test_invalid_h3_window_prompts_do_not_submit_a_job(app, model, seconds, prompts):
+    result = SiliconVideo().execute({"prompt": "shot", "model": model,
+                                     "duration_seconds": seconds, "h3_chain_prompts": prompts})
+    assert not result.success and "h3_chain_prompts" in result.error
+    assert app.requests == []
+
+
+def test_video_timeout_covers_the_job_and_finite_transfer_budgets():
+    # The control budget is pinned by VideoGenerationContractTests in the app;
+    # this outer tool also covers delivery of the control response.
+    assert _client.VIDEO_CONTROL_TIMEOUT_SECONDS == 44100
+    assert _client.VIDEO_TIMEOUT_SECONDS == 44160
+    assert _client.VIDEO_TIMEOUT_SECONDS > _client.VIDEO_CONTROL_TIMEOUT_SECONDS
+
+
+def test_timed_out_render_returns_an_actionable_error(app, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(_client.request, "urlopen", timeout)
+    result = SiliconVideo().execute({"prompt": "shot"})
+    assert not result.success
+    assert "may still be working" in result.error
+    assert "before submitting again" in result.error
+
+
 def test_3d_delivers_the_glb_and_keeps_the_obj(app, tmp_path):
     out = tmp_path / "props" / "crate.glb"
     result = Silicon3D().execute({"image_path": "/tmp/crate.png", "output_path": str(out), "vertex_budget": 1500})

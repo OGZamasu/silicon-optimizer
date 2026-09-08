@@ -1,0 +1,31 @@
+name: Local video node
+
+# These contract tests use temporary directories and fake renderers. They run on a
+# GitHub-hosted machine; pull requests never execute on the project's private Mac.
+on:
+  pull_request:
+    paths:
+      - 'Resources/video-node/**'
+      - '.github/workflows/video-node.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Resources/video-node/**'
+      - '.github/workflows/video-node.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test the adapter and installer
+        run: python -m unittest discover -s Resources/video-node -p 'test_*.py' -v
+      - name: Test the batch and gallery example
+        run: python -m unittest discover -s Resources/video-node/examples -p 'test_*.py' -v

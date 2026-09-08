@@ -45,6 +45,20 @@ that fails minutes in. When it is unavailable, do not silently fall back to a
 paid provider: present the choice. The user may prefer to start the paired PC or
 the local adapter.
 
+### Successive actions in a longer H3 clip
+
+For `model="hailuo-h3"` at 10 or 15 seconds, `h3_chain_prompts` can contain
+exactly two or three nonempty strings, one for each five-second window. Keep
+the character, camera, and setting consistent while describing the next
+action in each window. Each string is limited to 4,000 characters. Omit the
+field for an ordinary single-prompt request or for a different model.
+
+The local adapter and its installation instructions ship with Silicon
+Optimizer under `Contents/Resources/video-node`. Its batch example adds
+resumable submission and a review gallery when a production needs many clips.
+Video calls include time spent in the renderer's queue; after a timeout,
+inspect the job before retrying to avoid generating the same clip twice.
+
 ### No text-to-3D
 
 `silicon_3d` is image-to-3D only. For a mesh from a description, render the

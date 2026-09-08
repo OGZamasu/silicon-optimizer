@@ -674,16 +674,54 @@ public enum ControlAPI {
         public var resolution: String?
         /// Optional still to animate (image-to-video), as an absolute path.
         public var imagePath: String?
+        /// Optional prompt for each five-second H3 window, in temporal order.
+        public var h3ChainPrompts: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case prompt, modelID, seconds, resolution, imagePath
+            case h3ChainPrompts = "h3_chain_prompts"
+        }
+
+        public enum ValidationError: LocalizedError {
+            case invalidChainPrompts(String)
+            public var errorDescription: String? {
+                switch self { case .invalidChainPrompts(let message): message }
+            }
+        }
+
+        /// Validate after resolving the app's current model and duration defaults.
+        /// The runtime uses the same check for callers that do not use the control API.
+        public static func validatedH3ChainPrompts(
+            _ prompts: [String]?, modelID: String, seconds: Int
+        ) throws -> [String]? {
+            guard let prompts else { return nil }
+            guard modelID == "hailuo-h3", seconds == 10 || seconds == 15 else {
+                throw ValidationError.invalidChainPrompts(
+                    "h3_chain_prompts is only supported for hailuo-h3 at 10 or 15 seconds."
+                )
+            }
+            let trimmed = prompts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard trimmed.count == seconds / 5,
+                  trimmed.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.count <= 4000 }) else {
+                throw ValidationError.invalidChainPrompts(
+                    "h3_chain_prompts requires exactly \(seconds / 5) nonempty prompts, "
+                    + "each at most 4000 characters."
+                )
+            }
+            return trimmed
+        }
 
         public init(
             prompt: String, modelID: String? = nil, seconds: Int? = nil,
-            resolution: String? = nil, imagePath: String? = nil
+            resolution: String? = nil, imagePath: String? = nil,
+            h3ChainPrompts: [String]? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
             self.seconds = seconds
             self.resolution = resolution
             self.imagePath = imagePath
+            self.h3ChainPrompts = h3ChainPrompts
         }
     }
 

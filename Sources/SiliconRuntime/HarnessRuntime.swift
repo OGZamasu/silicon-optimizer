@@ -1,5 +1,6 @@
 import Foundation
 import SiliconCore
+import SiliconControl
 
 /// Manages the DeepSeek Harness (`dsh`) sidecar that powers the agentic chat experience.
 ///
@@ -524,8 +525,8 @@ public actor HarnessRuntime {
                     serverName: silicon
                     transport: stdio
                     command: '\(escapedServer)'
-                    # The longest tool renders a video clip on the node for ~10 minutes.
-                    toolCallTimeoutMs: 1800000
+                    # Covers the node's video queue/render budget and artifact download.
+                    toolCallTimeoutMs: \(VideoGenerationBudget.toolMilliseconds)
 
             """
         }

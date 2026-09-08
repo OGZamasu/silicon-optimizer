@@ -26,8 +26,17 @@ from urllib import error, request
 
 PROVIDER = "silicon_optimizer"
 
-#: The app polls for an hour; leave room for submission and the final artifact download.
-VIDEO_TIMEOUT_SECONDS = 3900
+#: Mirrors Sources/SiliconControl/VideoGenerationBudget.swift. The adapter bounds
+#: accepted jobs (including queue time) to twelve hours. Leave room for submission,
+#: a final in-flight status request, download, and the control response. This outer
+#: tool call then allows one more response margin, matching Harness and Codex.
+VIDEO_JOB_TIMEOUT_SECONDS = 12 * 60 * 60
+VIDEO_NODE_REQUEST_SECONDS = 120
+VIDEO_DOWNLOAD_SECONDS = 600
+VIDEO_RESPONSE_OVERHEAD_SECONDS = 60
+VIDEO_CONTROL_TIMEOUT_SECONDS = (VIDEO_JOB_TIMEOUT_SECONDS + 2 * VIDEO_NODE_REQUEST_SECONDS
+                                 + VIDEO_DOWNLOAD_SECONDS + VIDEO_RESPONSE_OVERHEAD_SECONDS)
+VIDEO_TIMEOUT_SECONDS = VIDEO_CONTROL_TIMEOUT_SECONDS + VIDEO_RESPONSE_OVERHEAD_SECONDS
 IMAGE_TIMEOUT_SECONDS = 600
 MESH_TIMEOUT_SECONDS = 1800
 
@@ -161,7 +170,11 @@ def _open(req: request.Request, timeout: float) -> Any:
             pass
         detail = str(detail)[:MAX_ERROR_DETAIL_CHARS]
         raise SiliconError(f"Silicon Optimizer answered {exc.code}: {detail}")
+    except TimeoutError as exc:
+        raise SiliconError("The request exceeded its time limit. The app or node may still be working; check its job status before submitting again.") from exc
     except error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise SiliconError("The request exceeded its time limit. The app or node may still be working; check its job status before submitting again.") from exc
         raise SiliconUnavailable(f"Could not reach Silicon Optimizer: {exc.reason}")
     return json.loads(body) if body else {}
 

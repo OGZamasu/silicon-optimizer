@@ -331,6 +331,17 @@ enum Tools {
                 "resolution": property("string", "e.g. 720p. Defaults to the app's setting."),
                 "image_path": property("string", "Optional still to animate (image-to-video): "
                     + "absolute path, e.g. something from generate_image."),
+                "h3_chain_prompts": .object([
+                    "type": .string("array"),
+                    "description": .string("Optional per-window prompts for hailuo-h3 only: "
+                        + "exactly 2 for 10 seconds or 3 for 15 seconds, in temporal order. "
+                        + "Omit to use the main prompt throughout."),
+                    "minItems": .number(2), "maxItems": .number(3),
+                    "items": .object([
+                        "type": .string("string"), "minLength": .number(1),
+                        "maxLength": .number(4000),
+                    ]),
+                ]),
             ],
             required: ["prompt"]
         ),
@@ -535,12 +546,23 @@ enum Tools {
             guard let prompt = arguments["prompt"]?.stringValue else {
                 throw ToolError.missing("prompt")
             }
+            let chainPrompts: [String]?
+            if let value = arguments["h3_chain_prompts"] {
+                guard let values = value.arrayValue,
+                      values.allSatisfy({ $0.stringValue != nil }) else {
+                    throw ToolError.invalid("h3_chain_prompts must be an array of strings.")
+                }
+                chainPrompts = values.compactMap(\.stringValue)
+            } else {
+                chainPrompts = nil
+            }
             let request = ControlAPI.VideoGenerateRequest(
                 prompt: prompt,
                 modelID: arguments["model_id"]?.stringValue,
                 seconds: arguments["seconds"]?.intValue,
                 resolution: arguments["resolution"]?.stringValue,
-                imagePath: arguments["image_path"]?.stringValue
+                imagePath: arguments["image_path"]?.stringValue,
+                h3ChainPrompts: chainPrompts
             )
             let clip: ControlAPI.VideoResponse = try await client.post(
                 "/video/generate", request
@@ -629,11 +651,13 @@ enum Tools {
         case unreadableImage(String)
         case tooManyImages(Int)
         case imagesTooLarge(Int)
+        case invalid(String)
 
         var errorDescription: String? {
             switch self {
             case .missing(let field): "Required argument '\(field)' was not provided."
             case .unknown(let name): "Unknown tool '\(name)'."
+            case .invalid(let message): message
             case .unreadableImage(let path):
                 "Could not safely read an image at '\(path)'. Use an owner-readable regular "
                     + "PNG, JPEG, GIF, or WebP under \(Tools.maximumImageBytes / 1_048_576) "

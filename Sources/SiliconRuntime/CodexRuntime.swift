@@ -1,5 +1,6 @@
 import Foundation
 import SiliconCore
+import SiliconControl
 
 /// A JSON value that can cross actor boundaries, for the Codex app-server protocol whose
 /// payloads have no fixed schema worth typing out. Ids in particular must round-trip
@@ -210,10 +211,10 @@ public actor CodexRuntime {
 
             # This app's own MCP bridge: gives Codex the app's tools (generate images and
             # 3D here, render video on the swarm's node, load models) next to its shell.
-            # The timeout covers the longest of them — a ~10 minute cinematic video clip.
+            # Covers the node's video queue/render budget and artifact download.
             [mcp_servers.silicon-optimizer]
             command = "\(tomlEscaped(mcpServerPath))"
-            tool_timeout_sec = 1800
+            tool_timeout_sec = \(VideoGenerationBudget.toolSeconds)
 
             """
         }
