@@ -39,8 +39,10 @@ accounting for the changes that made the local batch work:
 | Weights, tokens, job history, generated videos | Runtime data. Retained outside the repository; the installer and example create or use them through documented paths. |
 
 PR #19 can be reviewed on its own. Full parity with the installed application's
-non-video behavior also depends on PR #18 being accepted. The PRs overlap in
-some source files, so maintainers should preserve both changes when merging.
+non-video behavior also depends on PR #18 being accepted. Integration testing
+against PR #18 at `eabcada4` produced a clean merge: all 480 Swift tests across
+101 suites and all 25 OpenMontage provider tests passed with both PRs applied.
+The latest checked main (`bf4aaa3`) also merges cleanly with this change.
 
 ## Rendering evidence and its limits
 
