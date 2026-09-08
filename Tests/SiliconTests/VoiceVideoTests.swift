@@ -197,13 +197,15 @@ struct VideoTests {
     @Test func catalogEntriesAreRemoteAndHonest() {
         #expect(!VideoCatalog.all.isEmpty)
         #expect(VideoCatalog.all.allSatisfy { $0.backend == .nodeRemote })
-        #expect(VideoCatalog.all.allSatisfy { $0.capabilityID == "text-to-video" })
+        #expect(Set(VideoCatalog.all.map(\.capabilityID)).count == VideoCatalog.all.count)
+        #expect(VideoCatalog.all.allSatisfy { $0.capabilityID == $0.id })
         #expect(VideoCatalog.entry(id: "wan22-ti2v-5b")?.supportsImageInput == true)
         // Ids are what the node keys jobs on, so they must be unique and stable.
         #expect(Set(VideoCatalog.all.map(\.id)).count == VideoCatalog.all.count)
         #expect(VideoCatalog.all.map(\.id) == [
-            "wan22-ti2v-5b", "ltx2-distilled", "ltx23-uncensored",
+            "wan22-ti2v-5b", "ltx2-distilled", "ltx23-uncensored", "hailuo-h3",
         ])
+        #expect(VideoCatalog.entry(id: "hailuo-h3")?.author == "MiniMax")
     }
 
     /// The uncensored LTX-2.3 merge is a third id the node has to recognise; its entry

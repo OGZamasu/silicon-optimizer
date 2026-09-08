@@ -26,8 +26,8 @@ from urllib import error, request
 
 PROVIDER = "silicon_optimizer"
 
-#: Long enough for a video render on a node. Matches the app's own client.
-VIDEO_TIMEOUT_SECONDS = 1800
+#: The app polls for an hour; leave room for submission and the final artifact download.
+VIDEO_TIMEOUT_SECONDS = 3900
 IMAGE_TIMEOUT_SECONDS = 600
 MESH_TIMEOUT_SECONDS = 1800
 

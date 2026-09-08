@@ -1,9 +1,9 @@
-"""Video on your gaming PC, through Silicon Optimizer.
+"""Video on your own hardware, through Silicon Optimizer.
 
-The Mac does not render video; a paired Windows node with an NVIDIA card does, and
-the app routes to it. So ``get_status`` asks the app whether any video model is
-actually available right now — a node that is off is an honest UNAVAILABLE, not a
-render that fails five minutes in.
+A model-aware node may be a paired NVIDIA machine or a loopback Apple Silicon
+adapter such as Phosphene. ``get_status`` asks the app whether any exact video
+model is actually available right now — an offline or disabled runtime is an
+honest UNAVAILABLE, not a render that fails five minutes in.
 """
 
 from __future__ import annotations
@@ -35,14 +35,13 @@ class SiliconVideo(BaseTool):
     stability = ToolStability.BETA
     execution_mode = ExecutionMode.SYNC
     determinism = Determinism.STOCHASTIC
-    # A GPU, just not this machine's: the node on your own network.
+    # A GPU on one of the user's own machines, reached through the node contract.
     runtime = ToolRuntime.LOCAL_GPU
 
     dependencies: list[str] = []
     install_instructions = (
-        "Open Silicon Optimizer and pair a Windows PC with an NVIDIA card from its "
-        "Swarm tab (github.com/OGZamasu/silicon-node). Video renders there; the Mac "
-        "watches the progress."
+        "Open Silicon Optimizer and enable a model-aware video node: either pair an "
+        "NVIDIA machine from the Swarm tab or run the local Phosphene adapter on the Mac."
     )
 
     capabilities = ["text_to_video", "image_to_video", "offline_generation"]
@@ -58,8 +57,8 @@ class SiliconVideo(BaseTool):
         "iterating on a shot without a per-second meter running",
     ]
     not_good_for = [
-        "a swarm with no NVIDIA node paired",
-        "clips longer than the node's model allows (typically 5-8 s)",
+        "a setup with no ready model-aware video node",
+        "clip lengths outside the selected model's advertised choices",
     ]
 
     input_schema = {

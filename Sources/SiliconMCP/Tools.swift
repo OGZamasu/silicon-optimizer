@@ -293,35 +293,37 @@ enum Tools {
         Tool(
             name: "list_video_models",
             description: """
-                Video generation models and whether a swarm node can serve them right now. \
-                Video is the one capability with no local backend: clips render on a paired \
-                machine with an NVIDIA card, so "available" is a claim about the swarm, not \
-                this Mac.
+                Video generation models, their supported clip lengths, and whether an exact \
+                model capability is ready right now. The renderer may be a paired GPU machine \
+                or a loopback Apple Silicon adapter such as Phosphene.
                 """,
             properties: [:], required: []
         ),
         Tool(
             name: "generate_video",
             description: """
-                Render a short video clip from a prompt on the swarm's video node and return \
-                the file path. Long-running: the fast model (ltx2-distilled) takes one to \
-                three minutes per clip, the cinematic one (wan22-ti2v-5b) around ten, and the \
-                uncensored LTX-2.3 merge (ltx23-uncensored: adult content allowed, clips carry \
-                audio) a few minutes — call list_video_models first if unsure which is \
-                available. The finished clip also appears in the app's Video tab under Recent \
+                Render a short video clip from a prompt on the node advertising that exact \
+                model and return the file path. Long-running: ltx2-distilled generally takes \
+                one to three minutes, wan22-ti2v-5b around ten, the uncensored LTX-2.3 merge \
+                (ltx23-uncensored: adult content allowed, clips carry audio) a few minutes, \
+                and hailuo-h3 through Phosphene may take several minutes or longer for a \
+                chained clip. Call list_video_models first for availability and supported \
+                lengths. The finished clip also appears in the app's Video tab under Recent \
                 clips.
                 """,
             properties: [
                 "prompt": property("string", "What happens in the clip."),
                 "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min), "
-                    + "ltx2-distilled (fast, 1-3 min) or ltx23-uncensored (LTX-2.3 merge, "
-                    + "adult content allowed, audio, 2-5 min). Defaults to the app's selection."),
+                    + "ltx2-distilled (fast, 1-3 min), ltx23-uncensored (LTX-2.3 merge, "
+                    + "adult content allowed, audio, 2-5 min) or hailuo-h3 (local Phosphene, "
+                    + "chained 10/15 s clips). Defaults to the app's selection."),
                 "seconds": .object([
                     "type": .string("number"),
                     "description": .string(
                         "Clip length in seconds, "
                             + "\(ControlAPI.VideoGenerateRequest.minimumSeconds)-"
-                            + "\(ControlAPI.VideoGenerateRequest.maximumSeconds). Default 5."
+                            + "\(ControlAPI.VideoGenerateRequest.maximumSeconds). It must be "
+                            + "one of the selected model's supported lengths; default 5."
                     ),
                     "minimum": .number(Double(ControlAPI.VideoGenerateRequest.minimumSeconds)),
                     "maximum": .number(Double(ControlAPI.VideoGenerateRequest.maximumSeconds)),
@@ -520,10 +522,11 @@ enum Tools {
             let models: [ControlAPI.VideoModel] = try await client.get("/video/models")
             return models.map { model in
                 var line = "- \(model.name) [\(model.id)] — \(model.typicalDuration)"
+                line += ", \(model.supportedSeconds.map(String.init).joined(separator: "/")) s"
                 if model.supportsImageInput { line += ", can animate a still image" }
                 line += model.available
                     ? "\n  available now on \(model.node ?? "a node")"
-                    : "\n  NOT available — no reachable node offers video right now"
+                    : "\n  NOT available — no reachable node offers this model right now"
                 line += "\n  \(model.summary)"
                 return line
             }.joined(separator: "\n")

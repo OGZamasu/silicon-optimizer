@@ -798,19 +798,19 @@ extension AppModel {
 
     // MARK: - Video
 
-    /// The video catalog, with the honest availability answer per entry: video has no
-    /// local backend, so "available" means a reachable swarm node advertises the
-    /// capability ready right now.
+    /// The video catalog, with an availability answer for each exact model capability.
+    /// A generic video node must not make models it cannot serve appear ready.
     public func videoModels() async -> [ControlAPI.VideoModel] {
         await refreshSwarmIfStale()
-        let node = videoCapableNode
         return VideoCatalog.all.map { entry in
-            ControlAPI.VideoModel(
+            let node = videoCapableNode(for: entry)
+            return ControlAPI.VideoModel(
                 id: entry.id,
                 name: entry.name,
                 summary: entry.summary,
                 typicalDuration: entry.typicalDuration,
                 supportsImageInput: entry.supportsImageInput,
+                supportedSeconds: entry.supportedSeconds,
                 available: node != nil,
                 node: node?.name
             )
@@ -830,29 +830,56 @@ extension AppModel {
                 "A clip is already rendering; wait for it to finish."
             )
         }
-        await refreshSwarmIfStale()
-        guard let node = videoCapableNode,
-              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
-        else {
-            throw ControlHostError.badRequest(
-                "No swarm node offers video right now — the node may be off or still "
-                + "setting video up."
-            )
+
+        let explicitEntry: VideoEntry?
+        if let requestedID = request.modelID {
+            guard let entry = VideoCatalog.entry(id: requestedID) else {
+                let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
+                throw ControlHostError.badRequest(
+                    "Unknown video model \(requestedID). Known: \(known)"
+                )
+            }
+            explicitEntry = entry
+        } else {
+            explicitEntry = nil
         }
 
+        // A cold refresh may replace the historical Wan default with the first exact
+        // capability actually available. Resolve an omitted model only after that.
+        await refreshSwarmIfStale()
         let entryID = request.modelID ?? selectedVideoModel
-        guard VideoCatalog.entry(id: entryID) != nil else {
+        guard let entry = explicitEntry ?? VideoCatalog.entry(id: entryID) else {
             let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
             throw ControlHostError.badRequest("Unknown video model \(entryID). Known: \(known)")
         }
+        let seconds: Int
+        if let requestedSeconds = request.seconds {
+            guard entry.supportedSeconds.contains(requestedSeconds) else {
+                let choices = entry.supportedSeconds.map(String.init).joined(separator: ", ")
+                throw ControlHostError.badRequest(
+                    "\(entry.name) supports these clip lengths: \(choices) seconds."
+                )
+            }
+            seconds = requestedSeconds
+        } else {
+            seconds = entry.normalizedSeconds(
+                ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
+            )
+        }
+        guard let node = videoCapableNode(for: entry),
+              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+        else {
+            throw ControlHostError.badRequest(
+                "No ready swarm node offers \(entry.name) right now — the node may be "
+                + "off or still setting that model up."
+            )
+        }
 
         let videoRequest = VideoRequest(
-            entryID: entryID,
+            entryID: entry.id,
             prompt: prompt,
             image: request.imagePath.map { URL(fileURLWithPath: $0) },
-            seconds: ControlAPI.VideoGenerateRequest.clampedSeconds(
-                request.seconds ?? videoSeconds
-            ),
+            seconds: seconds,
             resolution: request.resolution ?? videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory
         )
@@ -883,7 +910,7 @@ extension AppModel {
             return ControlAPI.VideoResponse(
                 file: result.file.path,
                 node: node.name,
-                model: entryID,
+                model: entry.id,
                 elapsedSeconds: Date().timeIntervalSince(started)
             )
         } catch {

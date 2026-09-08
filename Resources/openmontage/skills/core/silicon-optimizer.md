@@ -8,17 +8,18 @@ API key. Prefer them by default; reach for a cloud provider when a specific
 model or capability is only available there, and say so in the decision log.
 
 The tools are thin clients for the Silicon Optimizer app on this Mac. The app
-does the work — images on the Mac's GPU, video on a paired Windows PC with an
-NVIDIA card, meshes on whichever can — and shows its own progress bars while it
-does. If the app is not running, every tool reports `unavailable` with a
-one-line reason; there is no key to configure and nothing to install here.
+does the work — images on the Mac's GPU, video through a model-aware node (a
+paired GPU machine or a local Phosphene adapter), meshes on whichever can — and
+shows its own progress bars while it does. If the app is not running, every tool
+reports `unavailable` with a one-line reason; there is no key to configure and
+nothing to install here.
 
 ## Tools
 
 | Tool | Capability | Where it runs | Cost |
 |------|-----------|---------------|------|
 | `silicon_image` | `image_generation` — text-to-image, image-to-image | This Mac | $0 |
-| `silicon_video` | `video_generation` — text-to-video, image-to-video | A paired NVIDIA node on the user's network | $0 |
+| `silicon_video` | `video_generation` — text-to-video, image-to-video | A paired GPU node or this Mac through a loopback adapter | $0 |
 | `silicon_3d` | `3d_asset_generation` — image-to-3D (textured GLB, clean OBJ) | This Mac or the node | $0 |
 
 ## How It Works
@@ -34,12 +35,15 @@ one-line reason; there is no key to configure and nothing to install here.
 
 ## Key Patterns
 
-### Video needs a node
+### Video needs an exact model capability
 
 `silicon_video.get_status()` asks the app whether any video model is *available
-right now*. A node that is switched off is `unavailable`, not a render that
-fails minutes in. When it is unavailable, do not silently fall back to a paid
-provider: present the choice. The user may prefer to turn the PC on.
+right now*. Each model publishes its own supported clip lengths; use the app's
+model listing rather than assuming every video node can run every model. A node
+that is switched off or has that model disabled is `unavailable`, not a render
+that fails minutes in. When it is unavailable, do not silently fall back to a
+paid provider: present the choice. The user may prefer to start the paired PC or
+the local adapter.
 
 ### No text-to-3D
 

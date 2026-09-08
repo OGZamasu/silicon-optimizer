@@ -1122,6 +1122,7 @@ public final class AppModel {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
         lastSwarmPoll = Date()
+        reconcileInitialVideoSelection()
         syncSwarmChatProviders()
         // Give this Mac its own per-client identity wherever a node can mint one, so
         // node activity logs name us instead of "swarm (shared token)".
@@ -2291,6 +2292,9 @@ public final class AppModel {
     public var videoImage: URL?
     public var videoSeconds = 5
     public var videoResolution = "720p"
+    /// Reconcile the historical Wan default once a real model-aware advertisement is
+    /// available. Later manual choices, including unavailable ones, remain untouched.
+    private var hasReconciledInitialVideoSelection = false
 
     let videoRuntime = NodeVideoRuntime()
     // internal(set), not private(set): the control API renders clips through the same
@@ -2303,23 +2307,86 @@ public final class AppModel {
     public internal(set) var videoResults: [VideoResult] = []
     public var videoError: String?
 
-    /// The first reachable node advertising a ready video capability — video's whole
-    /// backend, until Apple Silicon ports are worth wiring.
-    public var videoCapableNode: PeerStatus? {
-        swarmPeers.first { peer in
-            peer.reachable && peer.capabilities.contains {
-                $0.kind == NodeVideoRuntime.capabilityKind && $0.ready
-            }
+    /// A capability serves one catalog entry only. Matching the generic `video` kind
+    /// made every model look available as soon as any video runner came online.
+    nonisolated static func isReadyVideoCapability(
+        _ capability: PeerCapability, for entry: VideoEntry
+    ) -> Bool {
+        // Before capabilities became model-aware, `text-to-video` meant the one model
+        // nodes could run: Wan. Keep that alias one-way so old Wan nodes still work,
+        // but never let it claim LTX or H3.
+        let modelMatches = capability.id == entry.capabilityID
+            || (capability.id == "text-to-video" && entry.id == VideoCatalog.wan22.id)
+        return capability.kind == NodeVideoRuntime.capabilityKind
+            && modelMatches
+            && capability.ready
+            && capability.enabled != false
+    }
+
+    nonisolated static func videoCapability(
+        for entry: VideoEntry, on peer: PeerStatus
+    ) -> PeerCapability? {
+        peer.capabilities.first { isReadyVideoCapability($0, for: entry) }
+    }
+
+    nonisolated static func videoCapableNode(
+        for entry: VideoEntry, among peers: [PeerStatus]
+    ) -> PeerStatus? {
+        peers.first { peer in
+            peer.reachable && videoCapability(for: entry, on: peer) != nil
         }
+    }
+
+    /// The first reachable node advertising the selected model's exact capability.
+    public var videoCapableNode: PeerStatus? {
+        guard let entry = VideoCatalog.entry(id: selectedVideoModel) else { return nil }
+        return videoCapableNode(for: entry)
+    }
+
+    public func videoCapableNode(for entry: VideoEntry) -> PeerStatus? {
+        Self.videoCapableNode(for: entry, among: swarmPeers)
+    }
+
+    public func videoCapability(
+        for entry: VideoEntry, on peer: PeerStatus
+    ) -> PeerCapability? {
+        Self.videoCapability(for: entry, on: peer)
+    }
+
+    private func reconcileInitialVideoSelection() {
+        guard !hasReconciledInitialVideoSelection,
+              let firstAvailable = VideoCatalog.all.first(where: {
+                  Self.videoCapableNode(for: $0, among: swarmPeers) != nil
+              })
+        else { return }
+        hasReconciledInitialVideoSelection = true
+
+        // Only the untouched historical default is eligible for an automatic switch.
+        // A user may deliberately select H3 while its large install is still underway.
+        guard selectedVideoModel == VideoCatalog.wan22.id,
+              Self.videoCapableNode(for: VideoCatalog.wan22, among: swarmPeers) == nil
+        else {
+            return
+        }
+        selectedVideoModel = firstAvailable.id
+        videoSeconds = firstAvailable.normalizedSeconds(videoSeconds)
     }
 
     public func generateVideo() {
         let prompt = videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !isGeneratingVideo else { return }
-        guard let node = videoCapableNode,
+        guard let entry = VideoCatalog.entry(id: selectedVideoModel) else {
+            videoError = "Unknown video model \(selectedVideoModel)."
+            return
+        }
+        let seconds = entry.normalizedSeconds(
+            ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
+        )
+        videoSeconds = seconds
+        guard let node = videoCapableNode(for: entry),
               let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
         else {
-            videoError = "No swarm node offers video yet."
+            videoError = "No ready swarm node offers \(entry.name) yet."
             return
         }
         isGeneratingVideo = true
@@ -2329,10 +2396,10 @@ public final class AppModel {
         noteActivity()
 
         let request = VideoRequest(
-            entryID: selectedVideoModel,
+            entryID: entry.id,
             prompt: prompt,
             image: videoImage,
-            seconds: videoSeconds,
+            seconds: seconds,
             resolution: videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory
         )

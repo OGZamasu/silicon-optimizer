@@ -628,27 +628,30 @@ public enum ControlAPI {
         }
     }
 
-    /// One video model, with whether any swarm node can serve it right now. Video is the
-    /// one capability with no local backend, so availability is a claim about the swarm.
+    /// One video model, with whether any model-aware node can serve it right now. That
+    /// node may be remote or a loopback adapter, but it must advertise this exact model.
     public struct VideoModel: Codable, Sendable {
         public var id: String
         public var name: String
         public var summary: String
         public var typicalDuration: String
         public var supportsImageInput: Bool
+        public var supportedSeconds: [Int]
         public var available: Bool
         /// The node that would run it, when one is ready.
         public var node: String?
 
         public init(
             id: String, name: String, summary: String, typicalDuration: String,
-            supportsImageInput: Bool, available: Bool, node: String?
+            supportsImageInput: Bool, supportedSeconds: [Int], available: Bool,
+            node: String?
         ) {
             self.id = id
             self.name = name
             self.summary = summary
             self.typicalDuration = typicalDuration
             self.supportsImageInput = supportsImageInput
+            self.supportedSeconds = supportedSeconds
             self.available = available
             self.node = node
         }

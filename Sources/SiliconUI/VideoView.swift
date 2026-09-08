@@ -1,13 +1,12 @@
 import AVKit
 import SiliconCatalog
-import SiliconControl
 import SiliconRuntime
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The Video tab. Generation runs on a swarm node with a CUDA card — local video on
-/// Apple Silicon is not worth pretending about yet — so this tab is honest about which
-/// machine will do the work and what state it is in.
+/// The Video tab. Generation runs through a model-aware video node, which may be a
+/// paired CUDA machine or a loopback adapter for an Apple Silicon runtime such as
+/// Phosphene. The selected catalog entry decides which exact capability must be ready.
 struct VideoView: View {
     @Environment(AppModel.self) private var model
     @State private var recentClips: [URL] = []
@@ -51,11 +50,19 @@ struct VideoView: View {
             refreshRecents()
             model.revealVideoPanel(.result)
         }
+        .onChange(of: model.selectedVideoModel) {
+            guard let entry = selectedEntry else { return }
+            model.videoSeconds = entry.normalizedSeconds(model.videoSeconds)
+        }
         .onChange(of: selectedClip) { model.revealVideoPanel(.result) }
     }
 
     private var selectedEntry: VideoEntry? {
         VideoCatalog.entry(id: model.selectedVideoModel)
+    }
+
+    private var selectedNode: AppModel.PeerStatus? {
+        selectedEntry.flatMap { model.videoCapableNode(for: $0) }
     }
 
     /// What the player shows: a clip picked from recents, else this session's newest,
@@ -71,7 +78,7 @@ struct VideoView: View {
         @Bindable var model = model
         return CollapsibleCard(
             title: "Make a clip", systemImage: "film",
-            badge: model.videoCapableNode.map { "on \($0.name)" },
+            badge: selectedNode.map { "on \($0.name)" },
             isExpanded: model.videoPanel(.clip)
         ) {
             VStack(alignment: .leading, spacing: 12) {
@@ -106,7 +113,7 @@ struct VideoView: View {
 
                     HStack {
                         Picker("Length", selection: $model.videoSeconds) {
-                            ForEach(ControlAPI.VideoGenerateRequest.pickerSeconds, id: \.self) {
+                            ForEach(entry.supportedSeconds, id: \.self) {
                                 Text("\($0) s").tag($0)
                             }
                         }
@@ -142,7 +149,7 @@ struct VideoView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(
                             model.isGeneratingVideo
-                            || model.videoCapableNode == nil
+                            || selectedNode == nil
                             || model.videoPrompt.trimmingCharacters(
                                 in: .whitespacesAndNewlines
                             ).isEmpty
@@ -181,10 +188,8 @@ struct VideoView: View {
     /// What the render will actually cost. The catalog carries an estimate; a node
     /// that has run the thing carries a measurement, and a measurement wins.
     private func timingNote(for entry: VideoEntry) -> String {
-        guard let node = model.videoCapableNode,
-              let capability = node.capabilities.first(where: {
-                  $0.kind == NodeVideoRuntime.capabilityKind && $0.ready
-              }),
+        guard let node = model.videoCapableNode(for: entry),
+              let capability = model.videoCapability(for: entry, on: node),
               let seconds = capability.typicalSeconds, seconds > 0
         else { return "Typically \(entry.typicalDuration)." }
 
@@ -197,7 +202,7 @@ struct VideoView: View {
     /// The machine doing the work, stated plainly — with the truth when there is none.
     @ViewBuilder
     private var nodeRow: some View {
-        if let node = model.videoCapableNode {
+        if let node = selectedNode {
             HStack(spacing: 6) {
                 Circle().fill(Color.green).frame(width: 7, height: 7)
                 Text("Renders on \(node.name)")
@@ -205,12 +210,11 @@ struct VideoView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-        } else {
+        } else if let entry = selectedEntry {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Circle().fill(Color.orange).frame(width: 7, height: 7)
-                Text("No node can make video yet. Your silicon-node machine has the "
-                    + "card for it — the request to set it up is already filed on the "
-                    + "shared hub, and this tab lights up the moment it's ready.")
+                Text("No ready node offers \(entry.name). "
+                    + (entry.setupHint ?? "Enable its \(entry.capabilityID) capability."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -33,7 +33,7 @@ class _FakeApp:
     def __init__(self, tmp_path: Path):
         self.tmp_path = tmp_path
         self.requests: list[tuple[str, dict]] = []
-        self.video_available = True
+        self.video_models_available = {"ltx2-distilled"}
         self.refuse_with: str | None = None
         fake = self
 
@@ -58,7 +58,20 @@ class _FakeApp:
                 if not self._authed():
                     return self._send(401, {"error": "Invalid or missing control token."})
                 if self.path == "/video/models":
-                    return self._send(200, [{"id": "wan22", "available": fake.video_available, "node": "silicon-node"}])
+                    models = [
+                        ("wan22-ti2v-5b", [3, 5, 8]),
+                        ("ltx2-distilled", [3, 5, 8, 10, 15]),
+                        ("hailuo-h3", [3, 5, 10, 15]),
+                    ]
+                    return self._send(200, [
+                        {
+                            "id": model,
+                            "available": model in fake.video_models_available,
+                            "node": "silicon-node",
+                            "supportedSeconds": seconds,
+                        }
+                        for model, seconds in models
+                    ])
                 return self._send(404, {"error": "no such route"})
 
             def do_POST(self):
@@ -151,10 +164,12 @@ def test_a_stale_handshake_is_not_trusted(tmp_path, monkeypatch, app):
         _client.resolve()
 
 
-def test_video_is_unavailable_when_no_node_offers_it(app):
+def test_video_status_tracks_each_models_availability(app):
     assert SiliconVideo().get_status() == ToolStatus.AVAILABLE
-    app.video_available = False
+    app.video_models_available.clear()
     assert SiliconVideo().get_status() == ToolStatus.UNAVAILABLE
+    app.video_models_available.add("hailuo-h3")
+    assert SiliconVideo().get_status() == ToolStatus.AVAILABLE
 
 
 # --- the wire -------------------------------------------------------------------------
