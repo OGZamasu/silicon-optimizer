@@ -50,7 +50,7 @@ struct CloudProviderTests {
 
     @Test @MainActor
     func directCloudRoutingRequiresTheEnabledDiscoveredModel() throws {
-        let app = AppModel()
+        let app = AppModel(settings: .init())
         let model = CloudModel(
             id: "minimax/minimax-m3", displayName: "MiniMax M3", provider: .openRouter
         )

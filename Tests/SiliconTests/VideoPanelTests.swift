@@ -17,7 +17,7 @@ struct VideoPanelTests {
     }
 
     @Test func togglingAPanelWritesItToSettings() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         let tracking = model.videoPanel(.tracking)
         #expect(tracking.wrappedValue == false)
 
@@ -33,7 +33,7 @@ struct VideoPanelTests {
     /// Opening a panel twice must not stack duplicates in the stored list, which would then
     /// need two closes to shut.
     @Test func openingTwiceIsStillOneEntry() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         model.videoPanel(.live).wrappedValue = true
         model.videoPanel(.live).wrappedValue = true
         #expect(model.settings.expandedVideoPanels.filter { $0 == VideoPanel.live.rawValue }
@@ -44,7 +44,7 @@ struct VideoPanelTests {
 
     /// A finished clip landing inside a folded panel is the obvious way this could go wrong.
     @Test func aNewResultOpensTheResultPanel() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         #expect(model.videoPanel(.result).wrappedValue == false)
         model.revealVideoPanel(.result)
         #expect(model.videoPanel(.result).wrappedValue)

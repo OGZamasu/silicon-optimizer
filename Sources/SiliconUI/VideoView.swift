@@ -132,6 +132,8 @@ struct VideoView: View {
                             .help("An integer from 0 to 4294967295. Each following clip increments it; use the same value to compare sampling settings.")
                         Text("\(batchPromptCount) prompts × \(model.videoBatchVariations) = \(batchClipCount) clips · \(batchClipCount * model.videoSeconds) seconds of footage")
                             .font(.caption).foregroundStyle(.secondary)
+                        Text("Room for \(max(0, VideoBatchQueue.maximumPending - model.videoBatchQueue.pendingCount)) more queued clips.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
 
                     HStack {

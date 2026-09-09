@@ -558,7 +558,7 @@ struct CompanionFileTests {
 struct ConversationFolderTests {
 
     private func modelWithConversations(_ count: Int) -> AppModel {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         for _ in 0..<count { model.newConversation() }
         return model
     }
@@ -605,14 +605,14 @@ struct ConversationFolderTests {
     }
 
     @Test func renameRejectsBlankNames() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         let folder = model.createFolder(named: "Keep")
         model.renameFolder(folder.id, to: "   ")
         #expect(model.folders[0].name == "Keep")
     }
 
     @Test func unnamedFoldersStillGetALabel() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         let folder = model.createFolder(named: "  ")
         #expect(!folder.name.isEmpty)
     }

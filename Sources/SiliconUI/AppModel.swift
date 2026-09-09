@@ -2522,9 +2522,15 @@ public final class AppModel {
 
     // MARK: - Init
 
-    public init(videoQueue: VideoBatchQueue? = nil, videoRuntime: NodeVideoRuntime = NodeVideoRuntime()) {
+    public init(
+        videoQueue: VideoBatchQueue? = nil,
+        videoRuntime: NodeVideoRuntime = NodeVideoRuntime(),
+        settings: Settings? = nil
+    ) {
         self.profile = HardwareProbe.detect()
-        self.settings = Settings.load()
+        // Tests and previews inject settings instead of reading the user's Keychain.
+        // The ordinary application still loads/migrates its saved credentials.
+        self.settings = settings ?? Settings.load()
         self.videoRuntime = videoRuntime
         self.videoBatchQueue = videoQueue ?? VideoBatchQueue(
             storeURL: ControlAPI.handshakeURL.deletingLastPathComponent()

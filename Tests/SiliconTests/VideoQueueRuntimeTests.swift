@@ -37,7 +37,9 @@ private final class QueueHTTPProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let (code, data) = Self.state.response(to: request)
-        let response = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: "HTTP/1.1", headerFields: nil)!
+        let contentType = request.url!.path.hasSuffix(".mp4") ? "video/mp4" : "application/json"
+        let response = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
@@ -117,7 +119,7 @@ struct VideoQueueRuntimeTests {
         defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
         let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
         try queue.enqueue(prompts: ["A honey badger sails."], variations: 2, title: "Test movie", template: template, baseSeed: 91)
-        let model = AppModel(videoQueue: queue, videoRuntime: runtime())
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
         let peer = AppModel.PeerStatus(name: "fixture", baseURL: "http://queue.test", reachable: true,
                                       capabilities: [.init(id: "hailuo-h3", kind: "video", ready: true,
                                                            supportedParameters: ["seed", "h3_turbo"])])
@@ -129,7 +131,9 @@ struct VideoQueueRuntimeTests {
         #expect(QueueHTTPProtocol.state.calls().filter { $0.hasPrefix("POST") }.count == 2)
         #expect(queue.items[0].request.seed == 91 && queue.items[1].request.seed == 92)
         #expect(queue.items[0].file != queue.items[1].file)
-        #expect(queue.items.allSatisfy { FileManager.default.fileExists(atPath: $0.file!.path) })
+        #expect(queue.items.allSatisfy { item in
+            item.file.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        })
         #expect(!model.isGeneratingVideo && model.activeVideoQueueID == nil)
         let restored = VideoBatchQueue(storeURL: queue.storeURL)
         #expect(restored.next == nil)
@@ -141,12 +145,33 @@ struct VideoQueueRuntimeTests {
         defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
         let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
         try queue.enqueue(prompts: ["A shot"], variations: 1, title: "", template: template)
-        let model = AppModel(videoQueue: queue, videoRuntime: runtime())
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
         let peer = AppModel.PeerStatus(name: "old-node", baseURL: "http://queue.test", reachable: true,
                                       capabilities: [.init(id: "hailuo-h3", kind: "video", ready: true)])
         await model.processNextQueuedVideo(peers: [peer])
         #expect(QueueHTTPProtocol.state.calls().isEmpty)
         #expect(queue.next?.status == .pending)
         #expect(model.videoQueueMessage?.contains("does not advertise") == true)
+    }
+
+    @Test @MainActor func unwritableBatchFolderDoesNotStartAGPURender() async throws {
+        QueueHTTPProtocol.state.reset()
+        var template = request()
+        let root = template.outputDirectory
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let notADirectory = root.appendingPathComponent("not-a-directory")
+        try Data("fixture".utf8).write(to: notADirectory)
+        template.outputDirectory = notADirectory
+        let queue = VideoBatchQueue(storeURL: root.appendingPathComponent("queue.json"))
+        try queue.enqueue(prompts: ["A shot"], variations: 1, title: "", template: template)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        let peer = AppModel.PeerStatus(name: "fixture", baseURL: "http://queue.test", reachable: true,
+                                      capabilities: [.init(id: "hailuo-h3", kind: "video", ready: true,
+                                                           supportedParameters: ["h3_turbo"])])
+        await model.processNextQueuedVideo(peers: [peer])
+        #expect(QueueHTTPProtocol.state.calls().isEmpty)
+        #expect(queue.isPaused && queue.items.first?.status == .pending)
+        #expect(model.videoQueueMessage?.contains("Cannot write the batch folder") == true)
     }
 }

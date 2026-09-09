@@ -109,6 +109,7 @@ extension AppModel {
         guard videoQueueTask == nil else { return }
         videoQueueTask = Task { [weak self] in
             while !Task.isCancelled {
+                guard self != nil else { return }
                 await self?.processNextQueuedVideo()
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
             }
@@ -136,6 +137,15 @@ extension AppModel {
         if queued.nodeJob == nil, queued.request.h3Turbo != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
             videoQueueMessage = "This H3 node does not advertise per-clip sampling controls. Update its video-node adapter, or use Renderer default for a new batch."
+            return
+        }
+        do {
+            // Fail before spending GPU time if the editing destination is not
+            // writable. Keep the unsubmitted job pending, not "uncertain".
+            try videoBatchQueue.exportManifest(batchID: queued.batchID)
+        } catch {
+            videoQueueMessage = "Cannot write the batch folder; fix the video destination and resume. \(error.localizedDescription)"
+            try? videoBatchQueue.setPaused(true)
             return
         }
         isGeneratingVideo = true

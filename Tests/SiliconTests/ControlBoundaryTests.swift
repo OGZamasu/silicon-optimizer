@@ -15,7 +15,7 @@ struct ControlBoundaryTests {
     }
 
     @Test func languagePlanRejectsInvalidContextAndExpertDomains() async throws {
-        let app = AppModel()
+        let app = AppModel(settings: .init())
         let entry = try #require(ModelCatalog.all.first)
         for context in [0, -1, entry.maxContext + 1, Int.max] {
             await #expect(throws: ControlHostError.self) {
@@ -28,7 +28,7 @@ struct ControlBoundaryTests {
     }
 
     @Test func imagePlanRejectsInvalidGeometryAndSteps() async {
-        let app = AppModel()
+        let app = AppModel(settings: .init())
         let invalid: [(Int?, Int?, Int?)] = [
             (0, 512, 4), (-1, 512, 4), (Int.max, 1, 4),
             (8192, 8192, 4), (512, 512, 0), (512, 512, Int.max),

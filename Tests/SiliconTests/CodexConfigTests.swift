@@ -9,7 +9,7 @@ struct CodexConfigTests {
 
     @Test @MainActor
     func anUnsetWorkspaceNeverDefaultsToTheHomeDirectory() {
-        let app = AppModel()
+        let app = AppModel(settings: .init())
         app.settings.codexWorkingDirectory = nil
         #expect(!app.hasExplicitCodexWorkingDirectory)
         #expect(app.codexWorkingDirectory != FileManager.default.homeDirectoryForCurrentUser)

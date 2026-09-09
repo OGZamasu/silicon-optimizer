@@ -403,7 +403,8 @@ public actor NodeVideoRuntime {
                 maximumBytes: Self.maximumArtifactBytes,
                 budget: RemoteByteBudget(limit: Self.maximumJobBytes),
                 timeout: 600,
-                allowedContentTypes: ["video/*", "application/octet-stream"]
+                allowedContentTypes: ["video/*", "application/octet-stream"],
+                sessionConfiguration: session.configuration
             )
         } catch {
             throw VideoRuntimeError.failed(
