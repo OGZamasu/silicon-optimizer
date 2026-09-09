@@ -88,6 +88,13 @@ set `PHOSPHENE_H3_TURBO=false` in the node's LaunchAgent environment to request
 the non-Turbo path. Actual readiness, memory requirements, model access and
 supported tiers are determined by the installed Phosphene/H3 version.
 
+An H3 request may override that default with the boolean `h3_turbo` field. The
+choice is persisted and fingerprinted per job, so it cannot change midway
+through a batch or reuse an existing ID with different sampling. The node
+advertises this field in `supported_parameters`. See the app's
+[batch queue guide](../../docs/VIDEO-BATCH-QUEUE.md) for variations, overnight
+processing and sampling tradeoffs.
+
 The node converts completed H3 output to a 24 fps H.264 MP4, with AAC when
 audio is present, at the requested delivery resolution. It validates dimensions,
 codec, frame count and duration before publishing the artifact. Sidecars record

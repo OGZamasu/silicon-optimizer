@@ -33,6 +33,24 @@ enum Tools {
         .object(["type": .string(type), "description": .string(description)])
     }
 
+    static func describeQueue(_ queue: ControlAPI.VideoQueueView) -> String {
+        let pending = queue.items.filter { ["pending", "submitting", "rendering"].contains($0.status) }.count
+        let failed = queue.items.filter { $0.status == "failed" }.count
+        var lines = ["Video queue: \(queue.paused ? "paused" : "running"), \(pending) queued/running, \(failed) failed, \(queue.items.count) total."]
+        if let message = queue.message { lines.append(message) }
+        let visible = queue.items.filter { $0.status != "completed" } + queue.items.filter { $0.status == "completed" }.reversed()
+        for item in visible.prefix(100) {
+            lines.append("\(item.id): \(item.title), scene \(item.scene), variation \(item.variation), seed \(item.seed ?? 0) — \(item.status)")
+            lines.append("  folder: \(item.outputDirectory)")
+            if let file = item.file { lines.append("  file: \(file)") }
+            if let job = item.nodeJobID { lines.append("  node job: \(job)") }
+            if let error = item.error { lines.append("  \(error)") }
+        }
+        if visible.count > 100 { lines.append("Showing 100 items. Full history is in the app and GET /video/queue.") }
+        lines.append("Leave the app open to dispatch the remaining clips; the Mac must remain powered and awake.")
+        return lines.joined(separator: "\n")
+    }
+
     static let all: [Tool] = [
         Tool(
             name: "get_hardware_profile",
@@ -346,6 +364,29 @@ enum Tools {
             required: ["prompt"]
         ),
         Tool(
+            name: "queue_videos",
+            description: "Persist video prompts and return immediately. Generate 1–20 variations per prompt with distinct saved seeds, up to 200 unfinished clips, one render at a time. Clips and manifests go in batch folders. Leave the app open and the Mac powered with its lid open. A relaunch reconnects to saved jobs. Inspect video_queue before resubmitting after an uncertain response. Call list_video_models for supported controls.",
+            properties: [
+                "prompts": .object(["type": .string("array"), "minItems": .number(1), "maxItems": .number(200), "items": .object(["type": .string("string"), "minLength": .number(1), "maxLength": .number(12000)]), "description": .string("One prompt per shot, in scene order.")]),
+                "title": property("string", "Optional batch name."),
+                "variations": .object(["type": .string("integer"), "minimum": .number(1), "maximum": .number(20), "description": .string("Generations per prompt; default 1.")]),
+                "model_id": property("string", "Optional model ID; defaults to the app selection."),
+                "seconds": property("integer", "Supported clip length for the model, up to 15 seconds."),
+                "resolution": property("string", "480p, 720p or 1080p. Higher sizes may need more memory."),
+                "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional base seed, incremented per clip. Omit for random.")]),
+                "h3_turbo": property("boolean", "H3 only, when the node advertises this control: true = Turbo, false = slower full sampling at the same canvas, omit = renderer default. Slower is not guaranteed to look better."),
+            ], required: ["prompts"]
+        ),
+        Tool(
+            name: "video_queue",
+            description: "Inspect or control the persistent queue. Pause stops future dispatch, not the active render. Retry reconnects to a saved non-terminal job. Check the node and obtain user approval before confirm_new_render=true for an uncertain submission. Remove only affects unsubmitted entries; clear_finished keeps media and manifests.",
+            properties: [
+                "action": .object(["type": .string("string"), "enum": .array(["status", "pause", "resume", "retry", "remove", "clear_finished"].map(JSONValue.string)), "description": .string("Default status.")]),
+                "id": property("string", "Queue item ID for retry or remove."),
+                "confirm_new_render": property("boolean", "Explicit user confirmation to create a new render after checking the original job."),
+            ], required: []
+        ),
+        Tool(
             name: "get_status",
             description: "What is loaded right now, at what settings, and its last measured speed.",
             properties: [:], required: []
@@ -571,6 +612,48 @@ enum Tools {
                 + String(format: "%.0fs", clip.elapsedSeconds)
                 + ".\n  file: \(clip.file)"
                 + "\nThe clip is also in the app's Video tab under Recent clips."
+
+        case "queue_videos":
+            guard let values = arguments["prompts"]?.arrayValue,
+                  values.allSatisfy({ $0.stringValue != nil }) else {
+                throw ToolError.invalid("prompts must be an array of strings.")
+            }
+            let seed: UInt32?
+            if let value = arguments["seed"] {
+                guard let raw = value.doubleValue, raw.isFinite, raw.rounded() == raw,
+                      raw >= 0, raw <= Double(UInt32.max) else {
+                    throw ToolError.invalid("seed must be an integer from 0 through 4294967295.")
+                }
+                seed = UInt32(raw)
+            } else { seed = nil }
+            for key in ["variations", "seconds"] where arguments[key] != nil {
+                guard let value = arguments[key]?.doubleValue, value.isFinite,
+                      value.rounded() == value, value >= 1, value <= 200 else {
+                    throw ToolError.invalid("\(key) must be a positive integer in range.")
+                }
+            }
+            if arguments["h3_turbo"] != nil && arguments["h3_turbo"]?.boolValue == nil {
+                throw ToolError.invalid("h3_turbo must be a boolean.")
+            }
+            let queue: ControlAPI.VideoQueueView = try await client.post("/video/queue", ControlAPI.VideoQueueRequest(
+                prompts: values.compactMap(\.stringValue), title: arguments["title"]?.stringValue,
+                variations: arguments["variations"]?.intValue, modelID: arguments["model_id"]?.stringValue,
+                seconds: arguments["seconds"]?.intValue, resolution: arguments["resolution"]?.stringValue,
+                seed: seed, h3Turbo: arguments["h3_turbo"]?.boolValue
+            ))
+            return describeQueue(queue)
+
+        case "video_queue":
+            let action = arguments["action"]?.stringValue ?? "status"
+            let queue: ControlAPI.VideoQueueView
+            if action == "status" { queue = try await client.get("/video/queue") }
+            else {
+                queue = try await client.post("/video/queue/control", ControlAPI.VideoQueueControl(
+                    action: action, id: arguments["id"]?.stringValue,
+                    confirmNewRender: arguments["confirm_new_render"]?.boolValue
+                ))
+            }
+            return describeQueue(queue)
 
         case "run_benchmark":
             let result: ControlAPI.BenchmarkResult = try await client.postEmpty("/benchmark")

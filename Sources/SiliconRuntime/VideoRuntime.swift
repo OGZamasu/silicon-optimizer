@@ -4,7 +4,7 @@ import SiliconCatalog
 import SiliconCore
 import SiliconControl
 
-public struct VideoRequest: Sendable {
+public struct VideoRequest: Sendable, Codable {
     public var entryID: String
     public var prompt: String
     /// A still image to animate, for models that take one.
@@ -12,12 +12,17 @@ public struct VideoRequest: Sendable {
     public var seconds: Int
     public var resolution: String
     public var h3ChainPrompts: [String]?
+    public var seed: UInt32?
+    public var h3Turbo: Bool?
+    /// Stable client identity for node-side deduplication; not the model ID.
+    public var clientID: String?
     public var outputDirectory: URL
 
     public init(
         entryID: String, prompt: String, image: URL? = nil,
         seconds: Int = 5, resolution: String = "720p", h3ChainPrompts: [String]? = nil,
-        outputDirectory: URL
+        outputDirectory: URL, seed: UInt32? = nil, h3Turbo: Bool? = nil,
+        clientID: String? = nil
     ) {
         self.entryID = entryID
         self.prompt = prompt
@@ -26,6 +31,9 @@ public struct VideoRequest: Sendable {
         self.resolution = resolution
         self.h3ChainPrompts = h3ChainPrompts
         self.outputDirectory = outputDirectory
+        self.seed = seed
+        self.h3Turbo = h3Turbo
+        self.clientID = clientID
     }
 
     /// Shared by UI and control requests; validate before submitting any node job.
@@ -33,15 +41,30 @@ public struct VideoRequest: Sendable {
         let chainPrompts = try ControlAPI.VideoGenerateRequest.validatedH3ChainPrompts(
             h3ChainPrompts, modelID: entryID, seconds: seconds
         )
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: h3Turbo, modelID: entryID)
         var body: [String: Any] = [
             "model": entryID, "prompt": prompt, "seconds": seconds, "resolution": resolution,
         ]
         if let chainPrompts { body["h3_chain_prompts"] = chainPrompts }
-        if let image, let data = try? Data(contentsOf: image) {
+        if let seed { body["seed"] = seed }
+        if let h3Turbo { body["h3_turbo"] = h3Turbo }
+        if let clientID { body["entry_id"] = clientID }
+        if let image {
+            let data = try Data(contentsOf: image)
             body["image_b64"] = data.base64EncodedString()
             body["image_name"] = image.lastPathComponent
         }
         return try JSONSerialization.data(withJSONObject: body)
+    }
+}
+
+public struct VideoNodeJob: Sendable, Codable, Equatable {
+    public var id: String
+    public var submittedAt: Date
+
+    public init(id: String, submittedAt: Date = Date()) {
+        self.id = id
+        self.submittedAt = submittedAt
     }
 }
 
@@ -122,6 +145,8 @@ public actor NodeVideoRuntime {
         _ request: VideoRequest,
         node baseURL: URL,
         token: String?,
+        resuming job: VideoNodeJob? = nil,
+        onSubmitted: @escaping @Sendable (VideoNodeJob) async throws -> Void = { _ in },
         onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> VideoResult {
         guard let entry = VideoCatalog.entry(id: request.entryID) else {
@@ -130,17 +155,28 @@ public actor NodeVideoRuntime {
         cancelled = false
         let started = Date()
 
-        onProgress(.stage("Sending the job"))
-        var submit = URLRequest(url: baseURL.appendingPathComponent("v1/text-to-video"))
-        submit.httpMethod = "POST"
-        submit.timeoutInterval = 120
-        submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        submit.httpBody = try request.nodeBody()
+        let acceptedJob: VideoNodeJob
+        if let job {
+            acceptedJob = job
+            onProgress(.stage("Reconnecting to the saved job"))
+        } else {
+            onProgress(.stage("Sending the job"))
+            var submit = URLRequest(url: baseURL.appendingPathComponent("v1/text-to-video"))
+            submit.httpMethod = "POST"
+            submit.timeoutInterval = 120
+            submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+            submit.httpBody = try request.nodeBody()
 
-        let jobID = try await submitJob(
-            submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL
-        )
+            let jobID = try await submitJob(
+                submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL
+            )
+            acceptedJob = VideoNodeJob(id: jobID)
+            // Persist the receipt before any polling. A relaunch must never submit
+            // another render merely because the previous download was interrupted.
+            try await onSubmitted(acceptedJob)
+        }
+        let jobID = acceptedJob.id
         guard let statusURL = RemotePathIdentifier.appending(
             jobID, to: baseURL.appendingPathComponent("v1/jobs")
         ) else {
@@ -150,12 +186,15 @@ public actor NodeVideoRuntime {
 
         // Includes time waiting behind other renders. Keep outer control/MCP timeouts
         // longer than this budget plus submission and the final artifact transfer.
-        let deadline = Date().addingTimeInterval(TimeInterval(VideoGenerationBudget.nodeJobSeconds))
-        while Date() < deadline {
+        let deadline = acceptedJob.submittedAt.addingTimeInterval(TimeInterval(VideoGenerationBudget.nodeJobSeconds))
+        // Check even an old receipt once: the node may have finished while the app
+        // was closed, and the original deadline must not prevent downloading it.
+        var firstPoll = true
+        while firstPoll || Date() < deadline {
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
-            try? await Task.sleep(for: .seconds(5))
+            if !firstPoll { try? await Task.sleep(for: .seconds(5)) }
+            firstPoll = false
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
-            guard Date() < deadline else { break }
 
             var poll = URLRequest(url: statusURL)
             poll.timeoutInterval = 30
@@ -175,12 +214,16 @@ public actor NodeVideoRuntime {
 
             onProgress(NodeJobProgress(from: status))
 
-            let state = (status["status"] as? String ?? "").lowercased()
+            guard let rawState = status["status"] as? String, !rawState.isEmpty else {
+                throw VideoRuntimeError.failed(Self.reason(in: data)
+                    ?? "The node returned no status for saved video job \(jobID). Check the peer and job before rendering again.")
+            }
+            let state = rawState.lowercased()
             Self.log.notice("video job \(jobID, privacy: .public): status=\(state, privacy: .public)")
             if ["failed", "error", "cancelled"].contains(state) {
                 let detail = (status["error"] as? String ?? status["detail"] as? String)
                     .map { String($0.prefix(512)) }
-                throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
+                throw VideoNodeFailed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
                 onProgress(.stage("Downloading the clip"))

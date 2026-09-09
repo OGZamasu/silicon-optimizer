@@ -641,10 +641,13 @@ public enum ControlAPI {
         /// The node that would run it, when one is ready.
         public var node: String?
 
+        /// Optional renderer controls; absent on older nodes.
+        public var supportedParameters: [String]?
+
         public init(
             id: String, name: String, summary: String, typicalDuration: String,
             supportsImageInput: Bool, supportedSeconds: [Int], available: Bool,
-            node: String?
+            node: String?, supportedParameters: [String]? = nil
         ) {
             self.id = id
             self.name = name
@@ -654,6 +657,7 @@ public enum ControlAPI {
             self.supportedSeconds = supportedSeconds
             self.available = available
             self.node = node
+            self.supportedParameters = supportedParameters
         }
     }
 
@@ -676,16 +680,25 @@ public enum ControlAPI {
         public var imagePath: String?
         /// Optional prompt for each five-second H3 window, in temporal order.
         public var h3ChainPrompts: [String]?
+        public var seed: UInt32?
+        public var h3Turbo: Bool?
 
         enum CodingKeys: String, CodingKey {
-            case prompt, modelID, seconds, resolution, imagePath
+            case prompt, modelID, seconds, resolution, imagePath, seed
             case h3ChainPrompts = "h3_chain_prompts"
+            case h3Turbo = "h3_turbo"
         }
 
         public enum ValidationError: LocalizedError {
             case invalidChainPrompts(String)
             public var errorDescription: String? {
                 switch self { case .invalidChainPrompts(let message): message }
+            }
+        }
+
+        public static func validateSampling(h3Turbo: Bool?, modelID: String) throws {
+            if h3Turbo != nil, modelID != "hailuo-h3" {
+                throw ValidationError.invalidChainPrompts("h3_turbo is only supported for hailuo-h3.")
             }
         }
 
@@ -714,7 +727,7 @@ public enum ControlAPI {
         public init(
             prompt: String, modelID: String? = nil, seconds: Int? = nil,
             resolution: String? = nil, imagePath: String? = nil,
-            h3ChainPrompts: [String]? = nil
+            h3ChainPrompts: [String]? = nil, seed: UInt32? = nil, h3Turbo: Bool? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -722,6 +735,8 @@ public enum ControlAPI {
             self.resolution = resolution
             self.imagePath = imagePath
             self.h3ChainPrompts = h3ChainPrompts
+            self.seed = seed
+            self.h3Turbo = h3Turbo
         }
     }
 
@@ -816,6 +831,9 @@ public protocol ControlHost: AnyObject, Sendable {
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse
     func videoModels() async -> [ControlAPI.VideoModel]
+    func videoQueue() async -> ControlAPI.VideoQueueView
+    func enqueueVideos(_ request: ControlAPI.VideoQueueRequest) async throws -> ControlAPI.VideoQueueView
+    func controlVideoQueue(_ request: ControlAPI.VideoQueueControl) async throws -> ControlAPI.VideoQueueView
     func generateVideo(
         _ request: ControlAPI.VideoGenerateRequest
     ) async throws -> ControlAPI.VideoResponse

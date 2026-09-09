@@ -2,6 +2,10 @@
 
 [optimize.zamasu.dev](https://optimize.zamasu.dev)
 
+**Video batches:** queue multiple prompts and variations, let them render one at
+a time, and review clips with saved seeds in batch folders. See the
+[batch queue and sampling guide](docs/VIDEO-BATCH-QUEUE.md).
+
 A free Mac app that runs AI on your own computer. Chat, coding, images, voice, video and
 3D — running directly on your Mac, with nothing sent to the cloud. No subscription, no API
 key, and your conversations never leave your machine.

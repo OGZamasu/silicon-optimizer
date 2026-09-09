@@ -812,7 +812,8 @@ extension AppModel {
                 supportsImageInput: entry.supportsImageInput,
                 supportedSeconds: entry.supportedSeconds,
                 available: node != nil,
-                node: node?.name
+                node: node?.name,
+                supportedParameters: node.flatMap { videoCapability(for: entry, on: $0)?.supportedParameters }
             )
         }
     }
@@ -882,6 +883,14 @@ extension AppModel {
                 + "off or still setting that model up."
             )
         }
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: request.h3Turbo, modelID: entry.id)
+        if request.h3Turbo != nil,
+           videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
+            throw ControlHostError.badRequest("This node does not support per-clip h3_turbo; update its video-node adapter or omit that field.")
+        }
+        // Refreshing the swarm above suspends this method. A queue worker or a
+        // second control caller may have acquired the renderer in the meantime.
+        guard !isGeneratingVideo else { throw ControlHostError.badRequest("A clip is already rendering.") }
 
         let videoRequest = VideoRequest(
             entryID: entry.id,
@@ -890,7 +899,8 @@ extension AppModel {
             seconds: seconds,
             resolution: request.resolution ?? videoResolution,
             h3ChainPrompts: chainPrompts,
-            outputDirectory: settings.resolvedVideoOutputDirectory
+            outputDirectory: settings.resolvedVideoOutputDirectory,
+            seed: request.seed, h3Turbo: request.h3Turbo
         )
 
         isGeneratingVideo = true

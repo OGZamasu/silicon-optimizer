@@ -24,6 +24,7 @@ struct VideoView: View {
                         }
                         .frame(width: 400)
                         VStack(spacing: 16) {
+                            VideoQueueView()
                             resultCard
                             recentsPane
                         }
@@ -33,6 +34,7 @@ struct VideoView: View {
                     VStack(spacing: 16) {
                         composerCard
                         PersonaCards()
+                        VideoQueueView()
                         resultCard
                         recentsPane
                     }
@@ -53,6 +55,7 @@ struct VideoView: View {
         .onChange(of: model.selectedVideoModel) {
             guard let entry = selectedEntry else { return }
             model.videoSeconds = entry.normalizedSeconds(model.videoSeconds)
+            model.videoSampling = .nodeDefault
         }
         .onChange(of: selectedClip) { model.revealVideoPanel(.result) }
     }
@@ -77,12 +80,18 @@ struct VideoView: View {
     private var composerCard: some View {
         @Bindable var model = model
         return CollapsibleCard(
-            title: "Make a clip", systemImage: "film",
+            title: model.videoBatchMode ? "Queue a batch" : "Make a clip", systemImage: "film",
             badge: selectedNode.map { "on \($0.name)" },
             isExpanded: model.videoPanel(.clip)
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 nodeRow
+
+                Picker("Mode", selection: $model.videoBatchMode) {
+                    Text("Single clip").tag(false)
+                    Text("Batch & variations").tag(true)
+                }
+                .pickerStyle(.segmented)
 
                 Picker("Model", selection: $model.selectedVideoModel) {
                     ForEach(VideoCatalog.all) { entry in
@@ -96,20 +105,34 @@ struct VideoView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    TextEditor(text: $model.videoPrompt)
+                    TextEditor(text: model.videoBatchMode ? $model.videoBatchPrompts : $model.videoPrompt)
                         .font(.body)
-                        .frame(minHeight: 90)
+                        .frame(minHeight: model.videoBatchMode ? 170 : 90)
                         .padding(6)
                         .background(.background.secondary, in: .rect(cornerRadius: 7))
                         .overlay(alignment: .topLeading) {
-                            if model.videoPrompt.isEmpty {
-                                Text("Describe the shot — subject, motion, mood.")
+                            if (model.videoBatchMode ? model.videoBatchPrompts : model.videoPrompt).isEmpty {
+                                Text(model.videoBatchMode
+                                     ? "Describe each shot in its own paragraph. Separate shots with a blank line."
+                                     : "Describe the shot — subject, motion, mood.")
                                     .foregroundStyle(.tertiary)
                                     .padding(.top, 12)
                                     .padding(.leading, 11)
                                     .allowsHitTesting(false)
                             }
                         }
+
+                    if model.videoBatchMode {
+                        Text("One paragraph per shot. Blank lines separate shots; each variation uses a different saved seed.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextField("Batch name (optional)", text: $model.videoBatchTitle)
+                        Stepper("\(model.videoBatchVariations) variation\(model.videoBatchVariations == 1 ? "" : "s") per prompt",
+                                value: $model.videoBatchVariations, in: 1...VideoBatchQueue.maximumVariations)
+                        TextField("Base seed (blank = random)", text: $model.videoBatchSeed)
+                            .help("An integer from 0 to 4294967295. Each following clip increments it; use the same value to compare sampling settings.")
+                        Text("\(batchPromptCount) prompts × \(model.videoBatchVariations) = \(batchClipCount) clips · \(batchClipCount * model.videoSeconds) seconds of footage")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
 
                     HStack {
                         Picker("Length", selection: $model.videoSeconds) {
@@ -124,7 +147,21 @@ struct VideoView: View {
                         }
                     }
 
-                    if entry.supportsImageInput {
+                    if entry.id == "hailuo-h3" {
+                        Picker("Sampling", selection: $model.videoSampling) {
+                            ForEach(VideoSampling.allCases, id: \.self) { sampling in
+                                Text(sampling.label).tag(sampling)
+                            }
+                        }
+                        .disabled(!model.supportsH3Sampling)
+                        Text(model.supportsH3Sampling
+                             ? "Full sampling uses the non-Turbo schedule at the same canvas size. It takes longer, but is not guaranteed to look better. Size can increase memory use."
+                             : "Per-clip sampling requires the updated local video node. Renderer default keeps the node’s configured setting.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if entry.supportsImageInput && !model.videoBatchMode {
                         imageRow
                     }
 
@@ -141,6 +178,16 @@ struct VideoView: View {
                     }
 
                     HStack(spacing: 10) {
+                        if model.videoBatchMode {
+                            Button {
+                                model.enqueueVideoComposer()
+                            } label: {
+                                Label("Queue \(batchClipCount) clips", systemImage: "text.badge.plus")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(batchClipCount == 0 || batchClipCount + model.videoBatchQueue.pendingCount > VideoBatchQueue.maximumPending
+                                      || model.videoBatchQueue.storageError != nil || model.isEnqueuingVideoBatch)
+                        } else {
                         Button {
                             model.generateVideo()
                         } label: {
@@ -154,11 +201,21 @@ struct VideoView: View {
                                 in: .whitespacesAndNewlines
                             ).isEmpty
                         )
+                        }
 
-                        if model.isGeneratingVideo {
+                        if model.isGeneratingVideo && model.activeVideoQueueID == nil {
                             Button("Cancel") { model.cancelVideo() }
                                 .buttonStyle(.borderless)
                                 .font(.caption)
+                        }
+                    }
+
+                    if model.videoBatchMode {
+                        Text("Leave Silicon Optimizer open to run the queue. It prevents idle sleep while work is queued; keep the Mac powered and its lid open. Quitting saves the queue; reopening reconnects to the current job before starting the next.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let message = model.videoQueueMessage {
+                            Text(message).font(.caption).foregroundStyle(.orange)
                         }
                     }
 
@@ -184,6 +241,9 @@ struct VideoView: View {
             }
         }
     }
+
+    private var batchPromptCount: Int { VideoBatchQueue.parsePrompts(model.videoBatchPrompts).count }
+    private var batchClipCount: Int { batchPromptCount * model.videoBatchVariations }
 
     /// What the render will actually cost. The catalog carries an estimate; a node
     /// that has run the thing carries a measurement, and a measurement wins.

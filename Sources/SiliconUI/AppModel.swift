@@ -997,6 +997,7 @@ public final class AppModel {
         public var description: String?
         public var enabled: Bool?
         public var settings: [String: String] = [:]
+        public var supportedParameters: [String] = []
     }
 
     /// One GPU job on a peer, as its queue reports it (hub #128). `running` jobs carry
@@ -1448,7 +1449,8 @@ public final class AppModel {
                     detail: entry["detail"] as? String,
                     description: entry["description"] as? String,
                     enabled: entry["enabled"] as? Bool,
-                    settings: settings
+                    settings: settings,
+                    supportedParameters: entry["supported_parameters"] as? [String] ?? []
                 )
             }
         }
@@ -2292,11 +2294,22 @@ public final class AppModel {
     public var videoImage: URL?
     public var videoSeconds = 5
     public var videoResolution = "720p"
+    public var videoSampling: VideoSampling = .nodeDefault
+    public var videoBatchMode = false
+    public internal(set) var isEnqueuingVideoBatch = false
+    public var videoBatchPrompts = ""
+    public var videoBatchTitle = ""
+    public var videoBatchVariations = 1
+    public var videoBatchSeed = ""
+    public let videoBatchQueue: VideoBatchQueue
+    public internal(set) var activeVideoQueueID: String?
+    public internal(set) var videoQueueMessage: String?
+    @ObservationIgnored var videoQueueTask: Task<Void, Never>?
     /// Reconcile the historical Wan default once a real model-aware advertisement is
     /// available. Later manual choices, including unavailable ones, remain untouched.
     private var hasReconciledInitialVideoSelection = false
 
-    let videoRuntime = NodeVideoRuntime()
+    let videoRuntime: NodeVideoRuntime
     // internal(set), not private(set): the control API renders clips through the same
     // state so a chat-requested clip shows its progress in the Video tab too.
     public internal(set) var isGeneratingVideo = false
@@ -2389,6 +2402,10 @@ public final class AppModel {
             videoError = "No ready swarm node offers \(entry.name) yet."
             return
         }
+        if entry.id == "hailuo-h3", videoSampling.h3Turbo != nil, !supportsH3Sampling {
+            videoError = "Update the video node to use per-clip sampling, or choose Renderer default."
+            return
+        }
         isGeneratingVideo = true
         videoStage = "Starting"
         videoProgress = nil
@@ -2401,7 +2418,8 @@ public final class AppModel {
             image: videoImage,
             seconds: seconds,
             resolution: videoResolution,
-            outputDirectory: settings.resolvedVideoOutputDirectory
+            outputDirectory: settings.resolvedVideoOutputDirectory,
+            h3Turbo: entry.id == "hailuo-h3" ? videoSampling.h3Turbo : nil
         )
         let token = swarmConfig?.bearer(forPeer: node.name)
         Task {
@@ -2504,9 +2522,14 @@ public final class AppModel {
 
     // MARK: - Init
 
-    public init() {
+    public init(videoQueue: VideoBatchQueue? = nil, videoRuntime: NodeVideoRuntime = NodeVideoRuntime()) {
         self.profile = HardwareProbe.detect()
         self.settings = Settings.load()
+        self.videoRuntime = videoRuntime
+        self.videoBatchQueue = videoQueue ?? VideoBatchQueue(
+            storeURL: ControlAPI.handshakeURL.deletingLastPathComponent()
+                .appendingPathComponent("video-queue.json")
+        )
     }
 
     /// Whether the app has been launched before on this machine. Backed by `UserDefaults` so
@@ -2532,6 +2555,7 @@ public final class AppModel {
         beginSampling()
         startControlServer()
         startGatewayServer()
+        startVideoQueueWorker()
         measureStorageIfNeeded()
 
         Task {
@@ -2947,7 +2971,8 @@ public final class AppModel {
     /// keyboard, which is precisely what macOS reads as a machine that may as well sleep.
     private var mustStayAwake: Bool {
         hasWorkInFlight || isGeneratingImage || isGeneratingMesh
-            || isGeneratingVideo || isSpeaking || isTranscribing
+            || isGeneratingVideo || (!videoBatchQueue.isPaused && videoBatchQueue.pendingCount > 0
+                && videoBatchQueue.storageError == nil) || isSpeaking || isTranscribing
     }
 
     /// Takes or releases the sleep assertion to match what is running.

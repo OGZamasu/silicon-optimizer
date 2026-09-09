@@ -329,6 +329,31 @@ class PhospheneReadinessAndStatusTests(unittest.TestCase):
                 )
         self.assertEqual(render_queue.jobs["chain-test"]["request_fingerprint"], first_fingerprint)
 
+    def test_per_clip_sampling_is_frozen_fingerprinted_and_forwarded(self) -> None:
+        render_queue = self._empty_render_queue()
+        render_queue.pending = node.queue.Queue()
+        status = {"h3": {"available": True, "capable": True, "chain": True, "first_frame": True}}
+        payload = {"entry_id": "full-sampling", "model": "hailuo-h3", "prompt": "A badger sails.",
+                   "seconds": 10, "resolution": "480p", "seed": 42, "h3_turbo": False}
+        with patch.object(node, "phosphene_request", return_value=status), patch.object(render_queue, "_persist"), patch.object(node, "PHOSPHENE_H3_TURBO", True):
+            self.assertEqual(render_queue.submit(payload), "full-sampling")
+            self.assertEqual(render_queue.submit(payload), "full-sampling")
+            saved = render_queue.jobs["full-sampling"]
+            self.assertIs(saved["phosphene_h3_turbo"], False)
+            self.assertEqual(saved["resolution"], "480p")
+            self.assertEqual(node.phosphene_submission_form(saved)["h3_turbo"], "false")
+            with self.assertRaisesRegex(ValueError, "different render settings"):
+                render_queue.submit({**payload, "h3_turbo": True})
+            render_queue.submit({**payload, "entry_id": "turbo", "h3_turbo": True})
+            self.assertEqual(node.phosphene_submission_form(render_queue.jobs["turbo"])["h3_turbo"], "true")
+
+    def test_sampling_rejects_wrong_types_and_wrong_models_before_readiness(self) -> None:
+        for value in ("false", 0, 1, None, []):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "h3_turbo must be a boolean"):
+                self._empty_render_queue().submit({"prompt": "shot", "model": "hailuo-h3", "h3_turbo": value})
+        with self.assertRaisesRegex(ValueError, "only supported for hailuo-h3"):
+            self._empty_render_queue().submit({"prompt": "shot", "model": "ltx2-distilled", "h3_turbo": False})
+
     def test_interrupted_submission_is_not_repeated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -583,7 +608,7 @@ class NodeHTTPIntegrationTests(unittest.TestCase):
                 with patch.object(node, "RENDERS", render), patch.object(node, "PHOSPHENE_PANEL_URL", f"http://127.0.0.1:{panel.server_port}"), patch.object(node, "PHOSPHENE_OUTPUT_ROOTS", (source.parent,)), patch.object(node, "probe_media", return_value=probe), patch.object(node, "executable", side_effect=lambda name: name), patch.object(node.subprocess, "run", side_effect=ffmpeg), patch.object(node.Handler, "log_message"):
                     self.assertEqual(request("GET", "/v1/jobs", authenticated=False)[0], 401)
                     self.assertEqual(request("POST", "/v1/text-to-video", b"not-json")[0], 400)
-                    payload = {"entry_id": "http-h3", "model": "hailuo-h3", "prompt": "A sailboat crosses a lake.", "seconds": 10, "resolution": "480p", "seed": 7, "h3_chain_prompts": ["The sailboat moves.", "It reaches the shore."]}
+                    payload = {"entry_id": "http-h3", "model": "hailuo-h3", "prompt": "A sailboat crosses a lake.", "seconds": 10, "resolution": "480p", "seed": 7, "h3_turbo": False, "h3_chain_prompts": ["The sailboat moves.", "It reaches the shore."]}
                     encoded = json.dumps(payload).encode()
                     self.assertEqual(request("POST", "/v1/text-to-video", encoded)[0], 202)
                     self.assertEqual(request("POST", "/v1/text-to-video", encoded)[0], 202)
@@ -595,11 +620,13 @@ class NodeHTTPIntegrationTests(unittest.TestCase):
                     self.assertEqual(job["status"], "done")
                     self.assertEqual(len(captured), 1)
                     self.assertEqual(captured[0]["engine"], ["h3"])
+                    self.assertEqual(captured[0]["h3_turbo"], ["false"])
                     self.assertEqual(json.loads(captured[0]["h3_chain_prompts"][0]), payload["h3_chain_prompts"])
                     self.assertEqual(request("GET", job["artifact"], authenticated=False)[0], 401)
                     self.assertEqual(request("GET", job["artifact"]), (200, media_bytes))
                     metadata = json.loads(Path(render.jobs["http-h3"]["output_path"]).with_suffix(".json").read_text())
                     self.assertEqual(metadata["model"], "MiniMaxAI/MiniMax-H3")
+                    self.assertIs(metadata["h3_turbo"], False)
                     self.assertEqual(metadata["phosphene_job_id"], "panel-h3-001")
                     self.assertEqual(metadata["h3_chain_prompts"], payload["h3_chain_prompts"])
                     self.assertEqual(metadata["duration_seconds"], 10)

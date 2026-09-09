@@ -735,6 +735,10 @@ class RenderQueue:
         if model not in {"ltx2-distilled", "ltx-2.3-mlx-q4", "hailuo-h3"}:
             raise ValueError(f"unsupported video model: {model}")
 
+        h3_turbo = request.get("h3_turbo", PHOSPHENE_H3_TURBO)
+        if "h3_turbo" in request and (model != "hailuo-h3" or not isinstance(h3_turbo, bool)):
+            raise ValueError("h3_turbo must be a boolean and is only supported for hailuo-h3")
+
         seconds = int(request.get("seconds") or 10)
         resolution = str(request.get("resolution") or "720p")
         chain_prompts = normalize_h3_chain_prompts(
@@ -797,7 +801,7 @@ class RenderQueue:
             "output_name": output_name,
             "has_image": bool(request.get("image_b64")),
             "image_sha256": hashlib.sha256(str(request.get("image_b64") or "").encode()).hexdigest(),
-            "h3_turbo": PHOSPHENE_H3_TURBO if model == "hailuo-h3" else None,
+            "h3_turbo": h3_turbo if model == "hailuo-h3" else None,
             "h3_chain_prompts": chain_prompts,
         }
         request_fingerprint = hashlib.sha256(
@@ -826,7 +830,7 @@ class RenderQueue:
                 )
                 if (existing.get("fingerprint_version", 1) == 1 and legacy_matches
                         and not request.get("image_b64") and not existing.get("image_path")
-                        and (model != "hailuo-h3" or existing.get("phosphene_h3_turbo") == PHOSPHENE_H3_TURBO)):
+                        and (model != "hailuo-h3" or existing.get("phosphene_h3_turbo") == h3_turbo)):
                     return job_id
                 raise ValueError("entry_id already exists with different render settings")
 
@@ -863,7 +867,7 @@ class RenderQueue:
             "image_path": str(image_path) if image_path else None,
             "phosphene_job_id": None,
             "phosphene_submit_attempted": False,
-            "phosphene_h3_turbo": PHOSPHENE_H3_TURBO if model == "hailuo-h3" else None,
+            "phosphene_h3_turbo": h3_turbo if model == "hailuo-h3" else None,
             "h3_chain_prompts": chain_prompts,
             "request_fingerprint": request_fingerprint,
             "fingerprint_version": 2,
@@ -1579,6 +1583,7 @@ class Handler(BaseHTTPRequestHandler):
                         {
                             "id": "hailuo-h3",
                             "kind": "video",
+                            "supported_parameters": ["seed", "h3_chain_prompts", "h3_turbo", "entry_id"],
                             "ready": bool(h3_state["ready"]),
                             "peak_gb": 32,
                             "typical_seconds": 1200,

@@ -7,6 +7,7 @@ import SwiftUI
 /// view would otherwise quietly lose whatever someone had opened.
 public enum VideoPanel: String, CaseIterable, Sendable {
     case clip
+    case queue
     case cast
     case perform
     case live
