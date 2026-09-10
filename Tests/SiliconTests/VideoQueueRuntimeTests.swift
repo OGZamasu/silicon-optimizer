@@ -10,9 +10,10 @@ private final class QueueHTTPState: @unchecked Sendable {
     private var receiptSaved = false
     private var code = 200
     private var terminalFailure = false
+    private var running = false
 
-    func reset(code: Int = 200, failure: Bool = false) {
-        lock.withLock { requests = []; receiptSaved = false; self.code = code; terminalFailure = failure }
+    func reset(code: Int = 200, failure: Bool = false, running: Bool = false) {
+        lock.withLock { requests = []; receiptSaved = false; self.code = code; terminalFailure = failure; self.running = running }
     }
     func saved() { lock.withLock { receiptSaved = true } }
     func calls() -> [String] { lock.withLock { requests } }
@@ -27,6 +28,7 @@ private final class QueueHTTPState: @unchecked Sendable {
             }
             if terminalFailure { return (200, Data(#"{"status":"failed","error":"renderer failed"}"#.utf8)) }
             if code != 200 { return (code, Data(#"{"error":"Job missing or credentials refused"}"#.utf8)) }
+            if running { return (200, Data(#"{"status":"running"}"#.utf8)) }
             return (code, Data(#"{"status":"done","files":["/artifacts/clip.mp4"]}"#.utf8))
         }
     }
@@ -269,10 +271,109 @@ struct VideoQueueRuntimeTests {
         }
         try queue.setPaused(true)
         do {
-            _ = try await model.waitForQueuedVideo(single.id)
-            Issue.record("A paused pending clip must not hang a synchronous caller")
-        } catch { #expect(error.localizedDescription.contains("paused queue")) }
+            _ = try await model.waitForQueuedVideo(single.id, timeout: 0)
+            Issue.record("A paused pending clip still has a bounded wait")
+        } catch { #expect(error.localizedDescription.contains("Stopped waiting")) }
         #expect(queue.items.first?.status == .pending && queue.items.first?.nodeJob == nil)
         #expect(queue.isPaused)
+    }
+
+    @Test @MainActor func transientFailureAndManualPauseDoNotFailUnrelatedAcceptedWaiters() async throws {
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        try queue.enqueue(prompts: ["A", "B", "C"], variations: 1, title: "Waiters", template: template)
+        let items = queue.items
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        let waiters = items.dropFirst().map { item in
+            Task { try await model.waitForQueuedVideo(item.id, timeout: 5) }
+        }
+        defer { for waiter in waiters { waiter.cancel() } }
+        try queue.fail(items[0].id, message: "Connection lost")
+        #expect(queue.isPaused)
+        try await Task.sleep(for: .milliseconds(1100))
+        // Resume is explicit; neither accepted waiter may resume the queue.
+        #expect(queue.isPaused && queue.items.dropFirst().allSatisfy { $0.status == .pending })
+        try queue.setPaused(false)
+        try queue.setPaused(true)
+        for item in items.dropFirst() {
+            try queue.complete(item.id, result: .init(file: template.outputDirectory.appendingPathComponent("\(item.id).mp4"),
+                                                     modelName: "H3", prompt: item.request.prompt, elapsed: 1))
+        }
+        for (waiter, item) in zip(waiters, items.dropFirst()) {
+            #expect(try await waiter.value.file == queue.receipt(item.id)?.file?.path)
+        }
+        #expect(queue.isPaused)
+    }
+
+    @Test @MainActor func fileResponseSurvivesHistoryClearedBeforeItsNextPoll() async throws {
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        let item = try queue.enqueueSingle(template)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        // Hold the lease of an already-polling caller while simulating the
+        // complete/clear interleaving, without depending on a timer race.
+        queue.retainReceipt(item.id)
+        defer { queue.releaseReceipt(item.id) }
+        let file = template.outputDirectory.appendingPathComponent("completed.mp4")
+        try queue.complete(item.id, result: .init(file: file, modelName: "H3", prompt: "done", elapsed: 3))
+        _ = try await model.controlVideoQueue(.init(action: "clear_finished"))
+        defer { model.videoQueueTask?.cancel() }
+        #expect(queue.items.isEmpty)
+        let response = try await model.waitForQueuedVideo(item.id, timeout: 0)
+        #expect(response.file == file.path && response.elapsedSeconds == 3)
+    }
+
+    @Test @MainActor func cancellingAWaitDoesNotCancelItsSavedClip() async throws {
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        let item = try queue.enqueueSingle(template)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        let waiting = Task { try await model.waitForQueuedVideo(item.id, timeout: 5) }
+        waiting.cancel()
+        await #expect(throws: (any Error).self) { try await waiting.value }
+        #expect(queue.items[0].status == .pending && !queue.isPaused)
+        #expect(VideoBatchQueue(storeURL: queue.storeURL).items[0].id == item.id)
+    }
+
+    @Test @MainActor func stopFollowingPausesAndReconnectsTheSameJobWithoutAGlobalStop() async throws {
+        QueueHTTPProtocol.state.reset(running: true)
+        QueueHTTPProtocol.state.saved()
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        let item = try queue.enqueueSingle(template)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        defer { model.videoQueueTask?.cancel() }
+        let peer = AppModel.PeerStatus(name: "fixture", baseURL: "http://queue.test", reachable: true,
+                                      capabilities: [.init(id: "hailuo-h3", kind: "video", ready: true,
+                                                           supportedParameters: ["h3_turbo"])])
+        let render = Task { await model.processNextQueuedVideo(peers: [peer]) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while queue.items[0].status != .rendering {
+            guard ContinuousClock.now < deadline else { throw VideoRuntimeError.failed("Test receipt deadline") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await #expect(throws: (any Error).self) {
+            try await model.controlVideoQueue(.init(action: "stop_following", id: "not-this-job"))
+        }
+        #expect(!queue.isPaused)
+        _ = try await model.controlVideoQueue(.init(action: "stop_following", id: item.id))
+        await render.value
+        #expect(queue.isPaused && !model.isGeneratingVideo)
+        #expect(queue.items[0].canReconnect && !queue.items[0].uncertainSubmission)
+        #expect(queue.items[0].nodeJob?.id == "original-job")
+        #expect(queue.items[0].error?.contains("node may still be rendering") == true)
+        #expect(QueueHTTPProtocol.state.calls().filter { $0.hasPrefix("POST") } == ["POST /v1/text-to-video"])
+        let restored = VideoBatchQueue(storeURL: queue.storeURL)
+        #expect(restored.isPaused && restored.items[0].canReconnect)
+
+        QueueHTTPProtocol.state.reset()
+        try queue.retry(item.id)
+        await model.processNextQueuedVideo(peers: [peer])
+        #expect(queue.items[0].status == .completed && queue.isPaused)
+        #expect(!QueueHTTPProtocol.state.calls().contains { $0.hasPrefix("POST") })
     }
 }

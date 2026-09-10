@@ -53,8 +53,11 @@ extension AppModel {
     ) async throws -> ControlAPI.VideoResponse {
         let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
         let receipt = "Queue item \(id). Inspect the video queue before submitting again."
+        videoBatchQueue.retainReceipt(id)
+        defer { videoBatchQueue.releaseReceipt(id) }
         while true {
-            guard let item = videoBatchQueue.items.first(where: { $0.id == id }) else {
+            try Task.checkCancellation()
+            guard let item = videoBatchQueue.receipt(id) else {
                 throw ControlHostError.badRequest("The clip was removed from queue history. \(receipt)")
             }
             if item.status == .completed, let file = item.file {
@@ -67,9 +70,9 @@ extension AppModel {
             if let error = videoBatchQueue.storageError {
                 throw ControlHostError.badRequest("\(error) \(receipt)")
             }
-            if videoBatchQueue.isPaused && item.status == .pending {
-                throw ControlHostError.badRequest("The clip is saved in the paused queue; resume it in Video. \(receipt)")
-            }
+            // A pause (including another clip's transient failure) changes
+            // dispatch, not this already-accepted caller's outcome. Keep waiting
+            // for resume, a terminal result, disconnect or the original deadline.
             guard ContinuousClock.now < deadline, !Task.isCancelled else {
                 throw ControlHostError.badRequest("Stopped waiting, but the saved clip may still be queued or rendering. \(receipt)")
             }
@@ -139,12 +142,21 @@ extension AppModel {
             case "remove":
                 guard let id = request.id else { throw ControlHostError.badRequest("An item ID is required.") }
                 try videoBatchQueue.removePending(id)
+            case "stop_following":
+                guard let id = request.id, activeVideoQueueID == id,
+                      let render = videoQueueRenderTask else {
+                    throw ControlHostError.badRequest("That clip is not currently being followed by the app.")
+                }
+                // Save the pause before interrupting transport. Never advertise
+                // a remote GPU cancellation: the node may still finish this job.
+                try videoBatchQueue.setPaused(true)
+                render.cancel()
             case "clear_finished":
                 for batchID in Set(videoBatchQueue.items.map(\.batchID)) {
                     try videoBatchQueue.exportManifest(batchID: batchID)
                 }
                 try videoBatchQueue.clearFinished()
-            default: throw ControlHostError.badRequest("Use pause, resume, retry, remove, or clear_finished.")
+            default: throw ControlHostError.badRequest("Use pause, resume, retry, remove, stop_following, or clear_finished.")
             }
         } catch { throw ControlHostError.badRequest(error.localizedDescription) }
         videoQueueMessage = nil
@@ -206,11 +218,12 @@ extension AppModel {
             activeVideoQueueID = nil
             videoStage = nil
             videoProgress = nil
+            videoQueueRenderTask = nil
         }
         do {
             if queued.nodeJob == nil { try videoBatchQueue.begin(queued.id, nodeName: node.name, nodeURL: base) }
             let token = swarmConfig?.bearer(forPeer: node.name)
-            var result = try await videoRuntime.generate(
+            let render = Task { try await videoRuntime.generate(
                 queued.request, node: base, token: token, resuming: queued.nodeJob,
                 onSubmitted: { [weak self] receipt in
                     try await MainActor.run { try self?.videoBatchQueue.accepted(queued.id, job: receipt) }
@@ -222,7 +235,12 @@ extension AppModel {
                         self?.videoProgress = progress.fraction
                     }
                 }
-            )
+            ) }
+            videoQueueRenderTask = render
+            var result = try await withTaskCancellationHandler {
+                try await render.value
+            } onCancel: { render.cancel() }
+            videoQueueRenderTask = nil
             var destination = queued.request.outputDirectory.appendingPathComponent(queued.filename)
             // Never overwrite a file left between download and receipt persistence.
             // Reconnecting downloads again, but does not generate a second clip.
@@ -238,9 +256,12 @@ extension AppModel {
             do { try videoBatchQueue.exportManifest(batchID: queued.batchID) }
             catch { videoQueueMessage = "Clip saved; could not update its manifest: \(error.localizedDescription)" }
         } catch {
-            videoQueueMessage = error.localizedDescription
+            let message = videoQueueRenderTask?.isCancelled == true && !(error is VideoNodeFailed)
+                ? "Stopped following. The node may still be rendering; use Reconnect / download to retrieve the same job, or check the node before rendering again."
+                : error.localizedDescription
+            videoQueueMessage = message
             do {
-                try videoBatchQueue.fail(queued.id, message: error.localizedDescription,
+                try videoBatchQueue.fail(queued.id, message: message,
                                         terminalNodeFailure: error is VideoNodeFailed)
                 try videoBatchQueue.exportManifest(batchID: queued.batchID)
             } catch { videoQueueMessage = error.localizedDescription }

@@ -129,7 +129,21 @@ public actor ControlServer {
         }
         do {
             let request = try await HTTPRequest.read(from: connection)
-            let response = await route(request)
+            let response: HTTPResponse
+            if request.method == "POST", request.path == "/video/generate" {
+                // One request per connection: after its body, EOF/error means
+                // this client no longer wants the synchronous response. Keep a
+                // receive outstanding so Network.framework notices a FIN/RST
+                // while the route is waiting, not only at response.write().
+                let waiting = Task { await route(request) }
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
+                    if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
+                }
+                response = await waiting.value
+                guard !waiting.isCancelled else { return }
+            } else {
+                response = await route(request)
+            }
             try await response.write(to: connection)
         } catch {
             // A client that hangs up mid-request is routine, not worth surfacing.

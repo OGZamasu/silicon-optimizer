@@ -37,6 +37,7 @@ public struct VideoQueueItem: Identifiable, Codable, Sendable {
     public var previousNodeJobs: [String] = []
     public var file: URL?
     public var elapsed: TimeInterval?
+    public var finishedAt: Date?
     public var error: String?
     public var uncertainSubmission = false
     public var nodeFailed = false
@@ -65,10 +66,14 @@ public final class VideoBatchQueue {
     }
 
     public private(set) var items: [VideoQueueItem] = []
+    /// Rebuilt only when durable items change, never on a renderer progress tick.
+    public private(set) var displayItems: [VideoQueueItem] = []
     public private(set) var isPaused = false
     public private(set) var storageError: String?
     public let storeURL: URL
     @ObservationIgnored private let persist: (Data, URL) throws -> Void
+    @ObservationIgnored private var receiptWaiters: [String: Int] = [:]
+    @ObservationIgnored private var retainedReceipts: [String: VideoQueueItem] = [:]
 
     public init(
         storeURL: URL,
@@ -101,6 +106,7 @@ public final class VideoBatchQueue {
                 return item
             }
             isPaused = document.paused || items.contains(where: \.uncertainSubmission)
+            rebuildDisplayItems()
         } catch {
             // Never replace an unreadable history with an empty queue.
             storageError = "Could not load the video queue. The original file was preserved: \(error.localizedDescription)"
@@ -113,11 +119,34 @@ public final class VideoBatchQueue {
     }
     /// Active work and FIFO waiting clips stay visible above finished history.
     /// Presentation order never changes dispatch order or the persisted document.
-    public var displayItems: [VideoQueueItem] {
-        items.filter { $0.status == .rendering || $0.status == .submitting }
-            + items.filter { $0.status == .pending }
-            + items.reversed().filter { $0.status == .failed }
-            + items.reversed().filter { $0.status == .completed }
+    private func rebuildDisplayItems() {
+        var active: [VideoQueueItem] = []
+        var waiting: [VideoQueueItem] = []
+        var finished: [(offset: Int, item: VideoQueueItem)] = []
+        for (offset, item) in items.enumerated() {
+            switch item.status {
+            case .rendering, .submitting: active.append(item)
+            case .pending: waiting.append(item)
+            case .completed, .failed: finished.append((offset, item))
+            }
+        }
+        finished.sort {
+            let lhs = $0.item.finishedAt ?? $0.item.createdAt
+            let rhs = $1.item.finishedAt ?? $1.item.createdAt
+            return lhs == rhs ? $0.offset > $1.offset : lhs > rhs
+        }
+        displayItems = active + waiting + finished.map(\.item)
+    }
+
+    /// A live synchronous caller may still need a result after Clear history.
+    /// These in-memory leases never retain media or change the durable history.
+    public func retainReceipt(_ id: String) { receiptWaiters[id, default: 0] += 1 }
+    public func releaseReceipt(_ id: String) {
+        if let count = receiptWaiters[id], count > 1 { receiptWaiters[id] = count - 1 }
+        else { receiptWaiters[id] = nil; retainedReceipts[id] = nil }
+    }
+    public func receipt(_ id: String) -> VideoQueueItem? {
+        items.first { $0.id == id } ?? retainedReceipts[id]
     }
     public var next: VideoQueueItem? {
         guard storageError == nil else { return nil }
@@ -192,6 +221,7 @@ public final class VideoBatchQueue {
         let folder = template.outputDirectory.appendingPathComponent("Batches", isDirectory: true)
             .appendingPathComponent("\(timestamp)-\(batchID.prefix(8))", isDirectory: true)
         let imageSnapshot: URL?
+        let imageData: Data?
         if let image = template.image {
             guard image.isFileURL,
                   try image.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
@@ -206,9 +236,9 @@ public final class VideoBatchQueue {
             }
             let destination = folder.appendingPathComponent("inputs", isDirectory: true)
                 .appendingPathComponent(image.lastPathComponent)
-            try Self.writePrivate(data, destination)
             imageSnapshot = destination
-        } else { imageSnapshot = nil }
+            imageData = data
+        } else { imageSnapshot = nil; imageData = nil }
         let seed = baseSeed ?? UInt32.random(in: .min ... .max)
         var added: [VideoQueueItem] = []
         for (sceneIndex, prompt) in prompts.enumerated() {
@@ -226,10 +256,14 @@ public final class VideoBatchQueue {
                 ))
             }
         }
-        do { try commit(items + added, paused: isPaused) }
+        do {
+            if let imageSnapshot, let imageData { try Self.writePrivate(imageData, imageSnapshot) }
+            try commit(items + added, paused: isPaused)
+        }
         catch {
-            // Only remove the newly created snapshot, never the user's source.
-            if let imageSnapshot { try? FileManager.default.removeItem(at: imageSnapshot) }
+            // Roll back only our unused copy and empty directories. Do not
+            // delete a sibling file, manifest, source image or replaced symlink.
+            if let item = added.first { try? removeUnusedSnapshot(of: item, retained: []) }
             throw error
         }
         return added
@@ -255,22 +289,24 @@ public final class VideoBatchQueue {
         }
     }
 
-    public func complete(_ id: String, result: VideoResult) throws {
+    public func complete(_ id: String, result: VideoResult, now: Date = Date()) throws {
         try update(id) { item in
             item.status = .completed
             item.file = result.file
             item.elapsed = result.elapsed
+            item.finishedAt = now
             item.error = nil
         }
     }
 
-    public func fail(_ id: String, message: String, terminalNodeFailure: Bool = false) throws {
+    public func fail(_ id: String, message: String, terminalNodeFailure: Bool = false, now: Date = Date()) throws {
         var updated = items
         guard let index = updated.firstIndex(where: { $0.id == id }) else { return }
         updated[index].status = .failed
         updated[index].nodeFailed = terminalNodeFailure
         updated[index].uncertainSubmission = updated[index].nodeJob == nil
         updated[index].error = message
+        updated[index].finishedAt = now
         // A lost connection may still be consuming the GPU. Do not blindly add
         // further work until the user reconnects or checks an uncertain submission.
         try commit(updated, paused: isPaused || !terminalNodeFailure)
@@ -297,6 +333,7 @@ public final class VideoBatchQueue {
             item.uncertainSubmission = false
             item.nodeFailed = false
             item.error = nil
+            item.finishedAt = nil
         }
     }
 
@@ -307,7 +344,7 @@ public final class VideoBatchQueue {
         try commit(items.filter { $0.id != id }, paused: isPaused)
         do {
             let retained = try exportManifest(batchID: item.batchID, directory: item.request.outputDirectory)
-            try removeUnusedSnapshot(of: item, retained: retained)
+            try removeUnusedSnapshot(of: item, retained: retained, removingExportedManifest: true)
         } catch {
             throw VideoRuntimeError.failed("Clip removed from the queue, but its folder could not be fully cleaned up: \(error.localizedDescription)")
         }
@@ -316,7 +353,9 @@ public final class VideoBatchQueue {
     /// Only a never-submitted clip's queue-owned copy is disposable. Use
     /// descriptor-relative unlink and empty-directory removal, never recursive
     /// deletion: source images, shared references, media and symlink targets stay.
-    private func removeUnusedSnapshot(of item: VideoQueueItem, retained: [VideoQueueItem]) throws {
+    private func removeUnusedSnapshot(
+        of item: VideoQueueItem, retained: [VideoQueueItem], removingExportedManifest: Bool = false
+    ) throws {
         guard item.attempt == 1, item.nodeJob == nil, item.nodeURL == nil,
               item.previousNodeJobs.isEmpty, !item.uncertainSubmission,
               let image = item.request.image?.standardizedFileURL, image.isFileURL,
@@ -366,7 +405,7 @@ public final class VideoBatchQueue {
         }
         if retained.isEmpty && !otherFolderUsers {
             // This is the empty manifest just exported after the durable removal.
-            if unlinkat(directory, "manifest.json", 0) != 0, errno != ENOENT {
+            if removingExportedManifest, unlinkat(directory, "manifest.json", 0) != 0, errno != ENOENT {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
             if rmdir(folder.path) != 0, ![ENOENT, ENOTEMPTY, EEXIST, ENOTDIR].contains(errno) {
@@ -378,7 +417,9 @@ public final class VideoBatchQueue {
     public func clearFinished() throws {
         // Completed media and exported manifests stay on disk. Failed jobs are
         // retained, especially those whose remote outcome is still unknown.
+        let receipts = items.filter { $0.status == .completed && receiptWaiters[$0.id] != nil }
         try commit(items.filter { $0.status != .completed }, paused: isPaused)
+        for item in receipts { retainedReceipts[item.id] = item }
     }
 
     /// A portable editing receipt lives beside each batch's clips. It contains
@@ -427,6 +468,7 @@ public final class VideoBatchQueue {
         }
         items = updated
         isPaused = paused
+        rebuildDisplayItems()
     }
 
     public nonisolated static func writePrivate(_ data: Data, _ url: URL) throws {

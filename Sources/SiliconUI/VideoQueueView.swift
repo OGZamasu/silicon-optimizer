@@ -6,6 +6,7 @@ import SwiftUI
 struct VideoQueueView: View {
     @Environment(AppModel.self) private var model
     @State private var uncertainRetry: VideoQueueItem?
+    @State private var stopFollowing: VideoQueueItem?
 
     var body: some View {
         CollapsibleCard(title: "Video queue", systemImage: "list.bullet.rectangle",
@@ -63,6 +64,17 @@ struct VideoQueueView: View {
         } message: {
             Text("The original submission may still be running. Check the node first. This explicitly creates a new render and may produce another copy. Then resume the queue when ready.")
         }
+        .alert("Stop following this clip?", isPresented: Binding(
+            get: { stopFollowing != nil }, set: { if !$0 { stopFollowing = nil } }
+        )) {
+            Button("Keep following", role: .cancel) { stopFollowing = nil }
+            Button("Stop following") {
+                if let item = stopFollowing { model.cancelVideo(item.id) }
+                stopFollowing = nil
+            }
+        } message: {
+            Text("This pauses the queue and stops the app waiting. It does not stop the GPU render. The saved receipt lets you reconnect and download later. To stop rendering, use the video node's own controls.")
+        }
     }
 
     private func row(_ item: VideoQueueItem) -> some View {
@@ -80,10 +92,7 @@ struct VideoQueueView: View {
                      ?? VideoSampling.nodeDefault.label)
                     .font(.caption2).foregroundStyle(.secondary)
             }
-            if model.activeVideoQueueID == item.id {
-                ProgressView(value: model.videoProgress).progressViewStyle(.linear)
-                Text(model.videoStage ?? "Reconnecting").font(.caption).foregroundStyle(.secondary)
-            }
+            VideoQueueProgress(itemID: item.id)
             if let error = item.error {
                 Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
             }
@@ -96,6 +105,9 @@ struct VideoQueueView: View {
                 if item.status == .pending {
                     Button("Remove") { model.videoQueueAction("remove", id: item.id) }
                 }
+                if model.activeVideoQueueID == item.id {
+                    Button("Stop following…") { stopFollowing = item }
+                }
                 if item.status == .failed {
                     Button(item.canReconnect ? "Reconnect / download" : "Retry render") {
                         if item.uncertainSubmission { uncertainRetry = item }
@@ -107,6 +119,19 @@ struct VideoQueueView: View {
                 }
             }
             .buttonStyle(.borderless).font(.caption)
+        }
+    }
+}
+
+/// Progress observation belongs to this small child, not the history list.
+private struct VideoQueueProgress: View {
+    @Environment(AppModel.self) private var model
+    let itemID: String
+
+    var body: some View {
+        if model.activeVideoQueueID == itemID {
+            ProgressView(value: model.videoProgress).progressViewStyle(.linear)
+            Text(model.videoStage ?? "Reconnecting").font(.caption).foregroundStyle(.secondary)
         }
     }
 }

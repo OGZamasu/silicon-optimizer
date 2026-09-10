@@ -38,6 +38,14 @@ take longer than twelve hours.
 
 - **Pause after this clip** stops future submissions, not the active GPU job.
   **Resume queue** continues remaining clips.
+- **Stop following…** pauses future submissions and interrupts the app's active
+  wait/download. It **does not stop the remote GPU render**. Its saved receipt
+  remains available through **Reconnect / download**; if interrupted before a
+  receipt arrived, check the node before explicitly rendering again. The former
+  composer's Cancel button also only interrupted local polling. Use the node's
+  own controls to stop GPU work. Safe, capability-gated cancel-by-job-ID is
+  [tracked separately](https://github.com/OGZamasu/silicon-optimizer/issues/25);
+  the adapter must not call Phosphene's global stop and risk stopping another job.
 - Quitting saves the queue. The accepted node job can continue, but the app must
   reopen to download it and dispatch later clips. It reconnects to the original
   node/job ID instead of submitting another render.
@@ -55,6 +63,8 @@ take longer than twelve hours.
   reference-image copy and empty job folders after saving the removal. Original
   images, shared references, prior-attempt inputs and any media remain untouched;
   cleanup never follows symlinks or recursively deletes a folder.
+  Failed enqueue also removes only its unused snapshot and empty owned folders,
+  preserving unrelated files and the original image.
 
 ## Review and edit
 
@@ -75,8 +85,15 @@ Recent clips discovers both flat output files and `Batches/<job>/` media even
 after clearing finished history and relaunching. Discovery runs off the UI
 thread, skips inputs, deeper folders and symlinks, and shows the newest 60 files.
 To keep very large destinations responsive, scans examine at most 50,000 entries
-and 2,000 job folders, preferring recently modified folders. Existing queue
-receipts can also supply files from a previously configured output destination.
+and 2,000 job folders, preferring recently modified folders. Up to 2,000 queue
+receipt paths can also supply files from a previous destination, consuming the
+same 50,000-entry budget. An entry bound is not a timeout on an individual
+filesystem operation on a slow or unavailable volume.
+
+Active and waiting clips stay above a mixed completed/failed history ordered by
+finish time. Older receipts without a finish timestamp fall back to creation
+time and queue order. Presentation order is cached at queue changes; renderer
+progress updates only the progress view, not the history sorting.
 
 ## Sampling, quality and resource use
 
@@ -156,7 +173,9 @@ Authenticated Control API equivalents:
 - `GET /video/queue`: durable history and output paths.
 - `POST /video/queue/control`: for example `{"action":"pause"}` or
   `{"action":"retry","id":"<queue-item-id>"}`. Actions are `pause`, `resume`,
-  `retry`, `remove`, and `clear_finished`. Explicit new-render confirmation is
+  `retry`, `remove`, `stop_following`, and `clear_finished`. `stop_following`
+  requires the actively followed item ID and never cancels the remote GPU job.
+  Explicit new-render confirmation is
   `confirmNewRender: true`; the MCP spelling is `confirm_new_render`.
 
 Adding a batch is not a long-running request. After a lost response, inspect
@@ -164,17 +183,24 @@ the queue before submitting the same batch again. The synchronous single-clip
 `POST /video/generate` remains available: it now adds one durable clip and waits
 for its file, including behind already queued work. It rejects a paused queue
 before adding anything; use `/video/queue` to intentionally save work for later.
-If the queue is paused during that wait, the request times out, or the client
-disconnects, the saved clip is **not cancelled**. Check `GET /video/queue` before
-resubmitting. Long backlogs should use the asynchronous queue API rather than
-holding a synchronous request open. Restart/refresh the MCP client after
+Pausing during an accepted wait does not fail that caller, including when an
+unrelated clip causes a safety pause. The waiter keeps its original deadline;
+it does not resume dispatch automatically. A timeout or client disconnect
+ends only the wait: the saved clip is **not cancelled**. Check `GET /video/queue`
+before resubmitting. Clearing finished history preserves completed response
+receipts in memory until their live callers finish, so it cannot turn a
+successful render into a missing-history error. Long backlogs should use the
+asynchronous queue API rather than holding a synchronous request open. Restart/refresh the MCP client after
 installing the updated app to discover its tools.
 
 At most **eight synchronous video requests** may wait at once. Overflow receives
 HTTP **429 Too Many Requests** before adding a clip, leaving connection capacity
 for health, status and queue controls. Use `POST /video/queue` and poll
 `GET /video/queue` for larger submissions; the async queue's 200 unfinished-clip
-limit is independent of this eight-waiter limit.
+limit is independent of this eight-waiter limit. Closing the synchronous
+connection interrupts its waiter and releases its slot without dropping the
+saved job. This single-request-per-connection endpoint does not support HTTP
+pipelining or request-side half-close while waiting for the response.
 
 ## Verification
 
@@ -187,7 +213,10 @@ Python HTTP tests verify that per-job Turbo reaches Phosphene, participates in
 deduplication and is recorded in provenance.
 Loopback control-server tests hold eight video requests while rejecting 56
 overflow requests, exercise authenticated status/queue controls, and verify slot
-reuse after success, renderer errors and malformed input. Filesystem regressions
+reuse after success, renderer errors, malformed input and two waves of client
+disconnects. App tests cover waiters surviving pauses, result receipts outliving
+cleared history, and Stop following/reconnect without a second render submission.
+Ordering tests cover mixed finished statuses, retries and legacy receipts. Filesystem regressions
 cover recents after clear/relaunch, bounded shallow discovery, and safe reference
 cleanup including persistence failures, shared receipts, symlinks and sibling media.
 

@@ -900,7 +900,14 @@ extension AppModel {
         )
 
         videoError = nil
+        // A disconnected synchronous client must not enqueue after a slow
+        // capability refresh. Once accepted, only its waiter is cancellable.
+        try Task.checkCancellation()
         let item = try enqueueSingleVideo(videoRequest)
+        // Lease before the first suspension after acceptance, so even a very
+        // fast completion + clear cannot beat entry into the polling function.
+        videoBatchQueue.retainReceipt(item.id)
+        defer { videoBatchQueue.releaseReceipt(item.id) }
         return try await waitForQueuedVideo(item.id)
     }
 

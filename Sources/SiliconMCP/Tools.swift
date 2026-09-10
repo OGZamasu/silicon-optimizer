@@ -379,10 +379,10 @@ enum Tools {
         ),
         Tool(
             name: "video_queue",
-            description: "Inspect or control the persistent queue. Pause stops future dispatch, not the active render. Retry reconnects to a saved non-terminal job. Check the node and obtain user approval before confirm_new_render=true for an uncertain submission. Remove only affects unsubmitted entries; clear_finished keeps media and manifests.",
+            description: "Inspect or control the persistent queue. Pause stops future dispatch, not the active render. stop_following also stops the app waiting for the active clip, but does NOT cancel the remote GPU job; its receipt is preserved. Retry reconnects to a saved non-terminal job. Check the node and obtain user approval before confirm_new_render=true for an uncertain submission. Remove only affects unsubmitted entries; clear_finished keeps media and manifests.",
             properties: [
-                "action": .object(["type": .string("string"), "enum": .array(["status", "pause", "resume", "retry", "remove", "clear_finished"].map(JSONValue.string)), "description": .string("Default status.")]),
-                "id": property("string", "Queue item ID for retry or remove."),
+                "action": .object(["type": .string("string"), "enum": .array(["status", "pause", "resume", "retry", "remove", "stop_following", "clear_finished"].map(JSONValue.string)), "description": .string("Default status.")]),
+                "id": property("string", "Queue item ID for retry, remove or stop_following."),
                 "confirm_new_render": property("boolean", "Explicit user confirmation to create a new render after checking the original job."),
             ], required: []
         ),

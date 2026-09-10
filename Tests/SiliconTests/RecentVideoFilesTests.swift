@@ -87,7 +87,11 @@ struct RecentVideoFilesTests {
         #expect(RecentVideoFiles.scan(in: root, maximumFolders: 0).isEmpty)
         #expect(RecentVideoFiles.scan(in: root, maximumEntries: 0).isEmpty)
         #expect(RecentVideoFiles.scan(in: root, maximumEntries: 1).isEmpty)
-        // Queue receipts are independently capped and still usable when disk discovery is disabled.
-        #expect(RecentVideoFiles.scan(in: root, queuedFiles: [old], maximumEntries: 0) == [old])
+        // Receipts spend the same entry budget, even for an old destination.
+        #expect(RecentVideoFiles.scan(in: root, queuedFiles: [old], maximumEntries: 0).isEmpty)
+        #expect(RecentVideoFiles.scan(in: root, queuedFiles: [old, newer], maximumEntries: 1) == [old])
+        #expect(RecentVideoFiles.scan(in: root, queuedFiles: [old, newer], maximumEntries: 2).count == 2)
+        let missing = root.appendingPathComponent("missing.mp4")
+        #expect(RecentVideoFiles.scan(in: root, queuedFiles: [missing, old], maximumEntries: 1).isEmpty)
     }
 }

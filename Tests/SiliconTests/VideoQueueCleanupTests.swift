@@ -4,6 +4,49 @@ import Testing
 
 @Suite("Removed video reference cleanup") @MainActor
 struct VideoQueueCleanupTests {
+    @Test(arguments: ["empty", "sibling", "image", "inputs", "job"])
+    func failedEnqueueRemovesOnlyItsOwnedSnapshotAndEmptyDirectories(_ replacement: String) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("enqueue-rollback-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("reference.png")
+        try Data("original image".utf8).write(to: source)
+        var staged: VideoQueueItem?
+        let queue = VideoBatchQueue(storeURL: root.appendingPathComponent("queue.json")) { data, _ in
+            let item = try #require(JSONDecoder().decode(VideoBatchQueue.Document.self, from: data).items.first)
+            staged = item
+            let image = try #require(item.request.image)
+            if replacement == "sibling" {
+                try Data("keep".utf8).write(to: image.deletingLastPathComponent().appendingPathComponent("keep.png"))
+                try Data("user manifest".utf8).write(to: item.request.outputDirectory.appendingPathComponent("manifest.json"))
+            } else if replacement != "empty" {
+                let target = replacement == "image" ? image : replacement == "inputs"
+                    ? image.deletingLastPathComponent() : item.request.outputDirectory
+                let preserved = root.appendingPathComponent("preserved")
+                try FileManager.default.moveItem(at: target, to: preserved)
+                try FileManager.default.createSymbolicLink(at: target, withDestinationURL: preserved)
+            }
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        var request = VideoRequest(entryID: "hailuo-h3", prompt: "fixture", seconds: 10,
+                                   resolution: "480p", outputDirectory: root.appendingPathComponent("clips"))
+        request.image = source
+        #expect(throws: (any Error).self) { try queue.enqueueSingle(request) }
+        let item = try #require(staged)
+        let image = try #require(item.request.image)
+        #expect(queue.items.isEmpty && queue.displayItems.isEmpty && queue.storageError != nil)
+        #expect(try String(contentsOf: source, encoding: .utf8) == "original image")
+        if replacement == "empty" {
+            #expect(!FileManager.default.fileExists(atPath: item.request.outputDirectory.path))
+        } else if replacement == "sibling" {
+            #expect(!FileManager.default.fileExists(atPath: image.path))
+            #expect(try String(contentsOf: image.deletingLastPathComponent().appendingPathComponent("keep.png"), encoding: .utf8) == "keep")
+            #expect(try String(contentsOf: item.request.outputDirectory.appendingPathComponent("manifest.json"), encoding: .utf8) == "user manifest")
+        } else {
+            #expect(try Data(contentsOf: image) == Data(contentsOf: source))
+        }
+    }
+
     @MainActor private struct Fixture {
         let root: URL
         let source: URL

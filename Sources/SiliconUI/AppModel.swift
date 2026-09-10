@@ -2305,6 +2305,7 @@ public final class AppModel {
     public internal(set) var activeVideoQueueID: String?
     public internal(set) var videoQueueMessage: String?
     @ObservationIgnored var videoQueueTask: Task<Void, Never>?
+    @ObservationIgnored var videoQueueRenderTask: Task<VideoResult, any Error>?
     /// Reconcile the historical Wan default once a real model-aware advertisement is
     /// available. Later manual choices, including unavailable ones, remain untouched.
     private var hasReconciledInitialVideoSelection = false
@@ -2422,8 +2423,10 @@ public final class AppModel {
         }
     }
 
-    public func cancelVideo() {
-        Task { await videoRuntime.cancel() }
+    /// Stop local following, not the remote renderer. Retain the receipt for recovery.
+    public func cancelVideo(_ requestedID: String? = nil) {
+        guard let id = requestedID ?? activeVideoQueueID else { return }
+        videoQueueAction("stop_following", id: id)
     }
 
     // MARK: - Personas

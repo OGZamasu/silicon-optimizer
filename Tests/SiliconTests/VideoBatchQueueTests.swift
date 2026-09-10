@@ -118,6 +118,58 @@ struct VideoBatchQueueTests {
         #expect(permissions == 0o600)
     }
 
+    @Test func mixedFinishedHistoryUsesCompletionTimeIncludingRetriedOldClips() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try queue.enqueue(prompts: ["old failure", "later success", "waiting"], variations: 1,
+                          title: "Order", template: template, now: Date(timeIntervalSince1970: 1))
+        let ids = queue.items.map(\.id)
+        try queue.begin(ids[0], nodeName: "fixture", nodeURL: URL(string: "http://queue.test")!)
+        try queue.accepted(ids[0], job: .init(id: "failed-job"))
+        try queue.fail(ids[0], message: "failed", terminalNodeFailure: true, now: Date(timeIntervalSince1970: 10))
+        let result = VideoResult(file: folder.appendingPathComponent("test.mp4"), modelName: "H3", prompt: "done", elapsed: 1)
+        try queue.complete(ids[1], result: result, now: Date(timeIntervalSince1970: 20))
+        #expect(queue.displayItems.map(\.id) == [ids[2], ids[1], ids[0]])
+        #expect(VideoBatchQueue(storeURL: queue.storeURL).displayItems.map(\.id) == queue.displayItems.map(\.id))
+        try queue.retry(ids[0])
+        #expect(queue.items[0].finishedAt == nil)
+        #expect(queue.displayItems.map(\.id) == [ids[0], ids[2], ids[1]])
+        try queue.complete(ids[0], result: result, now: Date(timeIntervalSince1970: 30))
+        #expect(queue.displayItems.map(\.id) == [ids[2], ids[0], ids[1]])
+        #expect(queue.items.map(\.id) == ids)
+    }
+
+    @Test func legacyFinishedHistoryHasStableMixedStatusOrdering() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try queue.enqueue(prompts: ["failed", "done"], variations: 1, title: "Legacy", template: template)
+        var items = queue.items
+        items[0].status = .failed
+        items[1].status = .completed
+        try JSONEncoder().encode(VideoBatchQueue.Document(items: items)).write(to: queue.storeURL)
+        let restored = VideoBatchQueue(storeURL: queue.storeURL)
+        #expect(restored.storageError == nil)
+        #expect(restored.displayItems.map(\.id) == items.reversed().map(\.id))
+    }
+
+    @Test func clearedResultsLiveOnlyUntilAllRegisteredWaitersReleaseTheirReceipts() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let item = try queue.enqueueSingle(template)
+        queue.retainReceipt(item.id)
+        queue.retainReceipt(item.id)
+        let result = VideoResult(file: folder.appendingPathComponent("test.mp4"), modelName: "H3", prompt: "done", elapsed: 1)
+        try queue.complete(item.id, result: result)
+        try queue.clearFinished()
+        #expect(queue.items.isEmpty && queue.displayItems.isEmpty)
+        #expect(VideoBatchQueue(storeURL: queue.storeURL).items.isEmpty)
+        #expect(queue.receipt(item.id)?.file == result.file)
+        queue.releaseReceipt(item.id)
+        #expect(queue.receipt(item.id)?.file == result.file)
+        queue.releaseReceipt(item.id)
+        #expect(queue.receipt(item.id) == nil)
+    }
+
     @Test func wholeBatchValidationDoesNotPartiallyEnqueue() throws {
         let (queue, folder, template) = fixture()
         defer { try? FileManager.default.removeItem(at: folder) }
