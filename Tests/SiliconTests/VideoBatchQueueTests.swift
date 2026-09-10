@@ -18,6 +18,88 @@ struct VideoBatchQueueTests {
         #expect(VideoBatchQueue.parsePrompts(" \n\t\n").isEmpty)
     }
 
+    @Test func singlesJoinBatchesInFIFOOrderAndKeepWholePromptsAndSettings() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try queue.enqueue(prompts: ["batch one", "batch two"], variations: 1, title: "Movie", template: template)
+        var request = template
+        request.prompt = " first paragraph\n\nsecond paragraph "
+        request.h3ChainPrompts = ["window one", "window two"]
+        request.h3Turbo = false
+        request.seed = 42
+        let single = try queue.enqueueSingle(request)
+        request.prompt = "changed draft"
+        request.seconds = 15
+        request.h3Turbo = true
+        #expect(queue.items.count == 3)
+        #expect(queue.next?.request.prompt == "batch one")
+        #expect(single.request.prompt == "first paragraph\n\nsecond paragraph")
+        #expect(single.request.seed == 42 && single.request.seconds == 10 && single.request.h3Turbo == false)
+        #expect(single.request.h3ChainPrompts == ["window one", "window two"])
+        #expect(single.request.clientID?.hasPrefix("vq-") == true)
+        let restored = VideoBatchQueue(storeURL: queue.storeURL)
+        #expect(restored.items.last?.id == single.id)
+        #expect(restored.items.last?.request.h3ChainPrompts == single.request.h3ChainPrompts)
+        try queue.setPaused(true)
+        try queue.enqueueSingle(template)
+        #expect(queue.isPaused && queue.next == nil)
+    }
+
+    @Test func singleReferenceImagesArePrivateSnapshotsNotMutableSourcePaths() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let source = folder.appendingPathComponent("reference.png")
+        let original = Data("image fixture".utf8)
+        try original.write(to: source)
+        var request = template
+        request.image = source
+        let single = try queue.enqueueSingle(request)
+        let snapshot = try #require(single.request.image)
+        #expect(snapshot != source)
+        #expect(snapshot.deletingLastPathComponent().lastPathComponent == "inputs")
+        try Data("edited source".utf8).write(to: source)
+        #expect(try Data(contentsOf: snapshot) == original)
+        try FileManager.default.removeItem(at: source)
+        let restored = VideoBatchQueue(storeURL: queue.storeURL)
+        #expect(try Data(contentsOf: #require(restored.items.first?.request.image)) == original)
+        #expect(try FileManager.default.attributesOfItem(atPath: snapshot.path)[.posixPermissions] as? Int == 0o600)
+        let body = try #require(JSONSerialization.jsonObject(with: single.request.nodeBody()) as? [String: Any])
+        #expect(body["image_b64"] as? String == original.base64EncodedString())
+    }
+
+    @Test func singleValidationDoesNotBypassCapsOrAcceptMissingImages() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var request = template
+        request.h3ChainPrompts = ["missing second window"]
+        #expect(throws: (any Error).self) { try queue.enqueueSingle(request) }
+        request = template
+        request.image = folder.appendingPathComponent("missing.png")
+        #expect(throws: (any Error).self) { try queue.enqueueSingle(request) }
+        #expect(queue.items.isEmpty)
+        try queue.enqueue(prompts: Array(repeating: "shot", count: 10), variations: 20,
+                          title: "Full", template: template)
+        #expect(throws: (any Error).self) { try queue.enqueueSingle(template) }
+        #expect(queue.items.count == 200)
+    }
+
+    @Test func displayOrderKeepsActiveAndWaitingClipsAboveNewestFirstHistory() throws {
+        let (queue, folder, template) = fixture()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try queue.enqueue(prompts: ["old done", "new done", "failed", "active", "next", "last"],
+                          variations: 1, title: "Order", template: template)
+        let original = queue.items.map(\.id)
+        for index in [0, 1] {
+            try queue.complete(original[index], result: .init(file: folder.appendingPathComponent("\(index).mp4"),
+                                                              modelName: "H3", prompt: "done", elapsed: 1))
+        }
+        try queue.fail(original[2], message: "failed", terminalNodeFailure: true)
+        try queue.begin(original[3], nodeName: "fixture", nodeURL: URL(string: "http://queue.test")!)
+        #expect(queue.displayItems.map(\.id) == [3, 4, 5, 2, 1, 0].map { original[$0] })
+        #expect(queue.items.map(\.id) == original)
+    }
+
     @Test func variationsAreDistinctOrderedAndFrozenOnDisk() throws {
         let (queue, folder, template) = fixture()
         defer { try? FileManager.default.removeItem(at: folder) }

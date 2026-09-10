@@ -71,4 +71,19 @@ struct VideoPanelTests {
         #expect(decoded.expandedVideoPanels == [VideoPanel.clip.rawValue,
                                                 VideoPanel.camera.rawValue])
     }
+
+    @Test func recentsIncludeQueueOwnedClipsAfterRelaunchWithoutDuplicatesOrMissingFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("video-recents-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let batch = root.appendingPathComponent("Batches/test")
+        try FileManager.default.createDirectory(at: batch, withIntermediateDirectories: true)
+        let legacy = root.appendingPathComponent("legacy.mp4")
+        let queued = batch.appendingPathComponent("single.mp4")
+        let missing = batch.appendingPathComponent("removed.mp4")
+        try Data("legacy".utf8).write(to: legacy)
+        try Data("queued".utf8).write(to: queued)
+        let recent = VideoView.recentFiles(in: root, queuedFiles: [queued, legacy, missing])
+        #expect(Set(recent) == Set([legacy, queued].map { $0.resolvingSymlinksInPath() }))
+        #expect(recent.count == 2)
+    }
 }

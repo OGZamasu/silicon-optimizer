@@ -8,33 +8,39 @@ struct VideoQueueView: View {
     @State private var uncertainRetry: VideoQueueItem?
 
     var body: some View {
-        if !model.videoBatchQueue.items.isEmpty || model.videoBatchQueue.storageError != nil {
-            CollapsibleCard(title: "Video queue", systemImage: "list.bullet.rectangle",
-                            badge: "\(model.videoBatchQueue.pendingCount) queued/running",
-                            isExpanded: model.videoPanel(.queue)) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Button(model.videoBatchQueue.isPaused ? "Resume queue" : "Pause after this clip") {
-                            model.videoQueueAction(model.videoBatchQueue.isPaused ? "resume" : "pause")
-                        }
-                        .disabled(model.videoBatchQueue.storageError != nil)
-                        Spacer()
-                        Button("Clear finished history") { model.videoQueueAction("clear_finished") }
-                            .buttonStyle(.borderless)
-                            .disabled(!model.videoBatchQueue.items.contains { $0.status == .completed })
+        CollapsibleCard(title: "Video queue", systemImage: "list.bullet.rectangle",
+                        badge: "\(model.videoBatchQueue.pendingCount) queued/running",
+                        isExpanded: model.videoPanel(.queue)) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Button(model.videoBatchQueue.isPaused ? "Resume queue" : "Pause after this clip") {
+                        model.videoQueueAction(model.videoBatchQueue.isPaused ? "resume" : "pause")
                     }
-                    Text(model.videoBatchQueue.isPaused
-                         ? "Paused: an accepted clip can finish, but no new render will start."
-                         : "One clip at a time. Prompts and seeds are saved; the app can keep working while you use another tab.")
+                    .disabled(model.videoBatchQueue.storageError != nil)
+                    Spacer()
+                    Button("Clear finished history") { model.videoQueueAction("clear_finished") }
+                        .buttonStyle(.borderless)
+                        .disabled(!model.videoBatchQueue.items.contains { $0.status == .completed })
+                }
+                Text(model.videoBatchQueue.isPaused
+                     ? "Paused: an accepted clip can finish, but no new render will start."
+                     : "One clip at a time. Keep adding single clips or batches in the composer while this queue renders.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let message = model.videoBatchQueue.storageError ?? model.videoQueueMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if model.videoBatchQueue.items.isEmpty {
+                    Text("Your next clip will appear here. Use Add to queue in Make a clip, or queue a batch of prompts and variations.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Active and waiting clips first · newest finished clips first")
                         .font(.caption).foregroundStyle(.secondary)
-                    if let message = model.videoBatchQueue.storageError ?? model.videoQueueMessage {
-                        Label(message, systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(model.videoBatchQueue.items) { item in
+                            ForEach(model.videoBatchQueue.displayItems) { item in
                                 row(item)
                                 Divider()
                             }
@@ -43,19 +49,19 @@ struct VideoQueueView: View {
                     .frame(maxHeight: 420)
                 }
             }
-            .alert("Render this clip again?", isPresented: Binding(
-                get: { uncertainRetry != nil }, set: { if !$0 { uncertainRetry = nil } }
-            )) {
-                Button("Cancel", role: .cancel) { uncertainRetry = nil }
-                Button("I checked the node — render again") {
-                    if let item = uncertainRetry {
-                        model.videoQueueAction("retry", id: item.id, confirmNewRender: true)
-                    }
-                    uncertainRetry = nil
+        }
+        .alert("Render this clip again?", isPresented: Binding(
+            get: { uncertainRetry != nil }, set: { if !$0 { uncertainRetry = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { uncertainRetry = nil }
+            Button("I checked the node — render again") {
+                if let item = uncertainRetry {
+                    model.videoQueueAction("retry", id: item.id, confirmNewRender: true)
                 }
-            } message: {
-                Text("The original submission may still be running. Check the node first. This explicitly creates a new render and may produce another copy. Then resume the queue when ready.")
+                uncertainRetry = nil
             }
+        } message: {
+            Text("The original submission may still be running. Check the node first. This explicitly creates a new render and may produce another copy. Then resume the queue when ready.")
         }
     }
 
@@ -86,7 +92,7 @@ struct VideoQueueView: View {
                     Button("Play") { NSWorkspace.shared.open(file) }
                     Button("Show clip") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
                 }
-                Button("Batch folder") { NSWorkspace.shared.open(item.request.outputDirectory) }
+                Button("Output folder") { NSWorkspace.shared.open(item.request.outputDirectory) }
                 if item.status == .pending {
                     Button("Remove") { model.videoQueueAction("remove", id: item.id) }
                 }

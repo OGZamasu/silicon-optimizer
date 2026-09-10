@@ -110,6 +110,14 @@ public final class VideoBatchQueue {
     public var pendingCount: Int {
         items.filter { [.pending, .submitting, .rendering].contains($0.status) }.count
     }
+    /// Active work and FIFO waiting clips stay visible above finished history.
+    /// Presentation order never changes dispatch order or the persisted document.
+    public var displayItems: [VideoQueueItem] {
+        items.filter { $0.status == .rendering || $0.status == .submitting }
+            + items.filter { $0.status == .pending }
+            + items.reversed().filter { $0.status == .failed }
+            + items.reversed().filter { $0.status == .completed }
+    }
     public var next: VideoQueueItem? {
         guard storageError == nil else { return nil }
         // Following an already accepted job is safe even when future dispatch is paused.
@@ -136,6 +144,23 @@ public final class VideoBatchQueue {
         prompts: [String], variations: Int, title: String, template: VideoRequest,
         baseSeed: UInt32? = nil, now: Date = Date()
     ) throws -> String {
+        try append(prompts: prompts, variations: variations, title: title, template: template,
+                   baseSeed: baseSeed, now: now, singleClip: false)[0].batchID
+    }
+
+    /// Single clips use the same persistence and serial dispatcher as batches.
+    /// A multiline prompt is one clip; reference images are snapshotted privately
+    /// so editing or deleting the source while waiting cannot change the render.
+    @discardableResult
+    public func enqueueSingle(_ request: VideoRequest, now: Date = Date()) throws -> VideoQueueItem {
+        try append(prompts: [request.prompt], variations: 1, title: "Single clip", template: request,
+                   baseSeed: request.seed, now: now, singleClip: true)[0]
+    }
+
+    private func append(
+        prompts: [String], variations: Int, title: String, template: VideoRequest,
+        baseSeed: UInt32?, now: Date, singleClip: Bool
+    ) throws -> [VideoQueueItem] {
         guard storageError == nil else { throw VideoRuntimeError.failed(storageError!) }
         let prompts = prompts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard !prompts.isEmpty, prompts.count <= Self.maximumPending,
@@ -148,17 +173,41 @@ public final class VideoBatchQueue {
         guard let entry = VideoCatalog.entry(id: template.entryID),
               entry.supportedSeconds.contains(template.seconds),
               ["480p", "720p", "1080p"].contains(template.resolution),
-              template.image == nil, template.h3ChainPrompts == nil else {
+              template.outputDirectory.isFileURL,
+              singleClip || (template.image == nil && template.h3ChainPrompts == nil) else {
             throw VideoRuntimeError.failed("Choose a supported model, duration, and size. Batch prompts are text-only; use Make a clip for an image or per-window prompts.")
         }
-        // Validates sampling without materializing any side effect.
-        _ = try template.nodeBody()
+        guard template.image == nil || entry.supportsImageInput else {
+            throw VideoRuntimeError.failed("This video model does not support reference images.")
+        }
+        // Validate the metadata without reading an unbounded image into a JSON body.
+        var validated = template
+        validated.image = nil
+        _ = try validated.nodeBody()
         let batchID = UUID().uuidString
         let name = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         let batchName = name.isEmpty ? "Video batch" : name
         let timestamp = ISO8601DateFormatter().string(from: now).replacingOccurrences(of: ":", with: "-")
         let folder = template.outputDirectory.appendingPathComponent("Batches", isDirectory: true)
             .appendingPathComponent("\(timestamp)-\(batchID.prefix(8))", isDirectory: true)
+        let imageSnapshot: URL?
+        if let image = template.image {
+            guard image.isFileURL,
+                  try image.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                throw VideoRuntimeError.failed("Choose a local image file.")
+            }
+            let handle = try FileHandle(forReadingFrom: image)
+            defer { try? handle.close() }
+            let limit = 20 * 1024 * 1024
+            let data = try handle.read(upToCount: limit + 1) ?? Data()
+            guard !data.isEmpty, data.count <= limit else {
+                throw VideoRuntimeError.failed("Reference images must be nonempty and at most 20 MiB.")
+            }
+            let destination = folder.appendingPathComponent("inputs", isDirectory: true)
+                .appendingPathComponent(image.lastPathComponent)
+            try Self.writePrivate(data, destination)
+            imageSnapshot = destination
+        } else { imageSnapshot = nil }
         let seed = baseSeed ?? UInt32.random(in: .min ... .max)
         var added: [VideoQueueItem] = []
         for (sceneIndex, prompt) in prompts.enumerated() {
@@ -169,14 +218,20 @@ public final class VideoBatchQueue {
                 request.seed = seed &+ UInt32(added.count)
                 request.clientID = "vq-\(id)"
                 request.outputDirectory = folder
+                request.image = imageSnapshot
                 added.append(VideoQueueItem(
                     id: id, batchID: batchID, batchName: batchName, scene: sceneIndex + 1,
                     variation: variation, createdAt: now, request: request
                 ))
             }
         }
-        try commit(items + added, paused: isPaused)
-        return batchID
+        do { try commit(items + added, paused: isPaused) }
+        catch {
+            // Only remove the newly created snapshot, never the user's source.
+            if let imageSnapshot { try? FileManager.default.removeItem(at: imageSnapshot) }
+            throw error
+        }
+        return added
     }
 
     public func setPaused(_ paused: Bool) throws { try commit(items, paused: paused) }

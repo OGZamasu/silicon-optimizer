@@ -33,8 +33,8 @@ struct VideoView: View {
                 } else {
                     VStack(spacing: 16) {
                         composerCard
-                        PersonaCards()
                         VideoQueueView()
+                        PersonaCards()
                         resultCard
                         recentsPane
                     }
@@ -190,54 +190,27 @@ struct VideoView: View {
                             .disabled(batchClipCount == 0 || batchClipCount + model.videoBatchQueue.pendingCount > VideoBatchQueue.maximumPending
                                       || model.videoBatchQueue.storageError != nil || model.isEnqueuingVideoBatch)
                         } else {
-                        Button {
-                            model.generateVideo()
-                        } label: {
-                            Label("Generate", systemImage: "sparkles")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(
-                            model.isGeneratingVideo
-                            || selectedNode == nil
-                            || model.videoPrompt.trimmingCharacters(
-                                in: .whitespacesAndNewlines
-                            ).isEmpty
-                        )
-                        }
-
-                        if model.isGeneratingVideo && model.activeVideoQueueID == nil {
-                            Button("Cancel") { model.cancelVideo() }
-                                .buttonStyle(.borderless)
-                                .font(.caption)
-                        }
-                    }
-
-                    if model.videoBatchMode {
-                        Text("Leave Silicon Optimizer open to run the queue. It prevents idle sleep while work is queued; keep the Mac powered and its lid open. Quitting saves the queue; reopening reconnects to the current job before starting the next.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if let message = model.videoQueueMessage {
-                            Text(message).font(.caption).foregroundStyle(.orange)
-                        }
-                    }
-
-                    // Its own row, full width. Squeezed in beside the buttons, the line that
-                    // says how far along the node is — the whole point of showing it — was
-                    // the first thing to be truncated away.
-                    if model.isGeneratingVideo {
-                        VStack(alignment: .leading, spacing: 4) {
-                            if let fraction = model.videoProgress {
-                                ProgressView(value: fraction)
-                                    .progressViewStyle(.linear)
-                            } else {
-                                ProgressView()
-                                    .progressViewStyle(.linear)
+                            Button {
+                                model.generateVideo()
+                            } label: {
+                                Label("Add to queue", systemImage: "text.badge.plus")
                             }
-                            Text(model.videoStage ?? "Working")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.videoBatchQueue.pendingCount >= VideoBatchQueue.maximumPending
+                                      || model.videoBatchQueue.storageError != nil
+                                      || model.videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
+                    }
+
+                    Text("Single clips and batches share the Video queue. Add another prompt while a clip renders; its saved settings won’t change when you edit this composer.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Leave Silicon Optimizer open to run the queue. It prevents idle sleep while work is queued; keep the Mac powered and its lid open. Quitting saves the queue; reopening reconnects to the current job before starting the next.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let message = model.videoQueueMessage {
+                        Text(message).font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -406,12 +379,22 @@ struct VideoView: View {
     }
 
     private func refreshRecents() {
-        let directory = model.settings.resolvedVideoOutputDirectory
+        recentClips = Self.recentFiles(in: model.settings.resolvedVideoOutputDirectory,
+                                      queuedFiles: model.videoBatchQueue.items.compactMap(\.file))
+    }
+
+    /// Queue-owned single clips now live in per-job folders, too. Merge saved
+    /// receipts with legacy flat-directory clips without recursively scanning a
+    /// potentially huge output tree on the UI thread.
+    static func recentFiles(in directory: URL, queuedFiles: [URL]) -> [URL] {
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: [.contentModificationDateKey]
         )) ?? []
-        recentClips = contents
-            .filter { ["mp4", "webm", "mov"].contains($0.pathExtension.lowercased()) }
+        return Set((contents + queuedFiles).map { $0.resolvingSymlinksInPath() })
+            .filter {
+                ["mp4", "webm", "mov"].contains($0.pathExtension.lowercased())
+                    && FileManager.default.fileExists(atPath: $0.path)
+            }
             .sorted { a, b in
                 let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
                     .contentModificationDate) ?? .distantPast

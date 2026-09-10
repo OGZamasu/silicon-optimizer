@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SiliconControl
 @testable import SiliconRuntime
 @testable import SiliconUI
 
@@ -173,5 +174,105 @@ struct VideoQueueRuntimeTests {
         #expect(QueueHTTPProtocol.state.calls().isEmpty)
         #expect(queue.isPaused && queue.items.first?.status == .pending)
         #expect(model.videoQueueMessage?.contains("Cannot write the batch folder") == true)
+    }
+
+    @Test @MainActor func singleComposerRemainsUsableDuringRenderingAndPreservesPausedQueue() throws {
+        QueueHTTPProtocol.state.reset()
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        try queue.setPaused(true)
+        var settings = Settings()
+        settings.videoOutputDirectory = template.outputDirectory.path
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: settings)
+        defer { model.videoQueueTask?.cancel() }
+        model.selectedVideoModel = "hailuo-h3"
+        model.videoSeconds = 15
+        model.videoResolution = "720p"
+        model.videoSampling = .full
+        model.isGeneratingVideo = true
+        model.activeVideoQueueID = "already-rendering"
+        model.videoStage = "Denoising"
+        model.videoProgress = 0.5
+        model.videoPrompt = "A honey badger learns about chips."
+        model.generateVideo()
+        #expect(queue.items.count == 1)
+        #expect(model.videoPrompt.isEmpty && model.videoError == nil)
+        #expect(model.settings.expandedVideoPanels.contains(VideoPanel.queue.rawValue))
+        #expect(model.isGeneratingVideo && model.activeVideoQueueID == "already-rendering")
+        #expect(model.videoStage == "Denoising" && model.videoProgress == 0.5)
+        model.videoPrompt = "A second clip"
+        model.videoSeconds = 10
+        model.videoResolution = "480p"
+        model.videoSampling = .turbo
+        model.generateVideo()
+        #expect(queue.items.count == 2)
+        #expect(queue.items[0].request.seconds == 15 && queue.items[0].request.h3Turbo == false)
+        #expect(queue.items[1].request.seconds == 10 && queue.items[1].request.h3Turbo == true)
+        #expect(queue.isPaused && queue.next == nil)
+        #expect(QueueHTTPProtocol.state.calls().isEmpty)
+    }
+
+    @Test @MainActor func failedSingleEnqueueKeepsTheDraftAndDoesNotStartTheWorker() throws {
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"),
+                                    persist: { _, _ in throw CocoaError(.fileWriteOutOfSpace) })
+        var settings = Settings()
+        settings.videoOutputDirectory = template.outputDirectory.path
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: settings)
+        model.selectedVideoModel = "hailuo-h3"
+        model.videoPrompt = "Keep this draft"
+        model.generateVideo()
+        #expect(model.videoPrompt == "Keep this draft")
+        #expect(model.videoError != nil && queue.items.isEmpty && model.videoQueueTask == nil)
+        #expect(!model.isGeneratingVideo)
+    }
+
+    @Test @MainActor func controlWaitReturnsQueuedFileAfterSerialDispatch() async throws {
+        QueueHTTPProtocol.state.reset()
+        QueueHTTPProtocol.state.saved()
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        try queue.enqueue(prompts: ["first batch clip"], variations: 1, title: "Movie", template: template)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        let single = try model.enqueueSingleVideo(template)
+        // Drive the real worker with a mock peer without reading or changing the user's swarm.
+        model.videoQueueTask?.cancel()
+        let waiter = Task { try await model.waitForQueuedVideo(single.id, timeout: 10) }
+        let peer = AppModel.PeerStatus(name: "fixture", baseURL: "http://queue.test", reachable: true,
+                                      capabilities: [.init(id: "hailuo-h3", kind: "video", ready: true,
+                                                           supportedParameters: ["seed", "h3_turbo"])])
+        await model.processNextQueuedVideo(peers: [peer])
+        #expect(queue.items.map(\.status) == [.completed, .pending])
+        await model.processNextQueuedVideo(peers: [peer])
+        let response = try await waiter.value
+        #expect(response.file == queue.items.last?.file?.path)
+        #expect(response.model == "hailuo-h3" && response.node == "fixture")
+        #expect(queue.items.map(\.status) == [.completed, .completed])
+        #expect(QueueHTTPProtocol.state.calls().filter { $0.hasPrefix("POST") }.count == 2)
+    }
+
+    @Test @MainActor func stoppedControlWaitsLeaveSavedClipsIntact() async throws {
+        let template = request()
+        defer { try? FileManager.default.removeItem(at: template.outputDirectory) }
+        let queue = VideoBatchQueue(storeURL: template.outputDirectory.appendingPathComponent("queue.json"))
+        let single = try queue.enqueueSingle(template)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        do {
+            _ = try await model.waitForQueuedVideo(single.id, timeout: 0)
+            Issue.record("A bounded wait must expire")
+        } catch {
+            #expect(error.localizedDescription.contains(single.id))
+            #expect(error.localizedDescription.contains("before submitting again"))
+        }
+        try queue.setPaused(true)
+        do {
+            _ = try await model.waitForQueuedVideo(single.id)
+            Issue.record("A paused pending clip must not hang a synchronous caller")
+        } catch { #expect(error.localizedDescription.contains("paused queue")) }
+        #expect(queue.items.first?.status == .pending && queue.items.first?.nodeJob == nil)
+        #expect(queue.isPaused)
     }
 }

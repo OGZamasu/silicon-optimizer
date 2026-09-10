@@ -17,8 +17,9 @@ extension AppModel {
             videoQueueMessage = "Base seed must be an integer from 0 through 4,294,967,295, or blank for random."
             return
         }
+        let submittedPrompts = videoBatchPrompts
         let request = ControlAPI.VideoQueueRequest(
-            prompts: VideoBatchQueue.parsePrompts(videoBatchPrompts), title: videoBatchTitle,
+            prompts: VideoBatchQueue.parsePrompts(submittedPrompts), title: videoBatchTitle,
             variations: videoBatchVariations, modelID: selectedVideoModel,
             seconds: videoSeconds, resolution: videoResolution, seed: UInt32(seedText),
             h3Turbo: selectedVideoModel == "hailuo-h3" ? videoSampling.h3Turbo : nil
@@ -28,8 +29,54 @@ extension AppModel {
             defer { isEnqueuingVideoBatch = false }
             do {
                 _ = try await enqueueVideos(request)
-                videoBatchPrompts = ""
+                if videoBatchPrompts == submittedPrompts { videoBatchPrompts = "" }
             } catch { videoQueueMessage = error.localizedDescription }
+        }
+    }
+
+    @discardableResult
+    func enqueueSingleVideo(_ request: VideoRequest) throws -> VideoQueueItem {
+        let item = try videoBatchQueue.enqueueSingle(request)
+        videoQueueMessage = nil
+        do { try videoBatchQueue.exportManifest(batchID: item.batchID) }
+        catch { videoQueueMessage = "Clip queued, but its editing manifest could not be written: \(error.localizedDescription)" }
+        revealVideoPanel(.queue)
+        noteActivity()
+        startVideoQueueWorker()
+        return item
+    }
+
+    /// Preserve the synchronous control API's file response without owning the
+    /// renderer. A caller going away must not cancel or resubmit a durable job.
+    func waitForQueuedVideo(
+        _ id: String, timeout: TimeInterval = TimeInterval(VideoGenerationBudget.controlSeconds - 30)
+    ) async throws -> ControlAPI.VideoResponse {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+        let receipt = "Queue item \(id). Inspect the video queue before submitting again."
+        while true {
+            guard let item = videoBatchQueue.items.first(where: { $0.id == id }) else {
+                throw ControlHostError.badRequest("The clip was removed from queue history. \(receipt)")
+            }
+            if item.status == .completed, let file = item.file {
+                return .init(file: file.path, node: item.nodeName ?? "Video node",
+                             model: item.request.entryID, elapsedSeconds: item.elapsed ?? 0)
+            }
+            if item.status == .failed {
+                throw ControlHostError.badRequest("\(item.error ?? "The render failed.") \(receipt)")
+            }
+            if let error = videoBatchQueue.storageError {
+                throw ControlHostError.badRequest("\(error) \(receipt)")
+            }
+            if videoBatchQueue.isPaused && item.status == .pending {
+                throw ControlHostError.badRequest("The clip is saved in the paused queue; resume it in Video. \(receipt)")
+            }
+            guard ContinuousClock.now < deadline, !Task.isCancelled else {
+                throw ControlHostError.badRequest("Stopped waiting, but the saved clip may still be queued or rendering. \(receipt)")
+            }
+            do { try await Task.sleep(for: .seconds(1)) }
+            catch {
+                throw ControlHostError.badRequest("Stopped waiting; the saved clip has not been cancelled. \(receipt)")
+            }
         }
     }
 

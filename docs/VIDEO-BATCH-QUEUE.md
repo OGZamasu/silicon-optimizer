@@ -1,4 +1,13 @@
-# Video batches and variations
+# Video queue, batches and variations
+
+Every generation now uses the same **Video queue**, including **Single clip**
+and synchronous chat/API requests. In **Make a clip**, click **Add to queue**:
+the clip is saved immediately, the queue opens on the right (below the composer
+in a narrow window), and the composer clears for your next prompt. If the queue
+is unpaused and a compatible node is ready, the first clip starts automatically.
+Keep adding clips while it renders; their progress lives in the queue, not in
+the composer. Active work and FIFO waiting clips appear above finished history.
+Adding a clip never resumes a manually paused queue.
 
 In **Video**, choose **Batch & variations**. Paste one shot per paragraph, with
 a blank line between shots. Select the model, duration and size, choose 1–20
@@ -8,8 +17,11 @@ variations produce sixty clips. Up to 200 unfinished clips may be queued.
 Every variation gets a distinct saved 32-bit seed. An optional base seed makes
 the sequence predictable: subsequent clips increment it, wrapping after
 4,294,967,295. Settings are captured when added; changing the composer does not
-change queued jobs. This batch composer is text-only; the single-clip API still
-supports images and H3 per-window prompts.
+change queued jobs. This batch composer is text-only; single clips retain image
+input, and the single-clip API retains H3 per-window prompts. A single prompt
+stays one clip even if it contains blank lines. Reference images are copied into
+the clip's private `inputs/` folder when queued (up to 20 MiB), so subsequent
+source-file changes cannot alter a waiting render. Failed enqueue keeps the draft.
 
 ## Leave it working
 
@@ -42,7 +54,7 @@ take longer than twelve hours.
 
 ## Review and edit
 
-Every batch gets a unique folder under the configured video destination:
+Every batch or single clip gets a unique folder under the configured video destination:
 
 ```text
 ~/Movies/Silicon Optimizer/Batches/<timestamp>-<batch-id>/
@@ -51,10 +63,12 @@ Every batch gets a unique folder under the configured video destination:
   manifest.json
 ```
 
-Use **Play**, **Show clip** and **Batch folder** in the queue. The manifest records
+Use **Play**, **Show clip** and **Output folder** in the queue. The manifest records
 prompts, scene/take order, seeds, settings, node job IDs, status and output paths,
 never tokens. Import your chosen MP4s into an editor. This feature makes clips,
 not an automatically assembled or character-consistent movie.
+Recent clips includes both queue-owned files and older clips stored directly in
+the output directory, including saved queue results after relaunch.
 
 ## Sampling, quality and resource use
 
@@ -80,6 +94,24 @@ Fixed seeds do not guarantee identical output across model/runtime versions.
 Full sampling often has similar peak memory at the same canvas, but keeps the
 GPU busy longer and uses more total energy. CPU encoding/orchestration still
 exists; no quality mode promises a CPU-load cap.
+
+### Can I denoise more times?
+
+For the current Phosphene H3 non-Turbo tiers, Auto uses **9 sigma points / 8
+model forwards per window**. Recent Phosphene versions also expose `h3_steps`
+in their own **Steps** controls: Auto or 4–30 sigma points. For example, 20
+points means 19 forwards, roughly 2.4× the *denoising work* of 9 points at the
+same canvas, not necessarily 2.4× total render time. Turbo pins its distilled
+schedule and ignores a step override.
+
+That advanced override is **not yet forwarded by Silicon Optimizer's adapter**
+([tracked separately](https://github.com/OGZamasu/silicon-optimizer/issues/23));
+Full sampling requests the non-Turbo tier default, not an arbitrary step count.
+More steps are an experiment, not a guaranteed quality improvement. Compare
+the same prompt, seed, duration and size before spending a whole queue's time.
+They can keep peak memory similar while increasing GPU busy time, heat and
+energy. See the renderer's [H3 engine notes](https://github.com/mrbizarro/phosphene/blob/main/docs/H3_ENGINE.md)
+and [step handling](https://github.com/mrbizarro/phosphene/blob/main/mlx_ltx_panel.py).
 
 Higher H3 **Size** increases the generation canvas and/or export work and may
 increase memory as well as time. A 1080p export is not native 1080p generation.
@@ -121,8 +153,14 @@ Authenticated Control API equivalents:
 
 Adding a batch is not a long-running request. After a lost response, inspect
 the queue before submitting the same batch again. The synchronous single-clip
-`POST /video/generate` remains available. Restart/refresh the MCP client after
-installing the updated app to discover its two new tools.
+`POST /video/generate` remains available: it now adds one durable clip and waits
+for its file, including behind already queued work. It rejects a paused queue
+before adding anything; use `/video/queue` to intentionally save work for later.
+If the queue is paused during that wait, the request times out, or the client
+disconnects, the saved clip is **not cancelled**. Check `GET /video/queue` before
+resubmitting. Long backlogs should use the asynchronous queue API rather than
+holding a synchronous request open. Restart/refresh the MCP client after
+installing the updated app to discover its tools.
 
 ## Verification
 

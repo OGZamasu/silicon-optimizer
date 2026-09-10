@@ -818,20 +818,13 @@ extension AppModel {
         }
     }
 
-    /// Renders a clip on the video-capable node, exactly the way the Video tab does —
-    /// same runtime, same state, same Recent clips list — so a clip asked for in chat
-    /// appears in the app like any other.
+    /// Queue a clip exactly like the Video tab, then wait for its file for legacy
+    /// synchronous callers. All rendering and recovery belongs to the queue worker.
     public func generateVideo(
         _ request: ControlAPI.VideoGenerateRequest
     ) async throws -> ControlAPI.VideoResponse {
         let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { throw ControlHostError.badRequest("The prompt is empty.") }
-        guard !isGeneratingVideo else {
-            throw ControlHostError.badRequest(
-                "A clip is already rendering; wait for it to finish."
-            )
-        }
-
         let explicitEntry: VideoEntry?
         if let requestedID = request.modelID {
             guard let entry = VideoCatalog.entry(id: requestedID) else {
@@ -876,7 +869,7 @@ extension AppModel {
             throw ControlHostError.badRequest(error.localizedDescription)
         }
         guard let node = videoCapableNode(for: entry),
-              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
+              URL(string: node.baseURL.trimmingCharacters(in: .whitespaces)) != nil
         else {
             throw ControlHostError.badRequest(
                 "No ready swarm node offers \(entry.name) right now — the node may be "
@@ -888,9 +881,12 @@ extension AppModel {
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
             throw ControlHostError.badRequest("This node does not support per-clip h3_turbo; update its video-node adapter or omit that field.")
         }
-        // Refreshing the swarm above suspends this method. A queue worker or a
-        // second control caller may have acquired the renderer in the meantime.
-        guard !isGeneratingVideo else { throw ControlHostError.badRequest("A clip is already rendering.") }
+        // A synchronous caller cannot wait indefinitely for a manually paused
+        // queue. Reject before accepting anything; the async queue API can append
+        // to a paused queue intentionally. Never resume it on the caller's behalf.
+        guard !videoBatchQueue.isPaused else {
+            throw ControlHostError.badRequest("The video queue is paused. Resume it first, or use /video/queue to save clips for later. No clip was added.")
+        }
 
         let videoRequest = VideoRequest(
             entryID: entry.id,
@@ -903,39 +899,9 @@ extension AppModel {
             seed: request.seed, h3Turbo: request.h3Turbo
         )
 
-        isGeneratingVideo = true
-        videoStage = "Starting"
-        videoProgress = nil
         videoError = nil
-        noteActivity()
-        defer {
-            isGeneratingVideo = false
-            videoStage = nil
-            videoProgress = nil
-        }
-
-        let started = Date()
-        let token = swarmConfig?.bearer(forPeer: node.name)
-        do {
-            let result = try await videoRuntime.generate(
-                videoRequest, node: base, token: token
-            ) { progress in
-                Task { @MainActor in
-                    self.videoStage = progress.line(fallback: "Rendering on the node")
-                    self.videoProgress = progress.fraction
-                }
-            }
-            videoResults.insert(result, at: 0)
-            return ControlAPI.VideoResponse(
-                file: result.file.path,
-                node: node.name,
-                model: entry.id,
-                elapsedSeconds: Date().timeIntervalSince(started)
-            )
-        } catch {
-            videoError = error.localizedDescription
-            throw error
-        }
+        let item = try enqueueSingleVideo(videoRequest)
+        return try await waitForQueuedVideo(item.id)
     }
 
     /// A swarm answer older than the poll interval is re-fetched before it backs a

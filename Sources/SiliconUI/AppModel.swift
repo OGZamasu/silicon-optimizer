@@ -2387,7 +2387,7 @@ public final class AppModel {
 
     public func generateVideo() {
         let prompt = videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !isGeneratingVideo else { return }
+        guard !prompt.isEmpty else { return }
         guard let entry = VideoCatalog.entry(id: selectedVideoModel) else {
             videoError = "Unknown video model \(selectedVideoModel)."
             return
@@ -2396,59 +2396,29 @@ public final class AppModel {
             ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
         )
         videoSeconds = seconds
-        guard let node = videoCapableNode(for: entry),
-              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
-        else {
-            videoError = "No ready swarm node offers \(entry.name) yet."
-            return
-        }
-        if entry.id == "hailuo-h3", videoSampling.h3Turbo != nil, !supportsH3Sampling {
+        if entry.id == "hailuo-h3", videoSampling.h3Turbo != nil,
+           videoCapableNode(for: entry) != nil, !supportsH3Sampling {
             videoError = "Update the video node to use per-clip sampling, or choose Renderer default."
             return
         }
-        isGeneratingVideo = true
-        videoStage = "Starting"
-        videoProgress = nil
         videoError = nil
-        noteActivity()
 
         let request = VideoRequest(
             entryID: entry.id,
             prompt: prompt,
-            image: videoImage,
+            image: entry.supportsImageInput ? videoImage : nil,
             seconds: seconds,
             resolution: videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory,
             h3Turbo: entry.id == "hailuo-h3" ? videoSampling.h3Turbo : nil
         )
-        let token = swarmConfig?.bearer(forPeer: node.name)
-        Task {
-            defer {
-                isGeneratingVideo = false
-                videoStage = nil
-                videoProgress = nil
-            }
-            do {
-                let result = try await videoRuntime.generate(
-                    request, node: base, token: token
-                ) { progress in
-                    Task { @MainActor in
-                        self.videoStage = progress.line(fallback: "Rendering on the node")
-                        self.videoProgress = progress.fraction
-                    }
-                }
-                videoResults.insert(result, at: 0)
-                NodeVideoRuntime.log.notice(
-                    "video result added: \(result.file.path, privacy: .public)"
-                )
-            } catch {
-                // Both places, deliberately: the banner is for the person, the log is
-                // for whoever has to work out why a job vanished without one.
-                videoError = error.localizedDescription
-                NodeVideoRuntime.log.error(
-                    "video job failed: \(error.localizedDescription, privacy: .public)"
-                )
-            }
+        do {
+            _ = try enqueueSingleVideo(request)
+            // Only clear the draft once the queue has durably accepted it.
+            videoPrompt = ""
+            videoImage = nil
+        } catch {
+            videoError = error.localizedDescription
         }
     }
 
