@@ -176,6 +176,45 @@ The app bundle can be moved because the installer copies the script into the
 data directory. Models and the separately maintained Phosphene checkout are
 not copied into the Silicon Optimizer repository or app bundle.
 
+### Updating Phosphene separately
+
+There are three independently maintained pieces: the Silicon Optimizer app
+(composer and durable queue), this node (authenticated transport and delivery),
+and Phosphene (the H3 panel, engine environment and model packs). Updating or
+merging Silicon Optimizer does **not** update Phosphene, download its weights,
+or accept model terms. Keep compatibility notes here; do not vendor a local
+Phosphene checkout, Python environment, user state or model files into the PR.
+
+Before updating Phosphene, pause future app dispatch and let accepted jobs
+finish in **both** queues. Keep a rollback copy of its current source/version
+and private state, plus the app queue. Update through the installation's
+existing launcher and Phosphene's supported update flow; a macOS service-managed
+install must restart that same service rather than start a second panel on the
+same port. Follow the upstream dependency/patch steps when required by the
+release; do not replace pinned MLX packages with an arbitrary `pip --upgrade`.
+
+After restarting, inspect `GET /version` (`local_version` identifies the running
+panel) and `GET /status` for H3 availability and the selected DiT pack. Confirm
+MiniMax H3 is available in Silicon Optimizer, then render one short test through
+the app queue and verify the delivered MP4 and provenance before a large batch.
+Restore the user's prior pause state. A queue backup is for recovery, not for
+overwriting new history produced after the backup.
+
+Verified on 2026-09-10 (UTC): Phosphene **v4.12.2** (`377b9a9`), retaining the
+existing MiniMax H3 engine (`21e8824`) and compact Q8 pack, on an Apple M5 Max
+with 36 GiB unified memory. One H3 Turbo job submitted through the app's
+persistent queue completed without adapter changes: 3 seconds, 480p, seed
+`941222`. The delivered file was H.264 at 854 × 480, 24 fps / 72 frames, with
+AAC audio; both tracks passed a complete decode check and the artifact
+provenance identified `MiniMaxAI/MiniMax-H3`. The original queue history and
+pause state were preserved. This verifies that specific H3 path, not every
+Phosphene backend, mode, duration or performance profile.
+
+New Phosphene-only controls do not automatically appear in Silicon Optimizer:
+the node still forwards only its advertised parameters. For example, One Shot
+dialogue controls and arbitrary H3 denoising depth need explicit integration;
+upgrading the panel alone does not add those controls to the app.
+
 An older HoneyBadger deployment can be reused explicitly after stopping its
 old `dev.honeybadger.silicon-video-node` LaunchAgent. Run the new installer with
 `--data-dir "$HOME/Library/Application Support/HoneyBadgerVideo"`, the same
