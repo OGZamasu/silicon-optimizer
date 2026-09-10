@@ -13,6 +13,15 @@ struct VideoView: View {
     @State private var showsRecents = false
     @State private var selectedClip: URL?
 
+    private struct RecentsInput: Equatable {
+        var directory: URL
+        var files: [URL]
+    }
+    private var recentsInput: RecentsInput {
+        .init(directory: model.settings.resolvedVideoOutputDirectory,
+              files: model.videoBatchQueue.items.compactMap(\.file))
+    }
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -46,10 +55,18 @@ struct VideoView: View {
         .navigationTitle("Video")
         .task {
             await model.refreshSwarm()
-            refreshRecents()
+        }
+        .task(id: recentsInput) {
+            let input = recentsInput
+            let scan = Task.detached(priority: .utility) {
+                RecentVideoFiles.scan(in: input.directory, queuedFiles: input.files)
+            }
+            let files = await withTaskCancellationHandler(operation: { await scan.value },
+                                                          onCancel: { scan.cancel() })
+            guard !Task.isCancelled else { return }
+            recentClips = files
         }
         .onChange(of: model.videoResults.count) {
-            refreshRecents()
             model.revealVideoPanel(.result)
         }
         .onChange(of: model.selectedVideoModel) {
@@ -376,34 +393,6 @@ struct VideoView: View {
     private struct ClipFile: Identifiable {
         var id: String { url.path }
         var url: URL
-    }
-
-    private func refreshRecents() {
-        recentClips = Self.recentFiles(in: model.settings.resolvedVideoOutputDirectory,
-                                      queuedFiles: model.videoBatchQueue.items.compactMap(\.file))
-    }
-
-    /// Queue-owned single clips now live in per-job folders, too. Merge saved
-    /// receipts with legacy flat-directory clips without recursively scanning a
-    /// potentially huge output tree on the UI thread.
-    static func recentFiles(in directory: URL, queuedFiles: [URL]) -> [URL] {
-        let contents = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]
-        )) ?? []
-        return Set((contents + queuedFiles).map { $0.resolvingSymlinksInPath() })
-            .filter {
-                ["mp4", "webm", "mov"].contains($0.pathExtension.lowercased())
-                    && FileManager.default.fileExists(atPath: $0.path)
-            }
-            .sorted { a, b in
-                let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
-                    .contentModificationDate) ?? .distantPast
-                let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey])
-                    .contentModificationDate) ?? .distantPast
-                return dateA > dateB
-            }
-            .prefix(60)
-            .map { $0 }
     }
 }
 

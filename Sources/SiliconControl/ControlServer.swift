@@ -14,6 +14,11 @@ public actor ControlServer {
     private var listener: NWListener?
     private var activeConnections = 0
     private static let maximumConnections = 64
+    // Durable video waits must not occupy every socket needed to inspect or
+    // control the queue. Reject overflow before the host can enqueue anything.
+    static let maximumSynchronousVideos = 8
+    private var activeSynchronousVideos = 0
+    private let handshakeURL: URL
     private let token: String
     private var port: Int = 0
     /// The shared swarm secret, accepted alongside the per-launch token when set.
@@ -32,8 +37,9 @@ public actor ControlServer {
         return URL(string: "http://127.0.0.1:\(port)/overlay?token=\(token)")
     }
 
-    public init(host: any ControlHost) {
+    public init(host: any ControlHost, handshakeURL: URL = ControlAPI.handshakeURL) {
         self.host = host
+        self.handshakeURL = handshakeURL
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
         self.token = UUID().uuidString
     }
@@ -75,7 +81,7 @@ public actor ControlServer {
     public func stop() {
         listener?.cancel()
         listener = nil
-        try? FileManager.default.removeItem(at: ControlAPI.handshakeURL)
+        try? FileManager.default.removeItem(at: handshakeURL)
     }
 
     /// Writes the port and token where clients can find them.
@@ -87,7 +93,7 @@ public actor ControlServer {
             port: port, pid: ProcessInfo.processInfo.processIdentifier,
             token: token, version: "0.1.0"
         )
-        let url = ControlAPI.handshakeURL
+        let url = handshakeURL
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
@@ -233,6 +239,11 @@ public actor ControlServer {
                     try request.decode(ControlAPI.VideoQueueControl.self)
                 ))
             case ("POST", "/video/generate"):
+                guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
+                    return .error(429, "Too many synchronous video requests. No clip was added. Use POST /video/queue to save work without holding a connection, then GET /video/queue to follow it.")
+                }
+                activeSynchronousVideos += 1
+                defer { activeSynchronousVideos -= 1 }
                 return try .encode(await host.generateVideo(
                     try request.decode(ControlAPI.VideoGenerateRequest.self)
                 ))
@@ -448,6 +459,7 @@ struct HTTPResponse {
         case 401: "Unauthorized"
         case 403: "Forbidden"
         case 404: "Not Found"
+        case 429: "Too Many Requests"
         default: "Error"
         }
     }

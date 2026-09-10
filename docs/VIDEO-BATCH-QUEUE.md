@@ -51,6 +51,10 @@ take longer than twelve hours.
 - Only unsubmitted items can be removed. **Clear finished history** keeps media
   and editing manifests on disk. Invalid queue files are preserved; failed
   persistence prevents further submissions.
+- Removing a never-submitted single clip also discards its unused, queue-owned
+  reference-image copy and empty job folders after saving the removal. Original
+  images, shared references, prior-attempt inputs and any media remain untouched;
+  cleanup never follows symlinks or recursively deletes a folder.
 
 ## Review and edit
 
@@ -67,8 +71,12 @@ Use **Play**, **Show clip** and **Output folder** in the queue. The manifest rec
 prompts, scene/take order, seeds, settings, node job IDs, status and output paths,
 never tokens. Import your chosen MP4s into an editor. This feature makes clips,
 not an automatically assembled or character-consistent movie.
-Recent clips includes both queue-owned files and older clips stored directly in
-the output directory, including saved queue results after relaunch.
+Recent clips discovers both flat output files and `Batches/<job>/` media even
+after clearing finished history and relaunching. Discovery runs off the UI
+thread, skips inputs, deeper folders and symlinks, and shows the newest 60 files.
+To keep very large destinations responsive, scans examine at most 50,000 entries
+and 2,000 job folders, preferring recently modified folders. Existing queue
+receipts can also supply files from a previously configured output destination.
 
 ## Sampling, quality and resource use
 
@@ -162,6 +170,12 @@ resubmitting. Long backlogs should use the asynchronous queue API rather than
 holding a synchronous request open. Restart/refresh the MCP client after
 installing the updated app to discover its tools.
 
+At most **eight synchronous video requests** may wait at once. Overflow receives
+HTTP **429 Too Many Requests** before adding a clip, leaving connection capacity
+for health, status and queue controls. Use `POST /video/queue` and poll
+`GET /video/queue` for larger submissions; the async queue's 200 unfinished-clip
+limit is independent of this eight-waiter limit.
+
 ## Verification
 
 Tests cover parsing, seed order/wraparound, whole-batch validation, private
@@ -171,6 +185,11 @@ variations and verify separate output files, receipt-before-poll ordering,
 completed jobs older than twelve hours and capability gating for older nodes.
 Python HTTP tests verify that per-job Turbo reaches Phosphene, participates in
 deduplication and is recorded in provenance.
+Loopback control-server tests hold eight video requests while rejecting 56
+overflow requests, exercise authenticated status/queue controls, and verify slot
+reuse after success, renderer errors and malformed input. Filesystem regressions
+cover recents after clear/relaunch, bounded shallow discovery, and safe reference
+cleanup including persistence failures, shared receipts, symlinks and sibling media.
 
 A separate opt-in smoke test produced two real MiniMax H3 variations from one
 prompt, seeds 83000/83001, with distinct Phosphene job IDs. Both passed full

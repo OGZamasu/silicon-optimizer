@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SiliconCatalog
+import Darwin
 
 public enum VideoSampling: String, CaseIterable, Codable, Sendable {
     case nodeDefault, turbo, full
@@ -304,7 +305,74 @@ public final class VideoBatchQueue {
             throw VideoRuntimeError.failed("Only clips that have not been submitted can be removed.")
         }
         try commit(items.filter { $0.id != id }, paused: isPaused)
-        try exportManifest(batchID: item.batchID, directory: item.request.outputDirectory)
+        do {
+            let retained = try exportManifest(batchID: item.batchID, directory: item.request.outputDirectory)
+            try removeUnusedSnapshot(of: item, retained: retained)
+        } catch {
+            throw VideoRuntimeError.failed("Clip removed from the queue, but its folder could not be fully cleaned up: \(error.localizedDescription)")
+        }
+    }
+
+    /// Only a never-submitted clip's queue-owned copy is disposable. Use
+    /// descriptor-relative unlink and empty-directory removal, never recursive
+    /// deletion: source images, shared references, media and symlink targets stay.
+    private func removeUnusedSnapshot(of item: VideoQueueItem, retained: [VideoQueueItem]) throws {
+        guard item.attempt == 1, item.nodeJob == nil, item.nodeURL == nil,
+              item.previousNodeJobs.isEmpty, !item.uncertainSubmission,
+              let image = item.request.image?.standardizedFileURL, image.isFileURL,
+              UUID(uuidString: item.batchID) != nil else { return }
+        let folder = item.request.outputDirectory.standardizedFileURL
+        let timestamp = ISO8601DateFormatter().string(from: item.createdAt).replacingOccurrences(of: ":", with: "-")
+        guard folder.isFileURL, folder.deletingLastPathComponent().lastPathComponent == "Batches",
+              folder.lastPathComponent == "\(timestamp)-\(item.batchID.prefix(8))",
+              image.deletingLastPathComponent() == folder.appendingPathComponent("inputs", isDirectory: true),
+              !image.lastPathComponent.isEmpty else { return }
+        let canonicalImage = image.resolvingSymlinksInPath()
+        guard !(items + retained).contains(where: {
+            $0.request.image?.resolvingSymlinksInPath() == canonicalImage
+                || $0.file?.resolvingSymlinksInPath() == canonicalImage
+        }) else { return }
+
+        let directory = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else {
+            if [ENOENT, ELOOP, ENOTDIR].contains(errno) { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(directory) }
+        let inputs = openat(directory, "inputs", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if inputs >= 0 {
+            defer { close(inputs) }
+            var metadata = stat()
+            if fstatat(inputs, image.lastPathComponent, &metadata, AT_SYMLINK_NOFOLLOW) == 0 {
+                guard metadata.st_mode & S_IFMT == S_IFREG else { return }
+                guard unlinkat(inputs, image.lastPathComponent, 0) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            } else if errno != ENOENT {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            // AT_REMOVEDIR refuses nonempty directories, even if another file
+            // appears between the snapshot unlink and this operation.
+            if unlinkat(directory, "inputs", AT_REMOVEDIR) != 0,
+               ![ENOENT, ENOTEMPTY, EEXIST].contains(errno) {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        } else if errno != ENOENT {
+            if [ELOOP, ENOTDIR].contains(errno) { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let otherFolderUsers = items.contains {
+            $0.request.outputDirectory.resolvingSymlinksInPath() == folder.resolvingSymlinksInPath()
+        }
+        if retained.isEmpty && !otherFolderUsers {
+            // This is the empty manifest just exported after the durable removal.
+            if unlinkat(directory, "manifest.json", 0) != 0, errno != ENOENT {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if rmdir(folder.path) != 0, ![ENOENT, ENOTEMPTY, EEXIST, ENOTDIR].contains(errno) {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
     }
 
     public func clearFinished() throws {
@@ -315,9 +383,10 @@ public final class VideoBatchQueue {
 
     /// A portable editing receipt lives beside each batch's clips. It contains
     /// prompts, seeds, variations, remote IDs and output paths, never credentials.
-    public func exportManifest(batchID: String, directory: URL? = nil) throws {
+    @discardableResult
+    public func exportManifest(batchID: String, directory: URL? = nil) throws -> [VideoQueueItem] {
         let batch = items.filter { $0.batchID == batchID }
-        guard let directory = directory ?? batch.first?.request.outputDirectory else { return }
+        guard let directory = directory ?? batch.first?.request.outputDirectory else { return [] }
         let destination = directory.appendingPathComponent("manifest.json")
         // Clearing app history must not erase receipts for clips already in an
         // editor's folder when another member of that same batch finishes later.
@@ -336,6 +405,7 @@ public final class VideoBatchQueue {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         try Self.writePrivate(encoder.encode(exported), destination)
+        return exported
     }
 
     private func update(_ id: String, _ edit: (inout VideoQueueItem) throws -> Void) throws {

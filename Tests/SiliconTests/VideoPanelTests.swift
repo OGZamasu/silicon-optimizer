@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SiliconRuntime
 @testable import SiliconUI
 
 /// The Video tab is six panels of tools plus the player. Opening them all at once made the
@@ -82,7 +83,7 @@ struct VideoPanelTests {
         let missing = batch.appendingPathComponent("removed.mp4")
         try Data("legacy".utf8).write(to: legacy)
         try Data("queued".utf8).write(to: queued)
-        let recent = VideoView.recentFiles(in: root, queuedFiles: [queued, legacy, missing])
+        let recent = RecentVideoFiles.scan(in: root, queuedFiles: [queued, legacy, missing])
         #expect(Set(recent) == Set([legacy, queued].map { $0.resolvingSymlinksInPath() }))
         #expect(recent.count == 2)
     }
