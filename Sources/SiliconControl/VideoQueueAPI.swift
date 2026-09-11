@@ -11,19 +11,22 @@ extension ControlAPI {
         public var resolution: String?
         public var seed: UInt32?
         public var h3Turbo: Bool?
+        public var h3Steps: Int?
 
         enum CodingKeys: String, CodingKey {
             case prompts, title, variations, modelID, seconds, resolution, seed
             case h3Turbo = "h3_turbo"
+            case h3Steps = "h3_steps"
         }
         public init(
             prompts: [String], title: String? = nil, variations: Int? = nil,
             modelID: String? = nil, seconds: Int? = nil, resolution: String? = nil,
-            seed: UInt32? = nil, h3Turbo: Bool? = nil
+            seed: UInt32? = nil, h3Turbo: Bool? = nil, h3Steps: Int? = nil
         ) {
             self.prompts = prompts; self.title = title; self.variations = variations
             self.modelID = modelID; self.seconds = seconds; self.resolution = resolution
             self.seed = seed; self.h3Turbo = h3Turbo
+            self.h3Steps = h3Steps
         }
     }
 
@@ -49,6 +52,7 @@ extension ControlAPI {
             public var seconds: Int
             public var resolution: String
             public var h3Turbo: Bool?
+            public var h3Steps: Int?
             public var status: String
             public var nodeJobID: String?
             public var file: String?
@@ -60,13 +64,14 @@ extension ControlAPI {
                         scene: Int, variation: Int, seed: UInt32?, modelID: String,
                         seconds: Int, resolution: String, h3Turbo: Bool?, status: String,
                         nodeJobID: String?, file: String?, outputDirectory: String,
-                        error: String?, uncertainSubmission: Bool) {
+                        error: String?, uncertainSubmission: Bool, h3Steps: Int? = nil) {
                 self.id = id; self.batchID = batchID; self.title = title; self.prompt = prompt
                 self.scene = scene; self.variation = variation; self.seed = seed
                 self.modelID = modelID; self.seconds = seconds; self.resolution = resolution
                 self.h3Turbo = h3Turbo; self.status = status; self.nodeJobID = nodeJobID
                 self.file = file; self.outputDirectory = outputDirectory; self.error = error
                 self.uncertainSubmission = uncertainSubmission
+                self.h3Steps = h3Steps
             }
         }
         public var paused: Bool

@@ -14,6 +14,7 @@ public struct VideoRequest: Sendable, Codable {
     public var h3ChainPrompts: [String]?
     public var seed: UInt32?
     public var h3Turbo: Bool?
+    public var h3Steps: Int?
     /// Stable client identity for node-side deduplication; not the model ID.
     public var clientID: String?
     public var outputDirectory: URL
@@ -22,7 +23,7 @@ public struct VideoRequest: Sendable, Codable {
         entryID: String, prompt: String, image: URL? = nil,
         seconds: Int = 5, resolution: String = "720p", h3ChainPrompts: [String]? = nil,
         outputDirectory: URL, seed: UInt32? = nil, h3Turbo: Bool? = nil,
-        clientID: String? = nil
+        clientID: String? = nil, h3Steps: Int? = nil
     ) {
         self.entryID = entryID
         self.prompt = prompt
@@ -33,6 +34,7 @@ public struct VideoRequest: Sendable, Codable {
         self.outputDirectory = outputDirectory
         self.seed = seed
         self.h3Turbo = h3Turbo
+        self.h3Steps = h3Steps
         self.clientID = clientID
     }
 
@@ -41,13 +43,14 @@ public struct VideoRequest: Sendable, Codable {
         let chainPrompts = try ControlAPI.VideoGenerateRequest.validatedH3ChainPrompts(
             h3ChainPrompts, modelID: entryID, seconds: seconds
         )
-        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: h3Turbo, modelID: entryID)
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: h3Turbo, h3Steps: h3Steps, modelID: entryID)
         var body: [String: Any] = [
             "model": entryID, "prompt": prompt, "seconds": seconds, "resolution": resolution,
         ]
         if let chainPrompts { body["h3_chain_prompts"] = chainPrompts }
         if let seed { body["seed"] = seed }
         if let h3Turbo { body["h3_turbo"] = h3Turbo }
+        if let h3Steps { body["h3_steps"] = h3Steps }
         if let clientID { body["entry_id"] = clientID }
         if let image {
             let data = try Data(contentsOf: image)

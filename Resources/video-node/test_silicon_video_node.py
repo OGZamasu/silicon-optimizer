@@ -571,7 +571,8 @@ class NodeHTTPIntegrationTests(unittest.TestCase):
                 def log_message(self, *args):
                     pass
                 def do_GET(self):
-                    response = {"h3": {"available": True, "capable": True, "chain": True, "chain_prompts": True, "first_frame": True}, "history": [{"id": "panel-h3-001", "status": "done", "output_path": str(source)}] if captured else []}
+                    response = ({"local_version": "4.12.2"} if self.path == "/version" else
+                                {"h3": {"available": True, "capable": True, "chain": True, "chain_prompts": True, "first_frame": True}, "history": [{"id": "panel-h3-001", "status": "done", "output_path": str(source), "params": {"h3_turbo": False, "h3_steps": 30, "steps": 30}}] if captured else []})
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(json.dumps(response).encode())
@@ -608,7 +609,10 @@ class NodeHTTPIntegrationTests(unittest.TestCase):
                 with patch.object(node, "RENDERS", render), patch.object(node, "PHOSPHENE_PANEL_URL", f"http://127.0.0.1:{panel.server_port}"), patch.object(node, "PHOSPHENE_OUTPUT_ROOTS", (source.parent,)), patch.object(node, "probe_media", return_value=probe), patch.object(node, "executable", side_effect=lambda name: name), patch.object(node.subprocess, "run", side_effect=ffmpeg), patch.object(node.Handler, "log_message"):
                     self.assertEqual(request("GET", "/v1/jobs", authenticated=False)[0], 401)
                     self.assertEqual(request("POST", "/v1/text-to-video", b"not-json")[0], 400)
-                    payload = {"entry_id": "http-h3", "model": "hailuo-h3", "prompt": "A sailboat crosses a lake.", "seconds": 10, "resolution": "480p", "seed": 7, "h3_turbo": False, "h3_chain_prompts": ["The sailboat moves.", "It reaches the shore."]}
+                    with patch.object(node, "hardware_profile", return_value={"chip": "test", "memory_gb": 36}):
+                        advertisement = json.loads(request("GET", "/v1/node")[1])
+                    self.assertIn("h3_steps", advertisement["capabilities"][1]["supported_parameters"])
+                    payload = {"entry_id": "http-h3", "model": "hailuo-h3", "prompt": "A sailboat crosses a lake.", "seconds": 10, "resolution": "480p", "seed": 7, "h3_turbo": False, "h3_steps": 30, "h3_chain_prompts": ["The sailboat moves.", "It reaches the shore."]}
                     encoded = json.dumps(payload).encode()
                     self.assertEqual(request("POST", "/v1/text-to-video", encoded)[0], 202)
                     self.assertEqual(request("POST", "/v1/text-to-video", encoded)[0], 202)
@@ -621,12 +625,16 @@ class NodeHTTPIntegrationTests(unittest.TestCase):
                     self.assertEqual(len(captured), 1)
                     self.assertEqual(captured[0]["engine"], ["h3"])
                     self.assertEqual(captured[0]["h3_turbo"], ["false"])
+                    self.assertEqual(captured[0]["h3_steps"], ["30"])
                     self.assertEqual(json.loads(captured[0]["h3_chain_prompts"][0]), payload["h3_chain_prompts"])
                     self.assertEqual(request("GET", job["artifact"], authenticated=False)[0], 401)
                     self.assertEqual(request("GET", job["artifact"]), (200, media_bytes))
                     metadata = json.loads(Path(render.jobs["http-h3"]["output_path"]).with_suffix(".json").read_text())
                     self.assertEqual(metadata["model"], "MiniMaxAI/MiniMax-H3")
                     self.assertIs(metadata["h3_turbo"], False)
+                    self.assertEqual(metadata["requested_h3_steps"], 30)
+                    self.assertEqual(metadata["h3_steps"], 30)
+                    self.assertEqual(metadata["h3_forwards_per_window"], 29)
                     self.assertEqual(metadata["phosphene_job_id"], "panel-h3-001")
                     self.assertEqual(metadata["h3_chain_prompts"], payload["h3_chain_prompts"])
                     self.assertEqual(metadata["duration_seconds"], 10)

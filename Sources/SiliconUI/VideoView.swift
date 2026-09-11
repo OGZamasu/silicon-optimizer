@@ -73,6 +73,10 @@ struct VideoView: View {
             guard let entry = selectedEntry else { return }
             model.videoSeconds = entry.normalizedSeconds(model.videoSeconds)
             model.videoSampling = .nodeDefault
+            model.videoH3Steps = 0
+        }
+        .onChange(of: model.videoSampling) {
+            if model.videoSampling != .full { model.videoH3Steps = 0 }
         }
         .onChange(of: selectedClip) { model.revealVideoPanel(.result) }
     }
@@ -176,6 +180,21 @@ struct VideoView: View {
                         Text(model.supportsH3Sampling
                              ? "Full sampling uses the non-Turbo schedule at the same canvas size. It takes longer, but is not guaranteed to look better. Size can increase memory use."
                              : "Per-clip sampling requires the updated local video node. Renderer default keeps the node’s configured setting.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Picker("Denoising steps", selection: $model.videoH3Steps) {
+                            Text("Auto — renderer schedule").tag(0)
+                            ForEach([9, 12, 16, 20, 30], id: \.self) { steps in
+                                Text("\(steps) points · \(steps - 1) passes/window").tag(steps)
+                            }
+                        }
+                        .disabled(!model.supportsH3Steps || model.videoSampling != .full)
+                        Text(!model.supportsH3Steps
+                             ? "Extra steps require an updated video node and a supported Phosphene release. Auto preserves the renderer schedule."
+                             : model.videoSampling != .full
+                             ? "Choose Full sampling to set steps. Turbo uses its own fixed schedule."
+                             : "Auto currently uses 9 points / 8 denoising passes per window. 20 or 30 adds processing at the same canvas, not a larger model. Quality may not improve; memory can rise slightly. Saved separately for every queued clip.")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

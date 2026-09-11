@@ -160,6 +160,28 @@ from this standalone LTX process.
 
 ## Updates, existing deployments and troubleshooting
 
+### Per-clip H3 denoising steps
+
+The node accepts `h3_steps: 4...30` for `hailuo-h3` with explicit
+`h3_turbo: false`. Omission/null is Auto, with no form override and unchanged
+legacy request fingerprints. The node only advertises `h3_steps` for a ready
+H3 engine and a running Phosphene 4.x release at least 4.12.2, verified through
+its boot-version `/version` response. Unknown versions fail closed for explicit
+steps; other requests retain their existing compatibility. Update this adapter
+as well as the desktop app to expose the control. No engine source patch is
+needed for Phosphene 4.12.2.
+
+Steps are saved per job and included in deduplication, revalidated immediately
+before dispatch, and compared with the completed Phosphene job's actual params
+before the result is published. The JSON sidecar records requested and actual
+sigma points plus denoising passes per window. A mismatch is a failed result,
+not permission to resubmit or call Phosphene's global stop. Inspect the existing
+Phosphene job before retrying. More steps are a quality experiment, not a
+guarantee; they add time and can add some cache memory at the same canvas.
+See [the queue guide](../../docs/VIDEO-BATCH-QUEUE.md#can-i-denoise-more-times).
+
+### Updating the node
+
 Wait for active jobs to finish, quit Silicon Optimizer, then stop the installed
 node before rerunning the installer from a newer checkout or app bundle:
 

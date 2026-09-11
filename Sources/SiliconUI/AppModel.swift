@@ -2295,6 +2295,8 @@ public final class AppModel {
     public var videoSeconds = 5
     public var videoResolution = "720p"
     public var videoSampling: VideoSampling = .nodeDefault
+    /// 0 = Auto in the composer; the wire and queue use nil for omission.
+    public var videoH3Steps = 0
     public var videoBatchMode = false
     public internal(set) var isEnqueuingVideoBatch = false
     public var videoBatchPrompts = ""
@@ -2411,7 +2413,8 @@ public final class AppModel {
             seconds: seconds,
             resolution: videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            h3Turbo: entry.id == "hailuo-h3" ? videoSampling.h3Turbo : nil
+            h3Turbo: entry.id == "hailuo-h3" ? videoSampling.h3Turbo : nil,
+            h3Steps: composerH3Steps
         )
         do {
             _ = try enqueueSingleVideo(request)

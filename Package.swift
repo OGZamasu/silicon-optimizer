@@ -42,6 +42,7 @@ let package = Package(
             "SiliconCore", "SiliconHardware", "SiliconPlanner", "SiliconCatalog", "SiliconRuntime",
             "SiliconControl", "SiliconUI",
         ]),
+        .testTarget(name: "SiliconMCPTests", dependencies: ["SiliconMCP"]),
     ],
     swiftLanguageModes: [.v6]
 )

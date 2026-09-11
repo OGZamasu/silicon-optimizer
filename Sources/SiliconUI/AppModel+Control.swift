@@ -876,10 +876,14 @@ extension AppModel {
                 + "off or still setting that model up."
             )
         }
-        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: request.h3Turbo, modelID: entry.id)
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: request.h3Turbo, h3Steps: request.h3Steps, modelID: entry.id)
         if request.h3Turbo != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
             throw ControlHostError.badRequest("This node does not support per-clip h3_turbo; update its video-node adapter or omit that field.")
+        }
+        if request.h3Steps != nil,
+           videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_steps") != true {
+            throw ControlHostError.badRequest("This node does not advertise h3_steps. Update its video-node adapter and Phosphene, or omit steps for Auto.")
         }
         // A synchronous caller cannot wait indefinitely for a manually paused
         // queue. Reject before accepting anything; the async queue API can append
@@ -896,7 +900,7 @@ extension AppModel {
             resolution: request.resolution ?? videoResolution,
             h3ChainPrompts: chainPrompts,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            seed: request.seed, h3Turbo: request.h3Turbo
+            seed: request.seed, h3Turbo: request.h3Turbo, h3Steps: request.h3Steps
         )
 
         videoError = nil

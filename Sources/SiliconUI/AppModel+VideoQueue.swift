@@ -10,6 +10,17 @@ extension AppModel {
         return videoCapability(for: entry, on: peer)?.supportedParameters.contains("h3_turbo") == true
     }
 
+    public var supportsH3Steps: Bool {
+        guard let entry = VideoCatalog.entry(id: selectedVideoModel),
+              let peer = videoCapableNode(for: entry) else { return false }
+        return videoCapability(for: entry, on: peer)?.supportedParameters.contains("h3_steps") == true
+    }
+
+    /// Auto omits the override, preserving old nodes and persisted requests.
+    var composerH3Steps: Int? {
+        selectedVideoModel == "hailuo-h3" && videoH3Steps != 0 ? videoH3Steps : nil
+    }
+
     public func enqueueVideoComposer() {
         guard !isEnqueuingVideoBatch else { return }
         let seedText = videoBatchSeed.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -22,7 +33,8 @@ extension AppModel {
             prompts: VideoBatchQueue.parsePrompts(submittedPrompts), title: videoBatchTitle,
             variations: videoBatchVariations, modelID: selectedVideoModel,
             seconds: videoSeconds, resolution: videoResolution, seed: UInt32(seedText),
-            h3Turbo: selectedVideoModel == "hailuo-h3" ? videoSampling.h3Turbo : nil
+            h3Turbo: selectedVideoModel == "hailuo-h3" ? videoSampling.h3Turbo : nil,
+            h3Steps: composerH3Steps
         )
         isEnqueuingVideoBatch = true
         Task {
@@ -101,7 +113,7 @@ extension AppModel {
                   resolution: item.request.resolution, h3Turbo: item.request.h3Turbo,
                   status: item.status.rawValue, nodeJobID: item.nodeJob?.id, file: item.file?.path,
                   outputDirectory: item.request.outputDirectory.path, error: item.error,
-                  uncertainSubmission: item.uncertainSubmission)
+                  uncertainSubmission: item.uncertainSubmission, h3Steps: item.request.h3Steps)
         })
     }
 
@@ -115,7 +127,7 @@ extension AppModel {
             seconds: request.seconds ?? entry.normalizedSeconds(videoSeconds),
             resolution: request.resolution ?? videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            h3Turbo: request.h3Turbo
+            h3Turbo: request.h3Turbo, h3Steps: request.h3Steps
         )
         do {
             let batch = try videoBatchQueue.enqueue(
@@ -196,6 +208,11 @@ extension AppModel {
         if queued.nodeJob == nil, queued.request.h3Turbo != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
             videoQueueMessage = "This H3 node does not advertise per-clip sampling controls. Update its video-node adapter, or use Renderer default for a new batch."
+            return
+        }
+        if queued.nodeJob == nil, queued.request.h3Steps != nil,
+           videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_steps") != true {
+            videoQueueMessage = "This H3 node does not advertise denoising steps. Update its adapter and Phosphene, or choose Auto for a new clip. The saved override has not been dropped."
             return
         }
         do {

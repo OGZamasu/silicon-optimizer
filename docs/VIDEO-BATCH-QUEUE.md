@@ -129,13 +129,43 @@ points means 19 forwards, roughly 2.4× the *denoising work* of 9 points at the
 same canvas, not necessarily 2.4× total render time. Turbo pins its distilled
 schedule and ignores a step override.
 
-That advanced override is **not yet forwarded by Silicon Optimizer's adapter**
-([tracked separately](https://github.com/OGZamasu/silicon-optimizer/issues/23));
-Full sampling requests the non-Turbo tier default, not an arbitrary step count.
+In Silicon Optimizer, choose **Full sampling — slower**, then **Denoising
+steps**: Auto, 9, 12, 16, 20 or 30 points. This works for both single clips and
+batches. Auto omits the override and uses the non-Turbo tier default. Choosing
+Turbo or Renderer default resets the *composer* to Auto, not already queued
+clips. Each queue card shows its explicit step count and passes per window.
+
+The updated node advertises `h3_steps` only after checking the **running**
+Phosphene `/version`: the supported contract starts at 4.12.2, within the 4.x
+release line. Unknown/dev/new-major versions fail closed for explicit steps;
+Auto continues to work as before. Phosphene 4.12.2 does not publish a steps
+capability in `/status`, so the adapter uses the boot-version contract and
+also verifies the completed job's actual `params.steps`, `params.h3_steps`
+and Turbo state before publishing an overridden result. It rechecks support
+immediately before dispatch in case the panel changed while the clip waited.
+No Phosphene source patch, model download or global setting change is required.
+
+The Control and MCP APIs accept optional `h3_steps` integers from **4 through
+30**, with explicit `h3_turbo: false`. Omit steps (or use JSON null) for Auto;
+0, fractions, strings, booleans, other models and Turbo/default combinations
+are rejected. Saved queue requests and manifests use `h3Steps`, matching their
+existing camel-case settings. Step counts survive restart, retries and receipt
+reconnection, and participate in the node's deduplication identity. An older
+node leaves an explicit-steps clip pending instead of dropping its override.
+Legacy requests/queue documents without the field retain their old behavior
+and node fingerprints.
+
+Renderer sidecars distinguish `requested_h3_steps` from actual `h3_steps` and
+`h3_forwards_per_window`. Unknown actual values on legacy jobs remain null,
+not guessed from the request. The app's editing manifest records the request;
+the node's sidecar is the actual-parameter evidence.
+
 More steps are an experiment, not a guaranteed quality improvement. Compare
 the same prompt, seed, duration and size before spending a whole queue's time.
-They can keep peak memory similar while increasing GPU busy time, heat and
-energy. See the renderer's [H3 engine notes](https://github.com/mrbizarro/phosphene/blob/main/docs/H3_ENGINE.md)
+They can keep peak memory similar, but additional schedule/modulation caches
+may use more memory. They increase GPU busy time, heat and energy. 30 points
+means 29 forwards, about 3.6× the default's denoising work, **not** a prediction
+of whole-render duration. See the renderer's [H3 engine notes](https://github.com/mrbizarro/phosphene/blob/main/docs/H3_ENGINE.md)
 and [step handling](https://github.com/mrbizarro/phosphene/blob/main/mlx_ltx_panel.py).
 
 Higher H3 **Size** increases the generation canvas and/or export work and may
@@ -163,7 +193,8 @@ The MCP tools **queue_videos** (add prompts and return immediately) and
   "seconds": 10,
   "resolution": "480p",
   "seed": 1400,
-  "h3_turbo": true
+  "h3_turbo": false,
+  "h3_steps": 20
 }
 ```
 
@@ -210,7 +241,10 @@ placement and manifest retention. Mock HTTP tests run the app queue through two
 variations and verify separate output files, receipt-before-poll ordering,
 completed jobs older than twelve hours and capability gating for older nodes.
 Python HTTP tests verify that per-job Turbo reaches Phosphene, participates in
-deduplication and is recorded in provenance.
+deduplication and is recorded in provenance. H3 steps tests cover single/batch
+wire types and bounds, composer snapshots, persistence and manifests, unsupported
+nodes, boot-version gating, rechecking at dispatch, legacy fingerprints, form
+forwarding and actual-parameter mismatch refusal. These do not render videos.
 Loopback control-server tests hold eight video requests while rejecting 56
 overflow requests, exercise authenticated status/queue controls, and verify slot
 reuse after success, renderer errors, malformed input and two waves of client

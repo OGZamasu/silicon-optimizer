@@ -257,8 +257,36 @@ def phosphene_h3_readiness(snapshot: Optional[Dict[str, Any]] = None) -> Dict[st
     return {"ready": ready, "reason": reason, "status": status}
 
 
+def phosphene_supports_h3_steps() -> bool:
+    """Gate on the running panel, not its disk checkout or this adapter's version.
+
+    H3 /status has no sampling-depth capability in 4.12.2. That release's
+    /version reports the boot version; its make_job and runner forward 4–30
+    points. Fail closed for unknown/dev/new-major panels. We also verify the
+    completed job's actual parameters before publishing an overridden render.
+    """
+    try:
+        version = phosphene_request("/version").get("local_version")
+    except RuntimeError:
+        return False
+    match = re.fullmatch(r"v?(4)\.(\d+)\.(\d+)", str(version or ""))
+    return bool(match and tuple(map(int, match.groups())) >= (4, 12, 2))
+
+
+def normalize_h3_steps(value: Any, model: str, turbo: Any) -> Optional[int]:
+    # JSON null, like omission in the Codable API, means Auto.
+    if value is None:
+        return None
+    if model != "hailuo-h3" or type(value) is not int or not 4 <= value <= 30:
+        raise ValueError("h3_steps must be an integer from 4 through 30, only for hailuo-h3; omit for Auto")
+    if turbo is not False:
+        raise ValueError("h3_steps requires explicit h3_turbo=false; Turbo pins its own schedule")
+    return value
+
+
 def validate_phosphene_h3_request(
-    readiness: Dict[str, Any], seconds: int, has_image: bool, has_chain_prompts: bool = False
+    readiness: Dict[str, Any], seconds: int, has_image: bool, has_chain_prompts: bool = False,
+    h3_steps: Optional[int] = None,
 ) -> None:
     if not readiness.get("ready"):
         raise RuntimeError(str(readiness.get("reason") or "Hailuo H3 is not ready"))
@@ -284,6 +312,30 @@ def validate_phosphene_h3_request(
             "This Phosphene H3 runner cannot condition each chained window "
             "with a separate prompt; update the H3 pack or omit h3_chain_prompts"
         )
+    if h3_steps is not None and not phosphene_supports_h3_steps():
+        raise RuntimeError(
+            "Cannot verify h3_steps support in the running Phosphene panel; "
+            "use Phosphene 4.12.2 or a later 4.x release, or omit steps for Auto"
+        )
+
+
+def phosphene_sampling_provenance(job: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    params = record.get("params")
+    params = params if isinstance(params, dict) else {}
+    steps = params.get("steps")
+    steps = steps if type(steps) is int and steps >= 2 else None
+    requested = job.get("h3_steps")
+    if requested is not None and (steps != requested or params.get("h3_turbo") is not False
+                                  or params.get("h3_steps") != requested):
+        raise RuntimeError(
+            "Phosphene did not confirm the requested H3 denoising steps with Turbo off; "
+            "the render will not be published as a matching result. Check the saved Phosphene job before retrying"
+        )
+    return {
+        "requested_h3_steps": requested,
+        "h3_steps": steps,
+        "h3_forwards_per_window": steps - 1 if steps is not None else None,
+    }
 
 
 def normalize_h3_chain_prompts(
@@ -480,6 +532,12 @@ def completed_sidecar_matches(job: Dict[str, Any], path: Path) -> bool:
         if h3 and (metadata.get("phosphene_job_id") != job.get("phosphene_job_id")
                    or metadata.get("h3_chain_prompts") != job.get("h3_chain_prompts")):
             return False
+        if h3 and job.get("h3_steps") is not None and (
+            metadata.get("requested_h3_steps") != job["h3_steps"]
+            or metadata.get("h3_steps") != job["h3_steps"]
+            or metadata.get("h3_turbo") is not False
+        ):
+            return False
         return True
     except (OSError, ValueError, TypeError):
         return False
@@ -562,6 +620,9 @@ def phosphene_submission_form(job: Dict[str, Any]) -> Dict[str, str]:
         "open_when_done": "false",
     }
     chain_prompts = job.get("h3_chain_prompts")
+    steps = normalize_h3_steps(job.get("h3_steps"), "hailuo-h3", job.get("phosphene_h3_turbo"))
+    if steps is not None:
+        form["h3_steps"] = str(steps)
     if chain_prompts is not None:
         form["h3_chain_prompts"] = json.dumps(
             chain_prompts, ensure_ascii=False, separators=(",", ":")
@@ -738,6 +799,7 @@ class RenderQueue:
         h3_turbo = request.get("h3_turbo", PHOSPHENE_H3_TURBO)
         if "h3_turbo" in request and (model != "hailuo-h3" or not isinstance(h3_turbo, bool)):
             raise ValueError("h3_turbo must be a boolean and is only supported for hailuo-h3")
+        h3_steps = normalize_h3_steps(request.get("h3_steps"), model, request.get("h3_turbo"))
 
         seconds = int(request.get("seconds") or 10)
         resolution = str(request.get("resolution") or "720p")
@@ -779,6 +841,7 @@ class RenderQueue:
                 seconds,
                 bool(request.get("image_b64")),
                 chain_prompts is not None,
+                h3_steps,
             )
         requested_id = str(request.get("entry_id") or request.get("entryID") or "")
         if requested_id and not SAFE_ID.fullmatch(requested_id):
@@ -804,6 +867,9 @@ class RenderQueue:
             "h3_turbo": h3_turbo if model == "hailuo-h3" else None,
             "h3_chain_prompts": chain_prompts,
         }
+        # Preserve fingerprints of pre-steps requests when Auto is omitted.
+        if h3_steps is not None:
+            fingerprint_payload["h3_steps"] = h3_steps
         request_fingerprint = hashlib.sha256(
             json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -826,6 +892,7 @@ class RenderQueue:
                         "seed": seed,
                         "output_name": output_name,
                         "h3_chain_prompts": chain_prompts,
+                        "h3_steps": h3_steps,
                     }.items()
                 )
                 if (existing.get("fingerprint_version", 1) == 1 and legacy_matches
@@ -869,6 +936,7 @@ class RenderQueue:
             "phosphene_submit_attempted": False,
             "phosphene_h3_turbo": h3_turbo if model == "hailuo-h3" else None,
             "h3_chain_prompts": chain_prompts,
+            "h3_steps": h3_steps,
             "request_fingerprint": request_fingerprint,
             "fingerprint_version": 2,
             "created_at": created,
@@ -1029,6 +1097,7 @@ class RenderQueue:
                 int(job["seconds"]),
                 bool(job.get("image_path")),
                 chain_prompts is not None,
+                normalize_h3_steps(job.get("h3_steps"), "hailuo-h3", job.get("phosphene_h3_turbo")),
             )
             self._update(
                 job_id,
@@ -1107,6 +1176,7 @@ class RenderQueue:
         if self.stop_event.is_set():
             raise RuntimeError("video node is stopping")
         assert terminal is not None
+        sampling_provenance = phosphene_sampling_provenance(job, terminal)
         source = validated_phosphene_output(terminal.get("output_path"), int(job["seconds"]))
         self._update(job_id, stage="copying validated Phosphene output", progress=0.95)
         copied = 0
@@ -1223,6 +1293,7 @@ class RenderQueue:
                 "h3_upscale": options["h3_upscale"],
                 "h3_turbo": bool(job.get("phosphene_h3_turbo", PHOSPHENE_H3_TURBO)),
                 "h3_chain_prompts": job.get("h3_chain_prompts"),
+                **sampling_provenance,
                 "duration_seconds": duration,
                 "frames": job["frames"],
                 "frame_rate": 24,
@@ -1583,7 +1654,8 @@ class Handler(BaseHTTPRequestHandler):
                         {
                             "id": "hailuo-h3",
                             "kind": "video",
-                            "supported_parameters": ["seed", "h3_chain_prompts", "h3_turbo", "entry_id"],
+                            "supported_parameters": ["seed", "h3_chain_prompts", "h3_turbo", "entry_id"]
+                            + (["h3_steps"] if h3_state["ready"] and phosphene_supports_h3_steps() else []),
                             "ready": bool(h3_state["ready"]),
                             "peak_gb": 32,
                             "typical_seconds": 1200,

@@ -682,11 +682,14 @@ public enum ControlAPI {
         public var h3ChainPrompts: [String]?
         public var seed: UInt32?
         public var h3Turbo: Bool?
+        /// Optional H3 sigma-point count (4–30); requires explicit Full sampling.
+        public var h3Steps: Int?
 
         enum CodingKeys: String, CodingKey {
             case prompt, modelID, seconds, resolution, imagePath, seed
             case h3ChainPrompts = "h3_chain_prompts"
             case h3Turbo = "h3_turbo"
+            case h3Steps = "h3_steps"
         }
 
         public enum ValidationError: LocalizedError {
@@ -696,9 +699,17 @@ public enum ControlAPI {
             }
         }
 
-        public static func validateSampling(h3Turbo: Bool?, modelID: String) throws {
+        public static func validateSampling(h3Turbo: Bool?, h3Steps: Int? = nil, modelID: String) throws {
             if h3Turbo != nil, modelID != "hailuo-h3" {
                 throw ValidationError.invalidChainPrompts("h3_turbo is only supported for hailuo-h3.")
+            }
+            if let h3Steps {
+                guard modelID == "hailuo-h3", (4...30).contains(h3Steps) else {
+                    throw ValidationError.invalidChainPrompts("h3_steps must be an integer from 4 through 30, only for hailuo-h3. Omit it for Auto.")
+                }
+                guard h3Turbo == false else {
+                    throw ValidationError.invalidChainPrompts("h3_steps requires h3_turbo: false (Full sampling). Turbo pins its own schedule.")
+                }
             }
         }
 
@@ -727,7 +738,8 @@ public enum ControlAPI {
         public init(
             prompt: String, modelID: String? = nil, seconds: Int? = nil,
             resolution: String? = nil, imagePath: String? = nil,
-            h3ChainPrompts: [String]? = nil, seed: UInt32? = nil, h3Turbo: Bool? = nil
+            h3ChainPrompts: [String]? = nil, seed: UInt32? = nil, h3Turbo: Bool? = nil,
+            h3Steps: Int? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -737,6 +749,7 @@ public enum ControlAPI {
             self.h3ChainPrompts = h3ChainPrompts
             self.seed = seed
             self.h3Turbo = h3Turbo
+            self.h3Steps = h3Steps
         }
     }
 

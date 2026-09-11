@@ -91,6 +91,10 @@ struct VideoQueueView: View {
                 Text(item.request.h3Turbo.map { $0 ? VideoSampling.turbo.label : VideoSampling.full.label }
                      ?? VideoSampling.nodeDefault.label)
                     .font(.caption2).foregroundStyle(.secondary)
+                if let steps = item.request.h3Steps {
+                    Text("\(steps) sigma points · \(steps - 1) denoising passes per window")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
             VideoQueueProgress(itemID: item.id)
             if let error = item.error {

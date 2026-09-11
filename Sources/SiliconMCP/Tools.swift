@@ -33,6 +33,34 @@ enum Tools {
         .object(["type": .string(type), "description": .string(description)])
     }
 
+    static let h3StepsProperty: JSONValue = .object([
+        "type": .string("integer"), "minimum": .number(4), "maximum": .number(30),
+        "description": .string("H3 only, requires advertised h3_steps support and h3_turbo=false. Sigma points per window: 20 means 19 denoising passes. Omit for Auto. More steps take longer at the same canvas; quality improvement and identical memory use are not guaranteed."),
+    ])
+
+    static func videoSamplingArguments(_ arguments: [String: JSONValue]) throws -> (turbo: Bool?, steps: Int?) {
+        if arguments["h3_turbo"] != nil && arguments["h3_turbo"]?.boolValue == nil {
+            throw ToolError.invalid("h3_turbo must be a boolean.")
+        }
+        let turbo = arguments["h3_turbo"]?.boolValue
+        guard let value = arguments["h3_steps"], value != .null else { return (turbo, nil) }
+        guard case .number(let raw) = value, raw.isFinite, raw.rounded() == raw,
+              raw >= 4, raw <= 30 else {
+            throw ToolError.invalid("h3_steps must be an integer from 4 through 30. Omit it for Auto.")
+        }
+        guard turbo == false else { throw ToolError.invalid("h3_steps requires h3_turbo=false.") }
+        return (turbo, Int(raw))
+    }
+
+    static func videoSeedArgument(_ arguments: [String: JSONValue]) throws -> UInt32? {
+        guard let value = arguments["seed"] else { return nil }
+        guard case .number(let raw) = value, raw.isFinite, raw.rounded() == raw,
+              raw >= 0, raw <= Double(UInt32.max) else {
+            throw ToolError.invalid("seed must be an integer from 0 through 4294967295.")
+        }
+        return UInt32(raw)
+    }
+
     static func describeQueue(_ queue: ControlAPI.VideoQueueView) -> String {
         let pending = queue.items.filter { ["pending", "submitting", "rendering"].contains($0.status) }.count
         let failed = queue.items.filter { $0.status == "failed" }.count
@@ -42,6 +70,7 @@ enum Tools {
         for item in visible.prefix(100) {
             lines.append("\(item.id): \(item.title), scene \(item.scene), variation \(item.variation), seed \(item.seed ?? 0) — \(item.status)")
             lines.append("  folder: \(item.outputDirectory)")
+            if let steps = item.h3Steps { lines.append("  sampling: Full, \(steps) points / \(steps - 1) passes per window") }
             if let file = item.file { lines.append("  file: \(file)") }
             if let job = item.nodeJobID { lines.append("  node job: \(job)") }
             if let error = item.error { lines.append("  \(error)") }
@@ -349,6 +378,9 @@ enum Tools {
                 "resolution": property("string", "e.g. 720p. Defaults to the app's setting."),
                 "image_path": property("string", "Optional still to animate (image-to-video): "
                     + "absolute path, e.g. something from generate_image."),
+                "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional fixed seed for sampling comparisons.")]),
+                "h3_turbo": property("boolean", "H3 only: false = Full sampling, true = Turbo, omit = renderer default. Requires node support."),
+                "h3_steps": h3StepsProperty,
                 "h3_chain_prompts": .object([
                     "type": .string("array"),
                     "description": .string("Optional per-window prompts for hailuo-h3 only: "
@@ -375,6 +407,7 @@ enum Tools {
                 "resolution": property("string", "480p, 720p or 1080p. Higher sizes may need more memory."),
                 "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional base seed, incremented per clip. Omit for random.")]),
                 "h3_turbo": property("boolean", "H3 only, when the node advertises this control: true = Turbo, false = slower full sampling at the same canvas, omit = renderer default. Slower is not guaranteed to look better."),
+                "h3_steps": h3StepsProperty,
             ], required: ["prompts"]
         ),
         Tool(
@@ -579,6 +612,9 @@ enum Tools {
                 line += model.available
                     ? "\n  available now on \(model.node ?? "a node")"
                     : "\n  NOT available — no reachable node offers this model right now"
+                if let parameters = model.supportedParameters, !parameters.isEmpty {
+                    line += "\n  supported controls: \(parameters.joined(separator: ", "))"
+                }
                 line += "\n  \(model.summary)"
                 return line
             }.joined(separator: "\n")
@@ -597,13 +633,15 @@ enum Tools {
             } else {
                 chainPrompts = nil
             }
+            let sampling = try videoSamplingArguments(arguments)
             let request = ControlAPI.VideoGenerateRequest(
                 prompt: prompt,
                 modelID: arguments["model_id"]?.stringValue,
                 seconds: arguments["seconds"]?.intValue,
                 resolution: arguments["resolution"]?.stringValue,
                 imagePath: arguments["image_path"]?.stringValue,
-                h3ChainPrompts: chainPrompts
+                h3ChainPrompts: chainPrompts, seed: try videoSeedArgument(arguments),
+                h3Turbo: sampling.turbo, h3Steps: sampling.steps
             )
             let clip: ControlAPI.VideoResponse = try await client.post(
                 "/video/generate", request
@@ -618,28 +656,19 @@ enum Tools {
                   values.allSatisfy({ $0.stringValue != nil }) else {
                 throw ToolError.invalid("prompts must be an array of strings.")
             }
-            let seed: UInt32?
-            if let value = arguments["seed"] {
-                guard let raw = value.doubleValue, raw.isFinite, raw.rounded() == raw,
-                      raw >= 0, raw <= Double(UInt32.max) else {
-                    throw ToolError.invalid("seed must be an integer from 0 through 4294967295.")
-                }
-                seed = UInt32(raw)
-            } else { seed = nil }
+            let seed = try videoSeedArgument(arguments)
             for key in ["variations", "seconds"] where arguments[key] != nil {
                 guard let value = arguments[key]?.doubleValue, value.isFinite,
                       value.rounded() == value, value >= 1, value <= 200 else {
                     throw ToolError.invalid("\(key) must be a positive integer in range.")
                 }
             }
-            if arguments["h3_turbo"] != nil && arguments["h3_turbo"]?.boolValue == nil {
-                throw ToolError.invalid("h3_turbo must be a boolean.")
-            }
+            let sampling = try videoSamplingArguments(arguments)
             let queue: ControlAPI.VideoQueueView = try await client.post("/video/queue", ControlAPI.VideoQueueRequest(
                 prompts: values.compactMap(\.stringValue), title: arguments["title"]?.stringValue,
                 variations: arguments["variations"]?.intValue, modelID: arguments["model_id"]?.stringValue,
                 seconds: arguments["seconds"]?.intValue, resolution: arguments["resolution"]?.stringValue,
-                seed: seed, h3Turbo: arguments["h3_turbo"]?.boolValue
+                seed: seed, h3Turbo: sampling.turbo, h3Steps: sampling.steps
             ))
             return describeQueue(queue)
 
