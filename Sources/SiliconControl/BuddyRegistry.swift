@@ -15,8 +15,13 @@ public actor BuddyRegistry {
     public static let failuresBeforeLockout = 10
     public static let lockoutDuration: TimeInterval = 900
 
-    /// Enough sources to survive a phone retrying behind CGNAT, few enough that a spray of
-    /// forged addresses cannot grow this without bound.
+    /// A code is burned after this many wrong guesses from anywhere at all. The per-source
+    /// limiter alone is a botnet away from useless: ten addresses trying five a minute is
+    /// still fifty guesses a minute at a six-digit secret.
+    public static let guessesPerCode = 10
+
+    /// The most addresses this keeps failure counts for. Enough to survive a phone retrying
+    /// behind CGNAT; bounded so a spray of forged sources cannot grow it without limit.
     private static let trackedSources = 256
 
     public static let shared = BuddyRegistry()
@@ -24,7 +29,11 @@ public actor BuddyRegistry {
     private let url: URL
     private var config: BuddyConfig
     private var invitation: BuddyInvitation?
+    /// Wrong guesses against the code currently open, from every source together.
+    private var invitationGuesses = 0
     private var attempts: [String: Attempt] = [:]
+    /// Streams each device is holding open, and how to end them.
+    private var liveStreams: [String: [UUID: @Sendable () -> Void]] = [:]
 
     private struct Attempt {
         var recent: [Date] = []
@@ -42,10 +51,17 @@ public actor BuddyRegistry {
 
     public var allowsTailnetDevices: Bool { config.allowTailnetDevices }
 
+    /// Turning this off suspends every paired device rather than forgetting it: the list
+    /// survives, the tokens stop working, and anything a device is holding open ends now.
     public func setAllowsTailnetDevices(_ allowed: Bool) {
         guard config.allowTailnetDevices != allowed else { return }
         config.allowTailnetDevices = allowed
         config.save(to: url)
+        if !allowed {
+            invitation = nil
+            invitationGuesses = 0
+            endEveryStream()
+        }
     }
 
     // MARK: - Invitations
@@ -54,14 +70,15 @@ public actor BuddyRegistry {
     /// the owner cannot tell which screen admitted which device.
     @discardableResult
     public func invite(
-        host: String, port: Int,
+        host: String, port: Int, scope: BuddyScope = .full,
         lifetime: TimeInterval = BuddyPairing.codeLifetime, now: Date = Date()
     ) -> BuddyInvitation {
         let fresh = BuddyInvitation(
-            code: BuddyPairing.makeCode(), host: host, port: port,
+            code: BuddyPairing.makeCode(), host: host, port: port, scope: scope,
             expiresAt: now.addingTimeInterval(lifetime)
         )
         invitation = fresh
+        invitationGuesses = 0
         return fresh
     }
 
@@ -70,7 +87,10 @@ public actor BuddyRegistry {
         return invitation
     }
 
-    public func cancelInvitation() { invitation = nil }
+    public func cancelInvitation() {
+        invitation = nil
+        invitationGuesses = 0
+    }
 
     // MARK: - Pairing
 
@@ -93,35 +113,46 @@ public actor BuddyRegistry {
             recordFailure(source, at: now)
             return .refused(status: 400, message: "The request does not name a device.")
         }
-        guard let invitation, invitation.isLive(at: now) else {
-            recordFailure(source, at: now)
-            return .refused(
-                status: 403,
-                message: "No pairing code is open. Open Settings → Silicon Buddy on the Mac "
-                    + "and tap Pair a device."
-            )
-        }
+        // One sentence for "no code is open" and for "wrong code" alike. Two would tell an
+        // outsider exactly when the owner is standing at the Settings window.
         let offered = request.code.filter { !$0.isWhitespace }
-        guard BuddyPairing.digestsMatch(offered, invitation.code) else {
+        guard let invitation, invitation.isLive(at: now),
+              BuddyPairing.digestsMatch(offered, invitation.code)
+        else {
             recordFailure(source, at: now)
-            return .refused(status: 403, message: "That pairing code is not the one on screen.")
+            noteWrongCode()
+            return .refused(status: 403, message: Self.wrongCode)
         }
 
         // One use. The code burns whether or not the device ever comes back.
         self.invitation = nil
+        invitationGuesses = 0
         attempts[source] = nil
 
         let token = BuddyPairing.makeDeviceToken()
         let device = BuddyDevice(
-            id: UUID().uuidString, name: name, platform: platform,
+            id: UUID().uuidString, name: name, platform: platform, scope: invitation.scope,
             tokenHash: BuddyPairing.hash(token: token), pairedAt: now, lastSeen: now
         )
         config.devices.append(device)
         config.save(to: url)
 
         return .paired(ControlAPI.BuddyPairResponse(
-            deviceID: device.id, token: token, macName: macName, port: port
+            deviceID: device.id, token: token, macName: macName, port: port,
+            scope: device.effectiveScope.rawValue
         ))
+    }
+
+    public static let wrongCode = "That pairing code is not the one on screen."
+
+    /// Burns the open code once the guesses against it add up, whoever made them.
+    private func noteWrongCode() {
+        guard invitation != nil else { return }
+        invitationGuesses += 1
+        if invitationGuesses >= Self.guessesPerCode {
+            invitation = nil
+            invitationGuesses = 0
+        }
     }
 
     /// Nil when the address may try, a refusal when it may not.
@@ -163,6 +194,11 @@ public actor BuddyRegistry {
         attempts[source] = record
     }
 
+    /// Drops the least recently seen records once the table is over its ceiling, skipping
+    /// any address still serving a lockout — forgetting one of those would hand an attacker
+    /// a reset for the price of filling the table. That means the table can sit above the
+    /// ceiling while a lot of addresses are locked out, which is the correct trade: the
+    /// locked set is bounded by how many addresses managed ten failures each.
     private func pruneSources(at now: Date) {
         guard attempts.count > Self.trackedSources else { return }
         let stale = attempts
@@ -176,9 +212,11 @@ public actor BuddyRegistry {
     // MARK: - Using a device token
 
     /// The device that owns this bearer, with its last-seen time stamped. An unknown bearer
-    /// gets nil, which is what turns into the server's 401.
+    /// gets nil, and so does every bearer once the owner turns the toggle off — suspending
+    /// devices has to mean suspending them, not merely closing the door they came in by.
     @discardableResult
     public func authorize(bearer: String, at now: Date = Date()) -> ControlAPI.BuddyDeviceSummary? {
+        guard config.allowTailnetDevices else { return nil }
         let offered = BuddyPairing.hash(token: bearer)
         guard let index = config.devices.firstIndex(where: {
             BuddyPairing.digestsMatch($0.tokenHash, offered)
@@ -198,6 +236,12 @@ public actor BuddyRegistry {
         config.devices.sorted { $0.pairedAt < $1.pairedAt }.map(\.summary)
     }
 
+    /// Whether this device is still paired and still allowed. The `/events` heartbeat asks
+    /// each time round, so a revocation reaches a stream that was opened hours ago.
+    public func isKnown(deviceID: String) -> Bool {
+        config.allowTailnetDevices && config.devices.contains { $0.id == deviceID }
+    }
+
     /// True when a device was there to revoke, so the server can tell a stale id from a
     /// successful revocation.
     @discardableResult
@@ -206,7 +250,39 @@ public actor BuddyRegistry {
         config.devices.removeAll { $0.id == deviceID }
         guard config.devices.count != before else { return false }
         config.save(to: url)
+        // Revoking has to reach what the device is already holding. Without this, an
+        // `/events` subscription or a chat mid-answer outlives its credential by hours.
+        endStreams(forDevice: deviceID)
         return true
+    }
+
+    // MARK: - Streams a device is holding
+
+    /// Remembers how to end one stream, and hands back the ticket that releases it.
+    public func registerStream(
+        deviceID: String, cancel: @escaping @Sendable () -> Void
+    ) -> UUID {
+        let ticket = UUID()
+        liveStreams[deviceID, default: [:]][ticket] = cancel
+        return ticket
+    }
+
+    public func releaseStream(deviceID: String, ticket: UUID) {
+        liveStreams[deviceID]?.removeValue(forKey: ticket)
+        if liveStreams[deviceID]?.isEmpty == true { liveStreams[deviceID] = nil }
+    }
+
+    public func endStreams(forDevice id: String) {
+        let ending = liveStreams.removeValue(forKey: id) ?? [:]
+        for cancel in ending.values { cancel() }
+    }
+
+    public func endEveryStream() {
+        let ending = liveStreams
+        liveStreams = [:]
+        for device in ending.values {
+            for cancel in device.values { cancel() }
+        }
     }
 
     /// The whole record, for the Settings window and for tests.

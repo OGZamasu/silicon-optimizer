@@ -12,6 +12,13 @@ struct BuddyPairingRegistryTests {
             .appendingPathComponent("buddy-\(UUID()).json")
     }
 
+    /// A register with devices allowed, which is the state every pairing test is about.
+    private func openRegistry(at file: URL) async -> BuddyRegistry {
+        let registry = BuddyRegistry(url: file)
+        await registry.setAllowsTailnetDevices(true)
+        return registry
+    }
+
     private func request(code: String) -> ControlAPI.BuddyPairRequest {
         .init(code: code, deviceName: "Galaxy S24 Ultra", platform: "android")
     }
@@ -19,7 +26,7 @@ struct BuddyPairingRegistryTests {
     @Test func aCodeWorksOnceAndMintsATokenThatIsOnlyStoredAsAHash() async throws {
         let file = temporaryFile()
         defer { try? FileManager.default.removeItem(at: file) }
-        let registry = BuddyRegistry(url: file)
+        let registry = await openRegistry(at: file)
 
         let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
         #expect(invitation.url
@@ -46,15 +53,13 @@ struct BuddyPairingRegistryTests {
             request(code: invitation.code), from: "100.64.9.9",
             macName: "Studio", port: 8788
         )
-        #expect(again == .refused(
-            status: 403,
-            message: "No pairing code is open. Open Settings → Silicon Buddy on the Mac "
-                + "and tap Pair a device."
-        ))
+        // The same sentence as a wrong code. Two different ones would tell an outsider
+        // exactly when the owner is standing at the Settings window with a code open.
+        #expect(again == .refused(status: 403, message: BuddyRegistry.wrongCode))
     }
 
     @Test func aCodeStopsWorkingAfterFiveMinutes() async {
-        let registry = BuddyRegistry(url: temporaryFile())
+        let registry = await openRegistry(at: temporaryFile())
         let opened = Date()
         let invitation = await registry.invite(host: "100.64.1.2", port: 8788, now: opened)
 
@@ -72,7 +77,7 @@ struct BuddyPairingRegistryTests {
     }
 
     @Test func fiveTriesAMinuteThenTheAddressWaits() async {
-        let registry = BuddyRegistry(url: temporaryFile())
+        let registry = await openRegistry(at: temporaryFile())
         let start = Date()
         await registry.invite(host: "100.64.1.2", port: 8788, now: start)
 
@@ -81,9 +86,7 @@ struct BuddyPairingRegistryTests {
                 request(code: "000000"), from: "100.64.9.9", macName: "Studio",
                 port: 8788, now: start.addingTimeInterval(Double(attempt))
             )
-            #expect(outcome == .refused(
-                status: 403, message: "That pairing code is not the one on screen."
-            ))
+            #expect(outcome == .refused(status: 403, message: BuddyRegistry.wrongCode))
         }
         let throttled = await registry.pair(
             request(code: "000000"), from: "100.64.9.9", macName: "Studio",
@@ -98,13 +101,11 @@ struct BuddyPairingRegistryTests {
             request(code: "000000"), from: "100.64.9.10", macName: "Studio",
             port: 8788, now: start.addingTimeInterval(6)
         )
-        #expect(other == .refused(
-            status: 403, message: "That pairing code is not the one on screen."
-        ))
+        #expect(other == .refused(status: 403, message: BuddyRegistry.wrongCode))
     }
 
     @Test func tenFailuresLockTheAddressOutForAQuarterOfAnHour() async {
-        let registry = BuddyRegistry(url: temporaryFile())
+        let registry = await openRegistry(at: temporaryFile())
         let start = Date()
         await registry.invite(host: "100.64.1.2", port: 8788, lifetime: 100_000, now: start)
 
@@ -117,6 +118,11 @@ struct BuddyPairingRegistryTests {
                 )
             }
             moment = moment.addingTimeInterval(61)
+            // A fresh code each window: the per-code cap would otherwise burn it first,
+            // and this test is about the per-address lockout.
+            await registry.invite(
+                host: "100.64.1.2", port: 8788, lifetime: 100_000, now: moment
+            )
         }
 
         // The right code is now no help: the address itself is shut out.
@@ -141,7 +147,7 @@ struct BuddyPairingRegistryTests {
     }
 
     @Test func aNamelessDeviceIsRefusedWithoutSpendingTheCode() async {
-        let registry = BuddyRegistry(url: temporaryFile())
+        let registry = await openRegistry(at: temporaryFile())
         let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
         let outcome = await registry.pair(
             .init(code: invitation.code, deviceName: "  ", platform: "android"),
@@ -157,7 +163,7 @@ struct BuddyPairingRegistryTests {
     @Test func aDeviceTokenAuthorizesStampsLastSeenAndCanBeRevoked() async throws {
         let file = temporaryFile()
         defer { try? FileManager.default.removeItem(at: file) }
-        let registry = BuddyRegistry(url: file)
+        let registry = await openRegistry(at: file)
         let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
         guard case .paired(let response) = await registry.pair(
             request(code: invitation.code), from: "100.64.9.9",
@@ -217,6 +223,90 @@ struct BuddyPairingRegistryTests {
         #expect(!BuddyPairing.digestsMatch(hash, String(hash.dropLast())))
     }
 
+    /// The per-source limiter alone is a botnet away from useless: ten addresses trying
+    /// five a minute is still fifty guesses a minute at a six-digit secret.
+    @Test func aCodeBurnsAfterTenWrongGuessesFromAnywhereAtAll() async {
+        let registry = await openRegistry(at: temporaryFile())
+        let start = Date()
+        let invitation = await registry.invite(
+            host: "100.64.1.2", port: 8788, lifetime: 100_000, now: start
+        )
+
+        // One guess each from ten different addresses, so no single one is ever throttled.
+        for attempt in 0..<BuddyRegistry.guessesPerCode {
+            let outcome = await registry.pair(
+                request(code: "000000"), from: "100.64.9.\(attempt)",
+                macName: "Studio", port: 8788, now: start
+            )
+            #expect(outcome == .refused(status: 403, message: BuddyRegistry.wrongCode))
+        }
+        #expect(await registry.openInvitation(at: start) == nil)
+
+        // And the real code is worth nothing now either.
+        let tooLate = await registry.pair(
+            request(code: invitation.code), from: "100.64.9.200",
+            macName: "Studio", port: 8788, now: start
+        )
+        #expect(tooLate == .refused(status: 403, message: BuddyRegistry.wrongCode))
+    }
+
+    @Test func aDeviceIsPairedWithTheScopeTheOwnerChose() async {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let registry = await openRegistry(at: file)
+
+        let invitation = await registry.invite(host: "100.64.1.2", port: 8788, scope: .chat)
+        guard case .paired(let response) = await registry.pair(
+            request(code: invitation.code), from: "100.64.9.9", macName: "Studio", port: 8788
+        ) else { Issue.record("pairing should succeed"); return }
+        #expect(response.scope == "chat")
+        #expect(await registry.devices().first?.scope == "chat")
+
+        // Full control is what an owner gets by default, and what a file written before
+        // scopes existed is read as.
+        let legacy = BuddyDevice(
+            id: "old", name: "Old phone", platform: "ios",
+            tokenHash: "x", pairedAt: Date()
+        )
+        #expect(legacy.effectiveScope == .full)
+        #expect(BuddyScope.allCases.map(\.rawValue) == ControlAPI.buddyScopes)
+    }
+
+    /// Suspending devices has to mean suspending them, not merely closing the door they
+    /// came in by — the register is where the tokens stop being credentials.
+    @Test func aSuspendedRegisterAuthorizesNobody() async {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let registry = await openRegistry(at: file)
+        let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
+        guard case .paired(let response) = await registry.pair(
+            request(code: invitation.code), from: "100.64.9.9", macName: "Studio", port: 8788
+        ) else { Issue.record("pairing should succeed"); return }
+
+        #expect(await registry.authorize(bearer: response.token) != nil)
+        #expect(await registry.isKnown(deviceID: response.deviceID))
+        await registry.setAllowsTailnetDevices(false)
+        #expect(await registry.authorize(bearer: response.token) == nil)
+        #expect(await registry.isKnown(deviceID: response.deviceID) == false)
+        #expect(await registry.devices().count == 1)
+    }
+
+    /// Revoking reaches what the device is already holding, not merely its next request.
+    @Test func endingAStreamIsPartOfRevoking() async {
+        let registry = await openRegistry(at: temporaryFile())
+        let ended = Ended()
+        let ticket = await registry.registerStream(deviceID: "phone") {
+            Task { await ended.note() }
+        }
+        #expect(ticket != UUID())
+
+        await registry.revoke(deviceID: "phone")
+        // Nothing was paired under that id, so revoke says no — but a live stream still
+        // has to end, which is why the two are not the same check.
+        await registry.endStreams(forDevice: "phone")
+        await ended.wait()
+    }
+
     @Test func codesAreSixDigitsAndReadableAloud() {
         for _ in 0..<200 {
             let code = BuddyPairing.makeCode()
@@ -229,7 +319,7 @@ struct BuddyPairingRegistryTests {
 
     /// A code read off a screen arrives with the space the owner saw in it.
     @Test func aCodeTypedWithItsSpaceStillPairs() async {
-        let registry = BuddyRegistry(url: temporaryFile())
+        let registry = await openRegistry(at: temporaryFile())
         let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
         let outcome = await registry.pair(
             .init(code: invitation.displayCode, deviceName: "iPad mini", platform: "ipados"),
@@ -238,5 +328,20 @@ struct BuddyPairingRegistryTests {
         guard case .paired = outcome else {
             Issue.record("a spaced code is the same code"); return
         }
+    }
+}
+
+/// A latch for "this closure ran", since stream cancellation has no return value.
+actor Ended {
+    private var happened = false
+
+    func note() { happened = true }
+
+    func wait() async {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !happened, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(happened)
     }
 }

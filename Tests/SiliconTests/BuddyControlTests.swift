@@ -3,75 +3,106 @@ import Network
 import Testing
 @testable import SiliconControl
 
-/// The control server as a phone meets it: pairing, a device token, the second listener, and
-/// the two streaming routes.
+/// The control server as a phone meets it: pairing, a device token, the second listener, the
+/// two streaming routes, and everything that has to stop when the owner says so.
 ///
-/// Everything here runs over loopback with a private handshake file, so no user app, no
-/// tailnet and no real model is involved.
+/// Everything here runs over loopback with a private handshake file and a private
+/// `buddy.json`, so no user app, no tailnet and no real model is involved. The "tailnet"
+/// listener is bound to 127.0.0.1 at a port the fixture picks — the control server's own
+/// port would make it impossible to tell which listener answered.
 @Suite("Silicon Buddy control routes")
 struct BuddyControlTests {
 
     // MARK: - Pairing over the wire
 
     @Test func pairingMintsATokenThatWorksEverywhereAndOnlyTheMacCanRevokeIt() async throws {
-        try await withServer { _, client, registry, _ in
-            let invitation = await registry.invite(host: "127.0.0.1", port: client.port)
-
-            // The one unauthenticated POST on this server.
-            let (status, body) = try await client.call(
-                "POST", "/buddy/pair", token: nil,
-                body: #"{"code":"\#(invitation.code)","deviceName":"iPad mini","platform":"ipados"}"#
-            )
-            #expect(status == 200)
-            let paired = try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
-            #expect(paired.port == client.port)
+        try await withServer { fixture in
+            let paired = try await fixture.pair(name: "iPad mini", platform: "ipados")
+            #expect(paired.port == fixture.phone.port)
+            #expect(paired.scope == "full")
 
             // A device token is a bearer like any other, on every working route.
-            #expect(try await client.status("GET", "/status", token: paired.token) == 200)
-            #expect(try await client.status("GET", "/installed", token: paired.token) == 200)
-            #expect(try await client.status("GET", "/status", token: "guessed") == 401)
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
+            #expect(try await fixture.phone.status("GET", "/installed", token: paired.token) == 200)
+            #expect(try await fixture.phone.status("GET", "/status", token: "guessed") == 401)
 
             // Except the two that administer other devices.
-            #expect(try await client.status("GET", "/buddy/devices", token: paired.token) == 403)
-            #expect(try await client.status(
+            #expect(try await fixture.phone.status(
+                "GET", "/buddy/devices", token: paired.token
+            ) == 403)
+            #expect(try await fixture.phone.status(
                 "DELETE", "/buddy/devices/\(paired.deviceID)", token: paired.token
             ) == 403)
 
-            let (listStatus, listBody) = try await client.call(
-                "GET", "/buddy/devices", token: client.token
+            let (listStatus, listBody) = try await fixture.local.call(
+                "GET", "/buddy/devices", token: fixture.local.token
             )
             #expect(listStatus == 200)
             let listed = try JSONDecoder().decode(
                 [ControlAPI.BuddyDeviceSummary].self, from: listBody
             )
             #expect(listed.map(\.name) == ["iPad mini"])
+            #expect(listed.map(\.scope) == ["full"])
             #expect(listed.first?.lastSeen != nil)
             // The digest never leaves the file it is written in.
             #expect(!String(decoding: listBody, as: UTF8.self).contains("tokenHash"))
 
-            #expect(try await client.status(
-                "DELETE", "/buddy/devices/\(paired.deviceID)", token: client.token
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/devices/\(paired.deviceID)", token: fixture.local.token
             ) == 200)
-            #expect(try await client.status(
-                "DELETE", "/buddy/devices/\(paired.deviceID)", token: client.token
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/devices/\(paired.deviceID)", token: fixture.local.token
             ) == 404)
             // Revoked means revoked, on the next request rather than the next launch.
-            #expect(try await client.status("GET", "/status", token: paired.token) == 401)
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 401)
+        }
+    }
+
+    /// The listener a request arrived on is a security boundary, not bookkeeping. A phone
+    /// that leaves the house — or is lost with its token on it — must not be able to
+    /// authenticate from a café the Mac happens to share a network with.
+    @Test func aDeviceTokenIsNotACredentialOnTheLoopbackListener() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
+            #expect(try await fixture.local.status("GET", "/status", token: paired.token) == 401)
+            // And pairing itself is refused there, so a token cannot be minted that way.
+            await fixture.registry.invite(host: "127.0.0.1", port: fixture.local.port)
+            let refused = try await fixture.local.status(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"000000","deviceName":"x","platform":"y"}"#
+            )
+            #expect(refused == 403 || refused == 404)
+        }
+    }
+
+    @Test func turningTheToggleOffSuspendsEveryPairedDevice() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
+
+            await fixture.registry.setAllowsTailnetDevices(false)
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 401)
+            // Suspended, not forgotten: the row is still there to be turned back on.
+            #expect(await fixture.registry.devices().count == 1)
+
+            await fixture.registry.setAllowsTailnetDevices(true)
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
         }
     }
 
     @Test func aWrongCodeIsRefusedAndThenThrottled() async throws {
-        try await withServer { _, client, registry, _ in
-            await registry.invite(host: "127.0.0.1", port: client.port)
+        try await withServer { fixture in
+            await fixture.registry.invite(host: "127.0.0.1", port: fixture.phone.port)
             let attempt = #"{"code":"000000","deviceName":"Phone","platform":"android"}"#
 
             for _ in 0..<BuddyRegistry.attemptsPerMinute {
-                let refused = try await client.status(
+                let refused = try await fixture.phone.status(
                     "POST", "/buddy/pair", token: nil, body: attempt
                 )
                 #expect(refused == 403)
             }
-            let throttled = try await client.status(
+            let throttled = try await fixture.phone.status(
                 "POST", "/buddy/pair", token: nil, body: attempt
             )
             #expect(throttled == 429)
@@ -79,12 +110,57 @@ struct BuddyControlTests {
     }
 
     @Test func pairingWithNoCodeOpenIsRefusedRatherThanAccepted() async throws {
-        try await withServer { _, client, _, _ in
-            let refused = try await client.status(
+        try await withServer { fixture in
+            let refused = try await fixture.phone.status(
                 "POST", "/buddy/pair", token: nil,
                 body: #"{"code":"123456","deviceName":"Phone","platform":"android"}"#
             )
             #expect(refused == 403)
+        }
+    }
+
+    // MARK: - Scope
+
+    @Test func aChatOnlyDeviceMayTalkButNotSpendTheMachine() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair(scope: .chat)
+            #expect(paired.scope == "chat")
+            let token = paired.token
+
+            for allowed in [
+                ("GET", "/status"), ("GET", "/installed"), ("GET", "/catalog"),
+                ("GET", "/swarm"), ("GET", "/video/models"), ("GET", "/image/models"),
+                ("GET", "/mesh/models"), ("GET", "/video/queue"), ("GET", "/conversations"),
+            ] {
+                let code = try await fixture.phone.status(allowed.0, allowed.1, token: token)
+                #expect(code == 200, "\(allowed.0) \(allowed.1) should be open to chat-only")
+            }
+
+            for refused in [
+                ("POST", "/load"), ("POST", "/unload"), ("POST", "/install"),
+                ("POST", "/benchmark"), ("POST", "/video/generate"),
+                ("POST", "/image/generate"), ("POST", "/mesh/generate"),
+                ("POST", "/video/queue"), ("POST", "/video/queue/control"),
+                ("GET", "/buddy/devices"), ("POST", "/plan"), ("GET", "/recommend"),
+            ] {
+                let code = try await fixture.phone.status(
+                    refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
+                )
+                #expect(code == 403, "\(refused.0) \(refused.1) should be closed to chat-only")
+            }
+
+            // Chat is the whole point of the scope, streaming included.
+            let events = try await fixture.phone.events(
+                "POST", "/chat/stream", token: token,
+                body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            ) { $0.contains { $0.name == "finished" } }
+            #expect(events.contains { $0.name == "token" })
+
+            // A full-control device is not affected by any of this.
+            let full = try await fixture.pair(name: "Studio phone")
+            #expect(try await fixture.phone.status(
+                "POST", "/video/queue/control", token: full.token, body: #"{"action":"pause"}"#
+            ) == 200)
         }
     }
 
@@ -95,55 +171,90 @@ struct BuddyControlTests {
             #expect(ControlServer.isBindableTailnetAddress(allowed))
         }
         // The wildcard above all: binding it is exactly how a private API becomes public.
+        // The hostname shapes matter just as much — `NWEndpoint.Host` would take them as
+        // names and resolve them, handing the bind target to whoever runs that zone.
         for refused in [
             "0.0.0.0", "::", "::1", "", " ", "192.168.1.10", "10.0.0.5", "100.128.0.1",
             "100.63.255.255", "99.64.0.1", "127.0.0.1.1", "localhost", "100.64.0.1:8788",
+            "100.64.0.1.evil.example.com", "evil.example.com/100.64.0.1", "100.64.0.1%en0",
+            "127.0.0.1.attacker.test", "0100.64.0.1", "100.064.0.1", "100.64.0.01",
         ] {
             #expect(!ControlServer.isBindableTailnetAddress(refused), "\(refused) must be refused")
         }
     }
 
-    @Test func theSecondListenerServesTheSameRoutesAndClosesOnDemand() async throws {
-        try await withServer { server, client, registry, _ in
-            #expect(await server.tailnetListenerAddress == nil)
+    @Test func theSecondListenerClosesOnDemandAndRebindsWhenTheAddressMoves() async throws {
+        try await withServer { fixture in
             await #expect(throws: ControlServer.TailnetBindError.self) {
-                try await server.setTailnetAccess(address: "0.0.0.0")
+                try await fixture.server.setTailnetAccess(address: "0.0.0.0")
             }
-            #expect(await server.tailnetListenerAddress == nil)
-
-            let second = try await openSecondListener(on: server)
-            let phone = TestClient(port: second, token: client.token, session: client.session)
 
             // Same routes, same auth, a different way in.
-            #expect(try await phone.status("GET", "/health", token: nil) == 200)
-            #expect(try await phone.status("GET", "/status", token: client.token) == 200)
-            #expect(try await phone.status("GET", "/status", token: nil) == 401)
+            #expect(try await fixture.phone.status("GET", "/health", token: nil) == 200)
+            #expect(try await fixture.phone.status(
+                "GET", "/status", token: fixture.local.token
+            ) == 200)
+            #expect(try await fixture.phone.status("GET", "/status", token: nil) == 401)
 
-            let invitation = await registry.invite(host: "127.0.0.1", port: second)
-            let (status, body) = try await phone.call(
-                "POST", "/buddy/pair", token: nil,
-                body: #"{"code":"\#(invitation.code)","deviceName":"Phone","platform":"android"}"#
-            )
-            #expect(status == 200)
-            let paired = try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
-            #expect(try await phone.status("GET", "/status", token: paired.token) == 200)
-
-            // Turning the toggle off takes the listener down; loopback is untouched.
-            try await server.setTailnetAccess(address: nil)
-            #expect(await server.tailnetListenerAddress == nil)
+            // A tailscale address can move under the app; the listener has to follow.
+            let moved = try await fixture.reopenTailnetListener()
+            #expect(moved != fixture.phone.port)
+            let onward = TestClient(port: moved, token: fixture.local.token, session: fixture.session)
+            #expect(try await onward.status("GET", "/health", token: nil) == 200)
             await #expect(throws: (any Error).self) {
-                _ = try await phone.status("GET", "/health", token: nil)
+                _ = try await fixture.phone.status("GET", "/health", token: nil)
             }
-            #expect(try await client.status("GET", "/status", token: client.token) == 200)
+
+            try await fixture.server.setTailnetAccess(address: nil)
+            #expect(await fixture.server.tailnetListenerAddress == nil)
+            await #expect(throws: (any Error).self) {
+                _ = try await onward.status("GET", "/health", token: nil)
+            }
+            // Loopback is untouched throughout.
+            #expect(try await fixture.local.status(
+                "GET", "/status", token: fixture.local.token
+            ) == 200)
+        }
+    }
+
+    // MARK: - Request framing and size
+
+    @Test func aDeviceMaySendAPromptButNotAModel() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            let huge = String(repeating: "a", count: BuddyLimits.requestBodyBytes + 1024)
+            let body = #"{"messages":[{"role":"user","content":"\#(huge)","images":[]}]}"#
+            #expect(try await fixture.phone.status(
+                "POST", "/chat", token: paired.token, body: body
+            ) == 413)
+            // The Mac's own bridge keeps the ceiling it had.
+            #expect(try await fixture.local.status(
+                "POST", "/chat", token: fixture.local.token, body: body
+            ) != 413)
+        }
+    }
+
+    @Test func aChunkedBodyIsAnsweredRatherThanDropped() async throws {
+        try await withServer { fixture in
+            let raw = try await RawConnection.connect(port: fixture.local.port)
+            defer { raw.close() }
+            try await raw.send(
+                "POST /chat HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Authorization: Bearer \(fixture.local.token)\r\n"
+                    + "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+            )
+            let reply = try await raw.readSome()
+            #expect(reply.contains("411"))
+            #expect(reply.contains("Content-Length"))
         }
     }
 
     // MARK: - Streaming chat
 
     @Test func chatStreamSendsTokensThenMetrics() async throws {
-        try await withServer(tokens: ["Hel", "lo", " there"]) { _, client, _, _ in
-            let events = try await client.events(
-                "POST", "/chat/stream",
+        try await withServer(tokens: ["Hel", "lo", " there"]) { fixture in
+            let events = try await fixture.local.events(
+                "POST", "/chat/stream", token: fixture.local.token,
                 body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
             ) { $0.contains { $0.name == "finished" } }
 
@@ -158,63 +269,117 @@ struct BuddyControlTests {
         }
     }
 
-    @Test func aHostFailureBecomesAnErrorEventRatherThanASilentHangUp() async throws {
-        try await withServer(failing: true) { _, client, _, _ in
-            let events = try await client.events(
-                "POST", "/chat/stream",
+    /// Nothing is written until the host agrees to start, so a refusal is a status a phone
+    /// can act on rather than a 200 whose first frame contradicts it.
+    @Test func aRefusalBeforeTheFirstFrameIsAStatusNotAnEvent() async throws {
+        try await withServer(failing: true) { fixture in
+            let (status, body) = try await fixture.local.call(
+                "POST", "/chat/stream", token: fixture.local.token,
                 body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
-            ) { $0.contains { $0.name == "error" } }
-            let failure = try #require(events.first { $0.name == "error" })
-            #expect(failure.data.contains("No model is loaded."))
+            )
+            #expect(status == 400)
+            #expect(String(decoding: body, as: UTF8.self).contains("No model is loaded."))
+
+            let missing = try await fixture.local.status(
+                "POST", "/conversations/\(UUID().uuidString)/messages",
+                token: fixture.local.token, body: #"{"content":"hi","images":[]}"#
+            )
+            #expect(missing == 404)
+        }
+    }
+
+    @Test func aSecondMessageIntoAConversationStillAnsweringIsRefused() async throws {
+        try await withServer(tokens: (0..<200).map { "t\($0)" }, pace: .milliseconds(20)) {
+            fixture in
+            let summary = try await fixture.createConversation()
+            let first = Task {
+                _ = try await fixture.local.events(
+                    "POST", "/conversations/\(summary.id)/messages",
+                    token: fixture.local.token, body: #"{"content":"hi","images":[]}"#
+                ) { $0.count >= 300 }
+            }
+            defer { first.cancel() }
+            try await waitUntil { await fixture.host.emitted >= 2 }
+
+            let busy = try await fixture.local.status(
+                "POST", "/conversations/\(summary.id)/messages",
+                token: fixture.local.token, body: #"{"content":"and another"}"#
+            )
+            #expect(busy == 409)
         }
     }
 
     @Test func aClientWalkingAwayCancelsTheGenerationAndFreesTheSlot() async throws {
         try await withServer(tokens: (0..<200).map { "t\($0)" }, pace: .milliseconds(20)) {
-            _, client, _, host in
+            fixture in
             let reading = Task {
-                _ = try await client.events(
-                    "POST", "/chat/stream",
+                _ = try await fixture.local.events(
+                    "POST", "/chat/stream", token: fixture.local.token,
                     body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
                 ) { $0.count >= 2 }
                 // Never reached: this stream has 200 tokens to go.
                 try await Task.sleep(for: .seconds(30))
             }
-            try await waitUntil { await host.startedStreams == 1 }
-            try await waitUntil { await host.emitted >= 2 }
+            try await waitUntil { await fixture.host.startedStreams == 1 }
+            try await waitUntil { await fixture.host.emitted >= 2 }
             reading.cancel()
             _ = try? await reading.value
 
             // The upstream generation stops, rather than talking to a dead socket.
-            try await waitUntil { await host.cancelledStreams == 1 }
-            // And the slot it held comes back.
-            #expect(try await client.status("GET", "/status", token: client.token) == 200)
+            try await waitUntil { await fixture.host.cancelledStreams == 1 }
+            try await waitUntil { await fixture.server.openEventStreams == 0 }
+        }
+    }
+
+    /// The case that leaks: a client that stops reading without closing. The socket buffer
+    /// fills, the send never completes and never errors, and without a deadline the slot is
+    /// held until the app quits.
+    @Test func aClientThatStopsReadingIsReapedRatherThanHeldForever() async throws {
+        let hub = BuddyEventHub()
+        try await withServer(hub: hub, writeDeadline: .milliseconds(400)) { fixture in
+            let raw = try await RawConnection.connect(port: fixture.local.port)
+            defer { raw.close() }
+            try await raw.send(
+                "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Authorization: Bearer \(fixture.local.token)\r\n\r\n"
+            )
+            try await waitUntil { await fixture.server.openEventStreams == 1 }
+
+            // Enough to overflow any socket buffer while nothing on the far side reads.
+            let padding = String(repeating: "x", count: 262_144)
+            let filling = Task {
+                while !Task.isCancelled {
+                    await hub.post(.download(.init(
+                        id: "big", name: padding, fraction: 0.5,
+                        bytesReceived: 1, bytesExpected: 2, bytesPerSecond: 3
+                    )))
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+            }
+            defer { filling.cancel() }
+
+            try await waitUntil(15) { await fixture.server.openEventStreams == 0 }
         }
     }
 
     @Test func onlySoManyStreamsAtOnce() async throws {
-        try await withServer(tokens: [], pace: .milliseconds(1)) { _, client, _, _ in
+        try await withServer(tokens: []) { fixture in
             var held: [StreamHandle] = []
             defer { held.forEach { $0.cancel() } }
             for _ in 0..<ControlServer.maximumEventStreams {
-                held.append(try await client.openEventStream())
+                held.append(try await fixture.local.openEventStream())
             }
             // Every slot is taken, so the next phone is told to close one rather than
             // being quietly starved of a socket the MCP bridge also needs.
-            #expect(try await client.status("GET", "/events", token: client.token) == 429)
+            #expect(try await fixture.local.status(
+                "GET", "/events", token: fixture.local.token
+            ) == 429)
 
             held.removeLast().cancel()
-            try await waitUntil { (try? await client.status("GET", "/health", token: nil)) == 200 }
-            var reopened = 0
-            for _ in 0..<20 where reopened == 0 {
-                if let handle = try? await client.openEventStream() {
-                    held.append(handle)
-                    reopened = 1
-                } else {
-                    try await Task.sleep(for: .milliseconds(50))
-                }
+            try await waitUntil {
+                await fixture.server.openEventStreams < ControlServer.maximumEventStreams
             }
-            #expect(reopened == 1)
+            held.append(try await fixture.local.openEventStream())
         }
     }
 
@@ -222,7 +387,7 @@ struct BuddyControlTests {
 
     @Test func theEventStreamOpensWithAHeartbeatAndForwardsWhatTheAppPosts() async throws {
         let hub = BuddyEventHub()
-        try await withServer(hub: hub) { _, client, _, _ in
+        try await withServer(hub: hub) { fixture in
             let posting = Task {
                 // Posted repeatedly: the subscription is established inside the server, so
                 // there is no moment this side can wait for other than the first frame.
@@ -236,9 +401,9 @@ struct BuddyControlTests {
             }
             defer { posting.cancel() }
 
-            let events = try await client.events("GET", "/events", body: nil) {
-                $0.contains { $0.name == "download" }
-            }
+            let events = try await fixture.local.events(
+                "GET", "/events", token: fixture.local.token, body: nil
+            ) { $0.contains { $0.name == "download" } }
             #expect(events.first?.name == "heartbeat")
             let beat = try JSONDecoder().decode(
                 ControlAPI.HeartbeatEvent.self, from: Data(events[0].data.utf8)
@@ -250,12 +415,42 @@ struct BuddyControlTests {
                 ControlAPI.DownloadEvent.self, from: Data(download.data.utf8)
             )
             #expect(decoded.id == "qwen3-coder" && decoded.fraction == 0.5)
+            // The host is asked to start watching exactly when someone starts reading.
+            #expect(await fixture.host.eventUpdatesRequested >= 1)
+        }
+    }
+
+    /// Revoking has to reach what a device is already holding. Waiting for its next request
+    /// would leave an SSE subscription alive for as long as the phone cared to keep it.
+    @Test func revokingADeviceEndsTheStreamItIsHolding() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            let stream = try await fixture.phone.openEventStream(token: paired.token)
+            try await waitUntil { await fixture.server.openEventStreams == 1 }
+
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/devices/\(paired.deviceID)", token: fixture.local.token
+            ) == 200)
+            try await waitUntil { await fixture.server.openEventStreams == 0 }
+            stream.cancel()
+        }
+    }
+
+    @Test func turningTheToggleOffEndsEveryStream() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            let stream = try await fixture.phone.openEventStream(token: paired.token)
+            try await waitUntil { await fixture.server.openEventStreams == 1 }
+
+            await fixture.registry.setAllowsTailnetDevices(false)
+            try await waitUntil { await fixture.server.openEventStreams == 0 }
+            stream.cancel()
         }
     }
 
     @Test func theEventStreamNeedsATokenLikeEverythingElse() async throws {
-        try await withServer { _, client, _, _ in
-            let refused = try await client.status("GET", "/events", token: nil)
+        try await withServer { fixture in
+            let refused = try await fixture.local.status("GET", "/events", token: nil)
             #expect(refused == 401)
         }
     }
@@ -263,30 +458,26 @@ struct BuddyControlTests {
     // MARK: - Conversations
 
     @Test func conversationsAreListedCreatedReadAndRepliedTo() async throws {
-        try await withServer(tokens: ["Yes", "."]) { _, client, _, _ in
-            let (createStatus, created) = try await client.call(
-                "POST", "/conversations", token: client.token, body: #"{"title":"Trip plan"}"#
-            )
-            #expect(createStatus == 200)
-            let summary = try JSONDecoder().decode(
-                ControlAPI.ConversationSummary.self, from: created
-            )
+        try await withServer(tokens: ["Yes", "."]) { fixture in
+            let summary = try await fixture.createConversation(title: "Trip plan")
             #expect(summary.title == "Trip plan" && summary.messageCount == 0)
 
-            let (_, listed) = try await client.call("GET", "/conversations", token: client.token)
+            let (_, listed) = try await fixture.local.call(
+                "GET", "/conversations", token: fixture.local.token
+            )
             let list = try JSONDecoder().decode(
                 [ControlAPI.ConversationSummary].self, from: listed
             )
             #expect(list.map(\.id) == [summary.id])
 
-            let events = try await client.events(
-                "POST", "/conversations/\(summary.id)/messages",
+            let events = try await fixture.local.events(
+                "POST", "/conversations/\(summary.id)/messages", token: fixture.local.token,
                 body: #"{"content":"Are we going?","images":[]}"#
             ) { $0.contains { $0.name == "finished" } }
             #expect(events.filter { $0.name == "token" }.count == 2)
 
-            let (detailStatus, detail) = try await client.call(
-                "GET", "/conversations/\(summary.id)", token: client.token
+            let (detailStatus, detail) = try await fixture.local.call(
+                "GET", "/conversations/\(summary.id)", token: fixture.local.token
             )
             #expect(detailStatus == 200)
             let conversation = try JSONDecoder().decode(
@@ -294,17 +485,59 @@ struct BuddyControlTests {
             )
             #expect(conversation.messages.map(\.role) == ["user", "assistant"])
             #expect(conversation.messages.last?.content == "Yes.")
+            #expect(!conversation.isGenerating)
             // Images are never sent back, however they arrived.
             #expect(!String(decoding: detail, as: UTF8.self).contains("images"))
 
-            #expect(try await client.status(
-                "GET", "/conversations/\(UUID().uuidString)", token: client.token
+            #expect(try await fixture.local.status(
+                "GET", "/conversations/\(UUID().uuidString)", token: fixture.local.token
             ) == 404)
-            #expect(try await client.status("GET", "/conversations", token: nil) == 401)
+            #expect(try await fixture.local.status("GET", "/conversations", token: nil) == 401)
         }
     }
 
     // MARK: - Fixture
+
+    struct Fixture {
+        let server: ControlServer
+        /// The loopback listener — the MCP bridge's way in, and the control token's.
+        let local: TestClient
+        /// The stand-in for the tailnet listener, on loopback at its own port.
+        let phone: TestClient
+        let registry: BuddyRegistry
+        let host: BuddyTestHost
+        let session: URLSession
+
+        func pair(
+            name: String = "Galaxy S24 Ultra", platform: String = "android",
+            scope: BuddyScope = .full
+        ) async throws -> ControlAPI.BuddyPairResponse {
+            let invitation = await registry.invite(
+                host: "127.0.0.1", port: phone.port, scope: scope
+            )
+            let (status, body) = try await phone.call(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"\#(platform)"}"#
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
+        }
+
+        func createConversation(title: String = "Fixture") async throws
+            -> ControlAPI.ConversationSummary {
+            let (status, body) = try await local.call(
+                "POST", "/conversations", token: local.token, body: #"{"title":"\#(title)"}"#
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(ControlAPI.ConversationSummary.self, from: body)
+        }
+
+        /// Moves the second listener to a different port, as a changed tailscale address
+        /// would, and returns where it landed.
+        func reopenTailnetListener() async throws -> Int {
+            try await BuddyControlTests.bindTailnetListener(on: server, avoiding: phone.port)
+        }
+    }
 
     private func waitUntil(
         _ seconds: Double = 5, _ condition: @Sendable () async -> Bool
@@ -316,12 +549,11 @@ struct BuddyControlTests {
         }
     }
 
-    /// Binds the second listener on loopback at a port nobody is using. Ports are picked
-    /// rather than requested because the real one is the control server's own, and both
-    /// listeners sharing it would make it impossible to tell which one answered.
-    private func openSecondListener(on server: ControlServer) async throws -> Int {
-        for _ in 0..<12 {
+    /// Binds the second listener on loopback at a port nobody is using.
+    static func bindTailnetListener(on server: ControlServer, avoiding: Int? = nil) async throws -> Int {
+        for _ in 0..<16 {
             let candidate = Int.random(in: 49_152...65_500)
+            guard candidate != avoiding else { continue }
             try await server.setTailnetAccess(address: "127.0.0.1", port: candidate)
             for _ in 0..<50 {
                 if await server.tailnetError != nil { break }
@@ -334,7 +566,7 @@ struct BuddyControlTests {
         throw BuddyTestError.timeout
     }
 
-    private func reachable(port: Int) async -> Bool {
+    static func reachable(port: Int) async -> Bool {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/health")!)
         request.timeoutInterval = 2
         guard let (_, response) = try? await URLSession.shared.data(for: request) else {
@@ -346,7 +578,8 @@ struct BuddyControlTests {
     private func withServer(
         tokens: [String] = ["ok"], pace: Duration = .milliseconds(1), failing: Bool = false,
         hub: BuddyEventHub = BuddyEventHub(),
-        _ body: (ControlServer, TestClient, BuddyRegistry, BuddyTestHost) async throws -> Void
+        writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
+        _ body: (Fixture) async throws -> Void
     ) async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("buddy-control-\(UUID())")
@@ -357,7 +590,10 @@ struct BuddyControlTests {
         let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
         let host = BuddyTestHost(tokens: tokens, pace: pace, failing: failing)
         let server = ControlServer(
-            host: host, handshakeURL: handshakeURL, buddy: registry, events: hub
+            host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
+            eventWriteDeadline: writeDeadline,
+            // Never the real CLI: a test must not bind whatever tailnet this machine is on.
+            discoverTailnetAddress: { nil }
         )
 
         let configuration = URLSessionConfiguration.ephemeral
@@ -372,11 +608,15 @@ struct BuddyControlTests {
         let handshake = try JSONDecoder().decode(
             ControlAPI.Handshake.self, from: try Data(contentsOf: handshakeURL)
         )
-        try await body(
-            server,
-            TestClient(port: handshake.port, token: handshake.token, session: session),
-            registry, host
-        )
+        await registry.setAllowsTailnetDevices(true)
+        let tailnetPort = try await Self.bindTailnetListener(on: server)
+
+        try await body(Fixture(
+            server: server,
+            local: TestClient(port: handshake.port, token: handshake.token, session: session),
+            phone: TestClient(port: tailnetPort, token: handshake.token, session: session),
+            registry: registry, host: host, session: session
+        ))
         await server.stop()
     }
 }
@@ -431,7 +671,7 @@ struct TestClient: Sendable {
 
     /// Reads SSE frames until `stop` has seen enough.
     func events(
-        _ method: String, _ path: String, body: String?,
+        _ method: String, _ path: String, token: String?, body: String?,
         until stop: @Sendable ([Frame]) -> Bool
     ) async throws -> [Frame] {
         let (bytes, response) = try await session.bytes(
@@ -453,11 +693,12 @@ struct TestClient: Sendable {
 
     /// Opens an `/events` stream and holds it, returning once the server has actually
     /// accepted it — which is what the first heartbeat proves.
-    func openEventStream() async throws -> StreamHandle {
+    func openEventStream(token: String? = nil) async throws -> StreamHandle {
+        let bearer = token ?? self.token
         let ready = Ready()
         let task = Task {
             let (bytes, response) = try await session.bytes(
-                for: request("GET", "/events", token: token, body: nil)
+                for: request("GET", "/events", token: bearer, body: nil)
             )
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 throw BuddyTestError.unexpectedRoute
@@ -496,6 +737,58 @@ actor Ready {
     }
 }
 
+/// A socket that speaks HTTP and then stops listening — which `URLSession` will not do, and
+/// which is exactly the client the write deadline exists for.
+final class RawConnection: @unchecked Sendable {
+    private let connection: NWConnection
+
+    private init(connection: NWConnection) { self.connection = connection }
+
+    static func connect(port: Int) async throws -> RawConnection {
+        let connection = NWConnection(
+            host: .ipv4(.loopback),
+            port: NWEndpoint.Port(rawValue: UInt16(port))!,
+            using: .tcp
+        )
+        connection.start(queue: .global(qos: .userInitiated))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            if case .ready = connection.state { break }
+            guard ContinuousClock.now < deadline else {
+                connection.cancel()
+                throw BuddyTestError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return RawConnection(connection: connection)
+    }
+
+    func send(_ text: String) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            connection.send(content: Data(text.utf8), completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            })
+        }
+    }
+
+    func readSome() async throws -> String {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<String, any Error>) in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) {
+                data, _, _, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: String(decoding: data ?? Data(), as: UTF8.self))
+                }
+            }
+        }
+    }
+
+    func close() { connection.cancel() }
+}
+
 // MARK: - The host double
 
 /// A `ControlHost` with a scripted model and an in-memory conversation store. It counts the
@@ -511,6 +804,7 @@ actor BuddyTestHost: ControlHost {
     private(set) var emitted = 0
     private(set) var eventUpdatesRequested = 0
     private var stored: [ControlAPI.ConversationDetail] = []
+    private var answering: Set<String> = []
 
     init(tokens: [String], pace: Duration, failing: Bool) {
         self.tokens = tokens
@@ -520,16 +814,22 @@ actor BuddyTestHost: ControlHost {
 
     private func noteCancelled() { cancelledStreams += 1 }
     private func noteEmitted() { emitted += 1 }
+    private func finishAnswering(_ id: String?) {
+        guard let id else { return }
+        answering.remove(id)
+    }
 
     private func scripted(
         appendingTo conversation: String? = nil
     ) throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
         guard !failing else { throw BuddyTestError.noModelLoaded }
         startedStreams += 1
+        if let conversation { answering.insert(conversation) }
         let tokens = self.tokens
         let pace = self.pace
         return AsyncThrowingStream { continuation in
             let work = Task {
+                defer { Task { await self.finishAnswering(conversation) } }
                 do {
                     for token in tokens {
                         try await Task.sleep(for: pace)
@@ -584,9 +884,10 @@ actor BuddyTestHost: ControlHost {
     }
 
     func conversation(id: String) async throws -> ControlAPI.ConversationDetail {
-        guard let found = stored.first(where: { $0.id == id }) else {
+        guard var found = stored.first(where: { $0.id == id }) else {
             throw BuddyHostError.noSuchConversation(id)
         }
+        found.isGenerating = answering.contains(id)
         return found
     }
 
@@ -596,6 +897,7 @@ actor BuddyTestHost: ControlHost {
         guard let index = stored.firstIndex(where: { $0.id == id }) else {
             throw BuddyHostError.noSuchConversation(id)
         }
+        guard !answering.contains(id) else { throw BuddyHostError.conversationBusy(id) }
         let now = ControlAPI.timestamp(Date())
         stored[index].messages.append(
             .init(role: "user", content: message.content, createdAt: now)
@@ -604,7 +906,7 @@ actor BuddyTestHost: ControlHost {
         return try scripted(appendingTo: id)
     }
 
-    func beginEventUpdates() async { eventUpdatesRequested += 1 }
+    func beginEventUpdates(postingTo hub: BuddyEventHub) async { eventUpdatesRequested += 1 }
 
     func status() async -> ControlAPI.Status {
         .init(state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
@@ -619,6 +921,11 @@ actor BuddyTestHost: ControlHost {
     func meshModels() async -> [ControlAPI.MeshModel] { [] }
     func videoQueue() async -> ControlAPI.VideoQueueView {
         .init(paused: false, activeID: nil, message: nil, items: [])
+    }
+    func controlVideoQueue(
+        _ request: ControlAPI.VideoQueueControl
+    ) async throws -> ControlAPI.VideoQueueView {
+        await videoQueue()
     }
     func swarm() async -> ControlAPI.SwarmView { .init(peers: [], polledSecondsAgo: nil) }
     func profile() async -> ControlAPI.Profile { fatalError("Unexpected test route") }
@@ -636,7 +943,8 @@ actor BuddyTestHost: ControlHost {
         throw BuddyTestError.unexpectedRoute
     }
     func chat(_ request: ControlAPI.ChatRequest) async throws -> ControlAPI.ChatResponse {
-        throw BuddyTestError.unexpectedRoute
+        .init(content: "ok", reasoning: nil, promptTokens: 1,
+              generatedTokens: 1, tokensPerSecond: 1)
     }
     func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         throw BuddyTestError.unexpectedRoute
@@ -665,11 +973,6 @@ actor BuddyTestHost: ControlHost {
     }
     func enqueueVideos(
         _ request: ControlAPI.VideoQueueRequest
-    ) async throws -> ControlAPI.VideoQueueView {
-        throw BuddyTestError.unexpectedRoute
-    }
-    func controlVideoQueue(
-        _ request: ControlAPI.VideoQueueControl
     ) async throws -> ControlAPI.VideoQueueView {
         throw BuddyTestError.unexpectedRoute
     }
