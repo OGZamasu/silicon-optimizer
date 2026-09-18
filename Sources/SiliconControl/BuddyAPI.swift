@@ -38,6 +38,10 @@ extension ControlAPI {
         }
     }
 
+    /// What a device may do. The phone does not ask for this — the owner chose it on the
+    /// Mac before the code was shown — so it arrives in the answer, not the request.
+    public static let buddyScopes = ["full", "chat"]
+
     /// The only time a device token exists in plaintext. The Mac keeps a hash; the phone
     /// keeps this in its own keychain and presents it as a bearer from then on.
     public struct BuddyPairResponse: Codable, Sendable, Equatable {
@@ -45,12 +49,19 @@ extension ControlAPI {
         public var token: String
         public var macName: String
         public var port: Int
+        /// "full" or "chat". A chat-only device should hide the controls it cannot use
+        /// rather than discovering them as 403s.
+        public var scope: String
 
-        public init(deviceID: String, token: String, macName: String, port: Int) {
+        public init(
+            deviceID: String, token: String, macName: String, port: Int,
+            scope: String = "full"
+        ) {
             self.deviceID = deviceID
             self.token = token
             self.macName = macName
             self.port = port
+            self.scope = scope
         }
     }
 
@@ -60,16 +71,19 @@ extension ControlAPI {
         public var id: String
         public var name: String
         public var platform: String
+        /// "full" or "chat".
+        public var scope: String
         public var pairedAt: String
         public var lastSeen: String?
 
         public init(
-            id: String, name: String, platform: String,
+            id: String, name: String, platform: String, scope: String = "full",
             pairedAt: String, lastSeen: String? = nil
         ) {
             self.id = id
             self.name = name
             self.platform = platform
+            self.scope = scope
             self.pairedAt = pairedAt
             self.lastSeen = lastSeen
         }
@@ -195,12 +209,19 @@ extension ControlAPI {
         public var id: String
         public var title: String
         public var updatedAt: String
+        /// True while an answer is still being written into this conversation, here or on
+        /// the Mac. Sending into it would poison the prompt, so the server answers 409.
+        public var isGenerating: Bool
         public var messages: [Message]
 
-        public init(id: String, title: String, updatedAt: String, messages: [Message]) {
+        public init(
+            id: String, title: String, updatedAt: String,
+            isGenerating: Bool = false, messages: [Message]
+        ) {
             self.id = id
             self.title = title
             self.updatedAt = updatedAt
+            self.isGenerating = isGenerating
             self.messages = messages
         }
     }
@@ -229,19 +250,65 @@ extension ControlAPI {
             self.temperature = temperature
             self.maxTokens = maxTokens
         }
+
+        /// Everything but `content` is optional on the wire. A phone sending plain text
+        /// should not have to spell out that it attached no photographs.
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.content = try container.decode(String.self, forKey: .content)
+            self.images = try container.decodeIfPresent([String].self, forKey: .images) ?? []
+            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+            self.maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
+        }
     }
 }
 
 /// Raised by hosts that have no conversation store or no model to stream from, so the
-/// server can answer with a sentence instead of dropping the connection.
+/// server can answer with a sentence and a status instead of dropping the connection.
 public enum BuddyHostError: Error, LocalizedError, Equatable {
     case noSuchConversation(String)
+    case conversationBusy(String)
     case unsupported(String)
 
     public var errorDescription: String? {
         switch self {
         case .noSuchConversation(let id): "No conversation with id \(id)."
+        case .conversationBusy:
+            "That conversation is still being answered. Wait for it to finish, or start "
+                + "another one."
         case .unsupported(let what): "\(what) is not available on this host."
         }
+    }
+
+    /// What the server answers. A phone can act on 404 and 409; it cannot act on 400.
+    public var status: Int {
+        switch self {
+        case .noSuchConversation: 404
+        case .conversationBusy: 409
+        case .unsupported: 501
+        }
+    }
+}
+
+/// What a device may send, and how much of it.
+///
+/// A paired phone is trusted, not unlimited: these caps are what stop a bug on the other
+/// side — or a lost handset — from turning a tailnet into a memory exhaustion tool.
+public enum BuddyLimits {
+    /// A phone sends prompts and photographs, not model weights.
+    public static let requestBodyBytes = 4 * 1_048_576
+    public static let imagesPerMessage = 8
+    /// A base64 `data:` URL, so roughly 1.5 MB of actual image.
+    public static let imageCharacters = 2_000_000
+
+    /// Nil when the attachments are within reach, a sentence when they are not.
+    public static func refusal(forImages images: [String]) -> String? {
+        if images.count > imagesPerMessage {
+            return "At most \(imagesPerMessage) images in one message."
+        }
+        if images.contains(where: { $0.count > imageCharacters }) {
+            return "One of those images is too large. The limit is about 1.5 MB each."
+        }
+        return nil
     }
 }

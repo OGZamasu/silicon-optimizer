@@ -22,6 +22,11 @@ extension AppModel {
         guard let runtime = activeRuntime, runtimeState.isRunning else {
             throw ControlHostError.noModelLoaded
         }
+        if let refusal = BuddyLimits.refusal(
+            forImages: request.messages.flatMap(\.images)
+        ) {
+            throw ControlHostError.badRequest(refusal)
+        }
         let chatRequest = ChatRequest(
             messages: request.messages.map {
                 ChatMessage(
@@ -63,10 +68,10 @@ extension AppModel {
         var conversation = Conversation()
         let trimmed = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { conversation.title = String(trimmed.prefix(60)) }
-        // At the top and selected, exactly as `newConversation` does it: a conversation
-        // started from a phone should be the one on screen when the owner looks over.
+        // At the top of the sidebar, but not selected. A phone starting a thread must not
+        // move the cursor out from under whoever is typing at the Mac.
         conversations.insert(conversation, at: 0)
-        selectedConversationID = conversation.id
+        if selectedConversationID == nil { selectedConversationID = conversation.id }
         return Self.summarize(conversation)
     }
 
@@ -78,6 +83,7 @@ extension AppModel {
             id: conversation.id.uuidString,
             title: conversation.title,
             updatedAt: ControlAPI.timestamp(Self.updatedAt(conversation)),
+            isGenerating: isAnswering(conversation.id),
             messages: conversation.messages.map {
                 .init(
                     role: $0.role.rawValue, content: $0.content,
@@ -96,9 +102,17 @@ extension AppModel {
         guard let index = conversations.firstIndex(where: { $0.id.uuidString == id }) else {
             throw BuddyHostError.noSuchConversation(id)
         }
+        // Two answers being written into one transcript interleave, and the second request
+        // would carry the first one's half-finished reply as context. Refuse instead.
+        guard !isAnswering(conversations[index].id) else {
+            throw BuddyHostError.conversationBusy(id)
+        }
         let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             throw ControlHostError.badRequest("A message needs something in it.")
+        }
+        if let refusal = BuddyLimits.refusal(forImages: message.images) {
+            throw ControlHostError.badRequest(refusal)
         }
         noteActivity()
 
@@ -113,6 +127,7 @@ extension AppModel {
         }
 
         let conversationID = conversations[index].id
+        BuddyGenerations.shared.begin(conversationID)
         let chatRequest = ChatRequest(
             messages: conversations[index].messages.dropLast().map { $0 },
             temperature: message.temperature ?? settings.temperature,
@@ -123,6 +138,7 @@ extension AppModel {
 
         return streamed { [weak self] emit in
             guard let self else { return }
+            defer { BuddyGenerations.shared.end(conversationID) }
             do {
                 try await self.whileGenerating {
                     for try await event in try await runtime.chat(chatRequest) {
@@ -170,10 +186,16 @@ extension AppModel {
         }
     }
 
+    /// Whether an answer is still being written into this conversation — by a phone, or by
+    /// the Mac's own chat window, which is generating into whichever thread is selected.
+    func isAnswering(_ id: Conversation.ID) -> Bool {
+        BuddyGenerations.shared.isBusy(id) || (isGenerating && selectedConversationID == id)
+    }
+
     // MARK: - The /events side channel
 
-    public func beginEventUpdates() async {
-        BuddyEventPump.shared.start(watching: self)
+    public func beginEventUpdates(postingTo hub: BuddyEventHub) async {
+        BuddyEventPump.shared.start(watching: self, hub: hub)
     }
 
     /// What a subscriber would want to know right now. Built whole and diffed, rather than
@@ -299,6 +321,14 @@ public final class BuddyEventPump {
     }
 
     private var task: Task<Void, Never>?
+    /// Bumped on every stop, so a task that is winding down can tell whether the handle it
+    /// is about to clear is still its own.
+    private var generation = UUID()
+    /// Incremented on every start request. A task that reads "no subscribers" and then sees
+    /// this move knows a phone arrived during that await, and keeps going — otherwise the
+    /// new subscriber would find a pump that had just decided to stop and a handle that was
+    /// not yet free, and get nothing but heartbeats for the rest of the session.
+    private var startRequests = 0
 
     public init() {}
 
@@ -308,21 +338,33 @@ public final class BuddyEventPump {
         watching model: AppModel, hub: BuddyEventHub = .shared,
         interval: Duration = .seconds(1)
     ) {
+        startRequests += 1
         guard task == nil else { return }
+        let mine = UUID()
+        generation = mine
         task = Task { [weak self, weak model] in
             var previous: Snapshot?
             while !Task.isCancelled {
-                guard let model, await hub.subscriberCount > 0 else { break }
+                guard let self, let model else { break }
+                let requestsBefore = self.startRequests
+                let subscribers = await hub.subscriberCount
+                if subscribers == 0, self.startRequests == requestsBefore {
+                    // No await between the decision and the handle, so a `start` racing
+                    // this either bumped the counter above or is yet to run at all.
+                    if self.generation == mine { self.task = nil }
+                    return
+                }
                 let current = await model.buddyEventSnapshot()
                 for event in Self.changes(from: previous, to: current) { await hub.post(event) }
                 previous = current
                 guard (try? await Task.sleep(for: interval)) != nil else { break }
             }
-            self?.task = nil
+            if self?.generation == mine { self?.task = nil }
         }
     }
 
     public func stop() {
+        generation = UUID()
         task?.cancel()
         task = nil
     }
@@ -354,6 +396,22 @@ public final class BuddyEventPump {
     }
 }
 
+/// Which conversations have an answer in flight, for the same reason `BuddyEventPump` is a
+/// singleton: `AppModel` is `@Observable` and an extension cannot add a stored property.
+@MainActor
+public final class BuddyGenerations {
+
+    public static let shared = BuddyGenerations()
+
+    private var active: Set<Conversation.ID> = []
+
+    public init() {}
+
+    public func isBusy(_ id: Conversation.ID) -> Bool { active.contains(id) }
+    public func begin(_ id: Conversation.ID) { active.insert(id) }
+    public func end(_ id: Conversation.ID) { active.remove(id) }
+}
+
 // MARK: - Settings state
 
 /// The Silicon Buddy section's own state.
@@ -370,6 +428,9 @@ public final class BuddyCenter {
     public private(set) var allowsTailnetDevices = false
     public private(set) var devices: [ControlAPI.BuddyDeviceSummary] = []
     public private(set) var invitation: BuddyInvitation?
+    /// What the next pairing grants. Full control is the default: the owner is standing
+    /// over the device, approving it by hand, and remote parity is the point.
+    public var nextScope: BuddyScope = .full
     /// Where the QR says to dial, once the listener is actually up.
     public private(set) var reachAddress: String?
     public private(set) var problem: String?
@@ -401,7 +462,7 @@ public final class BuddyCenter {
 
     /// Opens a pairing code. Refuses rather than drawing a QR nobody can reach: a code
     /// pointing at a listener that is not up is a minute of someone's life.
-    public func pairDevice(server: ControlServer?) async {
+    public func pairDevice(server: ControlServer?, scope: BuddyScope? = nil) async {
         isBusy = true
         defer { isBusy = false }
         await refresh(server: server)
@@ -414,9 +475,24 @@ public final class BuddyCenter {
             return
         }
         problem = nil
-        let fresh = await registry.invite(host: host, port: port)
+        let granting = scope ?? nextScope
+        nextScope = granting
+        let fresh = await registry.invite(host: host, port: port, scope: granting)
         invitation = fresh
         scheduleExpiry(of: fresh)
+    }
+
+    /// Called while the sheet is open. A code that has just been spent should turn into the
+    /// new device's row, not sit there looking live.
+    public func followPairing(server: ControlServer?) async -> Bool {
+        let stillOpen = await registry.openInvitation()
+        guard stillOpen == nil, invitation != nil else {
+            invitation = stillOpen
+            return false
+        }
+        invitation = nil
+        await refresh(server: server)
+        return true
     }
 
     public func cancelInvitation() async {

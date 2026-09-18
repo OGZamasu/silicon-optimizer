@@ -10,18 +10,36 @@ struct EventSource: Sendable {
     let run: @Sendable (EventStreamWriter) async -> Void
 }
 
+enum EventStreamError: Error, LocalizedError, Equatable {
+    case writeTimedOut
+    case writeFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .writeTimedOut: "The device stopped reading this stream."
+        case .writeFailed(let reason): reason
+        }
+    }
+}
+
 /// Writes SSE frames down one connection.
 ///
 /// An actor because `/events` writes from two places at once — the hub's forwarder and the
-/// heartbeat — and half of one frame interleaved with half of another is not recoverable
-/// by any client.
+/// heartbeat — and half of one frame interleaved with half of another is not recoverable by
+/// any client.
 actor EventStreamWriter {
 
     private let connection: NWConnection
+    private let deadline: Duration
     private var opened = false
 
-    init(connection: NWConnection) {
+    /// `deadline` is how long one frame may take to leave. A phone that goes out of range
+    /// without closing the socket leaves a send that never completes and never errors;
+    /// `Task.cancel` cannot reach into Network.framework, so without it that connection —
+    /// and the stream slot behind it — is held until the app quits.
+    init(connection: NWConnection, deadline: Duration = ControlServer.defaultEventWriteDeadline) {
         self.connection = connection
+        self.deadline = deadline
     }
 
     /// Sends the response head. Idempotent, so an error path can open a stream that never
@@ -59,16 +77,64 @@ actor EventStreamWriter {
         try await send(event: event.name, data: try event.encoded())
     }
 
+    /// Says no. Before the first frame that is an ordinary HTTP status, which is what a
+    /// phone can act on; afterwards the head is long gone and an `error` event is all that
+    /// is left. Deciding late is why nothing is written until a route has actually started.
+    func refuse(status: Int, message: String) async {
+        if opened {
+            try? await send(event: "error", json: ControlAPI.ErrorResponse(error: message))
+        } else {
+            opened = true
+            try? await HTTPResponse.error(status, message).write(to: connection)
+        }
+    }
+
     private func write(_ payload: Data) async throws {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, any Error>) in
-            connection.send(content: payload, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        let connection = self.connection
+        let deadline = self.deadline
+        try await withTaskCancellationHandler {
+            switch await Self.deliver(payload, over: connection, within: deadline) {
+            case .sent: return
+            case .timedOut: throw EventStreamError.writeTimedOut
+            case .failed(let reason): throw EventStreamError.writeFailed(reason)
+            }
+        } onCancel: {
+            // A pending `send` cannot be cancelled; closing the socket is what unblocks it.
+            connection.cancel()
+        }
+    }
+
+    private enum Outcome: Sendable {
+        case sent
+        case timedOut
+        case failed(String)
+    }
+
+    private static func deliver(
+        _ payload: Data, over connection: NWConnection, within deadline: Duration
+    ) async -> Outcome {
+        await withTaskGroup(of: Outcome.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Outcome, Never>) in
+                    connection.send(content: payload, completion: .contentProcessed { error in
+                        continuation.resume(
+                            returning: error.map { .failed($0.localizedDescription) } ?? .sent
+                        )
+                    })
                 }
-            })
+            }
+            group.addTask {
+                guard (try? await Task.sleep(for: deadline)) != nil else {
+                    return .failed("Cancelled.")
+                }
+                // Cancelling the connection is what makes the send above complete, so the
+                // group can be drained instead of leaking a task that waits forever.
+                connection.cancel()
+                return .timedOut
+            }
+            let first = await group.next() ?? .timedOut
+            group.cancelAll()
+            return first
         }
     }
 }

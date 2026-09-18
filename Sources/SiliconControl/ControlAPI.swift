@@ -873,6 +873,7 @@ public protocol ControlHost: AnyObject, Sendable {
         id: String, to message: ControlAPI.NewMessageRequest
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error>
     /// Called when an `/events` stream opens, so a host only pays for watching its own
-    /// state while somebody is reading it.
-    func beginEventUpdates() async
+    /// state while somebody is reading it. The hub is the server's own, which is what lets
+    /// a test drive a real state change onto a real socket.
+    func beginEventUpdates(postingTo hub: BuddyEventHub) async
 }
