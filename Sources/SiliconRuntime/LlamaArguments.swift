@@ -92,6 +92,15 @@ public struct LlamaArguments: Sendable {
             arguments += ["--mmproj", projector.path]
         }
 
+        // An adapter built into the graph at load; the base file stays untouched. The
+        // scaled form is llama.cpp's own `FNAME:SCALE`, and 1.0 is the adapter as published.
+        if let lora = model.loraFile {
+            let scale = model.loraScale ?? 1.0
+            arguments += scale == 1.0
+                ? ["--lora", lora.path]
+                : ["--lora-scaled", "\(lora.path):\(scale)"]
+        }
+
         // Jinja templating enables the model's own chat template and tool-call grammar, which
         // is what makes function calling work without per-model special cases.
         arguments += ["--jinja"]

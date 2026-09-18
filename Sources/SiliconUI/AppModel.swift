@@ -3372,6 +3372,28 @@ public final class AppModel {
     /// - Parameter saveTo: A folder to save this model's files under instead of Silicon
     ///   Optimizer's own managed library directory — an external drive, say. The library's index
     ///   still lives where it always does; only these files move. Pass `nil` for the default.
+    /// For every file a resolution wants, a same-named file of the same size already in the
+    /// library is cloned into `destination` (an APFS clone: instant, no extra space). The
+    /// downloader then finds it present and valid and skips it. Best effort — a failed
+    /// clone just means a download.
+    func cloneIdenticalFiles(of resolution: ModelResolver.Resolution, into destination: URL) {
+        var wanted = resolution.files
+        if let projector = resolution.projector { wanted.append(projector) }
+        let candidates = installedModels.flatMap { $0.allFiles + [$0.projectorFile].compactMap { $0 } }
+        for file in wanted {
+            let name = (file.path as NSString).lastPathComponent
+            let target = destination.appendingPathComponent(name)
+            guard !FileManager.default.fileExists(atPath: target.path),
+                  let source = candidates.first(where: {
+                      $0.lastPathComponent == name
+                          && ModelLibrary.fileSize($0) == file.size
+                  })
+            else { continue }
+            try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            try? FileManager.default.copyItem(at: source, to: target)
+        }
+    }
+
     public func install(_ entry: ModelEntry, quantization: Quantization, saveTo: URL? = nil) {
         let key = "\(entry.id)@\(quantization.rawValue)"
         guard downloads[key] == nil else { return }
@@ -3398,6 +3420,10 @@ public final class AppModel {
                 } else {
                     await self.library.directory(for: entry.id, quantization: quantization)
                 }
+                // Two catalog entries can ship the same file (Bonsai 2 and its adapter-only
+                // twin): clone what an installed sibling already has, so the download that
+                // follows verifies it and moves on instead of fetching 6 GB again.
+                self.cloneIdenticalFiles(of: resolution, into: destination)
                 // The progress callback is @Sendable and fires off-actor, so it must not
                 // capture the observable task object directly — only the key.
                 let files = try await downloader.download(resolution, to: destination) {
@@ -3407,12 +3433,17 @@ public final class AppModel {
                 let projector = resolution.projector.map { file in
                     destination.appendingPathComponent((file.path as NSString).lastPathComponent)
                 }
+                var adapter: URL?
+                if let lora = resolution.lora {
+                    adapter = try await downloader.downloadAdapter(lora, to: destination)
+                }
                 // The projector is downloaded alongside the weights, so exclude it from the
                 // weights list the runtime is handed.
                 let weights = files.filter { $0 != projector }
                 _ = try await self.library.register(
                     entry: entry, quantization: quantization,
-                    files: weights, projector: projector
+                    files: weights, projector: projector,
+                    lora: adapter, loraScale: resolution.lora?.defaultScale
                 )
                 download.isFinished = true
                 await self.refreshLibrary()

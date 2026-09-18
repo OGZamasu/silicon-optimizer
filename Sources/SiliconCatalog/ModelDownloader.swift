@@ -121,6 +121,39 @@ public actor ModelDownloader {
         return written
     }
 
+    /// Fetches a LoRA adapter from its pinned URL into `directory`, verifying size and
+    /// SHA-256 — small enough to hash every time, and the URL is a commit-pinned raw file,
+    /// so a digest mismatch means the download was corrupted or the pin is wrong.
+    public func downloadAdapter(_ adapter: LoRAAdapter, to directory: URL) async throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(adapter.filename)
+        if FileManager.default.fileExists(atPath: destination.path),
+           (try? sha256(of: destination)) == adapter.sha256 {
+            return destination
+        }
+        let session = URLSession(configuration: configuration)
+        let (temporary, response) = try await session.download(from: adapter.url)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw HuggingFaceClient.ClientError.badResponse(
+                (response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        let received = ModelLibrary.fileSize(temporary)
+        guard received == adapter.size else {
+            try? FileManager.default.removeItem(at: temporary)
+            throw DownloadError.incompleteTransfer(
+                file: adapter.filename, received: received, expected: adapter.size)
+        }
+        let digest = try sha256(of: temporary)
+        guard digest == adapter.sha256 else {
+            try? FileManager.default.removeItem(at: temporary)
+            throw DownloadError.checksumMismatch(
+                file: adapter.filename, expected: adapter.sha256, actual: digest)
+        }
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        return destination
+    }
+
     // MARK: - Single file
 
     private func downloadFile(

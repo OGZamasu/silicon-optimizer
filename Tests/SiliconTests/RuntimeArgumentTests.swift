@@ -37,6 +37,22 @@ struct LlamaArgumentTests {
         #expect(arguments.contains("--jinja"))
     }
 
+    /// An adapter rides in as llama.cpp's own flags: plain `--lora` at the published
+    /// strength, the `FNAME:SCALE` form otherwise, and nothing when there is none.
+    @Test func loraAdapterFlagsFollowTheScale() {
+        var model = makeModel(moe: false)
+        #expect(!LlamaArguments(model: model, configuration: LoadConfiguration(), port: 1)
+            .build().contains("--lora"))
+        model.loraFile = URL(fileURLWithPath: "/models/bonsai-abliterate-lora.gguf")
+        let plain = LlamaArguments(model: model, configuration: LoadConfiguration(), port: 1).build()
+        #expect(consecutive(plain, "--lora", "/models/bonsai-abliterate-lora.gguf"))
+        #expect(!plain.contains("--lora-scaled"))
+        model.loraScale = 2.0
+        let scaled = LlamaArguments(model: model, configuration: LoadConfiguration(), port: 1).build()
+        #expect(consecutive(scaled, "--lora-scaled", "/models/bonsai-abliterate-lora.gguf:2.0"))
+        #expect(!scaled.contains("--lora"))
+    }
+
     @Test func quantizedKVCacheSetsBothHalves() {
         let arguments = LlamaArguments(
             model: makeModel(),

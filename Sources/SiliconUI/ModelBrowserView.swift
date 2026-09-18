@@ -379,6 +379,9 @@ private struct InstalledModelRow: View {
                         if installed.supportsVision {
                             Badge(text: "Vision", systemImage: "eye", tint: .purple)
                         }
+                        if installed.loraFile != nil {
+                            Badge(text: "Adapter at load", systemImage: "slider.horizontal.3", tint: .pink)
+                        }
                     }
                 }
 

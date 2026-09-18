@@ -10,7 +10,7 @@ import SiliconCore
 public enum ModelCatalog {
 
     public static let all: [ModelEntry] = [
-        bonsai2_27B,
+        bonsai2_27B, orcaBonsai27B,
         qwen3Coder30B, qwen3_8_27B, qwen3_8_27B_mlx, qwen3_30B_A3B, qwen3_32B, qwen3_14B,
         qwen3_8B, qwen3_4B, qwen3_4B_mlx, qwen3_1_7B, gptOSS20B, gptOSS120B, gemma3_27B,
         gemma3_12B, mistralSmall24B, llama3_3_70B, phi4_14B, glm4_5Air, qwen2_5VL_7B,
@@ -93,6 +93,63 @@ public enum ModelCatalog {
         ],
         rating: 5, maxContext: 262_144,
         isFeatured: true
+    )
+
+    /// OrcaRouter's runtime-uncensored Bonsai 2: the same ternary weights, bit for bit, with
+    /// a rank-1 LoRA that projects the refusal direction out of all 129 residual writes at
+    /// inference. Nothing is re-quantized (baking the edit into ternary weights rounds it
+    /// away), so nothing is lost; drop the adapter and it is the published model again.
+    /// Same files as the Bonsai entry, so an install clones them instead of fetching 6 GB
+    /// twice, and the same PrismML fork serves it. The adapter is pinned to a commit and a
+    /// digest.
+    public static let orcaBonsai27B = ModelEntry(
+        id: "orcabonsai-27b-uncensored",
+        name: "OrcaBonsai 27B Uncensored",
+        author: "OrcaRouter · PrismML base",
+        license: "Apache-2.0",
+        summary: """
+            Bonsai 2 27B with OrcaRouter's refusal-direction ablation applied at load as a \
+            9.7 MB adapter: same weights, same speed, far fewer refusals (6% on AdvBench, \
+            from 99%) and no measurable capability change. Edgy and adult requests get \
+            answered; self-harm prompts still get a crisis redirect.
+            """,
+        category: .general,
+        capabilities: [.reasoning, .coding, .toolCalling, .vision, .multilingual],
+        format: .gguf,
+        shape: qwen3_8_27B.shape,
+        variants: [
+            ModelVariant(
+                quantization: .ptq1_0,
+                repository: "prism-ml/Ternary-Bonsai-2-27B-gguf",
+                filename: "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+                downloadSize: Bytes(5_947_000_000),
+                visionProjector: "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+                lora: orcaBonsaiAdapter
+            ),
+            ModelVariant(
+                quantization: .pq2_0,
+                repository: "prism-ml/Ternary-Bonsai-2-27B-gguf",
+                filename: "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+                downloadSize: Bytes(7_206_000_000),
+                visionProjector: "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+                lora: orcaBonsaiAdapter
+            ),
+        ],
+        rating: 4, maxContext: 262_144
+    )
+
+    /// The adapter from github.com/Continuum-AI-Corp/OrcaBonsai-27B-Uncensored, pinned to
+    /// commit 947a80c. `A = rᵀW`, `B = −r` per residual writer; alpha 1 against rank 1, so
+    /// llama.cpp's `--lora` applies the projection exactly. Scale 2 flips the stubborn
+    /// prompts; 3 and above degrades the model — the authors' own measurements.
+    static let orcaBonsaiAdapter = LoRAAdapter(
+        url: URL(string: "https://raw.githubusercontent.com/Continuum-AI-Corp/OrcaBonsai-27B-Uncensored/947a80cd1d3b4f9a97417025e6c2c62223571287/gguf/bonsai-abliterate-lora.gguf")!,
+        filename: "bonsai-abliterate-lora.gguf",
+        size: Bytes(9_682_464),
+        sha256: "f1669534803d340a496015f5c45125f3437b4d13ec764f40e34488ce83967f42",
+        defaultScale: 1.0,
+        summary: "OrcaRouter refusal-direction ablation, applied at load as a rank-1 LoRA on "
+            + "all 129 residual writers. The weights themselves are untouched."
     )
 
     // MARK: - Qwen 3 family
