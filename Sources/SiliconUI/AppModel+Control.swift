@@ -86,6 +86,7 @@ extension AppModel: ControlHost {
                 let lhsRunnable = lhs.recommendation != nil
                 let rhsRunnable = rhs.recommendation != nil
                 if lhsRunnable != rhsRunnable { return lhsRunnable }
+                if lhs.featured != rhs.featured { return lhs.featured == true }
                 return lhs.rating > rhs.rating
             }
     }
@@ -327,8 +328,26 @@ extension AppModel: ControlHost {
                     plan: describe(recommendation.plan),
                     rationale: recommendation.rationale
                 )
-            }
+            },
+            featured: entry.isFeatured,
+            runtimeNote: runtimeNote(for: entry)
         )
+    }
+
+    /// What an agent needs to know before installing: whether the runtime this entry
+    /// needs is actually here.
+    private func runtimeNote(for entry: ModelEntry) -> String? {
+        guard entry.needsPrismRuntime else { return nil }
+        if hasPrismTernaryRuntime {
+            return "PrismML's llama.cpp fork is installed; this build reads the format."
+        }
+        if let install = prismRuntimeInstall {
+            return install.error.map {
+                "Fetching PrismML's llama.cpp fork failed: \($0) — install_model retries it."
+            } ?? "Fetching PrismML's llama.cpp fork now: \(install.stage)."
+        }
+        return "Needs PrismML's llama.cpp fork (a 12 MB download); install_model fetches it "
+            + "alongside the weights, or set a fork build's path in Settings › Advanced."
     }
 
     private func describe(_ plan: MemoryPlan) -> ControlAPI.Plan {

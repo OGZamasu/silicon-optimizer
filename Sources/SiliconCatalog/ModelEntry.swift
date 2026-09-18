@@ -106,12 +106,15 @@ public struct ModelEntry: Sendable, Codable, Hashable, Identifiable {
     public var maxContext: Int
     /// Set when a model needs a llama.cpp or MLX build newer than the last stable release.
     public var requiresRecentRuntime: Bool
+    /// Editorial spotlight: shown first in the browser with a Featured badge, and marked in
+    /// the control API. One or two entries at most, or the word stops meaning anything.
+    public var isFeatured: Bool
 
     public init(
         id: String, name: String, author: String, license: String, summary: String,
         category: ModelCategory, capabilities: ModelCapabilities, format: ModelFormat,
         shape: ModelShape, variants: [ModelVariant], rating: Int, maxContext: Int,
-        requiresRecentRuntime: Bool = false
+        requiresRecentRuntime: Bool = false, isFeatured: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -126,9 +129,15 @@ public struct ModelEntry: Sendable, Codable, Hashable, Identifiable {
         self.rating = rating
         self.maxContext = maxContext
         self.requiresRecentRuntime = requiresRecentRuntime
+        self.isFeatured = isFeatured
     }
 
     public var isMoE: Bool { shape.isMoE }
+
+    /// True when every way to run this model needs PrismML's llama.cpp fork.
+    public var needsPrismRuntime: Bool {
+        !variants.isEmpty && variants.allSatisfy { $0.quantization.needsPrismRuntime }
+    }
 
     /// Parameter count formatted the way model names express it ("30B", "3.8B").
     public var parameterLabel: String {

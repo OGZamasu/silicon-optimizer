@@ -340,7 +340,7 @@ flag) and hides the option if it doesn't, instead of letting the load fail.
 
 ## Beyond the built-in catalog
 
-The bundled list is 17 models curated for Apple Silicon. Search also covers all of Hugging
+The bundled list is 18 models curated for Apple Silicon. Search also covers all of Hugging
 Face: for any model with GGUF weights, the app fetches just the file's header (a few hundred
 kilobytes, not the download) and gives an unknown model the same memory breakdown and
 verdict as a curated one — its real architecture read from the file, not guessed from its

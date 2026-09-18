@@ -345,6 +345,8 @@ public struct Settings: Codable, Sendable, Equatable {
     // Runtime overrides
     public var llamaServerPath: String = ""
     public var mlxServerPath: String = ""
+    /// A PrismML fork build of your own; empty means the app fetches one when needed.
+    public var prismServerPath: String = ""
 
     public var customRuntimePaths: [RuntimeKind: URL] {
         var paths: [RuntimeKind: URL] = [:]
@@ -353,6 +355,9 @@ public struct Settings: Codable, Sendable, Equatable {
         }
         if !mlxServerPath.isEmpty {
             paths[.mlx] = URL(fileURLWithPath: mlxServerPath)
+        }
+        if !prismServerPath.isEmpty {
+            paths[.llamaCppPrism] = URL(fileURLWithPath: prismServerPath)
         }
         return paths
     }
@@ -424,6 +429,7 @@ public struct Settings: Codable, Sendable, Equatable {
         )
         llamaServerPath = value(.llamaServerPath, fallback.llamaServerPath)
         mlxServerPath = value(.mlxServerPath, fallback.mlxServerPath)
+        prismServerPath = value(.prismServerPath, fallback.prismServerPath)
         chatEngineRaw = try? container.decodeIfPresent(String.self, forKey: .chatEngineRaw)
         harnessWebPort = try? container.decodeIfPresent(Int.self, forKey: .harnessWebPort)
         harnessInferencePort = try? container.decodeIfPresent(

@@ -19,6 +19,7 @@ struct SettingsView: View {
             Section("Runtimes") {
                 runtimeRow(.llamaCpp)
                 runtimeRow(.mlx)
+                runtimeRow(.llamaCppPrism)
 
                 if !model.selector.isAnythingInstalled {
                     Label(
@@ -533,6 +534,15 @@ struct SettingsView: View {
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                     }
+                    LabeledContent("PrismML llama-server path") {
+                        TextField(
+                            "PrismML llama-server path",
+                            text: $model.settings.prismServerPath,
+                            prompt: Text("Fetched by the app when needed")
+                        )
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                    }
                     if let command = model.currentLaunchCommand {
                         LabeledContent("Launch command") {
                             ScrollView(.horizontal, showsIndicators: false) {
@@ -818,12 +828,38 @@ struct SettingsView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                } else if kind == .llamaCppPrism {
+                    prismInstallControl
                 } else {
                     Badge(text: "Not installed", systemImage: "xmark.circle", tint: .secondary)
                 }
             }
         }
         .help(kind.summary)
+    }
+
+    /// The fork is fetched by the app rather than found on the machine: one button, with
+    /// its progress and any failure right beside it.
+    @ViewBuilder
+    private var prismInstallControl: some View {
+        if let install = model.prismRuntimeInstall, install.error == nil {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(install.stage).font(.caption2).foregroundStyle(.secondary)
+            }
+        } else {
+            VStack(alignment: .trailing, spacing: 2) {
+                Button("Install (12 MB)") { model.installPrismRuntime() }
+                    .controlSize(.small)
+                if let error = model.prismRuntimeInstall?.error {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .frame(maxWidth: 320, alignment: .trailing)
+                }
+            }
+        }
     }
 
     /// Folder picker for the image output directory.

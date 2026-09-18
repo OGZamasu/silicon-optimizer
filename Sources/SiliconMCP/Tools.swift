@@ -802,6 +802,8 @@ enum Tools {
             "Capabilities: \(model.capabilities.joined(separator: ", "))",
             "Catalog id: \(model.id)",
         ]
+        if model.featured == true { lines.append("Featured pick.") }
+        if let note = model.runtimeNote { lines.append("Runtime: \(note)") }
         if let recommendation = model.recommendation {
             lines.append("")
             lines.append("Recommended for this Mac:")
@@ -835,9 +837,12 @@ enum Tools {
                     recommendation.plan.verdict
                 )
             } ?? "too large for this Mac"
-            return "- \(model.name) [\(model.id)] — \(model.parameters)"
+            return "- \(model.name) [\(model.id)]"
+                + (model.featured == true ? " ★ featured" : "")
+                + " — \(model.parameters)"
                 + (model.isMoE ? " MoE" : "")
                 + ", \(model.category)\n  \(fit)"
+                + (model.runtimeNote.map { "\n  \($0)" } ?? "")
         }.joined(separator: "\n")
     }
 }

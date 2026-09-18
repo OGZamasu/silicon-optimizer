@@ -58,6 +58,9 @@ struct ModelDetailSheet: View {
                     Text(entry.author).foregroundStyle(.secondary)
                     RatingStars(rating: entry.rating)
                     Badge(text: entry.license, systemImage: "doc.text")
+                    if entry.isFeatured {
+                        Badge(text: "Featured", systemImage: "star.fill", tint: .orange)
+                    }
                 }
                 .font(.callout)
             }
@@ -84,6 +87,10 @@ struct ModelDetailSheet: View {
             Text(entry.summary)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if entry.needsPrismRuntime {
+                PrismRuntimeNotice(entry: entry, showsWhenReady: true)
+            }
 
             HStack(spacing: 6) {
                 ForEach(entry.capabilities.labels, id: \.0) { label, icon in

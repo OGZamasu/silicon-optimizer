@@ -274,7 +274,7 @@ public struct MemoryPlanner: Sendable {
 
         // Lower quantization, as the last structural lever.
         let lowerOptions = Quantization.byQualityDescending.filter {
-            $0.bitsPerWeight < quantization.bitsPerWeight && !$0.isMLX && $0 != .mxfp4
+            $0.bitsPerWeight < quantization.bitsPerWeight && !$0.isMLX && !$0.isNativeFormat
         }
         if let candidate = lowerOptions.first(where: { lower in
             let ratio = lower.bitsPerWeight / quantization.bitsPerWeight

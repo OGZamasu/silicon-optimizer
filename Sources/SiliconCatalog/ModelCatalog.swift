@@ -10,6 +10,7 @@ import SiliconCore
 public enum ModelCatalog {
 
     public static let all: [ModelEntry] = [
+        bonsai2_27B,
         qwen3Coder30B, qwen3_8_27B, qwen3_8_27B_mlx, qwen3_30B_A3B, qwen3_32B, qwen3_14B,
         qwen3_8B, qwen3_4B, qwen3_4B_mlx, qwen3_1_7B, gptOSS20B, gptOSS120B, gemma3_27B,
         gemma3_12B, mistralSmall24B, llama3_3_70B, phi4_14B, glm4_5Air, qwen2_5VL_7B,
@@ -47,6 +48,52 @@ public enum ModelCatalog {
             )
         }
     }
+
+    // MARK: - Bonsai (PrismML)
+
+    /// Ternary Bonsai 2 27B — Qwen3.8 27B trained by PrismML into {−1, 0, +1} weights,
+    /// keeping 98.2% of its aggregate benchmark score in a 5.9 GB file. The shape is the
+    /// Qwen3.8 27B entry's, because the architecture is unchanged. Sizes are the repo's
+    /// real bytes; the vision tower ships as its own mmproj beside the weights.
+    ///
+    /// Both packings need PrismML's llama.cpp fork — the weights sit in a rotated basis that
+    /// stock llama.cpp has no kernel for, and a stock build refuses the file outright. The
+    /// runtime selector checks for the fork before loading. The MLX pack is left out on
+    /// purpose: it needs a loader that `mlx_lm.server` doesn't have, and would run wrong
+    /// silently rather than refuse.
+    public static let bonsai2_27B = ModelEntry(
+        id: "bonsai-2-27b",
+        name: "Bonsai 2 27B",
+        author: "PrismML",
+        license: "Apache-2.0",
+        summary: """
+            A 27B flagship in 5.9 GB: Qwen3.8 27B in ternary weights, keeping 98% of its \
+            benchmarks with vision, tool calling and a 262K context. Needs PrismML's \
+            llama.cpp fork — set its llama-server path in Settings and the app does the rest.
+            """,
+        category: .general,
+        capabilities: [.reasoning, .coding, .toolCalling, .vision, .multilingual],
+        format: .gguf,
+        shape: qwen3_8_27B.shape,
+        variants: [
+            ModelVariant(
+                quantization: .ptq1_0,
+                repository: "prism-ml/Ternary-Bonsai-2-27B-gguf",
+                filename: "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+                downloadSize: Bytes(5_947_000_000),
+                visionProjector: "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
+            ),
+            ModelVariant(
+                quantization: .pq2_0,
+                repository: "prism-ml/Ternary-Bonsai-2-27B-gguf",
+                filename: "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+                downloadSize: Bytes(7_206_000_000),
+                visionProjector: "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
+            ),
+        ],
+        rating: 5, maxContext: 262_144,
+        isFeatured: true
+    )
 
     // MARK: - Qwen 3 family
 

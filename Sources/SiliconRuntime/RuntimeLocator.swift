@@ -19,6 +19,7 @@ public enum RuntimeLocator {
                 executable: url,
                 version: help.version,
                 hasExpertStreaming: help.hasExpertStreaming,
+                hasPrismTernary: help.hasPrismTernary,
                 source: source
             )
         }
@@ -41,6 +42,22 @@ public enum RuntimeLocator {
             )
         }
         return nil
+    }
+
+    /// PrismML's llama.cpp fork, for the ternary GGUFs stock builds refuse: a custom path
+    /// from Settings first, then the copy the app fetched itself. Either must actually carry
+    /// the ternary types — a stock binary at the custom path is ignored, not trusted.
+    public static func locatePrismServer() -> RuntimeInstallation? {
+        if let custom = customPaths[.llamaCppPrism], isExecutable(custom),
+           supportsPrismTernary(custom) {
+            let help = capabilities(of: custom)
+            return RuntimeInstallation(
+                kind: .llamaCppPrism, executable: custom, version: help.version,
+                hasExpertStreaming: help.hasExpertStreaming, hasPrismTernary: true,
+                source: .userPath
+            )
+        }
+        return PrismRuntime.managedInstallation()
     }
 
     /// Where `mlx_lm.server` plausibly lives.
@@ -170,6 +187,7 @@ public enum RuntimeLocator {
     struct Capabilities {
         var version: String?
         var hasExpertStreaming: Bool
+        var hasPrismTernary: Bool
     }
 
     /// Asks the binary what it can do.
@@ -183,12 +201,41 @@ public enum RuntimeLocator {
         let banner = run(executable, arguments: ["--version"]) ?? ""
         return Capabilities(
             version: parseVersion(from: banner),
-            hasExpertStreaming: help.contains("--moe-n-slots")
+            hasExpertStreaming: help.contains("--moe-n-slots"),
+            hasPrismTernary: supportsPrismTernary(executable)
         )
     }
 
+    /// Whether the build carries PrismML's ternary tensor types, which is what Bonsai 2's
+    /// GGUF needs. Nothing in the fork's version banner says which fork it is — the tell is
+    /// the type name in ggml's type table, read from the executable and from any ggml
+    /// library beside it (release tarballs keep ggml in a dylib) or in a sibling `lib/`
+    /// (Homebrew and `cmake --install` layouts). Stock ggml names `tq1_0`; only the fork
+    /// names `ptq1_0`.
+    static func supportsPrismTernary(_ executable: URL) -> Bool {
+        let needle = Data("ptq1_0".utf8)
+        let directory = executable.deletingLastPathComponent()
+        var candidates = [executable]
+        let libraryFolders = [
+            directory, directory.deletingLastPathComponent().appendingPathComponent("lib"),
+        ]
+        for folder in libraryFolders {
+            guard let contents = try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: nil
+            ) else { continue }
+            candidates += contents.filter {
+                $0.lastPathComponent.hasPrefix("libggml") && $0.pathExtension == "dylib"
+            }
+        }
+        return candidates.contains { file in
+            guard let data = try? Data(contentsOf: file, options: .mappedIfSafe)
+            else { return false }
+            return data.range(of: needle) != nil
+        }
+    }
+
     /// Runs a short-lived probe, merging stdout and stderr.
-    private static func run(_ executable: URL, arguments: [String]) -> String? {
+    static func run(_ executable: URL, arguments: [String]) -> String? {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments

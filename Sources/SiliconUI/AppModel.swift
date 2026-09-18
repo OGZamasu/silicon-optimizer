@@ -3108,6 +3108,48 @@ public final class AppModel {
         AutoConfigurator(profile: profile, calibrations: settings.speedCalibrations)
     }
 
+    /// Whether a llama.cpp build with PrismML's ternary kernels is available — the fork the
+    /// app fetched, or a main build that carries the types. Stock builds, the bundled one
+    /// included, refuse Bonsai's files.
+    public var hasPrismTernaryRuntime: Bool {
+        selector.available[.llamaCppPrism] != nil
+            || selector.available[.llamaCpp]?.hasPrismTernary == true
+    }
+
+    // MARK: - PrismML runtime
+
+    /// Progress of fetching PrismML's llama.cpp fork while it runs; nil when idle.
+    public struct PrismRuntimeInstall: Sendable {
+        public var stage: String
+        public var error: String?
+    }
+
+    public internal(set) var prismRuntimeInstall: PrismRuntimeInstall?
+
+    /// Fetches PrismML's llama.cpp fork into Application Support and re-probes the
+    /// runtimes. Safe to call repeatedly: a fetch in flight is left alone, a failed one
+    /// is retried.
+    public func installPrismRuntime() {
+        if let current = prismRuntimeInstall, current.error == nil { return }
+        prismRuntimeInstall = PrismRuntimeInstall(stage: "Finding the newest PrismML build")
+        Task { [weak self] in
+            do {
+                _ = try await PrismRuntime.install { progress in
+                    Task { @MainActor in
+                        self?.prismRuntimeInstall = PrismRuntimeInstall(stage: progress.stage)
+                    }
+                }
+                guard let self else { return }
+                self.selector = RuntimeSelector.discover()
+                self.prismRuntimeInstall = nil
+            } catch {
+                self?.prismRuntimeInstall = PrismRuntimeInstall(
+                    stage: "Failed", error: error.localizedDescription
+                )
+            }
+        }
+    }
+
     public func plan(
         for entry: ModelEntry, quantization: Quantization, configuration: LoadConfiguration
     ) -> MemoryPlan {
@@ -3227,6 +3269,9 @@ public final class AppModel {
     public func install(_ entry: ModelEntry, quantization: Quantization, saveTo: URL? = nil) {
         let key = "\(entry.id)@\(quantization.rawValue)"
         guard downloads[key] == nil else { return }
+
+        // Weights are useless without the runtime that reads them; fetch both at once.
+        if entry.needsPrismRuntime && !hasPrismTernaryRuntime { installPrismRuntime() }
 
         let download = DownloadTask(id: key, entry: entry, quantization: quantization)
         downloads[key] = download

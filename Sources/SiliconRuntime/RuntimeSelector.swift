@@ -29,6 +29,7 @@ public struct RuntimeSelector: Sendable {
         var found: [RuntimeKind: RuntimeInstallation] = [:]
         if let llama = LlamaCppRuntime.locate() { found[.llamaCpp] = llama }
         if let mlx = MLXRuntime.locate() { found[.mlx] = mlx }
+        if let prism = RuntimeLocator.locatePrismServer() { found[.llamaCppPrism] = prism }
         return RuntimeSelector(available: found)
     }
 
@@ -48,6 +49,21 @@ public struct RuntimeSelector: Sendable {
             )
 
         case .gguf:
+            // PrismML's ternary packings only load on their fork: the copy the app fetched,
+            // or a main build that happens to carry the types (a custom path at the fork).
+            // A stock build refuses the file, so say so here — with the fix — rather than
+            // after the launch fails.
+            if model.quantization.needsPrismRuntime {
+                let capable = available[.llamaCppPrism]
+                    ?? available[.llamaCpp].flatMap { $0.hasPrismTernary ? $0 : nil }
+                guard let capable else { throw RuntimeError.prismTernaryUnsupported }
+                return Selection(
+                    kind: capable.kind, installation: capable,
+                    reason: "PrismML ternary GGUF — this llama.cpp build carries the fork's "
+                        + "ternary kernels."
+                )
+            }
+
             guard let installation = available[.llamaCpp] else {
                 throw RuntimeError.notInstalled(.llamaCpp)
             }
@@ -81,7 +97,7 @@ public struct RuntimeSelector: Sendable {
     /// Instantiates the runtime chosen by `select`.
     public func makeRuntime(for selection: Selection) -> any InferenceRuntime {
         switch selection.kind {
-        case .llamaCpp: LlamaCppRuntime(installation: selection.installation)
+        case .llamaCpp, .llamaCppPrism: LlamaCppRuntime(installation: selection.installation)
         case .mlx: MLXRuntime(installation: selection.installation)
         }
     }

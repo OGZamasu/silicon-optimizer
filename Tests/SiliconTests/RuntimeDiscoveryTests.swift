@@ -45,6 +45,33 @@ struct RuntimeDiscoveryTests {
         #expect(selector.expertStreamingAvailable == advertisesFlag)
     }
 
+    /// Nothing in a build's banner says whether it is PrismML's fork; the fork's extra ggml
+    /// types are the only tell, and their names live in the ggml library beside the binary
+    /// as often as in the binary itself. Stock ggml names `tq1_0`, which must not count.
+    @Test func detectsPrismTernaryFromTheTypeTable() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prism-probe-\(UUID().uuidString)/bin")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory.deletingLastPathComponent()) }
+
+        let server = directory.appendingPathComponent("llama-server")
+        try Data("stock build: q4_K tq1_0 tq2_0 iq2_xxs".utf8).write(to: server)
+        #expect(!RuntimeLocator.supportsPrismTernary(server))
+
+        // The fork keeps ggml in a dylib next to the server in its release tarballs.
+        let ggml = directory.appendingPathComponent("libggml-base.dylib")
+        try Data("types: q4_K tq1_0 pq2_0 ptq1_0".utf8).write(to: ggml)
+        #expect(RuntimeLocator.supportsPrismTernary(server))
+
+        // A `cmake --install` or Homebrew layout keeps it in a sibling lib/ instead.
+        try FileManager.default.removeItem(at: ggml)
+        #expect(!RuntimeLocator.supportsPrismTernary(server))
+        let lib = directory.deletingLastPathComponent().appendingPathComponent("lib")
+        try FileManager.default.createDirectory(at: lib, withIntermediateDirectories: true)
+        try Data("ptq1_0".utf8).write(to: lib.appendingPathComponent("libggml-base.0.dylib"))
+        #expect(RuntimeLocator.supportsPrismTernary(server))
+    }
+
     @Test func discoveryFindsSomethingOrReportsNothing() {
         let selector = RuntimeSelector.discover()
         if llamaServerExists {

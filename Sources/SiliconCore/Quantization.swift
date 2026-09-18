@@ -28,6 +28,13 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
     /// Microscaling FP4. Unlike the Q* formats this is not a post-training compression — some
     /// models are released natively in it, so it is effectively lossless for those weights.
     case mxfp4 = "MXFP4"
+    /// PrismML's ternary packings (Bonsai 2): {−1, 0, +1} weights in a rotated basis with an
+    /// FP16 scale per 128. Like MXFP4 these are release formats — the model was trained into
+    /// them — so the "loss" is the published gap to the model's own FP16 twin, and they are
+    /// never a downgrade for a model that shipped some other way. Both need PrismML's
+    /// llama.cpp fork; a stock build refuses the file.
+    case ptq1_0 = "PTQ1_0"
+    case pq2_0 = "PQ2_0"
     // MLX uses affine quantization with a group size; the extra scale/bias per group puts the
     // effective rate slightly above the nominal bit width.
     case mlx4 = "MLX-4bit"
@@ -56,6 +63,8 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .iq4_NL: 4.50
         case .f16, .bf16: 16.0
         case .mxfp4: 4.25
+        case .ptq1_0: 1.76
+        case .pq2_0: 2.16
         case .mlx4: 4.50
         case .mlx6: 6.50
         case .mlx8: 8.50
@@ -84,6 +93,7 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .iq4_NL: 2.0
         case .f16, .bf16: 0.0
         case .mxfp4: 0.3
+        case .ptq1_0, .pq2_0: 1.8
         case .mlx4: 2.5
         case .mlx6: 0.7
         case .mlx8: 0.1
@@ -96,6 +106,19 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         default: false
         }
     }
+
+    /// PrismML's ternary packings only load on their llama.cpp fork; stock builds refuse the
+    /// file outright.
+    public var needsPrismRuntime: Bool {
+        switch self {
+        case .ptq1_0, .pq2_0: true
+        default: false
+        }
+    }
+
+    /// Formats a model is released in rather than compressed to afterwards. The planner's
+    /// downgrade ladder skips them: no such file exists for a model that shipped as Q4_K_M.
+    public var isNativeFormat: Bool { self == .mxfp4 || needsPrismRuntime }
 
     /// The format most users should land on: the best quality that still fits comfortably.
     public static let recommendedDefault = Quantization.q4_K_M
@@ -131,6 +154,8 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
         case .iq4_NL: "Importance-matrix 4-bit, non-linear codebook. Close to Q4_K_M quality."
         case .f16, .bf16: "Unquantized. Only for small models or very large machines."
         case .mxfp4: "Native 4-bit release format. Lossless for models trained in it."
+        case .ptq1_0: "PrismML's densest ternary packing — a 27B in under 6 GB. Needs the PrismML llama.cpp fork."
+        case .pq2_0: "The same ternary weights in 2-bit slots: a little larger, quicker at prompts. Needs the PrismML llama.cpp fork."
         case .mlx4: "MLX 4-bit. Fast on Apple Silicon."
         case .mlx6: "MLX 6-bit. Good balance."
         case .mlx8: "MLX 8-bit. Near-lossless, larger."
@@ -151,7 +176,7 @@ public enum Quantization: String, CaseIterable, Sendable, Codable, Identifiable 
             of: #"-\d{5}-of-\d{5}$"#, with: "", options: .regularExpression
         )
         guard let range = withoutShard.range(
-            of: #"(UD-)?I?Q\d+(_[A-Z0-9]+)*|BF16|F16|F32|MXFP4"#,
+            of: #"(UD-)?(PT|P)?I?Q\d+(_[A-Z0-9]+)*|BF16|F16|F32|MXFP4"#,
             options: [.regularExpression, .backwards]
         ) else { return nil }
         return String(withoutShard[range])

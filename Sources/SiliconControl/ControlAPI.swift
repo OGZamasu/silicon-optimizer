@@ -106,12 +106,17 @@ public enum ControlAPI {
         public var quantizations: [String]
         /// Whether this Mac can run it, and how.
         public var recommendation: Recommendation?
+        /// Editorial spotlight. Optional on the wire so an older app still decodes.
+        public var featured: Bool?
+        /// Set when the entry needs a runtime the app has to check for (a fork, say) —
+        /// whether it is present, and what to do if not.
+        public var runtimeNote: String?
 
         public init(
             id: String, name: String, author: String, license: String, summary: String,
             category: String, parameters: String, activeParameters: String?, isMoE: Bool,
             capabilities: [String], rating: Int, maxContext: Int, quantizations: [String],
-            recommendation: Recommendation?
+            recommendation: Recommendation?, featured: Bool? = nil, runtimeNote: String? = nil
         ) {
             self.id = id
             self.name = name
@@ -127,6 +132,8 @@ public enum ControlAPI {
             self.maxContext = maxContext
             self.quantizations = quantizations
             self.recommendation = recommendation
+            self.featured = featured
+            self.runtimeNote = runtimeNote
         }
     }
 

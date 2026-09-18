@@ -101,6 +101,9 @@ struct ModelBrowserView: View {
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if pick.entry.needsPrismRuntime {
+                                PrismRuntimeNotice(entry: pick.entry)
+                            }
                         }
                         Spacer(minLength: 0)
                         VStack(spacing: 8) {
@@ -320,7 +323,9 @@ struct ModelBrowserView: View {
             }
             .filter { !showsOnlyRunnable || $0.recommendation != nil }
             .sorted { lhs, rhs in
-                (lhs.recommendation?.score ?? -1) > (rhs.recommendation?.score ?? -1)
+                // Featured entries lead the list; within a tier, best fit first.
+                if lhs.entry.isFeatured != rhs.entry.isFeatured { return lhs.entry.isFeatured }
+                return (lhs.recommendation?.score ?? -1) > (rhs.recommendation?.score ?? -1)
             }
     }
 
@@ -445,6 +450,9 @@ private struct CatalogRow: View {
                                 Badge(text: active, systemImage: "bolt.fill", tint: .indigo)
                             }
                             RatingStars(rating: entry.rating)
+                            if entry.isFeatured {
+                                Badge(text: "Featured", systemImage: "star.fill", tint: .orange)
+                            }
                         }
 
                         Text(entry.summary)
@@ -464,6 +472,10 @@ private struct CatalogRow: View {
                     Spacer(minLength: 0)
 
                     actionColumn
+                }
+
+                if entry.needsPrismRuntime {
+                    PrismRuntimeNotice(entry: entry)
                 }
 
                 if let download = downloadKey.flatMap({ model.downloads[$0] }) {

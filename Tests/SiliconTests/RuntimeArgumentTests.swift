@@ -192,6 +192,42 @@ struct RuntimeSelectionTests {
             try selector.select(model: makeModel(), configuration: LoadConfiguration())
         }
     }
+
+    /// Bonsai 2's ternary packings only load on PrismML's llama.cpp fork. A stock build must
+    /// be refused with the fix named, not handed a file it rejects in its own words.
+    @Test func prismTernaryNeedsTheFork() throws {
+        let bonsai = InstalledModel(
+            id: "bonsai", name: "Bonsai 2 27B", catalogID: "bonsai-2-27b",
+            quantization: .ptq1_0, format: .gguf,
+            primaryFile: URL(fileURLWithPath: "/models/Ternary-Bonsai-2-27B-PTQ1_0.gguf"),
+            allFiles: [URL(fileURLWithPath: "/models/Ternary-Bonsai-2-27B-PTQ1_0.gguf")],
+            projectorFile: nil, sizeOnDisk: .gib(5.5), installedAt: Date(),
+            shape: ModelCatalog.bonsai2_27B.shape, capabilities: []
+        )
+
+        let stock = RuntimeSelector(available: [.llamaCpp: llama])
+        #expect(throws: RuntimeError.self) {
+            try stock.select(model: bonsai, configuration: LoadConfiguration())
+        }
+        do {
+            _ = try stock.select(model: bonsai, configuration: LoadConfiguration())
+        } catch let error as RuntimeError {
+            #expect(error.errorDescription?.contains("PrismML") == true)
+            #expect(error.errorDescription?.contains("Settings") == true)
+        }
+
+        var fork = llama
+        fork.hasPrismTernary = true
+        let selection = try RuntimeSelector(available: [.llamaCpp: fork])
+            .select(model: bonsai, configuration: LoadConfiguration())
+        #expect(selection.kind == .llamaCpp)
+        #expect(selection.reason.contains("ternary"))
+
+        // A stock GGUF on the fork build takes the ordinary path, untouched.
+        let ordinary = try RuntimeSelector(available: [.llamaCpp: fork])
+            .select(model: makeModel(moe: false), configuration: LoadConfiguration())
+        #expect(ordinary.reason.contains("Dense GGUF"))
+    }
 }
 
 @Suite("Failure diagnosis")
@@ -399,6 +435,9 @@ struct QuantizationLabelTests {
         ("model-BF16.gguf", "BF16"),
         ("gpt-oss-20b-MXFP4.gguf", "MXFP4"),
         ("GLM-4.5-Air-Q3_K_M-00001-of-00002.gguf", "Q3_K_M"),
+        // PrismML's tokens carry a prefix; the label must keep it, or PTQ1_0 reads as Q1_0.
+        ("Ternary-Bonsai-2-27B-PTQ1_0.gguf", "PTQ1_0"),
+        ("Ternary-Bonsai-2-27B-PQ2_0.gguf", "PQ2_0"),
     ])
     func showsThePublishersOwnToken(filename: String, expected: String) {
         #expect(Quantization.label(fromFilename: filename) == expected)
@@ -415,6 +454,8 @@ struct QuantizationLabelTests {
     @Test func planningStillResolvesToAKnownCase() {
         #expect(Quantization.inferred(fromFilename: "m-Q2_K_L.gguf") == .q2_K)
         #expect(Quantization.inferred(fromFilename: "m-Q4_K_M.gguf") == .q4_K_M)
+        #expect(Quantization.inferred(fromFilename: "Ternary-Bonsai-2-27B-PTQ1_0.gguf") == .ptq1_0)
+        #expect(Quantization.inferred(fromFilename: "Ternary-Bonsai-2-27B-PQ2_0.gguf") == .pq2_0)
     }
 }
 

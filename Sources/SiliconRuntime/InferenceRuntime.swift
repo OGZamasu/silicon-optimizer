@@ -6,6 +6,8 @@ import SiliconPlanner
 public enum RuntimeKind: String, Sendable, Codable, CaseIterable, Identifiable {
     case llamaCpp = "llama.cpp"
     case mlx = "MLX"
+    /// PrismML's fork of llama.cpp, used only for the ternary GGUFs stock builds refuse.
+    case llamaCppPrism = "llama.cpp (PrismML)"
 
     public var id: String { rawValue }
 
@@ -18,6 +20,9 @@ public enum RuntimeKind: String, Sendable, Codable, CaseIterable, Identifiable {
             "Broadest model support, every GGUF quantization, and on-demand MoE expert paging."
         case .mlx:
             "Apple's own array framework. Often faster on dense models, and lower first-token latency."
+        case .llamaCppPrism:
+            "PrismML's llama.cpp fork: the ternary kernels Bonsai's 1.7-bit weights need. Fetched "
+                + "on demand — a 12 MB download — and used only for those models."
         }
     }
 }
@@ -103,6 +108,9 @@ public struct RuntimeInstallation: Sendable, Equatable {
     public var version: String?
     /// True when the build exposes the MoE expert-paging flags from llama.cpp#23324.
     public var hasExpertStreaming: Bool
+    /// True when the build carries PrismML's ternary tensor types (PTQ1_0/PQ2_0) — their
+    /// llama.cpp fork, which Bonsai 2's GGUF needs. Stock builds refuse the file.
+    public var hasPrismTernary: Bool
     public var source: Source
 
     public enum Source: String, Sendable, Equatable {
@@ -110,16 +118,18 @@ public struct RuntimeInstallation: Sendable, Equatable {
         case homebrew = "Homebrew"
         case userPath = "Custom path"
         case systemPath = "Found on PATH"
+        case managed = "Installed by the app"
     }
 
     public init(
         kind: RuntimeKind, executable: URL, version: String?,
-        hasExpertStreaming: Bool, source: Source
+        hasExpertStreaming: Bool, hasPrismTernary: Bool = false, source: Source
     ) {
         self.kind = kind
         self.executable = executable
         self.version = version
         self.hasExpertStreaming = hasExpertStreaming
+        self.hasPrismTernary = hasPrismTernary
         self.source = source
     }
 }
@@ -150,6 +160,7 @@ public enum RuntimeError: Error, LocalizedError {
     case didNotBecomeReady(log: String)
     case notRunning
     case expertStreamingUnsupported
+    case prismTernaryUnsupported
 
     public var errorDescription: String? {
         switch self {
@@ -163,6 +174,10 @@ public enum RuntimeError: Error, LocalizedError {
             "No model is loaded."
         case .expertStreamingUnsupported:
             "This llama.cpp build does not support expert streaming. Update it in Settings."
+        case .prismTernaryUnsupported:
+            "This model's ternary format needs PrismML's llama.cpp fork, and no build with its "
+                + "kernels is installed. Install it from the model's page or Settings › Runtimes "
+                + "(a 12 MB download), or point Settings › Advanced at a fork build."
         }
     }
 }
