@@ -148,13 +148,18 @@ extension AppModel: ControlHost {
         // Preflight before claiming the download has begun. The transfer runs detached, so a
         // disk-space failure inside it would surface only in the app window while the caller
         // had already been told "downloading now".
+        // An external folder when asked — the same "Download to…" the browser offers, so an
+        // agent can keep a 6 GB file off a nearly full startup volume. Otherwise the volume
+        // that will actually take the download: the configured library folder, which used
+        // to be ignored here, so a full startup disk refused downloads bound for a 3 TB one.
+        let saveTo = request.directory.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let projectorAllowance = entry.capabilities.contains(.vision) ? Bytes.gib(2) : .zero
         try ModelDownloader.checkDiskSpace(
             needed: (entry.variant(for: quantization)?.downloadSize ?? .zero) + projectorAllowance,
-            at: ModelLibrary.defaultRoot
+            at: saveTo ?? settings.resolvedModelLibraryDirectory ?? ModelLibrary.defaultRoot
         )
 
-        install(entry, quantization: quantization)
+        install(entry, quantization: quantization, saveTo: saveTo)
         let size = entry.variant(for: quantization)?.downloadSize.formatted ?? "unknown size"
         return "Started downloading \(entry.name) (\(quantization.rawValue), \(size)). "
             + "Progress is shown in the app."

@@ -118,6 +118,9 @@ enum Tools {
                 """,
             properties: [
                 "model_id": property("string", "Catalog id."),
+                "directory": property("string", "Optional absolute folder to download into — "
+                    + "an external volume, say — instead of the app's library on the startup "
+                    + "volume."),
                 "quantization": property(
                     "string", "Optional. Defaults to the recommendation for this Mac."
                 ),
@@ -392,7 +395,8 @@ enum Tools {
                 throw ToolError.missing("model_id")
             }
             let response: [String: String] = try await client.post("/install", ControlAPI.LoadRequest(
-                modelID: modelID, quantization: arguments["quantization"]?.stringValue
+                modelID: modelID, quantization: arguments["quantization"]?.stringValue,
+                directory: arguments["directory"]?.stringValue
             ))
             return response["status"] ?? "Download started."
 

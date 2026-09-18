@@ -285,15 +285,20 @@ public enum ControlAPI {
         public var quantization: String?
         public var contextLength: Int?
         public var expertSlots: Int?
+        /// Installs only: an absolute folder to download into — an external volume, say —
+        /// instead of the library on the startup volume. Optional on the wire, so an older
+        /// MCP binary in the bundle still talks to a newer app.
+        public var directory: String?
 
         public init(
             modelID: String, quantization: String? = nil,
-            contextLength: Int? = nil, expertSlots: Int? = nil
+            contextLength: Int? = nil, expertSlots: Int? = nil, directory: String? = nil
         ) {
             self.modelID = modelID
             self.quantization = quantization
             self.contextLength = contextLength
             self.expertSlots = expertSlots
+            self.directory = directory
         }
     }
 

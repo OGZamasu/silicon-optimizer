@@ -433,3 +433,27 @@ struct CloudProviderTests {
         )
     }
 }
+
+
+@Suite("Install requests")
+struct InstallRequestTests {
+    /// The MCP binary in the bundle and the app it talks to can differ by a release, so the
+    /// install request must decode with or without the newer `directory` field, and must
+    /// not put an empty one on the wire.
+    @Test func directoryIsOptionalOnTheWire() throws {
+        let legacy = try JSONDecoder().decode(
+            ControlAPI.LoadRequest.self,
+            from: Data(#"{"modelID":"bonsai-2-27b","quantization":"PTQ1_0"}"#.utf8)
+        )
+        #expect(legacy.directory == nil)
+
+        let external = try JSONDecoder().decode(
+            ControlAPI.LoadRequest.self,
+            from: Data(#"{"modelID":"bonsai-2-27b","directory":"/Volumes/T9/Local Models"}"#.utf8)
+        )
+        #expect(external.directory == "/Volumes/T9/Local Models")
+
+        let encoded = try JSONEncoder().encode(ControlAPI.LoadRequest(modelID: "x"))
+        #expect(!String(decoding: encoded, as: UTF8.self).contains("directory"))
+    }
+}
