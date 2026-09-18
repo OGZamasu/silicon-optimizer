@@ -1,12 +1,11 @@
 name: Local video node
 
-# These contract tests use temporary directories and fake renderers. They run on a
-# GitHub-hosted machine; pull requests never execute on the project's private Mac.
+# Same trust policy as ci.yml: push to main and manual dispatch only, on the project's
+# self-hosted Mac. GitHub-hosted runners are not available to this account, and a
+# `pull_request` trigger on a self-hosted runner would let any fork run code on it.
+# The contract tests use temporary directories and fake renderers; python3 is the
+# runner's own interpreter.
 on:
-  pull_request:
-    paths:
-      - 'Resources/video-node/**'
-      - '.github/workflows/video-node.yml'
   push:
     branches: [main]
     paths:
@@ -19,13 +18,15 @@ permissions:
 
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # v4.2.2; pin the immutable commit, not the mutable major-version tag.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          python-version: '3.11'
+          persist-credentials: false
+      - name: Record the interpreter
+        run: python3 --version
       - name: Test the adapter and installer
-        run: python -m unittest discover -s Resources/video-node -p 'test_*.py' -v
+        run: python3 -m unittest discover -s Resources/video-node -p 'test_*.py' -v
       - name: Test the batch and gallery example
-        run: python -m unittest discover -s Resources/video-node/examples -p 'test_*.py' -v
+        run: python3 -m unittest discover -s Resources/video-node/examples -p 'test_*.py' -v
