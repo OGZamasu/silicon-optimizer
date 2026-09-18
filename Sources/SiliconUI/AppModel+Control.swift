@@ -918,7 +918,11 @@ extension AppModel {
 
     /// A swarm answer older than the poll interval is re-fetched before it backs a
     /// claim like "no node offers video".
-    private func refreshSwarmIfStale() async {
+    /// Re-polls the swarm when the last look is more than twenty seconds old. The
+    /// video queue worker relies on this too: a batch can outlive the last poll by
+    /// hours, and a node that rebooted overnight has to be noticed without anyone
+    /// opening the Swarm or Video tab.
+    func refreshSwarmIfStale() async {
         let age = lastSwarmPoll.map { Date().timeIntervalSince($0) } ?? .infinity
         if age > 20 { await refreshSwarm() }
     }

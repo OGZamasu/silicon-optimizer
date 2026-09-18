@@ -188,6 +188,14 @@ extension AppModel {
     }
 
     func processNextQueuedVideo(peers: [PeerStatus]? = nil) async {
+        guard !isGeneratingVideo, videoBatchQueue.next != nil else { return }
+        // The saved peer list is only as fresh as the last poll, and nothing else polls
+        // while the app sits on this tab overnight. Ask again (at most every twenty
+        // seconds) before choosing a node, so a node that went away and came back is
+        // used instead of the queue waiting on a stale "unreachable" or failing on a
+        // stale "reachable". Tests hand in peers directly and skip the network.
+        if peers == nil { await refreshSwarmIfStale() }
+        // Re-read after the await: the user may have removed or paused meanwhile.
         guard !isGeneratingVideo, let queued = videoBatchQueue.next,
               let entry = VideoCatalog.entry(id: queued.request.entryID) else { return }
         let node: PeerStatus?
