@@ -17,14 +17,18 @@ struct VideoDurationTests {
         #expect(ControlAPI.VideoGenerateRequest.clampedSeconds(99) == 15)
     }
 
+    /// silicon-node clamps Wan and LTX-2 distilled to 121 frames (5 s) and the
+    /// LTX-2.3 merge to 241 (10 s) without saying so; only H3 chains longer clips.
     @Test func eachVideoModelPublishesOnlyTheLengthsItCanRun() {
-        #expect(VideoCatalog.wan22.supportedSeconds == [3, 5, 8])
-        #expect(VideoCatalog.ltx2.supportedSeconds == [3, 5, 8, 10, 15])
+        #expect(VideoCatalog.wan22.supportedSeconds == [3, 5])
+        #expect(VideoCatalog.ltx2.supportedSeconds == [3, 5])
+        #expect(VideoCatalog.ltx23Uncensored.supportedSeconds == [3, 5, 8, 10])
         #expect(VideoCatalog.hailuoH3.supportedSeconds == [3, 5, 10, 15])
 
-        #expect(VideoCatalog.ltx2.normalizedSeconds(8) == 8)
+        #expect(VideoCatalog.ltx2.normalizedSeconds(8) == 5)
+        #expect(VideoCatalog.ltx23Uncensored.normalizedSeconds(15) == 10)
         #expect(VideoCatalog.hailuoH3.normalizedSeconds(8) == 10)
-        #expect(VideoCatalog.wan22.normalizedSeconds(15) == 8)
+        #expect(VideoCatalog.wan22.normalizedSeconds(15) == 5)
     }
 
     @Test @MainActor func videoRoutingRequiresTheExactReadyEnabledCapability() {

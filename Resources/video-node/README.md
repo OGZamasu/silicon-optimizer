@@ -11,7 +11,7 @@ Supported engines:
 | Silicon model ID | Runtime | Durations exposed by the app |
 | --- | --- | --- |
 | `hailuo-h3` | MiniMax Hailuo H3 through an existing local Phosphene panel | 3, 5, 10, 15 seconds |
-| `ltx2-distilled` | Standalone LTX-2.3 distilled Q4 via `ltx-2-mlx` | 3, 5, 8, 10, 15 seconds |
+| `ltx2-distilled` | Standalone LTX-2.3 distilled Q4 via `ltx-2-mlx` | 3, 5 seconds (the adapter itself accepts 1–15 s, but the app's catalog publishes one list per model id, shared with the CUDA silicon-node, which caps this id at 5 s) |
 
 H3 10/15-second generation chains two/three five-second windows. The node
 checks the panel's live `h3.available`, `capable`, `chain`, `first_frame`, and

@@ -32,7 +32,11 @@ extension AppModel {
         let request = ControlAPI.VideoQueueRequest(
             prompts: VideoBatchQueue.parsePrompts(submittedPrompts), title: videoBatchTitle,
             variations: videoBatchVariations, modelID: selectedVideoModel,
-            seconds: videoSeconds, resolution: videoResolution, seed: UInt32(seedText),
+            // The picker only offers supported lengths, but a stale selection must not
+            // turn into a refused batch; snap it to the model's nearest length.
+            seconds: VideoCatalog.entry(id: selectedVideoModel)?.normalizedSeconds(videoSeconds)
+                ?? videoSeconds,
+            resolution: videoResolution, seed: UInt32(seedText),
             h3Turbo: selectedVideoModel == "hailuo-h3" ? videoSampling.h3Turbo : nil,
             h3Steps: composerH3Steps
         )

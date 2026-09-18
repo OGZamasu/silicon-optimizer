@@ -101,7 +101,8 @@ public enum VideoCatalog {
         outputs: "MP4, 720p 24 fps",
         rating: 5,
         supportsImageInput: true,
-        supportedSeconds: [3, 5, 8],
+        // silicon-node caps Wan at 121 frames (5 s at 24 fps) and clamps silently.
+        supportedSeconds: [3, 5],
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
     )
@@ -123,7 +124,10 @@ public enum VideoCatalog {
         outputs: "MP4, up to 1080p",
         rating: 4,
         supportsImageInput: true,
-        supportedSeconds: [3, 5, 8, 10, 15],
+        // The same 121-frame cap as Wan on silicon-node. The loopback MLX adapter would
+        // take up to 15 s, but there is no per-node way to say so yet; the catalog
+        // publishes what every node that advertises this id can deliver.
+        supportedSeconds: [3, 5],
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
     )
@@ -148,7 +152,8 @@ public enum VideoCatalog {
         outputs: "MP4 with audio, up to 720p 24 fps",
         rating: 4,
         supportsImageInput: true,
-        supportedSeconds: [3, 5, 8, 10, 15],
+        // silicon-node lets the merge run to 241 frames (10 s); longer is clamped.
+        supportedSeconds: [3, 5, 8, 10],
         setupHint: "Runs on a swarm node with an NVIDIA card, on top of the LTX-2 distilled "
             + "install it borrows the text encoder and decoders from. Install it from the "
             + "node's Store page; it is not in the recommended set."
