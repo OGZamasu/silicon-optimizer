@@ -51,7 +51,23 @@ struct ContractExportTests {
         #expect(Self.routes.allSatisfy { !$0.summary.isEmpty })
         // Every route says what it answers when it says no, so a generated client has the
         // failure shapes as well as the happy one.
-        #expect(Self.routes.allSatisfy { !$0.errors.isEmpty })
+        // Every route says how it refuses — except the one that cannot. /health exists to
+        // separate "the app is not running" from "bad token", so it has no failure mode.
+        #expect(Self.routes.allSatisfy { $0.path == "/health" || !$0.errors.isEmpty })
+        #expect(Self.routes.first { $0.path == "/health" }?.errors.isEmpty == true)
+        // A route a chat-only device may call must not advertise the refusal it would get
+        // if it could not, and one it may not must.
+        let chatRoutes = Set(
+            Self.routes.filter { $0.scopes.contains("chat") }.map { "\($0.method) \($0.path)" }
+        )
+        #expect(chatRoutes.contains("GET /recommend"))
+        #expect(chatRoutes.contains("GET /v1/node"))
+        #expect(chatRoutes.contains("POST /plan"))
+        #expect(!chatRoutes.contains("POST /load"))
+        #expect(!chatRoutes.contains("POST /benchmark"))
+        #expect(Self.routes.allSatisfy { route in
+            route.auth != "device" || route.scopes.contains("chat") == (route.errors[403] == nil)
+        })
         // File names carry no spaces and no braces, so a generator can use them as symbols.
         #expect(Self.routes.allSatisfy {
             !$0.fileName.contains(" ") && !$0.fileName.contains("{")
@@ -122,6 +138,8 @@ struct ContractExportTests {
         /// What this route says when it says no, keyed by status. Every entry is an
         /// `ErrorResponse`, which is the only failure envelope this server has.
         var errors: [Int: String] = [:]
+        /// The device scopes that may call it. Filled in from the server's own gate.
+        var scopes: [String] = ["full"]
 
         var isStream: Bool { !events.isEmpty }
 
@@ -138,13 +156,10 @@ struct ContractExportTests {
 
         /// The refusals every authenticated route shares, so each entry below only has to
         /// name what is particular to it.
-        static func commonErrors(auth: String) -> [Int: String] {
-            guard auth != "none" else {
-                return [
-                    403: BuddyRegistry.wrongCode,
-                    429: "Too many pairing attempts. Wait a minute.",
-                ]
-            }
+        static func commonErrors(auth: String, openToChatOnly: Bool) -> [Int: String] {
+            // An unauthenticated route can only fail in ways particular to it, so it says
+            // so itself rather than inheriting refusals it has no token to refuse.
+            guard auth != "none" else { return [:] }
             var shared = [
                 401: "Invalid or missing control token.",
                 411: "This server needs a Content-Length. Chunked bodies are not read.",
@@ -152,7 +167,7 @@ struct ContractExportTests {
             ]
             if auth == "control" {
                 shared[403] = "Only this Mac can list paired devices."
-            } else {
+            } else if !openToChatOnly {
                 shared[403] = "This device is paired for chat only. Pair it again with full "
                     + "control from Settings → Silicon Buddy on the Mac."
             }
@@ -176,6 +191,7 @@ struct ContractExportTests {
         func fixture() throws -> Data {
             var body: [String: Any] = [
                 "method": method, "path": path, "auth": auth, "summary": summary,
+                "scopes": scopes,
             ]
             body["request"] = try request.map { try json($0) } ?? NSNull()
             body["response"] = try response.map { try json($0) } ?? NSNull()
@@ -229,9 +245,16 @@ struct ContractExportTests {
             "Fixture file names replace `/`, `{` and `}` with `_`, so",
             "`POST /conversations/{id}/messages` is `POST__conversations__id__messages.json`.",
             "",
-            "`full` and `chat` are the two device scopes. A `chat` device may use the",
-            "read-only routes, `/chat`, `/chat/stream`, `/decide`, `/v1/systemone` and every",
-            "`/conversations` route; everything else answers 403.",
+            "Each fixture lists the device `scopes` that may call it; an empty list means the",
+            "route needs no token at all.",
+            "",
+            "`full` and `chat` are the two device scopes. A `chat` device may use the routes",
+            "that only read or advise — `/health`, `/status`, `/profile`, `/metrics`,",
+            "`/catalog`, `/installed`, `/recommend`, `/plan`, `/swarm`, `/v1/node`,",
+            "`/image/models`, `/mesh/models`, `/video/models`, `/video/queue`, `/events` —",
+            "plus `/chat`, `/chat/stream`, `/decide`, `/v1/systemone` and every",
+            "`/conversations` route. Everything else answers 403: installing, loading,",
+            "unloading, benchmarking, rendering, queue control and the device list.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -247,9 +270,18 @@ struct ContractExportTests {
 
     /// Each entry below names only the refusals particular to it; the ones every route of
     /// its auth class shares are folded in here, so they cannot drift apart.
+    ///
+    /// Which scope may call a route is asked of the server's own gate rather than restated,
+    /// so the fixtures cannot claim a 403 that cannot happen — or miss one that can.
     static let routes: [Route] = (buddyRoutes + coreRoutes + mediaRoutes).map { route in
         var decorated = route
-        decorated.errors = Route.commonErrors(auth: route.auth)
+        let openToChat = ControlServer.Caller.device(id: "fixture", scope: .chat)
+            .mayReach(method: route.method, path: route.path)
+        // Empty means no token at all, which is a different thing from "full only" and
+        // would be a lie to tell about /health.
+        decorated.scopes = route.auth == "none"
+            ? [] : (route.auth == "device" && openToChat ? ["full", "chat"] : ["full"])
+        decorated.errors = Route.commonErrors(auth: route.auth, openToChatOnly: openToChat)
             .merging(route.errors) { _, particular in particular }
         return decorated
     }
@@ -267,7 +299,12 @@ struct ContractExportTests {
                 deviceID: "7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C",
                 token: "V0hBVC1BLVRPS0VOLVdPVUxELUxPT0stTElLRS1IRVJF",
                 macName: "Mac Studio", port: 8788, scope: "full"
-            ))
+            )),
+            errors: [
+                400: "The request does not name a device.",
+                403: BuddyRegistry.wrongCode,
+                429: "Too many pairing attempts. Wait a minute.",
+            ]
         ),
         Route(
             method: "GET", path: "/buddy/devices", auth: "control",

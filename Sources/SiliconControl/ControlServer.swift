@@ -431,10 +431,15 @@ public actor ControlServer {
         /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
         /// nothing and costs the machine minutes — so the set is written out, and a route
         /// added later is closed to chat-only devices until someone decides otherwise.
+        ///
+        /// `/recommend`, `/v1/node` and `/plan` are in it for the opposite reason: they read
+        /// and advise and spend nothing, and a phone that cannot ask "would this fit here?"
+        /// is blinkered for no gain.
         static let chatOnlyRoutes: Set<String> = [
             "GET /health", "GET /status", "GET /profile", "GET /metrics", "GET /catalog",
             "GET /installed", "GET /swarm", "GET /video/models", "GET /image/models",
-            "GET /mesh/models", "GET /video/queue", "GET /events",
+            "GET /mesh/models", "GET /video/queue", "GET /events", "GET /recommend",
+            "GET /v1/node", "POST /plan",
             "POST /chat", "POST /chat/stream", "POST /decide", "POST /v1/systemone",
         ]
     }

@@ -131,9 +131,20 @@ struct BuddyControlTests {
                 ("GET", "/status"), ("GET", "/installed"), ("GET", "/catalog"),
                 ("GET", "/swarm"), ("GET", "/video/models"), ("GET", "/image/models"),
                 ("GET", "/mesh/models"), ("GET", "/video/queue"), ("GET", "/conversations"),
+                ("GET", "/v1/node"),
             ] {
                 let code = try await fixture.phone.status(allowed.0, allowed.1, token: token)
                 #expect(code == 200, "\(allowed.0) \(allowed.1) should be open to chat-only")
+            }
+
+            // Advisory routes: whatever this fixture's host answers, the scope gate is not
+            // what stopped them. Reading and advising spends nothing.
+            for advisory in [("GET", "/recommend"), ("POST", "/plan")] {
+                let code = try await fixture.phone.status(
+                    advisory.0, advisory.1, token: token,
+                    body: advisory.0 == "POST" ? #"{"modelID":"x"}"# : nil
+                )
+                #expect(code != 403, "\(advisory.0) \(advisory.1) should be open to chat-only")
             }
 
             for refused in [
@@ -141,7 +152,7 @@ struct BuddyControlTests {
                 ("POST", "/benchmark"), ("POST", "/video/generate"),
                 ("POST", "/image/generate"), ("POST", "/mesh/generate"),
                 ("POST", "/video/queue"), ("POST", "/video/queue/control"),
-                ("GET", "/buddy/devices"), ("POST", "/plan"), ("GET", "/recommend"),
+                ("GET", "/buddy/devices"),
             ] {
                 let code = try await fixture.phone.status(
                     refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
@@ -930,8 +941,16 @@ actor BuddyTestHost: ControlHost {
     func swarm() async -> ControlAPI.SwarmView { .init(peers: [], polledSecondsAgo: nil) }
     func profile() async -> ControlAPI.Profile { fatalError("Unexpected test route") }
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
+    /// Answered rather than trapped: `/v1/node` is one of the routes a chat-only device
+    /// may reach, so the scope test actually calls it.
     func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement {
-        fatalError("Unexpected test route")
+        .init(
+            name: "Fixture", platform: "macos-apple-silicon",
+            profile: .init(chip: "Apple M3 Max", memoryGB: 38.7,
+                           bandwidthGBps: 300, gpuCores: 40),
+            capabilities: [],
+            metrics: .init(queueDepth: 0, headroomGB: 8.9, gpuUtilPct: 0, memoryUsedPct: 0)
+        )
     }
     func plan(_ request: ControlAPI.PlanRequest) async throws -> ControlAPI.Plan {
         throw BuddyTestError.unexpectedRoute
