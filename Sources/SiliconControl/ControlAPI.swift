@@ -853,4 +853,26 @@ public protocol ControlHost: AnyObject, Sendable {
         _ request: ControlAPI.VideoGenerateRequest
     ) async throws -> ControlAPI.VideoResponse
     func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement
+
+    // MARK: Silicon Buddy
+
+    /// The same request as `chat`, delivered token by token. Cancelling the consumer must
+    /// stop the generation: a phone that walks out of range should not leave a model
+    /// talking to itself for another two minutes.
+    func chatStream(
+        _ request: ControlAPI.ChatRequest
+    ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error>
+    /// Named `conversationList` rather than `conversations` because the Mac's host already
+    /// has a stored property by that name.
+    func conversationList() async -> [ControlAPI.ConversationSummary]
+    func createConversation(title: String?) async -> ControlAPI.ConversationSummary
+    func conversation(id: String) async throws -> ControlAPI.ConversationDetail
+    /// Appends the user's message, then streams the answer — persisting both, so the
+    /// exchange appears in the Mac's own chat window as it happens.
+    func replyInConversation(
+        id: String, to message: ControlAPI.NewMessageRequest
+    ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error>
+    /// Called when an `/events` stream opens, so a host only pays for watching its own
+    /// state while somebody is reading it.
+    func beginEventUpdates() async
 }

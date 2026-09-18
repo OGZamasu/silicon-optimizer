@@ -210,4 +210,26 @@ private actor WaitingVideoHost: ControlHost {
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse { throw TestControlError.unexpectedRoute }
     func videoModels() async -> [ControlAPI.VideoModel] { [] }
     func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement { fatalError("Unexpected test route") }
+
+    // Silicon Buddy. This fixture is about video slots, so the streaming and conversation
+    // routes only need to exist — `BuddyControlTests` has the double that exercises them.
+    func chatStream(
+        _ request: ControlAPI.ChatRequest
+    ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
+        throw TestControlError.unexpectedRoute
+    }
+    func conversationList() async -> [ControlAPI.ConversationSummary] { [] }
+    func createConversation(title: String?) async -> ControlAPI.ConversationSummary {
+        .init(id: UUID().uuidString, title: title ?? "Untitled",
+              updatedAt: ControlAPI.timestamp(Date()), messageCount: 0)
+    }
+    func conversation(id: String) async throws -> ControlAPI.ConversationDetail {
+        throw BuddyHostError.noSuchConversation(id)
+    }
+    func replyInConversation(
+        id: String, to message: ControlAPI.NewMessageRequest
+    ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
+        throw TestControlError.unexpectedRoute
+    }
+    func beginEventUpdates() async {}
 }
