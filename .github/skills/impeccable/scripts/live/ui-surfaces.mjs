@@ -3,12 +3,12 @@
  * chrome Live mounts on the user's page, with the element ids that make it up.
  *
  * Single source of truth, consumed by:
- *   - skill/scripts/live/browser-script-parts.mjs — serializes this into
- *     window.__IMPECCABLE_LIVE_UI_SURFACES__ in the /live.js prelude.
- *   - skill/scripts/live-browser.js — publishes it on
+ *   - skill/scripts/live/browser-script-parts.mjs — serializes this into the
+ *     closure-scoped /live.js bootstrap.
+ *   - skill/scripts/live-browser.js — reads that bootstrap and publishes it on
  *     window.__IMPECCABLE_LIVE_CHROME_CORE__ for adapters and E2E probes. That
  *     file is served raw and injected as a classic <script>, so it cannot
- *     import this module at runtime; it reads the injected global instead, the
+ *     import this module at runtime; it reads the scoped bootstrap instead, the
  *     same path live/vocabulary.mjs already takes for the command palette.
  *   - the private impeccable-site repo — site/components/LiveUiGallery.astro
  *     and tests/live-ui-lab.test.mjs import LIVE_UI_SURFACES at build time and

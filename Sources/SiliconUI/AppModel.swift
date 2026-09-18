@@ -89,6 +89,11 @@ public final class AppModel {
     /// The loopback server that lists every model this app can reach and routes external
     /// harness requests to whichever machine serves the one they named.
     var gatewayServer: GatewayServer?
+    /// Full per-launch model/cloud authority, passed only to managed sidecars and the
+    /// owner-readable discovery file.
+    let gatewayToken = UUID().uuidString
+    /// Browser-visible capability limited by GatewayServer to media and UI helper routes.
+    let gatewayUIToken = UUID().uuidString
     /// The gateway's request ledger — what the Fleet tab shows.
     var gatewayLedger: GatewayLedger?
 
@@ -105,9 +110,10 @@ public final class AppModel {
     /// Start, never by auto-starting the model (picking a size is a preference, not a
     /// launch command).
     var pendingNodeContext: [String: Int] = [:]
-    /// Peers that could not mint the last approved member their own token, so the
-    /// shared credential went out instead — named in the invite sheet.
-    var pairingLegacyShared: [String] = []
+    /// Set before any credentials are delivered when one or more nodes cannot mint the
+    /// joiner's individual key. The owner can retry or deny; the admin token is never used
+    /// as a compatibility fallback.
+    var pairingApprovalError: String?
     /// Peers already asked for this Mac's own client token this run.
     var clientTokenAttempted: Set<String> = []
     /// Resolved once per session from the persisted choice, like the harness ports.
@@ -1133,7 +1139,10 @@ public final class AppModel {
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
         let started = Date()
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        let peerPolicy = RemoteURLPolicy.peerHost(base)
+        guard let (data, response) = try? await RemoteHTTP.data(
+                for: request, policy: peerPolicy, credentialOrigin: base
+              ),
               let http = response as? HTTPURLResponse else {
             status.error = "Unreachable."
             return status
@@ -1153,12 +1162,16 @@ public final class AppModel {
         // which is what the menu bar's remote controls and the harness's model picker
         // both run on.
         if status.capabilities.contains(where: { $0.kind == "llm" }) {
-            if let llmJSON = await fetchJSON(base.appendingPathComponent("v1/llm"), token: token) {
+            if let llmJSON = await fetchJSON(
+                base.appendingPathComponent("v1/llm"), token: token,
+                policy: peerPolicy, credentialOrigin: base
+            ) {
                 var llm = parseLLM(llmJSON)
                 // Proposed but not yet shipped on every node; a 404 just means the one
                 // loaded model is the whole list.
                 if let listJSON = await fetchJSON(
-                    base.appendingPathComponent("v1/llm/models"), token: token
+                    base.appendingPathComponent("v1/llm/models"), token: token,
+                    policy: peerPolicy, credentialOrigin: base
                 ) {
                     llm.availableModels = parseModelList(listJSON)
                 }
@@ -1167,9 +1180,10 @@ public final class AppModel {
                 // have disagreed in the wild ("qwen3.8.27b" vs "qwen3.8-27b"), and every
                 // chat request 404s until the engine's spelling wins.
                 if llm.running, let baseString = llm.openAIBase,
-                   let engineBase = URL(string: baseString),
+                   let engineBase = peerBackendURL(baseString, relativeTo: base),
                    let served = await fetchJSON(
-                       engineBase.appendingPathComponent("models"), token: token
+                       engineBase.appendingPathComponent("models"), token: token,
+                       policy: peerPolicy, credentialOrigin: base
                    ) {
                     let ids = parseModelList(served)
                     if let match = ids.first(where: { $0 == llm.model }) ?? ids.first {
@@ -1182,15 +1196,24 @@ public final class AppModel {
         return status
     }
 
-    private nonisolated static func fetchJSON(_ url: URL, token: String?) async -> [String: Any]? {
+    private nonisolated static func fetchJSON(
+        _ url: URL, token: String?, policy: RemoteURLPolicy, credentialOrigin: URL
+    ) async -> [String: Any]? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await RemoteHTTP.data(
+                for: request, policy: policy, credentialOrigin: credentialOrigin
+              ),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode)
         else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// A peer can publish an engine on another port, but not another machine or scheme.
+    nonisolated static func peerBackendURL(_ advertised: String, relativeTo peerBase: URL) -> URL? {
+        RemoteURLPolicy.peerHost(peerBase).resolve(advertised, relativeTo: peerBase)
     }
 
     nonisolated static func parseLLM(_ json: [String: Any]) -> PeerLLM {
@@ -1200,7 +1223,9 @@ public final class AppModel {
             healthy: json["healthy"] as? Bool ?? false,
             model: json["model"] as? String,
             uptimeSeconds: number(json["uptime_s"]),
-            contextLength: number(json["context_length"]).map { Int($0) }
+            contextLength: number(json["context_length"]).flatMap {
+                $0.rounded() == $0 && (1...1_000_000).contains($0) ? Int($0) : nil
+            }
         )
         llm.engine = json["engine"] as? String
         if let api = json["api"] as? [String: Any], let raw = api["openai"] as? String {
@@ -1273,11 +1298,11 @@ public final class AppModel {
     /// without it answers 404, which is translated to that exact explanation.
     public func cancelPeerJob(_ peer: PeerStatus, jobID: String) async {
         guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
-              let encoded = jobID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+              let url = RemotePathIdentifier.appending(
+                jobID, to: base.appendingPathComponent("v1/queue")
+              )
         else { return }
-        var request = URLRequest(
-            url: base.appendingPathComponent("v1/queue").appendingPathComponent(encoded)
-        )
+        var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
         if let token = swarmConfig?.bearer(forPeer: peer.name) {
@@ -1305,12 +1330,11 @@ public final class AppModel {
         settings: [String: String]? = nil
     ) async {
         guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
-              let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+              let url = RemotePathIdentifier.appending(
+                id, to: base.appendingPathComponent("v1/capabilities")
+              )
         else { return }
-        var request = URLRequest(
-            url: base.appendingPathComponent("v1/capabilities")
-                .appendingPathComponent(encoded)
-        )
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1457,11 +1481,16 @@ public final class AppModel {
     /// and a field that parses on one shape and not another is a silent blank on the
     /// dashboard. One door for all of them.
     private nonisolated static func number(_ value: Any?) -> Double? {
+        let result: Double?
         switch value {
-        case let double as Double: return double
-        case let int as Int: return Double(int)
-        default: return nil
+        case let double as Double: result = double
+        case let int as Int: result = Double(int)
+        default: result = nil
         }
+        guard let result, result.isFinite, abs(result) <= 1_000_000_000_000 else {
+            return nil
+        }
+        return result
     }
 
     // MARK: - In-app repairs

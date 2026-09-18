@@ -1,9 +1,26 @@
 import Foundation
 import Testing
 @testable import SiliconControl
+@testable import SiliconUI
 
 @Suite("Swarm pairing pieces")
 struct SwarmPairingPieceTests {
+
+    @Test("client-token responses distinguish legacy absence from operational failure")
+    func clientTokenResponseClassification() {
+        let token = Data(#"{"token":" per-member "}"#.utf8)
+        #expect(AppModel.classifyClientTokenResponse(status: 201, body: token)
+            == .minted("per-member"))
+        #expect(AppModel.classifyClientTokenResponse(status: 404, body: Data())
+            == .unsupported)
+        #expect(AppModel.classifyClientTokenResponse(status: 401, body: token) == .failed)
+        #expect(AppModel.classifyClientTokenResponse(status: 500, body: token) == .failed)
+        #expect(AppModel.classifyClientTokenResponse(status: 200, body: Data("{}".utf8))
+            == .failed)
+        #expect(AppModel.classifyClientTokenResponse(
+            status: 200, body: Data(#"{"token":""}"#.utf8)
+        ) == .failed)
+    }
 
     @Test("codes are six digits, spaced")
     func codeShape() {
@@ -13,6 +30,15 @@ struct SwarmPairingPieceTests {
             let halves = code.split(separator: " ")
             #expect(halves.count == 2)
             #expect(halves.allSatisfy { $0.count == 3 && $0.allSatisfy(\.isNumber) })
+        }
+    }
+
+    @Test("client names stay friendly single path components")
+    func clientNameBoundary() {
+        #expect(SwarmPairing.normalizedClientName("  Studio Mac  ") == "Studio Mac")
+        #expect(SwarmPairing.normalizedClientName(String(repeating: "a", count: 80))?.count == 64)
+        for invalid in ["", "   ", ".", "..", "../admin", "a/b", "a\\b", "%2e%2e", "x\ny"] {
+            #expect(SwarmPairing.normalizedClientName(invalid) == nil)
         }
     }
 
@@ -31,7 +57,8 @@ struct SwarmPairingPieceTests {
     @Test("tailscale status JSON becomes probe targets")
     func statusParsing() throws {
         let status = """
-        {"Peer": {
+        {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.100.10.5"]},
+         "Peer": {
           "key1": {"HostName": "windows-node", "Online": true,
                    "TailscaleIPs": ["100.118.191.121", "fd7a::1"]},
           "key2": {"HostName": "sams-mac", "Online": false,
@@ -40,11 +67,18 @@ struct SwarmPairingPieceTests {
         }}
         """
         let peers = SwarmPairing.peers(inStatusJSON: Data(status.utf8))
+        #expect(SwarmPairing.localIPv4(inStatusJSON: Data(status.utf8)) == "100.100.10.5")
         #expect(peers.count == 2)
         #expect(peers[0].hostName == "sams-mac")
         #expect(peers[0].online == false)
         #expect(peers[1].ip == "100.118.191.121")
         #expect(peers[1].online == true)
+
+        let stopped = Data(status.replacingOccurrences(
+            of: "\"Running\"", with: "\"Stopped\""
+        ).utf8)
+        #expect(SwarmPairing.localIPv4(inStatusJSON: stopped) == nil)
+        #expect(SwarmPairing.peers(inStatusJSON: stopped).isEmpty)
     }
 
     @Test("a joiner adopts the swarm's token and unions peers")

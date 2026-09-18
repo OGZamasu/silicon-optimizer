@@ -10,6 +10,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './lib/is-generated.mjs';
+import { matchesTemplateExtension, resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
+import {
+  atomicWriteFileInside,
+  readFileInside,
+  resolvePathInside,
+} from './lib/security-boundaries.mjs';
 import {
   buildSearchQueries,
   findElement,
@@ -166,7 +172,27 @@ Output (JSON):
       }));
       process.exit(1);
     }
-  } else if (isGeneratedFile(targetFile, genOpts)) {
+  }
+
+  try {
+    targetFile = resolvePathInside(process.cwd(), targetFile, { kind: 'file' });
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: 'file_outside_project_or_unsafe',
+      fallback: 'agent-driven',
+      message: error.message,
+    }));
+    process.exit(1);
+  }
+  if (!matchesTemplateExtension(targetFile, resolveLiveTemplateExtensions(process.cwd()))) {
+    console.error(JSON.stringify({
+      error: 'unsupported_source_file',
+      fallback: 'agent-driven',
+      file: path.relative(process.cwd(), targetFile),
+    }));
+    process.exit(1);
+  }
+  if (filePath && isGeneratedFile(targetFile, genOpts)) {
     console.error(JSON.stringify({
       error: 'file_is_generated',
       fallback: 'agent-driven',
@@ -175,7 +201,7 @@ Output (JSON):
     process.exit(1);
   }
 
-  const content = fs.readFileSync(targetFile, 'utf-8');
+  const content = readFileInside(process.cwd(), targetFile, { encoding: 'utf8' });
   const lines = content.split('\n');
   const resolved = resolveElementMatch({ lines, queries, tag, text });
 
@@ -263,7 +289,10 @@ Output (JSON):
       ...wrapperLines,
       ...lines.slice(spliceIndex),
     ];
-    fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+    atomicWriteFileInside(process.cwd(), targetFile, newLines.join('\n'), {
+      encoding: 'utf8',
+      allowCreate: false,
+    });
   }
 
   const insertLine = spliceIndex + 3;

@@ -28,6 +28,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './lib/impeccable-paths.mjs';
 import {
+  atomicWriteFileInside,
+  readFileInside,
+  resolvePathInside,
+} from './lib/security-boundaries.mjs';
+import {
   describeInjectArtifacts,
   frameworkIgnorePatterns,
   resolveFramework,
@@ -178,13 +183,17 @@ Output (JSON):
       return;
     }
     const results = resolvedFiles.map((relFile) => {
-      const absFile = path.resolve(cwd, relFile);
-      if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
-      const content = fs.readFileSync(absFile, 'utf-8');
+      let absFile;
+      try { absFile = resolvePathInside(cwd, relFile, { kind: 'file' }); }
+      catch (error) {
+        if (error?.code === 'ENOENT') return { file: relFile, error: 'file_not_found' };
+        throw error;
+      }
+      const content = readFileInside(cwd, absFile, { encoding: 'utf8' });
       const detagged = removeTag(content, config.commentSyntax);
       const updated = revertCspMeta(detagged);
       if (updated === content) return { file: relFile, removed: false, note: 'no tag present' };
-      fs.writeFileSync(absFile, updated, 'utf-8');
+      atomicWriteFileInside(cwd, absFile, updated, { encoding: 'utf8', allowCreate: false });
       return {
         file: relFile,
         removed: detagged !== content,
@@ -259,9 +268,13 @@ Output (JSON):
   }
 
   const results = resolvedFiles.map((relFile) => {
-    const absFile = path.resolve(cwd, relFile);
-    if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
-    const content = fs.readFileSync(absFile, 'utf-8');
+    let absFile;
+    try { absFile = resolvePathInside(cwd, relFile, { kind: 'file' }); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return { file: relFile, error: 'file_not_found' };
+      throw error;
+    }
+    const content = readFileInside(cwd, absFile, { encoding: 'utf8' });
     const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax));
     // Per-file, not per-project: a Vite app can hold an .astro partial, and a
     // framework project's entry template is often plain HTML.
@@ -271,7 +284,7 @@ Output (JSON):
       return { file: relFile, error: 'insertion_point_not_found', anchor: config.insertBefore || config.insertAfter };
     }
     const updated = patchCspMeta(withTag, port);
-    fs.writeFileSync(absFile, updated, 'utf-8');
+    atomicWriteFileInside(cwd, absFile, updated, { encoding: 'utf8', allowCreate: false });
     return {
       file: relFile,
       inserted: true,
@@ -355,10 +368,9 @@ function escapeRegExp(value) {
 
 /**
  * Expand config.files (which may contain glob patterns) into a literal list
- * of existing file paths relative to rootDir. Literal entries pass through;
- * glob patterns are expanded via fs.globSync. HARD_EXCLUDES and config.exclude
- * are applied as filters. Duplicates are removed. Order is preserved by
- * first appearance.
+ * of canonical regular files relative to rootDir. Both literal and glob
+ * entries are confined to the project and pass through the same exclusions.
+ * Duplicates are removed. Order is preserved by first appearance.
  */
 export function resolveFiles(rootDir, config) {
   const patterns = config.files;
@@ -373,13 +385,17 @@ export function resolveFiles(rootDir, config) {
   const out = [];
   for (const pat of patterns) {
     if (!isGlob(pat)) {
-      // Literal path — include even if it doesn't exist yet; the caller
-      // reports file_not_found per-entry. Exclude list doesn't apply to
-      // explicit literal entries (user named it on purpose).
-      if (!seen.has(pat)) {
-        seen.add(pat);
-        out.push(pat);
+      let absolute;
+      try {
+        absolute = resolvePathInside(rootDir, pat, { kind: 'file', allowAbsolute: false });
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+        absolute = resolvePathInside(rootDir, pat, { mustExist: false, allowAbsolute: false });
       }
+      const rel = path.relative(path.resolve(rootDir), absolute).split(path.sep).join('/');
+      if (isExcluded(rel) || seen.has(rel)) continue;
+      seen.add(rel);
+      out.push(rel);
       continue;
     }
     let matches;
@@ -390,8 +406,9 @@ export function resolveFiles(rootDir, config) {
     }
     for (const ent of matches) {
       if (!ent.isFile || !ent.isFile()) continue;
-      const abs = path.join(ent.parentPath || ent.path || rootDir, ent.name);
-      const rel = path.relative(rootDir, abs).split(path.sep).join('/');
+      const candidate = path.join(ent.parentPath || ent.path || rootDir, ent.name);
+      const abs = resolvePathInside(rootDir, candidate, { kind: 'file' });
+      const rel = path.relative(path.resolve(rootDir), abs).split(path.sep).join('/');
       if (isExcluded(rel)) continue;
       if (seen.has(rel)) continue;
       seen.add(rel);

@@ -65,10 +65,16 @@ struct SwarmInviteSheet: View {
                 Spacer()
             }
             Text("Check that the same code is on their screen, then let them in. "
-                 + "They receive the swarm token and the node list.")
+                 + "They receive an individual key for each node and the node list.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let error = model.pairingApprovalError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 10) {
                 Spacer()
                 Button("Deny") { model.denyPairing(request.id) }
@@ -89,17 +95,6 @@ struct SwarmInviteSheet: View {
             )
             .foregroundStyle(.green)
             .fixedSize(horizontal: false, vertical: true)
-            if !model.pairingLegacyShared.isEmpty {
-                Label(
-                    "\(model.pairingLegacyShared.joined(separator: ", ")) couldn't mint "
-                    + "an individual key (node update #125 not installed there), so they "
-                    + "received the shared key for that machine.",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 }

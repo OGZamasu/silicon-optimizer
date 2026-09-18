@@ -17,12 +17,14 @@ Usage:
 """
 
 import argparse
+import hmac
 import json
 import os
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, quote, urlsplit
 
 STATE = {
     "running": False,
@@ -34,6 +36,25 @@ STATE = {
 }
 LATEST = {"jpeg": None}
 LOCK = threading.Lock()
+TOKEN = ""
+
+
+def token_matches(supplied, expected):
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
+def request_is_authorized(path, authorization, expected_token):
+    if not expected_token:
+        return False
+    supplied = parse_qs(urlsplit(path).query).get("token", [""])[0]
+    if supplied and token_matches(supplied, expected_token):
+        return True
+    scheme, separator, credential = (authorization or "").partition(" ")
+    return (
+        bool(separator)
+        and scheme.lower() == "bearer"
+        and token_matches(credential.strip(), expected_token)
+    )
 
 
 def log(message):
@@ -52,7 +73,15 @@ class Handler(BaseHTTPRequestHandler):
         pass  # The app watches our stdout; the HTTP access log is noise.
 
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path = urlsplit(self.path).path
+        if path not in ("/", "/index.html", "/status", "/stream"):
+            self.send_error(404)
+            return
+        if not request_is_authorized(
+            self.path, self.headers.get("Authorization"), TOKEN
+        ):
+            self.send_error(401, "Missing or invalid sensor token")
+            return
         if path == "/status":
             body = json.dumps(STATE).encode()
             self.send_response(200)
@@ -65,8 +94,6 @@ class Handler(BaseHTTPRequestHandler):
             self.stream()
         elif path in ("/", "/index.html"):
             self.page()
-        else:
-            self.send_error(404)
 
     def page(self):
         # A browser source needs a page, not a bare stream. Black background and
@@ -76,11 +103,17 @@ class Handler(BaseHTTPRequestHandler):
             "<title>Silicon Optimizer — Face camera</title>"
             "<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}"
             "img{width:100%;height:100%;object-fit:contain;display:block}</style>"
-            "</head><body><img src='/stream'></body></html>"
+            "</head><body><img src='/stream?token=" + quote(TOKEN, safe="")
+            + "'></body></html>"
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'none'; "
+                         "img-src 'self'; style-src 'unsafe-inline'")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -108,6 +141,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global TOKEN
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--source", required=True)
@@ -120,6 +154,10 @@ def main():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     arguments = parser.parse_args()
+    TOKEN = os.environ.get("SILICON_SENSOR_TOKEN", "")
+    if not TOKEN:
+        print("fatal: sensor token unavailable", flush=True)
+        return 2
 
     sys.path.insert(0, arguments.repo)
     os.chdir(arguments.repo)  # The project resolves its models relative to itself.

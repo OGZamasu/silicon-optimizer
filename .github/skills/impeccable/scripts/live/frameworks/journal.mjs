@@ -29,6 +29,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PATCH_UNDOERS } from './index.mjs';
+import {
+  atomicWriteFileInside,
+  ensureDirectoryInside,
+  readFileInside,
+  removeFileInside,
+  resolvePathInside,
+} from '../../lib/security-boundaries.mjs';
 
 export const INJECT_JOURNAL_VERSION = 1;
 export const INJECT_JOURNAL_RELPATH = '.impeccable/live/inject-journal.json';
@@ -41,7 +48,7 @@ export function readInjectJournal(cwd = process.cwd()) {
   const file = injectJournalPath(cwd);
   let raw;
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    raw = JSON.parse(readFileInside(cwd, file, { encoding: 'utf8', maxBytes: 1024 * 1024 }));
   } catch {
     return null;
   }
@@ -50,13 +57,13 @@ export function readInjectJournal(cwd = process.cwd()) {
 }
 
 export function clearInjectJournal(cwd = process.cwd()) {
-  try { fs.unlinkSync(injectJournalPath(cwd)); } catch { /* already gone */ }
+  try { removeFileInside(cwd, injectJournalPath(cwd)); } catch { /* already gone or unsafe */ }
 }
 
 function writeInjectJournal(cwd, journal) {
   const file = injectJournalPath(cwd);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(journal, null, 2) + '\n', 'utf-8');
+  ensureDirectoryInside(cwd, path.dirname(file));
+  atomicWriteFileInside(cwd, file, JSON.stringify(journal, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   return file;
 }
 
@@ -84,10 +91,11 @@ function normalizeRel(cwd, rel) {
   return path.resolve(cwd, String(rel || '')).split(path.sep).join('/');
 }
 
-function readIfPresent(abs) {
+function readIfPresent(cwd, abs) {
   try {
-    return fs.readFileSync(abs, 'utf-8');
-  } catch {
+    return readFileInside(cwd, abs, { encoding: 'utf8' });
+  } catch (error) {
+    if (error?.code && error.code !== 'ENOENT') throw error;
     return null;
   }
 }
@@ -117,7 +125,14 @@ function healArtifact(cwd, artifact, undoers) {
   // cloned repo. Never touch anything outside the project tree, whatever the
   // journal claims to own.
   if (!insideProject(cwd, abs)) return { path: artifact.path, action: 'refused_outside_project' };
-  const content = readIfPresent(abs);
+  let content;
+  try {
+    resolvePathInside(cwd, abs, { kind: 'file' });
+    content = readIfPresent(cwd, abs);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { path: artifact.path, action: 'absent' };
+    return { path: artifact.path, action: 'refused_unsafe_path' };
+  }
   if (content === null) return { path: artifact.path, action: 'absent' };
 
   if (artifact.kind === 'created') {
@@ -126,7 +141,7 @@ function healArtifact(cwd, artifact, undoers) {
     if (!artifact.marker || !content.includes(artifact.marker)) {
       return { path: artifact.path, action: 'disowned' };
     }
-    try { fs.rmSync(abs, { force: true }); } catch { return null; }
+    try { removeFileInside(cwd, abs); } catch { return null; }
     if (artifact.pruneTo !== undefined) {
       const pruneRoot = path.resolve(cwd, artifact.pruneTo || '.');
       if (insideProject(cwd, pruneRoot) || pruneRoot === path.resolve(cwd)) {
@@ -147,7 +162,7 @@ function healArtifact(cwd, artifact, undoers) {
     if (typeof undo !== 'function') return null;
     const next = undo(content);
     if (next === content) return { path: artifact.path, action: 'disowned' };
-    try { fs.writeFileSync(abs, next, 'utf-8'); } catch { return null; }
+    try { atomicWriteFileInside(cwd, abs, next, { encoding: 'utf8', allowCreate: false }); } catch { return null; }
     return { path: artifact.path, action: 'unpatched' };
   }
 

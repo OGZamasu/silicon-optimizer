@@ -226,6 +226,7 @@ struct VideoTests {
             "result": [
                 "files": ["/v1/files/out.mp4", "thumbnail.png"],
                 "extra": ["nested": "http://node:8790/v1/files/alt.webm"],
+                "hostile": "http://127.0.0.1:9000/private.mov",
             ],
         ]
         let urls = NodeVideoRuntime.videoURLs(in: status, base: base)
@@ -260,6 +261,18 @@ struct VideoTests {
         #expect(NodeJobProgress(from: [:]).line(fallback: "Working") == "Working")
         // Over an hour reads as h:mm:ss.
         #expect(NodeJobProgress.duration(3725) == "1:02:05")
+        #expect(NodeJobProgress.duration(.infinity) == "—")
+
+        let hostile = NodeJobProgress(from: [
+            "progress": Double.nan, "step": Double.infinity,
+            "steps_total": "999999999999999999999999999999",
+            "eta_seconds": "inf", "queue_position": -1,
+        ])
+        #expect(hostile.fraction == nil)
+        #expect(hostile.step == nil)
+        #expect(hostile.stepsTotal == nil)
+        #expect(hostile.eta == nil)
+        #expect(hostile.queuePosition == nil)
     }
 
     @Test func videoOutputNamesSortAndDoNotCollide() {

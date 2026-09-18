@@ -1,9 +1,19 @@
 import Foundation
 import Testing
 @testable import SiliconRuntime
+@testable import SiliconUI
 
 @Suite("Codex configuration")
 struct CodexConfigTests {
+
+    @Test @MainActor
+    func anUnsetWorkspaceNeverDefaultsToTheHomeDirectory() {
+        let app = AppModel()
+        app.settings.codexWorkingDirectory = nil
+        #expect(!app.hasExplicitCodexWorkingDirectory)
+        #expect(app.codexWorkingDirectory != FileManager.default.homeDirectoryForCurrentUser)
+        #expect(app.codexWorkingDirectory.path.contains("SiliconOptimizer/codex/workspace"))
+    }
 
     @Test func configPointsCodexAtTheGateway() {
         let document = CodexRuntime.configuration(
@@ -14,6 +24,7 @@ struct CodexConfigTests {
         #expect(document.contains("model = \"local/qwen3.8-27b-Q4_K_M\""))
         #expect(document.contains("model_provider = \"silicon\""))
         #expect(document.contains("[model_providers.silicon]"))
+        #expect(document.contains("env_key = \"SILICON_GATEWAY_KEY\""))
         #expect(document.contains("base_url = \"http://127.0.0.1:9414/v1\""))
         // Not a choice: Codex dropped chat-completions support in early 2026.
         #expect(document.contains("wire_api = \"responses\""))

@@ -450,4 +450,28 @@ struct DiffusionInstallerTests {
         #expect(DiffusionCatalog.flux2Klein9B.isGated)
         #expect(!DiffusionCatalog.flux2Klein4B.isGated)
     }
+
+    @Test func huggingFaceCredentialIsEnvironmentOnlyAndRedacted() {
+        let secret = "hf_test_secret_that_must_not_reach_argv"
+        let diffusion = DiffusionInstaller(
+            executable: URL(fileURLWithPath: "/usr/bin/true"), token: secret
+        )
+        let diffusionArguments = diffusion.downloadArguments(DiffusionCatalog.flux2Klein4B)
+        #expect(!diffusionArguments.contains(secret))
+        #expect(!diffusionArguments.contains("--token"))
+        #expect(diffusion.processEnvironment(base: [:])["HF_TOKEN"] == secret)
+        #expect(!diffusion.redactingCredential(in: "failed: \(secret)").contains(secret))
+
+        let mesh = MeshInstaller(
+            executable: URL(fileURLWithPath: "/usr/bin/true"), token: secret
+        )
+        let download = MeshInstaller.Download(
+            repository: "owner/model", destination: .hubCache, expectedSize: .gib(1)
+        )
+        let meshArguments = mesh.downloadArguments(download)
+        #expect(!meshArguments.contains(secret))
+        #expect(!meshArguments.contains("--token"))
+        #expect(mesh.processEnvironment(base: [:])["HF_TOKEN"] == secret)
+        #expect(!mesh.redactingCredential(in: "failed: \(secret)").contains(secret))
+    }
 }

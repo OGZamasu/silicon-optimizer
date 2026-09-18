@@ -31,6 +31,7 @@ actor ServerProcess {
         executable: URL,
         arguments: [String],
         environment: [String: String] = [:],
+        inheritEnvironment: Bool = true,
         currentDirectory: URL? = nil,
         onLogLine: (@Sendable (String) -> Void)? = nil
     ) throws {
@@ -43,7 +44,7 @@ actor ServerProcess {
             process.currentDirectoryURL = currentDirectory
         }
 
-        var mergedEnvironment = ProcessInfo.processInfo.environment
+        var mergedEnvironment = inheritEnvironment ? ProcessInfo.processInfo.environment : [:]
         mergedEnvironment.merge(environment) { _, new in new }
         process.environment = mergedEnvironment
 

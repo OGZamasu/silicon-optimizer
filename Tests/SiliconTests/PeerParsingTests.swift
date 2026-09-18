@@ -14,6 +14,34 @@ struct PeerParsingTests {
         return abs(value - expected) < 0.01
     }
 
+    @Test func nonFiniteAndExtremeTelemetryIsDiscardedWithoutLosingThePeer() {
+        var status = AppModel.PeerStatus(
+            name: "hostile-node", baseURL: "http://node:8790", reachable: true
+        )
+        AppModel.parseNode([
+            "profile": ["memory_gb": Double.infinity],
+            "metrics": [
+                "queue_depth": Double.nan,
+                "gpu_util_pct": Double.infinity,
+                "vram_used_mb": 1e300,
+            ],
+            "capabilities": [["id": "llm", "ready": true, "peak_gb": Double.nan]],
+        ], into: &status)
+        #expect(status.reachable)
+        #expect(status.totalGB == nil)
+        #expect(status.queueDepth == nil)
+        #expect(status.gpuUtil == nil)
+        #expect(status.usedGB == nil)
+        #expect(status.capabilities.count == 1)
+        #expect(status.capabilities[0].peakGB == nil)
+
+        let llm = AppModel.parseLLM([
+            "installed": true, "context_length": Double.infinity,
+        ])
+        #expect(llm.installed)
+        #expect(llm.contextLength == nil)
+    }
+
     @Test func readsACUDANodeAdvertisement() {
         let json: [String: Any] = [
             "name": "silicon-node",
@@ -273,6 +301,16 @@ struct PeerEngineParsingTests {
         let llm = AppModel.parseLLM(["running": true, "model": "qwen3.8-27b"])
         #expect(llm.engine == nil)
     }
+
+    @Test func advertisedEngineStaysOnTheConfiguredPeerHost() {
+        let peer = URL(string: "http://100.64.0.9:8790")!
+        #expect(AppModel.peerBackendURL("/v1", relativeTo: peer)?.absoluteString
+            == "http://100.64.0.9:8790/v1")
+        #expect(AppModel.peerBackendURL("http://100.64.0.9:8081/v1", relativeTo: peer) != nil)
+        #expect(AppModel.peerBackendURL("http://127.0.0.1:8081/v1", relativeTo: peer) == nil)
+        #expect(AppModel.peerBackendURL("https://100.64.0.9/v1", relativeTo: peer) == nil)
+        #expect(AppModel.peerBackendURL("file:///tmp/v1", relativeTo: peer) == nil)
+    }
 }
 
 /// Image routing (#136): the capability match that decides a job leaves the Mac, and
@@ -319,11 +357,14 @@ struct NodeImageRoutingTests {
     @Test func resultURLsResolveRelativeAgainstTheNode() {
         let base = URL(string: "http://100.64.0.9:8790")!
         let urls = NodeImageRuntime.imageURLs(
-            in: ["result_urls": ["/v1/results/a.png", "http://elsewhere/b.png"]],
+            in: ["result_urls": [
+                "/v1/results/a.png", "http://100.64.0.9:8081/b.png",
+                "http://elsewhere/b.png", "file:///tmp/stolen.png",
+            ]],
             base: base
         )
         #expect(urls.count == 2)
         #expect(urls[0].absoluteString == "http://100.64.0.9:8790/v1/results/a.png")
-        #expect(urls[1].host == "elsewhere")
+        #expect(urls[1].absoluteString == "http://100.64.0.9:8081/b.png")
     }
 }

@@ -81,6 +81,8 @@ public enum CloudAudioError: LocalizedError {
 public actor CloudAudioRuntime {
 
     private static let log = Logger(subsystem: "dev.siliconoptimizer", category: "cloud-audio")
+    private static let maximumArtifactURLs = 8
+    private static let maximumArtifactBytes: Int64 = 256 * 1_024 * 1_024
     private let session = URLSession(configuration: .default)
     private var cancelled = false
 
@@ -123,16 +125,24 @@ public actor CloudAudioRuntime {
     /// flat `audio_url` *and* a `medias` array *and* `media_urls`; speech answers with
     /// `media_urls` alone. Reading all three costs nothing and means one renamed key upstream
     /// does not become a failed render here.
-    static func audioURLs(inOutcome outcome: [String: Any]) -> [URL] {
-        var found: [String] = []
-        if let direct = outcome["audio_url"] as? String { found.append(direct) }
+    static func audioURLs(inOutcome outcome: [String: Any], base: URL) -> [URL] {
+        var found: [URL] = []
+        var seen = Set<String>()
+        let policy = RemoteURLPolicy.publicHTTPS
+        func add(_ raw: String) {
+            guard found.count < maximumArtifactURLs, seen.insert(raw).inserted,
+                  let url = policy.resolve(raw, relativeTo: base)
+            else { return }
+            found.append(url)
+        }
+        if let direct = outcome["audio_url"] as? String { add(direct) }
         for key in ["media_urls", "medias"] {
             for entry in (outcome[key] as? [[String: Any]]) ?? [] {
-                if let url = entry["url"] as? String { found.append(url) }
+                if let url = entry["url"] as? String { add(url) }
+                if found.count == maximumArtifactURLs { break }
             }
         }
-        var seen = Set<String>()
-        return found.filter { seen.insert($0).inserted }.compactMap(URL.init(string:))
+        return found
     }
 
     /// Terminal states, so a failure ends the poll instead of running out the deadline.
@@ -168,7 +178,10 @@ public actor CloudAudioRuntime {
             withJSONObject: Self.submissionBody(for: request)
         )
 
-        let (submitData, submitResponse) = try await session.data(for: submit)
+        let (submitData, submitResponse) = try await RemoteHTTP.data(
+            for: submit, session: session, policy: .sameOrigin(base),
+            credentialOrigin: base
+        )
         let submitStatus = (submitResponse as? HTTPURLResponse)?.statusCode ?? 502
         guard (200..<300).contains(submitStatus) else {
             throw CloudAudioError.submitFailed(
@@ -177,9 +190,12 @@ public actor CloudAudioRuntime {
         }
         guard let submitted = (try? JSONSerialization.jsonObject(with: submitData))
                 as? [String: Any],
-              let requestID = submitted["request_id"] as? String
+              let requestID = submitted["request_id"] as? String,
+              RemotePathIdentifier.appending(
+                requestID, to: base.appendingPathComponent(Self.requestsPath)
+              ) != nil
         else {
-            throw CloudAudioError.submitFailed(submitStatus, "no request id in the answer")
+            throw CloudAudioError.submitFailed(submitStatus, "no valid request id in the answer")
         }
 
         Self.log.info("cloud audio \(request.model, privacy: .public) → \(requestID, privacy: .public)")
@@ -190,7 +206,7 @@ public actor CloudAudioRuntime {
             requestID: requestID, base: base, apiKey: apiKey, onProgress: onProgress
         )
 
-        let urls = Self.audioURLs(inOutcome: outcome)
+        let urls = Self.audioURLs(inOutcome: outcome, base: base)
         guard let first = urls.first else { throw CloudAudioError.noAudioReturned }
 
         onProgress(.stage("Downloading"))
@@ -207,9 +223,11 @@ public actor CloudAudioRuntime {
         onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> [String: Any] {
         let deadline = Date().addingTimeInterval(900)
-        let statusURL = base
-            .appendingPathComponent(Self.requestsPath)
-            .appendingPathComponent(requestID)
+        guard let statusURL = RemotePathIdentifier.appending(
+            requestID, to: base.appendingPathComponent(Self.requestsPath)
+        ) else {
+            throw CloudAudioError.submitFailed(502, "invalid request id in the answer")
+        }
 
         while Date() < deadline {
             if cancelled { throw CloudAudioError.cancelled }
@@ -220,7 +238,12 @@ public actor CloudAudioRuntime {
 
             // A single failed poll is a blip, not a failure: keep waiting rather than
             // throwing away a render that is probably still running.
-            if let (data, _) = try? await session.data(for: poll),
+            if let (data, response) = try? await RemoteHTTP.data(
+                    for: poll, session: session, policy: .sameOrigin(base),
+                    credentialOrigin: base
+               ),
+               let http = response as? HTTPURLResponse,
+               (200..<300).contains(http.statusCode),
                let status = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 onProgress(NodeJobProgress(from: status))
                 let state = (status["status"] as? String) ?? ""
@@ -241,20 +264,26 @@ public actor CloudAudioRuntime {
     private func download(
         _ url: URL, into directory: URL, model: String, format: String
     ) async throws -> URL {
-        let (data, response) = try await session.data(from: url)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 502
-        guard status == 200, !data.isEmpty else {
-            throw CloudAudioError.submitFailed(status, "could not download the finished audio")
-        }
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
         let stamp = Int(Date().timeIntervalSince1970)
-        let safeModel = model.replacingOccurrences(of: "/", with: "-")
+        let safeModel = String(model.map {
+            $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-"
+        }.prefix(80))
+        let safeFormat = String(format.filter(\.isLetter).prefix(8)).lowercased()
         let destination = directory
-            .appendingPathComponent("\(safeModel)-\(stamp).\(format)")
-        try data.write(to: destination, options: .atomic)
-        return destination
+            .appendingPathComponent("\(safeModel)-\(stamp).\(safeFormat.isEmpty ? "mp3" : safeFormat)")
+        do {
+            return try await RemoteArtifactTransfer.download(
+                from: url,
+                policy: .publicHTTPS,
+                to: destination,
+                maximumBytes: Self.maximumArtifactBytes,
+                budget: RemoteByteBudget(limit: Self.maximumArtifactBytes),
+                timeout: 600,
+                allowedContentTypes: ["audio/*", "application/octet-stream"]
+            )
+        } catch let error as RemoteTransferError {
+            throw CloudAudioError.submitFailed(502, error.localizedDescription)
+        }
     }
 
     static func message(inBody body: Data) -> String? {
@@ -262,13 +291,15 @@ public actor CloudAudioRuntime {
         else { return nil }
         if let outcome = root["outcome"] as? [String: Any],
            let message = (outcome["message"] ?? outcome["error"]) as? String {
-            return message
+            return String(message.prefix(512))
         }
         if let error = root["error"] as? [String: Any], let message = error["message"] as? String {
-            return message
+            return String(message.prefix(512))
         }
         for key in ["message", "error", "detail"] {
-            if let message = root[key] as? String, !message.isEmpty { return message }
+            if let message = root[key] as? String, !message.isEmpty {
+                return String(message.prefix(512))
+            }
         }
         return nil
     }

@@ -76,16 +76,12 @@ public struct MeshInstaller: Sendable {
         _ download: Download,
         onProgress: @Sendable @escaping (ModelDownloader.Progress) -> Void
     ) async throws {
-        var arguments = ["download", download.repository]
         if case .localDirectory(let directory) = download.destination {
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true
             )
-            arguments += ["--local-dir", directory.path]
         }
-        if let token, !token.isEmpty {
-            arguments += ["--token", token]
-        }
+        let arguments = downloadArguments(download)
 
         let already = Self.downloadedSize(of: download)
         let expected = max(download.expectedSize, already)
@@ -127,10 +123,31 @@ public struct MeshInstaller: Sendable {
         }
     }
 
+    func downloadArguments(_ download: Download) -> [String] {
+        var arguments = ["download", download.repository]
+        if case .localDirectory(let directory) = download.destination {
+            arguments += ["--local-dir", directory.path]
+        }
+        return arguments
+    }
+
+    func processEnvironment(base: [String: String] = ProcessInfo.processInfo.environment)
+        -> [String: String] {
+        var environment = base
+        if let token, !token.isEmpty { environment["HF_TOKEN"] = token }
+        return environment
+    }
+
+    func redactingCredential(in output: String) -> String {
+        guard let token, !token.isEmpty else { return output }
+        return output.replacingOccurrences(of: token, with: "[redacted]")
+    }
+
     private func run(arguments: [String]) async throws -> String {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        process.environment = processEnvironment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -149,6 +166,6 @@ public struct MeshInstaller: Sendable {
             process.terminate()
         }
         try Task.checkCancellation()
-        return await reader.value
+        return redactingCredential(in: await reader.value)
     }
 }

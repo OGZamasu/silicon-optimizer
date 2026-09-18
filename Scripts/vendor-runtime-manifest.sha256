@@ -1,0 +1,6 @@
+# Accepted release runtime artifacts, one per line:
+# <lowercase SHA-256><two spaces><llama-server|node|filename.dylib>
+#
+# Vendor/ is intentionally not tracked. No artifact is accepted in this source checkout
+# until a maintainer records the exact reviewed release bytes here in a commit. Releases
+# fail closed while the required llama-server and node entries are absent.

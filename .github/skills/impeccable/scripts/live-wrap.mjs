@@ -14,7 +14,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './lib/is-generated.mjs';
-import { resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
+import { matchesTemplateExtension, resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
+import {
+  atomicWriteFileInside,
+  readFileInside,
+  resolvePathInside,
+} from './lib/security-boundaries.mjs';
 import { readBuffer as readManualEditsBuffer } from './live/manual-edits-buffer.mjs';
 import { findSourceFile } from './live/source-search.mjs';
 import { resolveSourceTraits } from './live/frameworks/index.mjs';
@@ -123,7 +128,27 @@ The agent should insert variant HTML at insertLine.`);
       }
       process.exit(1);
     }
-  } else {
+  }
+
+  try {
+    targetFile = resolvePathInside(process.cwd(), targetFile, { kind: 'file' });
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: 'file_outside_project_or_unsafe',
+      fallback: 'agent-driven',
+      message: error.message,
+    }));
+    process.exit(1);
+  }
+  if (!matchesTemplateExtension(targetFile, resolveLiveTemplateExtensions(process.cwd()))) {
+    console.error(JSON.stringify({
+      error: 'unsupported_source_file',
+      fallback: 'agent-driven',
+      file: path.relative(process.cwd(), targetFile),
+    }));
+    process.exit(1);
+  }
+  if (filePath) {
     if (isGeneratedFile(targetFile, genOpts)) {
       console.error(JSON.stringify({
         error: 'file_is_generated',
@@ -136,7 +161,7 @@ The agent should insert variant HTML at insertLine.`);
     matchedQuery = queries[0];
   }
 
-  const content = fs.readFileSync(targetFile, 'utf-8');
+  const content = readFileInside(process.cwd(), targetFile, { encoding: 'utf8' });
   const lines = content.split('\n');
 
   // Find the element, trying each query in priority order. When `--text` is
@@ -400,7 +425,10 @@ The agent should insert variant HTML at insertLine.`);
       ...wrapperLines,
       ...lines.slice(endLine + 1),
     ];
-    fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+    atomicWriteFileInside(process.cwd(), targetFile, newLines.join('\n'), {
+      encoding: 'utf8',
+      allowCreate: false,
+    });
 
     // Calculate insert line (the "insert below this line" comment).
     // 0-indexed file position. Both HTML and JSX wrappers have 6 lines above

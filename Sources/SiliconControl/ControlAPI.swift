@@ -471,6 +471,9 @@ public enum ControlAPI {
         public var steps: Int?
         public var quantization: String?
         public var seed: Int?
+        /// Enforced routing capability: true forbids handing the prompt or source image to
+        /// a paired node even when remote rendering is otherwise configured.
+        public var localOnly: Bool?
         /// Revision: path to an existing image to start from instead of noise.
         public var initImagePath: String?
         /// How strongly that image steers the result, 0–1 (mflux influence semantics).
@@ -479,7 +482,8 @@ public enum ControlAPI {
         public init(
             prompt: String, modelID: String? = nil, width: Int? = nil, height: Int? = nil,
             steps: Int? = nil, quantization: String? = nil, seed: Int? = nil,
-            initImagePath: String? = nil, initImageInfluence: Double? = nil
+            initImagePath: String? = nil, initImageInfluence: Double? = nil,
+            localOnly: Bool? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -488,6 +492,7 @@ public enum ControlAPI {
             self.steps = steps
             self.quantization = quantization
             self.seed = seed
+            self.localOnly = localOnly
             self.initImagePath = initImagePath
             self.initImageInfluence = initImageInfluence
         }

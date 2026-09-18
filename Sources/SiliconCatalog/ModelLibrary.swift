@@ -17,11 +17,17 @@ public struct InstalledModel: Sendable, Codable, Hashable, Identifiable {
     /// Architecture read from the GGUF header at install time, which supersedes catalog estimates.
     public var shape: ModelShape?
     public var capabilities: ModelCapabilities
+    /// Canonical directory created for a download. Nil for imports and legacy entries whose
+    /// ownership cannot be proven, which limits removal to the explicitly registered files.
+    public var managedDirectory: URL?
+    /// Canonical download root that authorized `managedDirectory` when the model was registered.
+    public var managedRoot: URL?
 
     public init(
         id: String, name: String, catalogID: String?, quantization: Quantization,
         format: ModelFormat, primaryFile: URL, allFiles: [URL], projectorFile: URL?,
-        sizeOnDisk: Bytes, installedAt: Date, shape: ModelShape?, capabilities: ModelCapabilities
+        sizeOnDisk: Bytes, installedAt: Date, shape: ModelShape?, capabilities: ModelCapabilities,
+        managedDirectory: URL? = nil, managedRoot: URL? = nil
     ) {
         self.id = id
         self.name = name
@@ -35,6 +41,8 @@ public struct InstalledModel: Sendable, Codable, Hashable, Identifiable {
         self.installedAt = installedAt
         self.shape = shape
         self.capabilities = capabilities
+        self.managedDirectory = managedDirectory
+        self.managedRoot = managedRoot
     }
 
     public var supportsVision: Bool { capabilities.contains(.vision) && projectorFile != nil }
@@ -57,6 +65,56 @@ public actor ModelLibrary {
     private var index: [String: InstalledModel] = [:]
 
     private var indexURL: URL { root.appendingPathComponent("index.json") }
+
+    private static func canonical(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private static func isStrictDescendant(_ candidate: URL, of root: URL) -> Bool {
+        let candidateComponents = canonical(candidate).pathComponents
+        let rootComponents = canonical(root).pathComponents
+        return candidateComponents.count > rootComponents.count
+            && candidateComponents.starts(with: rootComponents)
+    }
+
+    /// Ownership URLs are stored after canonicalization. If either path resolves somewhere
+    /// different later, an ancestor was replaced by a symlink and the old capability no longer
+    /// authorizes recursive deletion at that name.
+    private static func isStillCanonical(_ url: URL) -> Bool {
+        let standardized = url.standardizedFileURL
+        return canonical(standardized).path == standardized.path
+    }
+
+    /// Returns the canonical directory only when recursive deletion is confined below a root
+    /// currently owned by the library. Returning the resolved path also avoids following a
+    /// different final symlink at the deletion sink.
+    private func downloadOwnership(for directory: URL) -> (directory: URL, root: URL)? {
+        let resolved = Self.canonical(directory)
+        let roots = [root, downloadRoot].map(Self.canonical)
+        guard let owner = roots.first(where: { Self.isStrictDescendant(resolved, of: $0) })
+        else { return nil }
+        return (resolved, owner)
+    }
+
+    private func recursiveDeletionDirectory(for model: InstalledModel) -> URL? {
+        guard model.catalogID != nil,
+              let claimedDirectory = model.managedDirectory,
+              let claimedRoot = model.managedRoot
+        else {
+            return nil
+        }
+        guard Self.isStillCanonical(claimedDirectory), Self.isStillCanonical(claimedRoot)
+        else { return nil }
+        let claimed = Self.canonical(claimedDirectory)
+        let owner = Self.canonical(claimedRoot)
+        let primaryDirectory = model.primaryFile.deletingLastPathComponent().standardizedFileURL
+        guard Self.isStillCanonical(primaryDirectory) else { return nil }
+        let actual = Self.canonical(primaryDirectory)
+        guard claimed == actual,
+              Self.isStrictDescendant(claimed, of: owner)
+        else { return nil }
+        return claimed
+    }
 
     public init(root: URL = ModelLibrary.defaultRoot) {
         self.root = root
@@ -87,7 +145,15 @@ public actor ModelLibrary {
     private func pruneTrulyDeleted() {
         let before = index.count
         index = index.filter { _, model in
-            let isManaged = model.primaryFile.path.hasPrefix(root.path)
+            let isManaged = if let directory = model.managedDirectory,
+                               let owner = model.managedRoot,
+                               Self.isStillCanonical(directory), Self.isStillCanonical(owner) {
+                Self.canonical(directory)
+                    == Self.canonical(model.primaryFile.deletingLastPathComponent())
+                    && Self.isStrictDescendant(directory, of: owner)
+            } else {
+                false
+            }
             return !isManaged || FileManager.default.fileExists(atPath: model.primaryFile.path)
         }
         if index.count != before { try? save() }
@@ -131,6 +197,7 @@ public actor ModelLibrary {
         // actually have, including any re-quantization the publisher has done since.
         let shape = (try? GGUFReader().read(at: primary))
             .flatMap { GGUFReader().shape(from: $0, fallback: entry.shape) } ?? entry.shape
+        let ownership = downloadOwnership(for: primary.deletingLastPathComponent())
 
         let model = InstalledModel(
             id: "\(entry.id)@\(quantization.rawValue)",
@@ -144,7 +211,9 @@ public actor ModelLibrary {
             sizeOnDisk: files.reduce(Bytes.zero) { $0 + Self.fileSize($1) },
             installedAt: Date(),
             shape: shape,
-            capabilities: entry.capabilities
+            capabilities: entry.capabilities,
+            managedDirectory: ownership?.directory,
+            managedRoot: ownership?.root
         )
         try add(model)
         return model
@@ -155,12 +224,10 @@ public actor ModelLibrary {
         // Remove the model's own directory rather than individual files so companion files
         // (projectors, partial downloads) go with it. Managed means "under a root this
         // library downloads into" — imported files elsewhere only lose the files we know.
-        let directory = model.primaryFile.deletingLastPathComponent()
-        let managed = (directory.path.hasPrefix(root.path) && directory.path != root.path)
-            || (directory.path.hasPrefix(downloadRoot.path)
-                && directory.path != downloadRoot.path)
-        if managed {
-            try? FileManager.default.removeItem(at: directory)
+        // Imports are never evidence that their containing directory belongs to this app, even
+        // when the selected file happens to sit below a managed root.
+        if let managed = recursiveDeletionDirectory(for: model) {
+            try? FileManager.default.removeItem(at: managed)
         } else {
             for file in model.allFiles { try? FileManager.default.removeItem(at: file) }
         }

@@ -31,6 +31,12 @@ VIDEO_TIMEOUT_SECONDS = 1800
 IMAGE_TIMEOUT_SECONDS = 600
 MESH_TIMEOUT_SECONDS = 1800
 
+# Control replies contain job metadata and local output paths, never media bytes. Keeping the
+# refusal budget smaller also prevents an error page from becoming an agent-sized diagnostic.
+MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+MAX_ERROR_BYTES = 64 * 1024
+MAX_ERROR_DETAIL_CHARS = 4096
+
 
 class SiliconUnavailable(RuntimeError):
     """The app is not running, or is not reachable from here."""
@@ -107,19 +113,53 @@ def resolve() -> Endpoint:
     return Endpoint(base_url=f"http://127.0.0.1:{port}", token=token)
 
 
+def _read_limited(stream: Any, limit: int, kind: str) -> bytes:
+    """Read at most ``limit`` bytes, including for chunked/lengthless responses."""
+    length = None
+    headers = getattr(stream, "headers", None)
+    if headers is not None:
+        try:
+            raw_length = headers.get("Content-Length")
+            length = int(raw_length) if raw_length is not None else None
+        except (TypeError, ValueError, OverflowError):
+            length = None
+    if length is not None and length > limit:
+        raise SiliconError(f"Silicon Optimizer {kind} exceeded the {limit}-byte limit.")
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(min(64 * 1024, limit + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise SiliconError(f"Silicon Optimizer {kind} exceeded the {limit}-byte limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _open(req: request.Request, timeout: float) -> Any:
     try:
         with request.urlopen(req, timeout=timeout) as response:
-            body = response.read()
+            body = _read_limited(response, MAX_RESPONSE_BYTES, "response")
     except error.HTTPError as exc:
         # The app answers refusals as {"error": "..."} with a 4xx/5xx. Those words are
         # the diagnosis — "model won't fit", "no node offers video" — so they are what
         # the agent should see, not a status code.
-        detail = exc.read().decode("utf-8", "replace")
         try:
-            detail = json.loads(detail).get("error", detail)
-        except ValueError:
+            detail = _read_limited(exc, MAX_ERROR_BYTES, "error response").decode(
+                "utf-8", "replace"
+            )
+        except SiliconError as size_error:
+            raise SiliconError(f"Silicon Optimizer answered {exc.code}: {size_error}") from exc
+        try:
+            parsed = json.loads(detail)
+            if isinstance(parsed, dict):
+                detail = parsed.get("error", detail)
+        except (TypeError, ValueError):
             pass
+        detail = str(detail)[:MAX_ERROR_DETAIL_CHARS]
         raise SiliconError(f"Silicon Optimizer answered {exc.code}: {detail}")
     except error.URLError as exc:
         raise SiliconUnavailable(f"Could not reach Silicon Optimizer: {exc.reason}")

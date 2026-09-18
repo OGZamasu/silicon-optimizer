@@ -2,8 +2,7 @@
  * Impeccable Live Variant Mode - Browser Script
  *
  * Injected into the user's page via <script src="http://localhost:PORT/live.js">.
- * The server prepends window.__IMPECCABLE_TOKEN__ and window.__IMPECCABLE_PORT__
- * before this code.
+ * The server wraps this bundle with a closure-scoped per-session bootstrap.
  *
  * UI: a single floating bar that morphs between three states -
  * configure (pick action + go), generating (progressive dots), and cycling
@@ -19,9 +18,14 @@
   if (window.__IMPECCABLE_LIVE_INIT__) return;
   window.__IMPECCABLE_LIVE_INIT__ = true;
 
-  const TOKEN = window.__IMPECCABLE_TOKEN__;
-  const PORT = window.__IMPECCABLE_PORT__;
-  const APP_ROOT = window.__IMPECCABLE_APP_ROOT__ || null;
+  // This file is always served through assembleLiveBrowserScript(), which
+  // supplies a closure-scoped immutable bootstrap. Do not add a window-global
+  // fallback: it would leave the bearer capability needlessly discoverable
+  // after initialization.
+  const BOOTSTRAP = __IMPECCABLE_BOOTSTRAP__;
+  const TOKEN = BOOTSTRAP.token;
+  const PORT = BOOTSTRAP.port;
+  const APP_ROOT = BOOTSTRAP.appRoot || null;
   if (!TOKEN || !PORT) {
     window.__IMPECCABLE_LIVE_INIT__ = false; // reset so the real load can init
     return;
@@ -58,7 +62,7 @@
   const Z = { highlight: 100001, bar: 100005, picker: 100007, toast: 100010 };
   const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'; // ease-out-quint
   const PREFIX = 'impeccable-live';
-  const IMPECCABLE_COMMAND = (window.__IMPECCABLE_COMMAND_PREFIX__ || '/') + 'impeccable';
+  const IMPECCABLE_COMMAND = (BOOTSTRAP.commandPrefix || '/') + 'impeccable';
   const PICK_CURSOR_STYLE_ID = PREFIX + '-pick-cursor-style';
   const MANUAL_APPLY_STATE_TTL_MS = 15 * 60 * 1000;
   const sessionState = window.__IMPECCABLE_LIVE_SESSION__?.createLiveBrowserSessionState({
@@ -86,11 +90,11 @@
 
   // Command vocabulary (values + labels + icons) comes from the canonical source,
   // skill/scripts/live/vocabulary.mjs, which live-server.mjs serializes into
-  // window.__IMPECCABLE_VOCAB__ when it serves /live.js (same injection path as
+  // the scoped bootstrap when it serves /live.js (same injection path as
   // the token/port above, so it is always present here). The icons stack above
   // each chip label and recolor to C.brand when selected (strokes use
   // currentColor). ACTIONS drives the picker grid; ICONS maps value -> svg.
-  const VOCAB = Array.isArray(window.__IMPECCABLE_VOCAB__) ? window.__IMPECCABLE_VOCAB__ : [];
+  const VOCAB = Array.isArray(BOOTSTRAP.vocabulary) ? BOOTSTRAP.vocabulary : [];
   const ICONS = {};
   const ACTIONS = VOCAB.map((c) => {
     ICONS[c.value] = c.icon;
@@ -99,17 +103,17 @@
 
   // The Live chrome inventory (which surfaces exist, and the element ids each
   // one owns) comes from the canonical source, skill/scripts/live/ui-surfaces.mjs,
-  // which the /live.js assembler serializes into these globals alongside the
-  // token/port/vocabulary. This file is served raw and injected as a classic
+  // which the /live.js assembler serializes into the scoped bootstrap. This
+  // file is served raw and injected as a classic
   // script, so it cannot import that module; the private impeccable-site repo
   // imports it directly to check its Live UI lab holds a snapshot for every
   // surface, which only works while the list has exactly one definition.
   // Add a surface in ui-surfaces.mjs, not here.
-  const LIVE_CHROME_MOUNT_CONTRACT = Array.isArray(window.__IMPECCABLE_LIVE_MOUNT_CONTRACT__)
-    ? window.__IMPECCABLE_LIVE_MOUNT_CONTRACT__
+  const LIVE_CHROME_MOUNT_CONTRACT = Array.isArray(BOOTSTRAP.mountContract)
+    ? BOOTSTRAP.mountContract
     : ['root', 'transport', 'state', 'actions'];
-  const LIVE_UI_SURFACES = Array.isArray(window.__IMPECCABLE_LIVE_UI_SURFACES__)
-    ? window.__IMPECCABLE_LIVE_UI_SURFACES__
+  const LIVE_UI_SURFACES = Array.isArray(BOOTSTRAP.uiSurfaces)
+    ? BOOTSTRAP.uiSurfaces
     : [];
   const LIVE_UI_COMPONENT_IDS = [...new Set(LIVE_UI_SURFACES.flatMap((surface) => surface.ids))];
 
@@ -3763,12 +3767,11 @@
     const container = copyEditContainerContext(contextElement);
     if (container) for (const op of ops) op.container = container;
     try {
-      // Token in the query string as well as the body: the URL token is what
-      // authorizes the CORS preflight when the page runs on a non-loopback
-      // dev host (ddev, Valet), since the preflight carries no request body.
+      // The query token authorizes the CORS preflight for non-loopback dev
+      // hosts; the header lets the server authenticate before reading bytes.
       const res = await fetch('http://localhost:' + PORT + '/manual-edit-stash?token=' + encodeURIComponent(TOKEN), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
         body: JSON.stringify({
           token: TOKEN,
           id: id8(),
@@ -4102,7 +4105,7 @@
     try {
       const res = await fetch(
         'http://localhost:' + PORT + '/manual-edit-commit?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname) + '&async=1',
-        { method: 'POST', keepalive: true },
+        { method: 'POST', keepalive: true, headers: { 'X-Impeccable-Token': TOKEN } },
       );
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
@@ -4146,7 +4149,7 @@
     try {
       const res = await fetch(
         'http://localhost:' + PORT + '/manual-edit-discard?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
-        { method: 'POST' },
+        { method: 'POST', headers: { 'X-Impeccable-Token': TOKEN } },
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const result = await res.json().catch(() => ({}));
@@ -4195,7 +4198,7 @@
     try {
       const res = await fetch(
         'http://localhost:' + PORT + '/manual-edit-commit?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname) + '&async=1&repair=1',
-        { method: 'POST', keepalive: true },
+        { method: 'POST', keepalive: true, headers: { 'X-Impeccable-Token': TOKEN } },
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
       if (pendingKeepFixingBtn) pendingKeepFixingBtn.style.display = 'none';
@@ -4216,7 +4219,7 @@
         'http://localhost:' + PORT + '/manual-edit-repair-decision?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
           body: JSON.stringify({ token: TOKEN, pageUrl: location.pathname, action: 'rollback' }),
         },
       );
@@ -7150,12 +7153,11 @@
       console.debug('[impeccable] Dropped optional live event:', err);
       return null;
     }
-    // Token in the query string as well as the body: the URL token is what
-    // authorizes the CORS preflight when the page runs on a non-loopback
-    // dev host (ddev, Valet), since the preflight carries no request body.
+    // The query token authorizes the CORS preflight for non-loopback dev
+    // hosts; the header lets the server authenticate before reading bytes.
     const doSend = () => fetch('http://localhost:' + PORT + '/events?token=' + encodeURIComponent(TOKEN), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
       body: JSON.stringify(msg),
     }).then(async res => {
       if (res.ok) return res;
@@ -8052,7 +8054,7 @@
         const uploadRes = await fetch(
           'http://localhost:' + PORT + '/annotation?token=' + encodeURIComponent(TOKEN) +
           '&eventId=' + encodeURIComponent(basePayload.id),
-          { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob },
+          { method: 'POST', headers: { 'Content-Type': 'image/png', 'X-Impeccable-Token': TOKEN }, body: blob },
         );
         if (uploadRes.ok) {
           const { path: p } = await uploadRes.json();

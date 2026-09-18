@@ -159,6 +159,7 @@ public actor TrackerRuntime {
             ]
         }
 
+        let token = UUID().uuidString
         let process = ServerProcess()
         self.process = process
         onState(.starting(stage: "Starting the tracker…"))
@@ -166,9 +167,12 @@ public actor TrackerRuntime {
             try await process.start(
                 executable: Self.python,
                 arguments: arguments,
-                environment: ["PYTHONUNBUFFERED": "1"],
+                environment: [
+                    "PYTHONUNBUFFERED": "1",
+                    "SILICON_SENSOR_TOKEN": token,
+                ],
                 onLogLine: { line in
-                    if let state = Self.interpret(line, port: options.port) {
+                    if let state = Self.interpret(line, port: options.port, token: token) {
                         onState(state)
                     }
                 }
@@ -178,14 +182,13 @@ public actor TrackerRuntime {
         }
     }
 
-    static func interpret(_ line: String, port: Int) -> State? {
+    static func interpret(_ line: String, port: Int, token: String = "") -> State? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("ready: ") {
-            return URL(string: String(trimmed.dropFirst("ready: ".count)))
-                .map { .tracking(url: $0, fps: 0) }
+            return sensorURL(port: port, token: token).map { .tracking(url: $0, fps: 0) }
         }
         if trimmed.hasPrefix("fps: "), let fps = Double(trimmed.dropFirst(5)) {
-            return URL(string: "http://127.0.0.1:\(port)/state")
+            return sensorURL(port: port, token: token)
                 .map { .tracking(url: $0, fps: fps) }
         }
         if trimmed.hasPrefix("fatal: camera unavailable") {
@@ -201,6 +204,16 @@ public actor TrackerRuntime {
             return .starting(stage: String(trimmed.dropFirst("stage: ".count)))
         }
         return nil
+    }
+
+    static func sensorURL(port: Int, token: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = port
+        components.path = "/state"
+        if !token.isEmpty { components.queryItems = [URLQueryItem(name: "token", value: token)] }
+        return components.url
     }
 
     public func stop() async {

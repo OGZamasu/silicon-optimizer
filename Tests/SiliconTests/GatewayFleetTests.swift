@@ -221,7 +221,7 @@ struct GatewayDiscoveryTests {
             .appendingPathComponent("gwdisc-\(UUID().uuidString)")
         GatewayDiscovery.write(
             port: 51_349, pid: ProcessInfo.processInfo.processIdentifier,
-            version: "1.2.3", directory: directory
+            version: "1.2.3", token: "per-launch-secret", directory: directory
         )
         let data = try Data(contentsOf: GatewayDiscovery.fileURL(directory: directory))
         let payload = try #require(
@@ -229,6 +229,11 @@ struct GatewayDiscoveryTests {
         )
         #expect(payload["port"] as? Int == 51_349)
         #expect(payload["base_url"] as? String == "http://127.0.0.1:51349/v1")
+        #expect(payload["token"] as? String == "per-launch-secret")
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: GatewayDiscovery.fileURL(directory: directory).path
+        )
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
         #expect(GatewayDiscovery.isAlive(payload))
 
         var dead = payload

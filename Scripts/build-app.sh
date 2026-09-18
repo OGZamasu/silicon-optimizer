@@ -28,7 +28,10 @@ INSTALL_DIR="$HOME/Applications"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --release) CONFIGURATION="release"; shift ;;
-        --sign) SIGN_IDENTITY="$2"; shift 2 ;;
+        --sign)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "--sign requires an identity" >&2; exit 1; }
+            SIGN_IDENTITY="$2"; shift 2
+            ;;
         --dmg) MAKE_DMG=1; shift ;;
         --install)
             INSTALL=1
@@ -42,6 +45,26 @@ done
 APP_NAME="Silicon Optimizer"
 BUNDLE="build/${APP_NAME}.app"
 BUILD_FLAGS=(--configuration "$CONFIGURATION" --arch arm64)
+if [[ -n "${SILICON_SWIFT_SCRATCH_PATH:-}" ]]; then
+    BUILD_FLAGS+=(--scratch-path "$SILICON_SWIFT_SCRATCH_PATH")
+fi
+
+sign_nested_code() {
+    local target="$1"
+    shift
+    if [[ -n "$SIGN_IDENTITY" ]]; then
+        codesign --force --options runtime --timestamp "$@" --sign "$SIGN_IDENTITY" "$target"
+    else
+        codesign --force "$@" --sign - "$target"
+    fi
+}
+
+# Vendor/ is optional for local source builds. If it exists, however, no ignored or
+# locally replaced native binary may enter the bundle without matching the committed list.
+if [[ -d Vendor ]]; then
+    echo "==> Verifying vendor runtime artifacts"
+    ./Scripts/verify-vendor-runtime.sh
+fi
 
 echo "==> Building ($CONFIGURATION)"
 # The executable embeds Resources/Info.plist via a linker section, but SwiftPM only
@@ -68,13 +91,23 @@ if [[ -f Resources/AppIcon.icns ]]; then
         "$BUNDLE/Contents/Info.plist" 2>/dev/null || true
 fi
 
-# A bundled llama-server, when present, is preferred over any Homebrew copy at runtime.
-if [[ -x Vendor/llama-server ]]; then
-    echo "==> Embedding llama-server"
+# Copy the verified set as one unit, then verify the staged bytes again. The second check
+# prevents a replacement between the source check and the copy from reaching code signing.
+if [[ -d Vendor ]]; then
     RUNTIME_DIR="$BUNDLE/Contents/Resources/bin"
     mkdir -p "$RUNTIME_DIR"
-    cp Vendor/llama-server "$RUNTIME_DIR/"
-    cp Vendor/*.dylib "$RUNTIME_DIR/" 2>/dev/null || true
+    cp Vendor/llama-server Vendor/node "$RUNTIME_DIR/"
+    for lib in Vendor/*.dylib; do
+        [[ -f "$lib" ]] || continue
+        cp "$lib" "$RUNTIME_DIR/"
+    done
+    ./Scripts/verify-vendor-runtime.sh "$RUNTIME_DIR" Scripts/vendor-runtime-manifest.sha256
+fi
+
+# A bundled llama-server, when present, is preferred over any Homebrew copy at runtime.
+if [[ -x "$BUNDLE/Contents/Resources/bin/llama-server" ]]; then
+    echo "==> Embedding llama-server"
+    RUNTIME_DIR="$BUNDLE/Contents/Resources/bin"
 
     # CMake bakes the build tree's absolute path in as the rpath, so a copied binary keeps
     # loading its libraries from wherever it was compiled. That works on the build machine and
@@ -99,8 +132,11 @@ if [[ -x Vendor/llama-server ]]; then
 
     # Re-signing is mandatory after install_name_tool: editing a Mach-O invalidates its
     # signature, and macOS kills unsigned-but-modified binaries on launch.
-    codesign --force --sign - "$RUNTIME_DIR"/*.dylib 2>/dev/null || true
-    codesign --force --sign - "$RUNTIME_DIR/llama-server"
+    for lib in "$RUNTIME_DIR"/*.dylib; do
+        [[ -f "$lib" ]] || continue
+        sign_nested_code "$lib"
+    done
+    sign_nested_code "$RUNTIME_DIR/llama-server"
 
     # Prove it before shipping: a bundle whose runtime cannot start is worse than one with no
     # runtime at all, because the app will not fall back to Homebrew.
@@ -112,12 +148,10 @@ fi
 
 # Node.js powers the default Chat tab (DeepSeek Harness). The official darwin-arm64 binary is
 # self-contained — no rpath surgery needed — so bundling it is a copy, a sign, and a proof.
-if [[ -x Vendor/node ]]; then
+if [[ -x "$BUNDLE/Contents/Resources/bin/node" ]]; then
     echo "==> Embedding Node.js"
     RUNTIME_DIR="$BUNDLE/Contents/Resources/bin"
-    mkdir -p "$RUNTIME_DIR"
-    cp Vendor/node "$RUNTIME_DIR/"
-    codesign --force --sign - "$RUNTIME_DIR/node"
+    sign_nested_code "$RUNTIME_DIR/node"
     if ! "$RUNTIME_DIR/node" --version >/dev/null 2>&1; then
         echo "ERROR: embedded node cannot launch" >&2
         exit 1
@@ -131,7 +165,7 @@ if [[ -x "$MCP_BINARY" ]]; then
     echo "==> Embedding silicon-mcp"
     mkdir -p "$BUNDLE/Contents/Resources/bin"
     cp "$MCP_BINARY" "$BUNDLE/Contents/Resources/bin/"
-    codesign --force --sign - "$BUNDLE/Contents/Resources/bin/silicon-mcp"
+    sign_nested_code "$BUNDLE/Contents/Resources/bin/silicon-mcp"
 fi
 
 # The DeepSeek Harness plugin that puts every local and swarm model in its picker. Plain
@@ -194,14 +228,14 @@ fi
 echo "==> Signing"
 # Nested code must be signed from the inside out.
 if [[ -d "$BUNDLE/Contents/Frameworks/Sparkle.framework" ]]; then
-    SPARKLE_ID="${SIGN_IDENTITY:--}"
     find "$BUNDLE/Contents/Frameworks/Sparkle.framework" \
-        \( -name "*.xpc" -o -name "*.app" \) -maxdepth 4 -print0 2>/dev/null \
+        -depth -type d \( -name "*.xpc" -o -name "*.app" \) -print0 \
         | while IFS= read -r -d '' nested; do
-            codesign --force --options runtime --sign "$SPARKLE_ID" "$nested" 2>/dev/null || true
+            sign_nested_code "$nested" \
+                --preserve-metadata=identifier,entitlements,requirements,flags,runtime
         done
-    codesign --force --options runtime --sign "$SPARKLE_ID" \
-        "$BUNDLE/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
+    sign_nested_code "$BUNDLE/Contents/Frameworks/Sparkle.framework" \
+        --preserve-metadata=identifier,entitlements,requirements,flags,runtime
 fi
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
@@ -249,12 +283,5 @@ fi
 if [[ "$MAKE_DMG" == "1" ]]; then
     echo "==> Creating disk image"
     DMG="build/${APP_NAME}.dmg"
-    rm -f "$DMG"
-    STAGING="$(mktemp -d)"
-    cp -R "$BUNDLE" "$STAGING/"
-    ln -s /Applications "$STAGING/Applications"
-    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" \
-        -ov -format ULFO "$DMG" >/dev/null
-    rm -rf "$STAGING"
-    echo "==> Built $DMG"
+    ./Scripts/create-dmg.sh "$BUNDLE" "$DMG"
 fi

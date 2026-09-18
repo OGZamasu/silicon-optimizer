@@ -1,0 +1,5 @@
+# The repository root historically ignored this file. The deployment lock is a reviewed
+# supply-chain input and must be committed; only generated local state stays ignored here.
+!package-lock.json
+node_modules/
+.wrangler/

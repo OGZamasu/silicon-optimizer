@@ -64,7 +64,7 @@ extension AppModel {
         piEventTask = Task { [weak self] in
             guard let self else { return }
             let events = await runtime.start(
-                gatewayPort: gatewayPort,
+                gatewayPort: gatewayPort, gatewayToken: gatewayToken,
                 mcpServerPath: CodexRuntime.locateMCPServer(),
                 nodePath: self.settings.nodeBinaryPath ?? "",
                 onState: { state in

@@ -204,7 +204,7 @@ public struct DiffusionInstaller: Sendable {
         }
     }
 
-    private func downloadArguments(_ entry: DiffusionEntry) -> [String] {
+    func downloadArguments(_ entry: DiffusionEntry) -> [String] {
         var arguments = ["download", entry.repository]
         // One `--include` per pattern: passing several values to a single flag makes the CLI
         // read the extras as positional filenames and drop the flag entirely, with only a
@@ -212,10 +212,20 @@ public struct DiffusionInstaller: Sendable {
         for pattern in entry.downloadPatterns {
             arguments += ["--include", pattern]
         }
-        if let token, !token.isEmpty {
-            arguments += ["--token", token]
-        }
         return arguments
+    }
+
+    func processEnvironment(base: [String: String] = ProcessInfo.processInfo.environment)
+        -> [String: String] {
+        var environment = base
+        environment["PYTHONUNBUFFERED"] = "1"
+        if let token, !token.isEmpty { environment["HF_TOKEN"] = token }
+        return environment
+    }
+
+    func redactingCredential(in output: String) -> String {
+        guard let token, !token.isEmpty else { return output }
+        return output.replacingOccurrences(of: token, with: "[redacted]")
     }
 
     @discardableResult
@@ -223,10 +233,7 @@ public struct DiffusionInstaller: Sendable {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONUNBUFFERED"] = "1"
-        if let token, !token.isEmpty { environment["HF_TOKEN"] = token }
-        process.environment = environment
+        process.environment = processEnvironment()
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -239,9 +246,9 @@ public struct DiffusionInstaller: Sendable {
                         try process.run()
                         let data = pipe.fileHandleForReading.readDataToEndOfFile()
                         process.waitUntilExit()
-                        continuation.resume(
-                            returning: String(data: data, encoding: .utf8) ?? ""
-                        )
+                        continuation.resume(returning: redactingCredential(
+                            in: String(data: data, encoding: .utf8) ?? ""
+                        ))
                     } catch {
                         continuation.resume(throwing: InstallError.toolMissing)
                     }

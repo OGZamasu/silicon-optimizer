@@ -10,6 +10,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+  atomicWriteFileInside,
+  ensureDirectoryInside,
+  readFileInside,
+  removeFileInside,
+} from '../lib/security-boundaries.mjs';
 
 export const SVELTE_LIVE_ROOT_COMPONENT = 'src/lib/impeccable/ImpeccableLiveRoot.svelte';
 export const SVELTE_LAYOUT_MARKER_OPEN = '<!-- impeccable-live-svelte-start -->';
@@ -70,11 +76,12 @@ export function applySvelteKitLiveAdapter({ cwd = process.cwd(), port, token, co
 
   const layoutRel = detected.layoutFile;
   const layoutAbs = path.join(cwd, layoutRel);
-  fs.mkdirSync(path.dirname(layoutAbs), { recursive: true });
-  const layoutExisted = fs.existsSync(layoutAbs);
-  const before = layoutExisted ? fs.readFileSync(layoutAbs, 'utf-8') : defaultSvelteLayout();
+  ensureDirectoryInside(cwd, path.dirname(layoutAbs));
+  const existingLayout = readOptionalProjectFile(cwd, layoutAbs);
+  const layoutExisted = existingLayout !== null;
+  const before = existingLayout ?? defaultSvelteLayout();
   const after = patchSvelteLayout(before, { rev: svelteAdapterRev(token) });
-  fs.writeFileSync(layoutAbs, after, 'utf-8');
+  atomicWriteFileInside(cwd, layoutAbs, after, { encoding: 'utf8' });
 
   return {
     file: layoutRel,
@@ -91,18 +98,19 @@ export function removeSvelteKitLiveAdapter({ cwd = process.cwd(), config = null 
 
   const layoutAbs = path.join(cwd, detected.layoutFile);
   let removed = false;
-  if (fs.existsSync(layoutAbs)) {
-    const before = fs.readFileSync(layoutAbs, 'utf-8');
+  const existingLayout = readOptionalProjectFile(cwd, layoutAbs);
+  if (existingLayout !== null) {
+    const before = existingLayout;
     const after = unpatchSvelteLayout(before);
     if (after !== before) {
-      fs.writeFileSync(layoutAbs, after, 'utf-8');
+      atomicWriteFileInside(cwd, layoutAbs, after, { encoding: 'utf8', allowCreate: false });
       removed = true;
     }
   }
 
   const rootAbs = path.join(cwd, SVELTE_LIVE_ROOT_COMPONENT);
-  if (fs.existsSync(rootAbs)) {
-    fs.rmSync(rootAbs, { force: true });
+  if (readOptionalProjectFile(cwd, rootAbs) !== null) {
+    removeFileInside(cwd, rootAbs);
     removed = true;
   }
 
@@ -173,8 +181,8 @@ export function unpatchSvelteLayout(content) {
 
 export function ensureSvelteLiveRootComponent(cwd, port, token) {
   const file = path.join(cwd, SVELTE_LIVE_ROOT_COMPONENT);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, buildSvelteLiveRootComponent(port, token), 'utf-8');
+  ensureDirectoryInside(cwd, path.dirname(file));
+  atomicWriteFileInside(cwd, file, buildSvelteLiveRootComponent(port, token), { encoding: 'utf8' });
   return file;
 }
 
@@ -295,6 +303,14 @@ function fileIncludes(file, text) {
     return fs.readFileSync(file, 'utf-8').includes(text);
   } catch {
     return false;
+  }
+}
+
+function readOptionalProjectFile(cwd, filePath) {
+  try { return readFileInside(cwd, filePath, { encoding: 'utf8' }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
   }
 }
 

@@ -107,19 +107,32 @@ extension AppModel: ControlHost {
         guard let entry = ModelCatalog.entry(id: request.modelID) else {
             throw ControlHostError.unknownModel(request.modelID)
         }
+        let contextLength = request.contextLength ?? 8192
+        guard contextLength >= 1, entry.maxContext >= 1, contextLength <= entry.maxContext else {
+            throw ControlHostError.badRequest(
+                "Context length must be between 1 and \(entry.maxContext) tokens for "
+                    + "\(entry.name)."
+            )
+        }
         let quantization = request.quantization
             .flatMap { Quantization(rawValue: $0) }
             ?? autoConfigurator().best(for: entry, otherAppsInUse: memoryUsedByOtherApps)?.quantization
             ?? .q4_K_M
 
         var configuration = LoadConfiguration(
-            contextLength: request.contextLength ?? 8192,
+            contextLength: contextLength,
             kvCachePrecision: request.kvCachePrecision
                 .flatMap { KVCachePrecision(rawValue: $0) } ?? .f16,
             flashAttention: request.flashAttention ?? true,
             threads: profile.performanceCores
         )
-        if let slots = request.expertSlots, let moe = entry.shape.moe {
+        if let slots = request.expertSlots {
+            guard let moe = entry.shape.moe, slots >= 1, moe.expertCount >= 1,
+                  slots <= moe.expertCount else {
+                throw ControlHostError.badRequest(
+                    "Expert slots must be between 1 and the model's expert count."
+                )
+            }
             configuration.expertStreaming = ExpertStreamingConfiguration(slotCount: slots)
             configuration.microBatchSize = ExpertStreamingConfiguration.maximumMicroBatch(
                 slotCount: slots, expertsUsedPerToken: moe.expertsUsedPerToken
@@ -181,8 +194,23 @@ extension AppModel: ControlHost {
         }
 
         var configuration = defaultConfiguration(for: target)
-        if let context = request.contextLength { configuration.contextLength = context }
-        if let slots = request.expertSlots, let moe = target.shape?.moe {
+        if let context = request.contextLength {
+            let catalogMaximum = target.catalogID.flatMap(ModelCatalog.entry(id:))?.maxContext
+            let maximum = catalogMaximum ?? target.shape?.trainingContextLength ?? 1_048_576
+            guard context >= 1, maximum >= 1, context <= maximum else {
+                throw ControlHostError.badRequest(
+                    "Context length must be between 1 and \(maximum) tokens for this model."
+                )
+            }
+            configuration.contextLength = context
+        }
+        if let slots = request.expertSlots {
+            guard let moe = target.shape?.moe, slots >= 1, moe.expertCount >= 1,
+                  slots <= moe.expertCount else {
+                throw ControlHostError.badRequest(
+                    "Expert slots must be between 1 and the model's expert count."
+                )
+            }
             configuration.expertStreaming = ExpertStreamingConfiguration(slotCount: slots)
             configuration.microBatchSize = ExpertStreamingConfiguration.maximumMicroBatch(
                 slotCount: slots, expertsUsedPerToken: moe.expertsUsedPerToken
@@ -439,7 +467,10 @@ extension AppModel {
 
         // Routing before the MFLUX guard, deliberately: a Mac without MFLUX — or a
         // weak one — is exactly the machine that should hand the job to a node.
-        if let node = imageRenderTarget {
+        let candidateNode = imageRenderTarget
+        if Self.shouldRouteImageRemotely(
+            localOnly: request.localOnly, hasCandidate: candidateNode != nil
+        ), let node = candidateNode {
             return try await generateImageOnNode(
                 request, configuration: configuration, node: node
             )
@@ -506,6 +537,12 @@ extension AppModel {
             model: entry.name,
             warning: warning
         )
+    }
+
+    nonisolated static func shouldRouteImageRemotely(
+        localOnly: Bool?, hasCandidate: Bool
+    ) -> Bool {
+        localOnly != true && hasCandidate
     }
 
     /// The control-API image path, rendered by a node (#136): same response shape,
@@ -587,6 +624,18 @@ extension AppModel {
         if let width = request.width { configuration.width = width }
         if let height = request.height { configuration.height = height }
         if let steps = request.steps { configuration.steps = steps }
+        guard (1...8192).contains(configuration.width),
+              (1...8192).contains(configuration.height),
+              configuration.width <= 40_000_000 / configuration.height
+        else {
+            throw ControlHostError.badRequest(
+                "Image dimensions must be positive, no more than 8192 per side, and "
+                    + "no more than 40 megapixels total."
+            )
+        }
+        guard (1...200).contains(configuration.steps) else {
+            throw ControlHostError.badRequest("Image steps must be between 1 and 200.")
+        }
         if let raw = request.quantization, let quantization = Quantization(rawValue: raw) {
             configuration.quantization = quantization
         }
@@ -600,7 +649,12 @@ extension AppModel {
             }
             configuration.initImage = url
             if let influence = request.initImageInfluence {
-                configuration.initImageInfluence = max(0, min(1, influence))
+                guard influence.isFinite, (0...1).contains(influence) else {
+                    throw ControlHostError.badRequest(
+                        "Initial-image influence must be a finite value from 0 through 1."
+                    )
+                }
+                configuration.initImageInfluence = influence
             }
         }
         return (entry, configuration)

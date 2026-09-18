@@ -52,7 +52,8 @@ extension AppModel {
         let nodePath = settings.nodeBinaryPath ?? ""
         Task {
             await runtime.start(
-                webPort: webPort, gatewayPort: gateway, models: models,
+                webPort: webPort, gatewayPort: gateway, gatewayToken: gatewayToken,
+                models: models,
                 defaultModel: defaultModel, nodePath: nodePath
             ) { [weak self] state in
                 Task { @MainActor in self?.qwenState = state }

@@ -48,12 +48,25 @@ public actor GatewayServer {
 
     private let host: any GatewayHost
     private let ledger: GatewayLedger?
+    /// Full gateway authority. Managed agent sidecars receive this only through their
+    /// process environment; it is never embedded in a browser page or URL.
+    public let token: String
+    /// Narrow browser capability for media and UI helper routes. The embedded chat page must
+    /// be able to put this in media URLs, so it deliberately cannot authorize model or cloud work.
+    public let uiToken: String
     private var listener: NWListener?
+    private var activeConnections = 0
+    private static let maximumConnections = 64
     public private(set) var port: Int = 0
 
-    public init(host: any GatewayHost, ledger: GatewayLedger? = nil) {
+    public init(
+        host: any GatewayHost, ledger: GatewayLedger? = nil,
+        token: String = UUID().uuidString, uiToken: String = UUID().uuidString
+    ) {
         self.host = host
         self.ledger = ledger
+        self.token = token
+        self.uiToken = uiToken
     }
 
     public func start(preferredPort: Int = 0) throws {
@@ -87,17 +100,62 @@ public actor GatewayServer {
     }
 
     private func accept(_ connection: NWConnection) {
+        guard activeConnections < Self.maximumConnections else {
+            connection.cancel()
+            return
+        }
+        activeConnections += 1
         connection.start(queue: .global(qos: .userInitiated))
         Task { await serve(connection) }
     }
 
     private func serve(_ connection: NWConnection) async {
-        defer { connection.cancel() }
+        defer {
+            connection.cancel()
+            activeConnections -= 1
+        }
         guard let request = try? await HTTPRequest.read(from: connection) else { return }
 
-        switch (request.method, request.path) {
-        case ("GET", "/health"):
+        // Binding to loopback is a network boundary, not an HTTP authorization decision.
+        // Literal Host and loopback-only Origin checks also prevent a public web page from
+        // turning this service into a DNS-rebinding or cross-origin confused deputy.
+        guard Self.isValidLoopbackHost(request.headers["host"]),
+              Self.isTrustedLoopbackOrigin(request.headers["origin"])
+        else {
+            try? await HTTPResponse.error(403, "Only loopback clients may use the gateway.")
+                .write(to: connection)
+            return
+        }
+
+        if request.method == "OPTIONS" {
+            await servePreflight(request, on: connection)
+            return
+        }
+
+        if (request.method, request.path) == ("GET", "/health") {
             try? await HTTPResponse.json(["status": "ok"]).write(to: connection)
+            return
+        }
+
+        let isUIRoute = request.path.hasPrefix("/ui/")
+        let authorized = isUIRoute
+            ? Self.isUIRequestAuthorized(request, token: token, uiToken: uiToken)
+            : Self.isPrivilegedRequestAuthorized(request, token: token)
+        guard authorized else {
+            var response = HTTPResponse.error(401, "Invalid or missing gateway token.")
+            if isUIRoute { Self.attachCORS(to: &response, for: request) }
+            try? await response.write(to: connection)
+            return
+        }
+
+        if request.method == "POST", !Self.isJSONContentType(request.headers["content-type"]) {
+            var response = HTTPResponse.error(415, "POST requests require application/json.")
+            if isUIRoute { Self.attachCORS(to: &response, for: request) }
+            try? await response.write(to: connection)
+            return
+        }
+
+        switch (request.method, request.path) {
         case ("GET", "/v1/models"), ("GET", "/models"):
             let models = await host.gatewayModels()
             let body = GatewayAPI.modelsJSON(models)
@@ -112,12 +170,92 @@ public actor GatewayServer {
             await serveReveal(request, on: connection)
         case ("POST", "/ui/open3d"):
             await host.gatewayOpenMeshViewer()
-            try? await HTTPResponse.json(["status": "ok"]).write(to: connection)
+            var response = HTTPResponse.json(["status": "ok"])
+            Self.attachCORS(to: &response, for: request)
+            try? await response.write(to: connection)
         default:
             try? await HTTPResponse.error(
                 404, "Unknown endpoint \(request.method) \(request.path)"
             ).write(to: connection)
         }
+    }
+
+    // MARK: - Gateway authorization
+
+    static func isValidLoopbackHost(_ value: String?) -> Bool {
+        guard let value else { return false }
+        let host = value.lowercased()
+        return host == "127.0.0.1" || host.hasPrefix("127.0.0.1:")
+            || host == "localhost" || host.hasPrefix("localhost:")
+            || host == "[::1]" || host.hasPrefix("[::1]:")
+    }
+
+    static func isTrustedLoopbackOrigin(_ value: String?) -> Bool {
+        guard let value else { return true } // Native/CLI clients do not send Origin.
+        guard let url = URL(string: value), url.scheme == "http",
+              let host = url.host?.lowercased()
+        else { return false }
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
+
+    static func isJSONContentType(_ value: String?) -> Bool {
+        value?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "application/json"
+    }
+
+    static func isPrivilegedRequestAuthorized(_ request: HTTPRequest, token: String) -> Bool {
+        !token.isEmpty && request.bearerToken == token
+    }
+
+    static func isUIRequestAuthorized(
+        _ request: HTTPRequest, token: String, uiToken: String
+    ) -> Bool {
+        if isPrivilegedRequestAuthorized(request, token: token) { return true }
+        guard !uiToken.isEmpty else { return false }
+        if request.bearerToken == uiToken { return true }
+        // Media elements cannot set headers. Query capabilities are therefore read-only and
+        // scoped to /ui/media; mutation routes must use the Authorization header.
+        return request.method == "GET" && request.path == "/ui/media"
+            && request.query["token"] == uiToken
+    }
+
+    private func servePreflight(_ request: HTTPRequest, on connection: NWConnection) async {
+        guard request.path.hasPrefix("/ui/"),
+              let origin = request.headers["origin"],
+              Self.isTrustedLoopbackOrigin(origin),
+              let method = request.headers["access-control-request-method"]?.uppercased(),
+              ["GET", "POST"].contains(method)
+        else {
+            try? await HTTPResponse.error(403, "Cross-origin request denied.")
+                .write(to: connection)
+            return
+        }
+        var response = HTTPResponse(status: 204, body: Data())
+        response.extraHeaders = [
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin",
+        ]
+        try? await response.write(to: connection)
+    }
+
+    private static func attachCORS(to response: inout HTTPResponse, for request: HTTPRequest) {
+        guard let origin = request.headers["origin"], isTrustedLoopbackOrigin(origin) else {
+            return
+        }
+        response.extraHeaders["Access-Control-Allow-Origin"] = origin
+        response.extraHeaders["Vary"] = "Origin"
+    }
+
+    private func writeUIResponse(
+        _ source: HTTPResponse, for request: HTTPRequest, to connection: NWConnection
+    ) async {
+        var response = source
+        Self.attachCORS(to: &response, for: request)
+        try? await response.write(to: connection)
     }
 
     // MARK: - Chat completions (DeepSeek Harness dialect)
@@ -392,19 +530,24 @@ public actor GatewayServer {
     /// folders are served; everything else is a 403, loopback or not.
     private func serveMedia(_ request: HTTPRequest, on connection: NWConnection) async {
         guard let path = request.query["path"]?.removingPercentEncoding else {
-            try? await HTTPResponse.error(400, "No path given.").write(to: connection)
+            await writeUIResponse(
+                .error(400, "No path given."), for: request, to: connection
+            )
             return
         }
         let roots = await host.gatewayMediaRoots()
         guard GatewayAPI.isAllowedMediaPath(path, roots: roots) else {
-            try? await HTTPResponse.error(
-                403, "Only media inside the app's output folders is served."
-            ).write(to: connection)
+            await writeUIResponse(
+                .error(403, "Only media inside the app's output folders is served."),
+                for: request, to: connection
+            )
             return
         }
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
         guard let data = try? Data(contentsOf: url) else {
-            try? await HTTPResponse.error(404, "The file is gone.").write(to: connection)
+            await writeUIResponse(
+                .error(404, "The file is gone."), for: request, to: connection
+            )
             return
         }
         let type = GatewayAPI.mediaContentTypes[url.pathExtension.lowercased()]
@@ -420,11 +563,11 @@ public actor GatewayServer {
                 "Content-Range": "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(data.count)",
                 "Accept-Ranges": "bytes",
             ]
-            try? await response.write(to: connection)
+            await writeUIResponse(response, for: request, to: connection)
         } else {
             var response = HTTPResponse(status: 200, body: data, contentType: type)
             response.extraHeaders = ["Accept-Ranges": "bytes"]
-            try? await response.write(to: connection)
+            await writeUIResponse(response, for: request, to: connection)
         }
     }
 
@@ -433,18 +576,21 @@ public actor GatewayServer {
                 as? [String: Any],
               let path = json["path"] as? String
         else {
-            try? await HTTPResponse.error(400, "No path given.").write(to: connection)
+            await writeUIResponse(
+                .error(400, "No path given."), for: request, to: connection
+            )
             return
         }
         let roots = await host.gatewayMediaRoots()
         guard GatewayAPI.isAllowedMediaPath(path, roots: roots) else {
-            try? await HTTPResponse.error(
-                403, "Only media inside the app's output folders can be revealed."
-            ).write(to: connection)
+            await writeUIResponse(
+                .error(403, "Only media inside the app's output folders can be revealed."),
+                for: request, to: connection
+            )
             return
         }
         await host.gatewayReveal(path: path)
-        try? await HTTPResponse.json(["status": "ok"]).write(to: connection)
+        await writeUIResponse(.json(["status": "ok"]), for: request, to: connection)
     }
 
     /// The `data:` payloads inside one SSE frame. Comments and other fields are dropped.
@@ -556,6 +702,12 @@ private actor SSEConnection {
 /// Requests against the OpenAI-compatible server that actually hosts a model.
 enum BackendClient {
 
+    static let maximumBufferedBytes = 16 * 1_048_576
+    static let maximumErrorBytes = 64 * 1_024
+    static let maximumFrameBytes = 1 * 1_048_576
+    static let maximumStreamBytes = 16 * 1_048_576
+    static let maximumStreamFrames = 100_000
+
     static func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         // First token can be minutes away on a long prompt; the whole answer longer still.
@@ -587,20 +739,35 @@ enum BackendClient {
     static func send(
         path: String, body: Data, to base: URL, bearer: String? = nil
     ) async throws -> (Int, Data) {
-        let (data, response) = try await session().data(
+        let session = session()
+        let (bytes, response) = try await session.bytes(
             for: request(path: path, body: body, base: base, bearer: bearer)
         )
         let status = (response as? HTTPURLResponse)?.statusCode ?? 502
+        let limit = status == 200 ? maximumBufferedBytes : maximumErrorBytes
+        var data = Data()
+        data.reserveCapacity(min(limit, response.expectedContentLength > 0
+            ? Int(min(response.expectedContentLength, Int64(limit))) : 0))
+        for try await byte in bytes {
+            guard data.count < limit else {
+                session.invalidateAndCancel()
+                throw BackendError.limit("The model's server response exceeded the byte limit.")
+            }
+            data.append(byte)
+        }
         return (status, data)
     }
 
     enum BackendError: Error, LocalizedError {
         case status(Int, String)
+        case limit(String)
 
         var errorDescription: String? {
             switch self {
             case .status(let code, let message):
                 return "The model's server answered \(code): \(message)"
+            case .limit(let message):
+                return message
             }
         }
     }
@@ -617,7 +784,15 @@ enum BackendClient {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 502
         guard status == 200 else {
             var collected = Data()
-            for try await byte in bytes { collected.append(byte) }
+            for try await byte in bytes {
+                guard collected.count < maximumErrorBytes else {
+                    session.invalidateAndCancel()
+                    throw BackendError.limit(
+                        "The model's server error exceeded the byte limit."
+                    )
+                }
+                collected.append(byte)
+            }
             let message = Self.errorMessage(inBody: collected) ?? "no detail"
             throw BackendError.status(status, message)
         }
@@ -627,12 +802,31 @@ enum BackendClient {
                 // A byte array rather than Data: Data's indices do not re-zero after
                 // removeSubrange, which has bitten before; Array's always do.
                 var buffer: [UInt8] = []
+                var totalBytes = 0
+                var frameCount = 0
                 do {
                     for try await byte in bytes {
+                        totalBytes += 1
+                        guard totalBytes <= Self.maximumStreamBytes else {
+                            throw BackendError.limit(
+                                "The model's stream exceeded the total byte limit."
+                            )
+                        }
                         buffer.append(byte)
+                        guard buffer.count <= Self.maximumFrameBytes else {
+                            throw BackendError.limit(
+                                "The model's stream emitted an oversized frame."
+                            )
+                        }
                         // Frames end at a blank line. Scanning only at a newline keeps this
                         // linear: a boundary can only complete at the newest byte.
                         if byte == UInt8(ascii: "\n"), let frame = Self.takeFrame(from: &buffer) {
+                            frameCount += 1
+                            guard frameCount <= Self.maximumStreamFrames else {
+                                throw BackendError.limit(
+                                    "The model's stream emitted too many frames."
+                                )
+                            }
                             continuation.yield(frame)
                         }
                     }
@@ -643,10 +837,14 @@ enum BackendClient {
                     }
                     continuation.finish()
                 } catch {
+                    session.invalidateAndCancel()
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.onTermination = { _ in
+                task.cancel()
+                session.invalidateAndCancel()
+            }
         }
     }
 

@@ -1,4 +1,6 @@
 import Foundation
+import Darwin
+import ImageIO
 import SiliconControl
 
 /// The tools exposed to Claude and ChatGPT.
@@ -553,12 +555,21 @@ enum Tools {
                 messages.append(.init(role: "system", content: system))
             }
             var images: [String] = []
-            for value in arguments["image_paths"]?.arrayValue ?? [] {
+            let imageValues = arguments["image_paths"]?.arrayValue ?? []
+            guard imageValues.count <= Self.maximumImageCount else {
+                throw ToolError.tooManyImages(Self.maximumImageCount)
+            }
+            var aggregateImageBytes = 0
+            for value in imageValues {
                 guard let path = value.stringValue else { continue }
-                guard let dataURL = Self.dataURL(forImageAt: path) else {
+                guard let attachment = Self.dataURL(forImageAt: path) else {
                     throw ToolError.unreadableImage(path)
                 }
-                images.append(dataURL)
+                aggregateImageBytes += attachment.bytes
+                guard aggregateImageBytes <= Self.maximumAggregateImageBytes else {
+                    throw ToolError.imagesTooLarge(Self.maximumAggregateImageBytes)
+                }
+                images.append(attachment.url)
             }
             messages.append(.init(role: "user", content: prompt, images: images))
 
@@ -604,29 +615,101 @@ enum Tools {
         case missing(String)
         case unknown(String)
         case unreadableImage(String)
+        case tooManyImages(Int)
+        case imagesTooLarge(Int)
 
         var errorDescription: String? {
             switch self {
             case .missing(let field): "Required argument '\(field)' was not provided."
             case .unknown(let name): "Unknown tool '\(name)'."
             case .unreadableImage(let path):
-                "Could not read an image at '\(path)'. Give an absolute path to a PNG or JPEG."
+                "Could not safely read an image at '\(path)'. Use an owner-readable regular "
+                    + "PNG, JPEG, GIF, or WebP under \(Tools.maximumImageBytes / 1_048_576) "
+                    + "MB and 40 megapixels."
+            case .tooManyImages(let limit):
+                "At most \(limit) images may be attached to one request."
+            case .imagesTooLarge(let limit):
+                "The attached images exceed the \(limit / 1_048_576) MB aggregate limit."
             }
         }
     }
 
-    /// Inlines an image as a data URL, which is what the OpenAI vision schema expects.
-    static func dataURL(forImageAt path: String) -> String? {
-        let url = URL(fileURLWithPath: path)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let mime: String
-        switch url.pathExtension.lowercased() {
-        case "jpg", "jpeg": mime = "image/jpeg"
-        case "gif": mime = "image/gif"
-        case "webp": mime = "image/webp"
-        default: mime = "image/png"
+    static let maximumImageCount = 4
+    // Data-URL encoding expands bytes by roughly one third. The aggregate therefore stays
+    // below the control listener's 16 MiB authenticated JSON body ceiling with room for text.
+    static let maximumImageBytes = 10 * 1_048_576
+    static let maximumAggregateImageBytes = 10 * 1_048_576
+    static let maximumImagePixels = 40_000_000
+
+    /// Opens without following a final symlink, verifies owner/type/size and image metadata,
+    /// then reads through the admitted descriptor under a hard byte budget. This keeps devices,
+    /// FIFOs, symlink swaps, decompression bombs, and base64 duplication out of the MCP process.
+    static func dataURL(forImageAt path: String) -> (url: String, bytes: Int)? {
+        guard (path as NSString).isAbsolutePath else { return nil }
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        // O_NONBLOCK matters before fstat: opening an attacker-selected FIFO for reading can
+        // otherwise wait forever for a writer even though the later regular-file check rejects it.
+        let descriptor = open(normalized, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_uid == getuid(),
+              metadata.st_size >= 0,
+              metadata.st_size <= off_t(maximumImageBytes)
+        else { return nil }
+
+        var data = Data()
+        do {
+            while data.count <= maximumImageBytes {
+                let remaining = maximumImageBytes + 1 - data.count
+                guard remaining > 0,
+                      let chunk = try handle.read(upToCount: min(1_048_576, remaining)),
+                      !chunk.isEmpty
+                else { break }
+                data.append(chunk)
+            }
+        } catch {
+            return nil
         }
-        return "data:\(mime);base64,\(data.base64EncodedString())"
+        guard !data.isEmpty, data.count <= maximumImageBytes,
+              let mime = admittedImageMIME(data: data, extension: URL(
+                fileURLWithPath: normalized
+              ).pathExtension.lowercased()),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              width > 0, height > 0,
+              width <= maximumImagePixels / height
+        else { return nil }
+        return ("data:\(mime);base64,\(data.base64EncodedString())", data.count)
+    }
+
+    static func admittedImageMIME(data: Data, extension fileExtension: String) -> String? {
+        let bytes = [UInt8](data.prefix(12))
+        if fileExtension == "png",
+           bytes.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return "image/png"
+        }
+        if ["jpg", "jpeg"].contains(fileExtension),
+           bytes.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return "image/jpeg"
+        }
+        if fileExtension == "gif",
+           data.starts(with: Data("GIF87a".utf8)) || data.starts(with: Data("GIF89a".utf8)) {
+            return "image/gif"
+        }
+        if fileExtension == "webp", bytes.count >= 12,
+           Array(bytes[0..<4]) == Array("RIFF".utf8),
+           Array(bytes[8..<12]) == Array("WEBP".utf8) {
+            return "image/webp"
+        }
+        return nil
     }
 
     // MARK: - Rendering

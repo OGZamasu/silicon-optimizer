@@ -9,6 +9,7 @@ the way the control server does.
 from __future__ import annotations
 
 import json
+import io
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -173,11 +174,13 @@ def test_image_translates_names_and_delivers_to_output_path(app, tmp_path):
     assert path == "/image/generate"
     # OpenMontage names → the app's ImageRequest names, and nothing null sent.
     assert body == {"prompt": "a lighthouse at dusk", "width": 1024, "height": 576, "seed": 7,
-                    "initImagePath": "/tmp/ref.png", "initImageInfluence": 0.6}
+                    "initImagePath": "/tmp/ref.png", "initImageInfluence": 0.6,
+                    "localOnly": True}
     assert out.read_bytes() == b"PNG"
     assert result.artifacts == [str(out)]
     assert result.cost_usd == 0.0
     assert result.model == "flux-schnell"
+    assert result.data["execution_destination"] == "this Mac"
 
 
 def test_video_only_sends_the_still_for_image_to_video(app, tmp_path):
@@ -234,3 +237,34 @@ def test_a_remote_mac_needs_its_token(monkeypatch):
         _client.resolve()
     monkeypatch.setenv("SILICON_OPTIMIZER_TOKEN", "swarm-secret")
     assert _client.resolve() == _client.Endpoint("http://10.0.0.5:8791", "swarm-secret")
+
+
+def test_success_body_is_capped_even_without_content_length(monkeypatch):
+    class Response(io.BytesIO):
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    monkeypatch.setattr(_client, "MAX_RESPONSE_BYTES", 8)
+    monkeypatch.setattr(_client.request, "urlopen", lambda *_args, **_kwargs: Response(b"123456789"))
+    with pytest.raises(_client.SiliconError, match="8-byte limit"):
+        _client._open(_client.request.Request("http://127.0.0.1/test"), 1)
+
+
+def test_error_body_and_diagnostic_are_bounded(monkeypatch):
+    monkeypatch.setattr(_client, "MAX_ERROR_BYTES", 16)
+    failure = _client.error.HTTPError(
+        "http://127.0.0.1/test", 500, "failure", {}, io.BytesIO(b"x" * 17)
+    )
+
+    def raise_failure(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(_client.request, "urlopen", raise_failure)
+    with pytest.raises(_client.SiliconError, match="16-byte limit") as raised:
+        _client._open(_client.request.Request("http://127.0.0.1/test"), 1)
+    assert len(str(raised.value)) < 200

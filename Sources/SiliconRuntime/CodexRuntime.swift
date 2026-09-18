@@ -150,6 +150,7 @@ public actor CodexRuntime {
     /// The provider id inside the generated Codex config. Permanent once chosen: Codex
     /// threads store model ids against it.
     public static let providerID = "silicon"
+    public static let gatewayKeyVariable = "SILICON_GATEWAY_KEY"
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -200,6 +201,7 @@ public actor CodexRuntime {
         [model_providers.\(providerID)]
         name = "Silicon Optimizer"
         base_url = "http://127.0.0.1:\(gatewayPort)/v1"
+        env_key = "\(gatewayKeyVariable)"
         wire_api = "responses"
 
         """
@@ -269,6 +271,7 @@ public actor CodexRuntime {
     public func start(
         nodePath: String = "",
         gatewayPort: Int,
+        gatewayToken: String,
         defaultModel: String,
         trustedProjectPath: String? = nil,
         onState: @escaping @Sendable (RuntimeState) -> Void
@@ -313,9 +316,12 @@ public actor CodexRuntime {
         process.environment = [
             "CODEX_HOME": home.path,
             "PATH": "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+            "HOME": home.path,
+            Self.gatewayKeyVariable: gatewayToken,
         ]
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.currentDirectoryURL = trustedProjectPath
+            .map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
+            ?? home
 
         let stdin = Pipe()
         let stdout = Pipe()

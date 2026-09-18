@@ -44,7 +44,7 @@ extension AppModel {
         pairingAddress = address
         pairingRequest = nil
         pairingDelivered = false
-        pairingLegacyShared = []
+        pairingApprovalError = nil
         startPairingPoll()
         return nil
     }
@@ -61,7 +61,7 @@ extension AppModel {
 
     /// Approval mints the joiner their OWN credential on every node that can issue one
     /// (per-client tokens, node work order #125) and delivers a config carrying those —
-    /// never the shared admin token, unless a legacy node leaves no choice. The nodes'
+    /// never the shared admin token. The nodes'
     /// activity logs then name the member on every job, and one member can be revoked
     /// without rotating everyone.
     func approvePairing(_ id: String) {
@@ -71,40 +71,59 @@ extension AppModel {
         else { return }
         Task {
             var released = SwarmConfig(swarmToken: nil, peers: [])
-            var legacyShared: [String] = []
+            var mintedPeers: [SwarmPeer] = []
+            var blocked: [String] = []
             for peer in config.peers {
-                if let minted = await self.mintClientToken(
+                switch await self.mintClientToken(
                     on: peer, clientName: joinerName, admin: config.effectiveToken
                 ) {
-                    released.peers.append(SwarmPeer(
-                        name: peer.name, baseURL: peer.baseURL, token: minted
+                case .minted(let token):
+                    mintedPeers.append(SwarmPeer(
+                        name: peer.name, baseURL: peer.baseURL, token: token
                     ))
-                } else {
-                    // A node without the client-token API (pre-#125) can only be
-                    // shared the old way. Named in the sheet so the owner knows.
-                    released.peers.append(SwarmPeer(
-                        name: peer.name, baseURL: peer.baseURL, token: config.effectiveToken
-                    ))
-                    legacyShared.append(peer.name)
+                case .unsupported:
+                    blocked.append("\(peer.name) needs the per-member key update")
+                case .failed:
+                    blocked.append("\(peer.name) could not issue a key")
                 }
             }
-            self.pairingLegacyShared = legacyShared
+            guard blocked.isEmpty else {
+                // Do not leave credentials behind after an all-or-nothing approval attempt.
+                for peer in mintedPeers {
+                    _ = await self.revokeClientToken(
+                        on: peer, clientName: joinerName, admin: config.effectiveToken
+                    )
+                }
+                self.pairingApprovalError = blocked.joined(separator: "; ")
+                    + ". No credentials were shared. Update or reconnect those nodes, then retry."
+                return
+            }
+            released.peers = mintedPeers
+            self.pairingApprovalError = nil
             await server.approve(id, releasing: released)
         }
     }
 
-    /// Mints a per-client token on one node using the admin credential. Returns nil
-    /// when the node cannot (missing endpoint, unreachable) — the caller decides the
-    /// fallback. A 409 means the name already has a token there; since only admins
+    enum ClientTokenMintResult: Equatable, Sendable {
+        case minted(String)
+        case unsupported
+        case failed
+    }
+
+    /// Mints a per-client token on one node using the admin credential. Legacy absence and
+    /// operational failure are deliberately distinct, and neither can release the admin
+    /// credential. A 409 means the name already has a token there; since only admins
     /// reach this path, replace it (revoke, re-mint) so pairing the same machine
     /// twice heals rather than fails.
     func mintClientToken(
         on peer: SwarmPeer, clientName: String, admin: String?
-    ) async -> String? {
-        guard let admin else { return nil }
-        func attempt() async -> (Int, String?) {
+    ) async -> ClientTokenMintResult {
+        guard let admin,
+              let clientName = SwarmPairing.normalizedClientName(clientName)
+        else { return .failed }
+        func attempt() async -> (Int, Data)? {
             guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
-            else { return (0, nil) }
+            else { return nil }
             var request = URLRequest(url: base.appendingPathComponent("swarm/clients"))
             request.httpMethod = "POST"
             request.timeoutInterval = 15
@@ -114,20 +133,34 @@ extension AppModel {
                 withJSONObject: ["name": clientName]
             )
             guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse else { return (0, nil) }
-            let token = (try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any])?["token"] as? String
-            return (http.statusCode, token)
+                  let http = response as? HTTPURLResponse else { return nil }
+            return (http.statusCode, data)
         }
 
-        let (status, token) = await attempt()
-        if (200..<300).contains(status), let token { return token }
+        guard let (status, body) = await attempt() else { return .failed }
+        let first = Self.classifyClientTokenResponse(status: status, body: body)
+        if case .minted = first { return first }
         if status == 409 {
-            _ = await revokeClientToken(on: peer, clientName: clientName, admin: admin)
-            let (retryStatus, retryToken) = await attempt()
-            if (200..<300).contains(retryStatus) { return retryToken }
+            guard await revokeClientToken(
+                on: peer, clientName: clientName, admin: admin
+            ), let (retryStatus, retryBody) = await attempt() else { return .failed }
+            let retry = Self.classifyClientTokenResponse(status: retryStatus, body: retryBody)
+            if case .minted = retry { return retry }
+            return .failed
         }
-        return nil
+        return first
+    }
+
+    nonisolated static func classifyClientTokenResponse(
+        status: Int, body: Data
+    ) -> ClientTokenMintResult {
+        if [404, 405, 501].contains(status) { return .unsupported }
+        guard (200..<300).contains(status),
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let rawToken = object["token"] as? String
+        else { return .failed }
+        let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? .failed : .minted(token)
     }
 
     @discardableResult
@@ -136,12 +169,10 @@ extension AppModel {
     ) async -> Bool {
         guard let admin,
               let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
-              let encoded = clientName.addingPercentEncoding(
-                withAllowedCharacters: .urlPathAllowed
-              )
+              let clientName = SwarmPairing.normalizedClientName(clientName)
         else { return false }
         var request = URLRequest(
-            url: base.appendingPathComponent("swarm/clients").appendingPathComponent(encoded)
+            url: base.appendingPathComponent("swarm/clients").appendingPathComponent(clientName)
         )
         request.httpMethod = "DELETE"
         request.timeoutInterval = 15
@@ -256,10 +287,10 @@ extension AppModel {
                   swarmPeers.first(where: { $0.name == peer.name })?.reachable == true
             else { continue }
             clientTokenAttempted.insert(peer.name)
-            if let minted = await mintClientToken(
+            if case .minted(let token) = await mintClientToken(
                 on: peer, clientName: ourName, admin: admin
             ) {
-                config.setToken(minted, forPeer: peer.name)
+                config.setToken(token, forPeer: peer.name)
                 changed = true
             }
         }
@@ -269,6 +300,7 @@ extension AppModel {
     func denyPairing(_ id: String) {
         guard let server = pairingServer else { return }
         pairingRequest = nil
+        pairingApprovalError = nil
         Task { await server.deny(id) }
     }
 

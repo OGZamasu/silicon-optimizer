@@ -99,7 +99,7 @@ function uniqueStrings(values) {
 }
 
 /**
- * Detector filters shared by `npx impeccable detect` and the design hook.
+ * Detector filters shared by the bundled detector and the design hook.
  * `hook.enabled` remains hook lifecycle state; manual CLI scans still run when
  * the hook is disabled, but they honor the same ignore rules and design-system
  * toggle.

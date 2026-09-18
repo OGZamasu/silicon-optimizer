@@ -12,6 +12,7 @@
  *
  * The app writes this file into the Pi workspace and supplies the environment:
  *   SILICON_GATEWAY_PORT — the gateway's loopback port
+ *   SILICON_GATEWAY_KEY  — the per-launch gateway bearer
  *   SILICON_MCP_PATH     — path to the bundled silicon-mcp executable (optional)
  */
 
@@ -32,7 +33,8 @@ type GatewayModel = {
 
 export default async function (pi: ExtensionAPI) {
   const port = process.env.SILICON_GATEWAY_PORT;
-  if (!port) {
+  const gatewayToken = process.env.SILICON_GATEWAY_KEY;
+  if (!port || !gatewayToken) {
     return;
   }
   const baseUrl = `http://127.0.0.1:${port}/v1`;
@@ -40,7 +42,9 @@ export default async function (pi: ExtensionAPI) {
   // ---- The gateway as a provider ---------------------------------------------
   let models: Array<Record<string, unknown>> = [];
   try {
-    const response = await fetch(`${baseUrl}/models`);
+    const response = await fetch(`${baseUrl}/models`, {
+      headers: { authorization: `Bearer ${gatewayToken}` },
+    });
     const payload = (await response.json()) as { data?: GatewayModel[] };
     models = (payload.data ?? []).map((model) => ({
       id: model.id,

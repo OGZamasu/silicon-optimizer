@@ -41,6 +41,9 @@ public struct NodeImageResult: Sendable {
 public actor NodeImageRuntime {
 
     private static let log = Logger(subsystem: "dev.siliconoptimizer", category: "node-image")
+    private static let maximumArtifacts = 8
+    private static let maximumArtifactBytes: Int64 = 64 * 1_024 * 1_024
+    private static let maximumJobBytes: Int64 = 256 * 1_024 * 1_024
     private let session = URLSession(configuration: .default)
     private var cancelled = false
 
@@ -85,9 +88,13 @@ public actor NodeImageRuntime {
         )
 
         let nodeName = baseURL.host ?? "the node"
+        let networkPolicy = RemoteURLPolicy.peerHost(baseURL)
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.data(for: submit)
+            (data, response) = try await RemoteHTTP.data(
+                for: submit, session: session, policy: networkPolicy,
+                credentialOrigin: baseURL
+            )
         } catch {
             throw VideoRuntimeError.noNode("Could not reach \(nodeName).")
         }
@@ -109,9 +116,14 @@ public actor NodeImageRuntime {
             )
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let jobID = (json["job_id"] as? String) ?? (json["id"] as? String)
+              let jobID = (json["job_id"] as? String) ?? (json["id"] as? String),
+              let statusURL = RemotePathIdentifier.appending(
+                jobID, to: baseURL.appendingPathComponent("v1/jobs")
+              )
         else {
-            throw VideoRuntimeError.failed("\(nodeName) accepted the job but sent no job id.")
+            throw VideoRuntimeError.failed(
+                "\(nodeName) accepted the job but sent an invalid job id."
+            )
         }
         Self.log.notice("image job \(jobID, privacy: .public) submitted to \(baseURL.absoluteString, privacy: .public)")
 
@@ -121,10 +133,13 @@ public actor NodeImageRuntime {
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
             try? await Task.sleep(for: .seconds(2))
 
-            var poll = URLRequest(url: baseURL.appendingPathComponent("v1/jobs/\(jobID)"))
+            var poll = URLRequest(url: statusURL)
             poll.timeoutInterval = 30
             if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-            guard let (statusData, _) = try? await session.data(for: poll),
+            guard let (statusData, _) = try? await RemoteHTTP.data(
+                    for: poll, session: session, policy: networkPolicy,
+                    credentialOrigin: baseURL
+                  ),
                   let status = try? JSONSerialization.jsonObject(with: statusData)
                     as? [String: Any]
             else { continue }
@@ -133,7 +148,8 @@ public actor NodeImageRuntime {
 
             let state = (status["status"] as? String ?? "").lowercased()
             if ["failed", "error", "cancelled"].contains(state) {
-                let detail = status["error"] as? String ?? status["detail"] as? String
+                let detail = (status["error"] as? String ?? status["detail"] as? String)
+                    .map { String($0.prefix(512)) }
                 throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
@@ -145,20 +161,22 @@ public actor NodeImageRuntime {
                     )
                 }
                 var saved: [URL] = []
+                let budget = RemoteByteBudget(limit: Self.maximumJobBytes)
                 for remote in remotes {
-                    var fetch = URLRequest(url: remote)
-                    fetch.timeoutInterval = 120
-                    if let token {
-                        fetch.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                    }
-                    let (bytes, _) = try await session.data(for: fetch)
                     let destination = request.outputDirectory.appendingPathComponent(
                         "silicon-image-\(UUID().uuidString.prefix(8)).png"
                     )
-                    try FileManager.default.createDirectory(
-                        at: request.outputDirectory, withIntermediateDirectories: true
+                    try await RemoteArtifactTransfer.download(
+                        from: remote,
+                        policy: networkPolicy,
+                        credentialOrigin: baseURL,
+                        bearerToken: token,
+                        to: destination,
+                        maximumBytes: Self.maximumArtifactBytes,
+                        budget: budget,
+                        timeout: 120,
+                        allowedContentTypes: ["image/*", "application/octet-stream"]
                     )
-                    try bytes.write(to: destination)
                     saved.append(destination)
                 }
                 return NodeImageResult(images: saved, elapsed: Date().timeIntervalSince(started))
@@ -173,9 +191,9 @@ public actor NodeImageRuntime {
             ?? (status["results"] as? [String])
             ?? (status["images"] as? [String])
             ?? []
-        return raw.compactMap { path in
-            if let absolute = URL(string: path), absolute.scheme != nil { return absolute }
-            return URL(string: path, relativeTo: base)?.absoluteURL
+        let policy = RemoteURLPolicy.peerHost(base)
+        return raw.prefix(maximumArtifacts).compactMap {
+            policy.resolve($0, relativeTo: base)
         }
     }
 }

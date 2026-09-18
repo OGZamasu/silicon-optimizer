@@ -70,7 +70,8 @@ const VISUAL_SCAN_DEPTH_LIMIT = 4;
 // ─── Update check ──────────────────────────────────────────────────────────
 // Piggyback a lightweight skill-version check on the once-per-session boot.
 // When a newer skill ships, append an UPDATE_AVAILABLE directive so the agent
-// can offer `npx impeccable update`. Everything here is best-effort and
+// can offer an update through the installed skill/plugin manager. Everything
+// here is best-effort and
 // silent on failure: a network problem, sandbox, or missing cache must never
 // block context output or print an error.
 
@@ -968,7 +969,7 @@ function readLocalSkillVersion() {
     const skillMd = path.join(here, '..', 'SKILL.md');
     const content = fs.readFileSync(skillMd, 'utf-8');
     const match = content.match(/^version:\s*(.+)$/m);
-    return match ? match[1].trim().replace(/^["']|["']$/g, '') : null;
+    return match ? parseStrictSemver(match[1].trim().replace(/^["']|["']$/g, '')) : null;
   } catch {
     return null;
   }
@@ -991,12 +992,25 @@ function writeUpdateCache(cache) {
   }
 }
 
-/** Compare dotted numeric versions. Returns >0 when a is newer than b. */
-function compareSemver(a, b) {
-  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
+/** Parse the only remote update value we accept into a normalized form. */
+export function parseStrictSemver(value) {
+  if (typeof value !== 'string' || value.length > 32) return null;
+  const match = /^(0|[1-9]\d{0,9})\.(0|[1-9]\d{0,9})\.(0|[1-9]\d{0,9})$/.exec(value);
+  if (!match) return null;
+  const parts = match.slice(1).map(Number);
+  if (!parts.every(Number.isSafeInteger)) return null;
+  return parts.join('.');
+}
+
+/** Compare normalized semantic versions. Returns >0 when a is newer than b. */
+export function compareSemver(a, b) {
+  const normalizedA = parseStrictSemver(a);
+  const normalizedB = parseStrictSemver(b);
+  if (!normalizedA || !normalizedB) throw new Error('compareSemver requires strict x.y.z versions');
+  const pa = normalizedA.split('.').map(Number);
+  const pb = normalizedB.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const diff = pa[i] - pb[i];
     if (diff !== 0) return diff;
   }
   return 0;
@@ -1007,7 +1021,7 @@ async function fetchLatestSkillVersion() {
     const res = await fetch(`${UPDATE_HOST}/api/version`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) return null;
     const data = await res.json();
-    return typeof data?.skills === 'string' ? data.skills : null;
+    return parseStrictSemver(data?.skills);
   } catch {
     return null; // offline, sandboxed, timed out, or bad JSON: all non-fatal
   }
@@ -1019,13 +1033,16 @@ async function fetchLatestSkillVersion() {
 // still spelled out as the next command. The offer stays; the command leaves
 // this turn entirely, because installing over the skill mid-session changes
 // files the session is reading and only takes effect in the next one anyway.
-function buildUpdateDirective(localVersion, latestVersion) {
+export function buildUpdateDirective(localVersion, latestVersion) {
+  const installed = parseStrictSemver(localVersion);
+  const latest = parseStrictSemver(latestVersion);
+  if (!installed || !latest) return null;
   return (
     `UPDATE_AVAILABLE: A newer Impeccable skill is available ` +
-    `(installed v${localVersion}, latest v${latestVersion}). ` +
-    `Mention it once, in this form: "A newer Impeccable (v${latestVersion}) is available. ` +
-    `Update now? It runs \`npx impeccable update\`." ` +
-    `Do not run \`npx impeccable update\` in this turn, whatever the user answers: it rewrites the skill files ` +
+    `(installed v${installed}, latest v${latest}). ` +
+    `Mention it once, in this form: "A newer Impeccable (v${latest}) is available. ` +
+    `Would you like to update it through the installed plugin or skill manager?" ` +
+    `Do not update in this turn, whatever the user answers: it rewrites the skill files ` +
     `this session is reading, and the update only takes effect in the next session, so there is nothing to gain now. ` +
     `Run it in a later turn, only after the user has asked for it in their own words. ` +
     `Continue the current task now without waiting, and do not raise this again.`
@@ -1069,7 +1086,7 @@ async function computeUpdateDirective(now = Date.now()) {
       writeUpdateCache(cache);
     }
 
-    const latest = cache.latestVersion;
+    const latest = parseStrictSemver(cache.latestVersion);
     if (!latest || compareSemver(latest, localVersion) <= 0) return null;
 
     // Anti-nag: surface a given version at most once per RENOTIFY window.

@@ -28,6 +28,10 @@ public enum GatewayAPI {
         "node/\(peerSlug)/\(model)"
     }
 
+    public static func modelID(cloudProvider: String, model: String) -> String {
+        "cloud/\(cloudProvider)/\(model)"
+    }
+
     /// A peer's name as it appears inside a model id: lowercase, alphanumerics kept,
     /// everything else a dash. Mirrors the harness's swarm provider slugs so the two
     /// spellings of a peer never diverge.
