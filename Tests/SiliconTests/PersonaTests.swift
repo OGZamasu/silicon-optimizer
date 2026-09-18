@@ -295,6 +295,14 @@ struct FaceCamTests {
         #expect(url.absoluteString == "http://127.0.0.1:8791/")
         #expect(fps == 0)
 
+        let protected = FaceCamRuntime.interpret(
+            "ready: ignored", port: 8791, token: "camera-secret"
+        )
+        guard case .live(let protectedURL, _) = try #require(protected) else {
+            Issue.record("protected ready line should go live"); return
+        }
+        #expect(protectedURL.query == "token=camera-secret")
+
         let running = FaceCamRuntime.interpret("fps: 17.7", port: 8791)
         guard case .live(_, let rate) = try #require(running) else {
             Issue.record("fps line should stay live"); return
@@ -352,6 +360,11 @@ struct TrackerTests {
         ) else { Issue.record("ready should start tracking"); return }
         #expect(url.absoluteString.hasSuffix("/state"))
         #expect(fps == 0)
+
+        guard case .tracking(let protectedURL, _) = try #require(
+            TrackerRuntime.interpret("ready: ignored", port: 8792, token: "tracking-secret")
+        ) else { Issue.record("protected ready line should start tracking"); return }
+        #expect(protectedURL.query == "token=tracking-secret")
 
         guard case .tracking(_, let rate) = try #require(
             TrackerRuntime.interpret("fps: 126.3", port: 8792)

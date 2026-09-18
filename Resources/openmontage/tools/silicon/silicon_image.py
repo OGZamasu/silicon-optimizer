@@ -29,10 +29,9 @@ class SiliconImage(BaseTool):
     stability = ToolStability.BETA
     execution_mode = ExecutionMode.SYNC
     determinism = Determinism.SEEDED
-    # This Mac's GPU, or a paired node's — the app decides per render, and a node with
-    # a bigger card wins when it is up. Either way: no key, no bill, nothing leaves your
-    # network. HYBRID is the closest of OpenMontage's four words for that.
-    runtime = ToolRuntime.HYBRID
+    # This provider deliberately sets localOnly on every request: its privacy claim is an
+    # enforced routing constraint, not guidance that an automatic scheduler may ignore.
+    runtime = ToolRuntime.LOCAL
 
     dependencies: list[str] = []
     install_instructions = (
@@ -87,8 +86,8 @@ class SiliconImage(BaseTool):
         return 0.0
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
-        # Seconds on this Mac; minutes when the app routes to a node that is busy or has
-        # to load the model first. The app's Images tab shows the same progress.
+        # Seconds on this Mac. The enforced localOnly request may still need to load a model;
+        # the app's Images tab shows the same progress.
         return 60.0
 
     @staticmethod
@@ -103,6 +102,7 @@ class SiliconImage(BaseTool):
             "seed": inputs.get("seed"),
             "initImagePath": inputs.get("reference_image_path"),
             "initImageInfluence": inputs.get("reference_strength"),
+            "localOnly": True,
         })
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
@@ -130,6 +130,7 @@ class SiliconImage(BaseTool):
                 "output_path": output,
                 "images_generated": 1,
                 "elapsed_seconds": answer.get("elapsedSeconds"),
+                "execution_destination": "this Mac",
                 # The app warns instead of refusing when a render is predicted to be
                 # tight on memory; pass that through so the agent can plan around it.
                 "warning": answer.get("warning"),

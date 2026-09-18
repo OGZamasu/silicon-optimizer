@@ -3,6 +3,11 @@
 The app bundle includes these runtimes so that a fresh install works without any separate
 setup. Each remains the property of its authors under its own licence.
 
+Release inputs under `Vendor/` are ignored by Git because they are large platform binaries.
+Every native file that may enter a public bundle must therefore be listed, by exact filename
+and SHA-256 digest, in the tracked `Scripts/vendor-runtime-manifest.sha256`. The release
+script rejects a missing, changed, symlinked, or undeclared runtime before code signing.
+
 ## llama.cpp (`Contents/Resources/bin/llama-server` and `lib*.dylib`)
 
 - Upstream: https://github.com/ggml-org/llama.cpp — MIT licence.
@@ -12,8 +17,8 @@ setup. Each remains the property of its authors under its own licence.
 
 ## Node.js (`Contents/Resources/bin/node`)
 
-- Upstream: https://nodejs.org — the official `darwin-arm64` build, unmodified
-  (checksum-verified against the release SHASUMS at bundle time).
+- Upstream: https://nodejs.org — an official `darwin-arm64` build, unmodified.
+  Its reviewed release bytes must match the digest in the tracked runtime manifest.
 - Node.js is available under the MIT licence with bundled components under their own
   licences; the full text ships alongside this file as `NODE_LICENSE`.
 - Used to run the DeepSeek Harness (`@deepseek-ai/dsh`, MIT), which the app installs into

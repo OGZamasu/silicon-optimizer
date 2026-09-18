@@ -1,0 +1,9 @@
+{
+  "queue_depth": 2,
+  "server": {
+    "name": "silicon-node",
+    "version": "0.3.0"
+  },
+  "status": "ok",
+  "uptime_s": 41233
+}

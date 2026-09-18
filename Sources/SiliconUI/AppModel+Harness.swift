@@ -131,7 +131,7 @@ extension AppModel {
         Task {
             await runtime.start(
                 webPort: ports.web, inferencePort: ports.inference, nodePath: nodePath,
-                advertising: advertised, gatewayPort: gateway
+                advertising: advertised, gatewayPort: gateway, gatewayToken: gatewayToken
             ) { [weak self] state in
                 Task { @MainActor in self?.harnessState = state }
             }

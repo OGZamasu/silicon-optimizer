@@ -27,9 +27,8 @@ extension AppModel: GatewayHost {
         return port
     }
 
-    /// Starts the gateway at launch, next to the control server. Loopback only — the server
-    /// itself enforces that — and token-free, matching the posture of the inference server
-    /// it fronts.
+    /// Starts the gateway at launch, next to the control server. Loopback binding limits the
+    /// network path; per-launch capabilities separately authorize model and browser operations.
     func startGatewayServer() {
         let supportDirectory = SwarmConfig.configURL.deletingLastPathComponent()
         let ledger = GatewayLedger(
@@ -37,19 +36,22 @@ extension AppModel: GatewayHost {
             previews: settings.fleetPreviewsEnabled ?? true
         )
         gatewayLedger = ledger
-        let server = GatewayServer(host: self, ledger: ledger)
+        let server = GatewayServer(
+            host: self, ledger: ledger, token: gatewayToken, uiToken: gatewayUIToken
+        )
         gatewayServer = server
         let port = gatewayPort()
         Task {
             do {
                 try await server.start(preferredPort: port)
-                // The well-known file local agents read instead of running lsof against
-                // the app. No secrets in it — the gateway is loopback and token-free.
+                // The well-known owner-readable file local agents read instead of running
+                // lsof against the app. It carries the per-launch capability and is mode 0600.
                 GatewayDiscovery.write(
                     port: port,
                     pid: ProcessInfo.processInfo.processIdentifier,
                     version: Bundle.main.infoDictionary?["CFBundleShortVersionString"]
                         as? String ?? "dev",
+                    token: gatewayToken,
                     directory: supportDirectory
                 )
             } catch {
@@ -310,7 +312,9 @@ extension AppModel: GatewayHost {
     private static func nodeBackend(peer: PeerStatus, model: String) -> GatewayReadyBackend? {
         guard let llm = peer.llm, llm.running, llm.healthy, let served = llm.model,
               GatewayAPI.modelNamesMatch(served, model),
-              let base = llm.openAIBase.flatMap(URL.init(string:))
+              let peerBase = URL(string: peer.baseURL),
+              let advertised = llm.openAIBase,
+              let base = Self.peerBackendURL(advertised, relativeTo: peerBase)
         else { return nil }
         // The peer's base already ends in /v1, and the request goes out under the engine's
         // own spelling of the name — engines 404 anything else.
@@ -426,6 +430,7 @@ extension AppModel: GatewayHost {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(gatewayToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 300
         request.httpBody = encoded
         _ = try? await URLSession.shared.data(for: request)

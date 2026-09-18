@@ -14,6 +14,10 @@ import {
 } from '../../lib/impeccable-config.mjs';
 import {
   HTML_EXTENSIONS,
+  MAX_SCAN_FILES,
+  MAX_SCAN_FILE_BYTES,
+  MAX_SCAN_TOTAL_BYTES,
+  ScanBudgetError,
   buildImportGraph,
   detectFrameworkConfig,
   isPortListening,
@@ -106,6 +110,11 @@ function formatFindings(findings, jsonMode) {
 // project design system (or base options when null). Falls back to a plain
 // object so direct/legacy callers still work.
 async function detectLocalFile(filePath, options) {
+  const stat = fs.lstatSync(filePath);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new ScanBudgetError(`${filePath} is not a regular file`);
+  if (stat.size > MAX_SCAN_FILE_BYTES) {
+    throw new ScanBudgetError(`${filePath} exceeds the ${MAX_SCAN_FILE_BYTES}-byte per-file limit`);
+  }
   if (HTML_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
     return detectHtml(filePath, options);
   }
@@ -115,7 +124,15 @@ async function detectLocalFile(filePath, options) {
 async function handleStdin(optionsFor = () => ({})) {
   const resolve = typeof optionsFor === 'function' ? optionsFor : () => optionsFor;
   const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > MAX_SCAN_FILE_BYTES) {
+      throw new ScanBudgetError(`stdin exceeds the ${MAX_SCAN_FILE_BYTES}-byte input limit`);
+    }
+    chunks.push(buffer);
+  }
   const input = Buffer.concat(chunks).toString('utf-8');
   try {
     const parsed = JSON.parse(input);
@@ -290,9 +307,31 @@ async function detectCli() {
   let allFindings = [];
 
   if (!process.stdin.isTTY && targets.length === 0) {
-    allFindings = await handleStdin(scanOptionsFor);
+    try {
+      allFindings = await handleStdin(scanOptionsFor);
+    } catch (error) {
+      if (!(error instanceof ScanBudgetError)) throw error;
+      process.stderr.write(`Error: ${error.message}\n`);
+      process.exit(1);
+    }
   } else {
-    const paths = targets.length > 0 ? targets : [process.cwd()];
+    const paths = [...new Set(targets.length > 0 ? targets : [process.cwd()])];
+    if (paths.length > 64) {
+      process.stderr.write('Error: detector target count exceeds 64\n');
+      process.exit(1);
+    }
+    let aggregateFileCount = 0;
+    let aggregateFileBytes = 0;
+    const accountFiles = (files) => {
+      for (const file of files) {
+        const stat = fs.lstatSync(file);
+        if (stat.isSymbolicLink() || !stat.isFile()) throw new ScanBudgetError(`${file} is not a regular file`);
+        aggregateFileCount += 1;
+        aggregateFileBytes += stat.size;
+        if (aggregateFileCount > MAX_SCAN_FILES) throw new ScanBudgetError(`scan input count exceeds ${MAX_SCAN_FILES} files`);
+        if (aggregateFileBytes > MAX_SCAN_TOTAL_BYTES) throw new ScanBudgetError(`scan inputs exceed ${MAX_SCAN_TOTAL_BYTES} bytes`);
+      }
+    };
     // file:// URLs get the same Puppeteer-rendered pass as http(s) — the
     // real cascade, real computed styles, real layout. Callers that want a
     // browser-grade scan of a local artifact can pass file:///abs/path.html
@@ -322,8 +361,9 @@ async function detectCli() {
 
         const resolved = path.resolve(target);
         let stat;
-        try { stat = fs.statSync(resolved); }
+        try { stat = fs.lstatSync(resolved); }
         catch { process.stderr.write(`Warning: cannot access ${target}\n`); continue; }
+        if (stat.isSymbolicLink()) throw new ScanBudgetError(`${target} is a symbolic link`);
 
         if (stat.isDirectory()) {
           // Check for framework dev server config (skip in JSON/quiet modes to avoid polluting output)
@@ -335,7 +375,7 @@ async function detectCli() {
                 process.stderr.write(
                   `\n${fwConfig.name} dev server detected on localhost:${fwConfig.port}.\n` +
                   `For more accurate results, scan the running site:\n` +
-                  `  npx impeccable detect http://localhost:${fwConfig.port}\n\n`
+                  `  node ${JSON.stringify(process.argv[1])} http://localhost:${fwConfig.port}\n\n`
                 );
               } else if (probe.listening && !probe.matched) {
                 process.stderr.write(
@@ -346,7 +386,7 @@ async function detectCli() {
                 process.stderr.write(
                   `\n${fwConfig.name} project detected (${path.basename(fwConfig.configPath)}).\n` +
                   `Start the dev server and scan via URL for best results:\n` +
-                  `  npx impeccable detect http://localhost:${fwConfig.port}\n\n`
+                  `  node ${JSON.stringify(process.argv[1])} http://localhost:${fwConfig.port}\n\n`
                 );
               }
             }
@@ -354,6 +394,7 @@ async function detectCli() {
 
           const files = walkDir(resolved)
             .filter(file => !shouldIgnoreDetectionFile(file, process.cwd(), detectionConfig));
+          accountFiles(files);
           const htmlCount = files.filter(f => HTML_EXTENSIONS.has(path.extname(f).toLowerCase())).length;
 
           // Warn and confirm if scanning many files (static HTML/CSS processes each HTML file)
@@ -395,10 +436,16 @@ async function detectCli() {
           }
         } else if (stat.isFile()) {
           if (shouldIgnoreDetectionFile(resolved, process.cwd(), detectionConfig)) continue;
+          accountFiles([resolved]);
           const fileOptions = scanOptionsFor(resolved);
           allFindings.push(...await detectLocalFile(resolved, fileOptions));
         }
       }
+    } catch (error) {
+      if (!(error instanceof ScanBudgetError)) throw error;
+      process.stderr.write(`Error: ${error.message}\n`);
+      process.exitCode = 1;
+      return;
     } finally {
       if (browserDetector) await browserDetector.close();
     }

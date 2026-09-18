@@ -1,0 +1,80 @@
+{
+  "capabilities": [
+    {
+      "description": "Turns a single photo into a game-ready 3D model.",
+      "detail": "Route A: TRELLIS.2 densify then LATO.2 retopology.",
+      "enabled": true,
+      "id": "image-to-mesh",
+      "kind": "mesh",
+      "name": "Image \u2192 clean low-poly mesh (TRELLIS.2 + LATO.2)",
+      "peak_vram_gb": 13.0,
+      "ready": true,
+      "settings": {
+        "vert_num": 2000
+      },
+      "typical_seconds": 323.7
+    },
+    {
+      "description": "OpenAI-compatible chat served from this node's GPU.",
+      "detail": "Jobs preempt the LLM; it auto-restores.",
+      "enabled": true,
+      "id": "llm-qwen3.8-27b",
+      "kind": "llm",
+      "name": "Chat (Qwen3.8 27B)",
+      "peak_vram_gb": null,
+      "ready": true,
+      "settings": {},
+      "typical_seconds": null
+    }
+  ],
+  "llm": {
+    "context_length": 32768,
+    "max_concurrency": 4,
+    "model": "qwen3.8-27b",
+    "running": true
+  },
+  "metrics": {
+    "gpu_consumer": "llm",
+    "gpu_util_pct": 5,
+    "headroom_gb": 2.9,
+    "memory_used_pct": 87,
+    "queue_depth": 0,
+    "vram_free_mb": 3010,
+    "vram_used_mb": 21300
+  },
+  "name": "silicon-node",
+  "peers": [
+    {
+      "base_url": "http://studio-mac:8788",
+      "name": "studio-mac"
+    }
+  ],
+  "platform": "windows-wsl2-cuda",
+  "profile": {
+    "driver": "610.88",
+    "gpu": "NVIDIA GeForce RTX 3090 Ti",
+    "vram_mb": 24564
+  },
+  "queue": {
+    "pending": [
+      {
+        "id": "job-90ab12cd34ef56789012",
+        "kind": "image-to-mesh",
+        "submitted_by": "studio-mac"
+      }
+    ],
+    "running": {
+      "id": "job-4f2c1a9b7d3e5f608a12",
+      "kind": "text-to-video",
+      "progress": 0.42,
+      "started_at": 1756461321.5,
+      "submitted_by": "mac-studio"
+    }
+  },
+  "serving": {
+    "paused": false,
+    "profile": "everything",
+    "reason": null,
+    "since": null
+  }
+}

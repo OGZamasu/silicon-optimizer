@@ -1,4 +1,6 @@
 import Foundation
+import Darwin
+import ImageIO
 import SiliconControl
 
 /// The tools exposed to Claude and ChatGPT.
@@ -29,6 +31,53 @@ enum Tools {
 
     static func property(_ type: String, _ description: String) -> JSONValue {
         .object(["type": .string(type), "description": .string(description)])
+    }
+
+    static let h3StepsProperty: JSONValue = .object([
+        "type": .string("integer"), "minimum": .number(4), "maximum": .number(30),
+        "description": .string("H3 only, requires advertised h3_steps support and h3_turbo=false. Sigma points per window: 20 means 19 denoising passes. Omit for Auto. More steps take longer at the same canvas; quality improvement and identical memory use are not guaranteed."),
+    ])
+
+    static func videoSamplingArguments(_ arguments: [String: JSONValue]) throws -> (turbo: Bool?, steps: Int?) {
+        if arguments["h3_turbo"] != nil && arguments["h3_turbo"]?.boolValue == nil {
+            throw ToolError.invalid("h3_turbo must be a boolean.")
+        }
+        let turbo = arguments["h3_turbo"]?.boolValue
+        guard let value = arguments["h3_steps"], value != .null else { return (turbo, nil) }
+        guard case .number(let raw) = value, raw.isFinite, raw.rounded() == raw,
+              raw >= 4, raw <= 30 else {
+            throw ToolError.invalid("h3_steps must be an integer from 4 through 30. Omit it for Auto.")
+        }
+        guard turbo == false else { throw ToolError.invalid("h3_steps requires h3_turbo=false.") }
+        return (turbo, Int(raw))
+    }
+
+    static func videoSeedArgument(_ arguments: [String: JSONValue]) throws -> UInt32? {
+        guard let value = arguments["seed"] else { return nil }
+        guard case .number(let raw) = value, raw.isFinite, raw.rounded() == raw,
+              raw >= 0, raw <= Double(UInt32.max) else {
+            throw ToolError.invalid("seed must be an integer from 0 through 4294967295.")
+        }
+        return UInt32(raw)
+    }
+
+    static func describeQueue(_ queue: ControlAPI.VideoQueueView) -> String {
+        let pending = queue.items.filter { ["pending", "submitting", "rendering"].contains($0.status) }.count
+        let failed = queue.items.filter { $0.status == "failed" }.count
+        var lines = ["Video queue: \(queue.paused ? "paused" : "running"), \(pending) queued/running, \(failed) failed, \(queue.items.count) total."]
+        if let message = queue.message { lines.append(message) }
+        let visible = queue.items.filter { $0.status != "completed" } + queue.items.filter { $0.status == "completed" }.reversed()
+        for item in visible.prefix(100) {
+            lines.append("\(item.id): \(item.title), scene \(item.scene), variation \(item.variation), seed \(item.seed ?? 0) — \(item.status)")
+            lines.append("  folder: \(item.outputDirectory)")
+            if let steps = item.h3Steps { lines.append("  sampling: Full, \(steps) points / \(steps - 1) passes per window") }
+            if let file = item.file { lines.append("  file: \(file)") }
+            if let job = item.nodeJobID { lines.append("  node job: \(job)") }
+            if let error = item.error { lines.append("  \(error)") }
+        }
+        if visible.count > 100 { lines.append("Showing 100 items. Full history is in the app and GET /video/queue.") }
+        lines.append("Leave the app open to dispatch the remaining clips; the Mac must remain powered and awake.")
+        return lines.joined(separator: "\n")
     }
 
     static let all: [Tool] = [
@@ -291,35 +340,84 @@ enum Tools {
         Tool(
             name: "list_video_models",
             description: """
-                Video generation models and whether a swarm node can serve them right now. \
-                Video is the one capability with no local backend: clips render on a paired \
-                machine with an NVIDIA card, so "available" is a claim about the swarm, not \
-                this Mac.
+                Video generation models, their supported clip lengths, and whether an exact \
+                model capability is ready right now. The renderer may be a paired GPU machine \
+                or a loopback Apple Silicon adapter such as Phosphene.
                 """,
             properties: [:], required: []
         ),
         Tool(
             name: "generate_video",
             description: """
-                Render a short video clip from a prompt on the swarm's video node and return \
-                the file path. Long-running: the fast model (ltx2-distilled) takes one to \
-                three minutes per clip, the cinematic one (wan22-ti2v-5b) around ten, and the \
-                uncensored LTX-2.3 merge (ltx23-uncensored: adult content allowed, clips carry \
-                audio) a few minutes — call list_video_models first if unsure which is \
-                available. The finished clip also appears in the app's Video tab under Recent \
+                Render a short video clip from a prompt on a swarm node that can run that \
+                model and return the file path. Long-running: ltx2-distilled generally takes \
+                one to three minutes, wan22-ti2v-5b around ten, the uncensored LTX-2.3 merge \
+                (ltx23-uncensored: adult content allowed, clips carry audio) a few minutes, \
+                and hailuo-h3 through Phosphene may take several minutes or longer for a \
+                chained clip. Call list_video_models first for availability and supported \
+                lengths. The finished clip also appears in the app's Video tab under Recent \
                 clips.
                 """,
             properties: [
                 "prompt": property("string", "What happens in the clip."),
                 "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min), "
-                    + "ltx2-distilled (fast, 1-3 min) or ltx23-uncensored (LTX-2.3 merge, "
-                    + "adult content allowed, audio, 2-5 min). Defaults to the app's selection."),
-                "seconds": property("number", "Clip length in seconds, 1-10. Default 5."),
+                    + "ltx2-distilled (fast, 1-3 min), ltx23-uncensored (LTX-2.3 merge, "
+                    + "adult content allowed, audio, 2-5 min) or hailuo-h3 (local Phosphene, "
+                    + "chained 10/15 s clips). Defaults to the app's selection."),
+                "seconds": .object([
+                    "type": .string("number"),
+                    "description": .string(
+                        "Clip length in seconds, "
+                            + "\(ControlAPI.VideoGenerateRequest.minimumSeconds)-"
+                            + "\(ControlAPI.VideoGenerateRequest.maximumSeconds). It must be "
+                            + "one of the selected model's supported lengths; default 5."
+                    ),
+                    "minimum": .number(Double(ControlAPI.VideoGenerateRequest.minimumSeconds)),
+                    "maximum": .number(Double(ControlAPI.VideoGenerateRequest.maximumSeconds)),
+                ]),
                 "resolution": property("string", "e.g. 720p. Defaults to the app's setting."),
                 "image_path": property("string", "Optional still to animate (image-to-video): "
                     + "absolute path, e.g. something from generate_image."),
+                "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional fixed seed for sampling comparisons.")]),
+                "h3_turbo": property("boolean", "H3 only: false = Full sampling, true = Turbo, omit = renderer default. Requires node support."),
+                "h3_steps": h3StepsProperty,
+                "h3_chain_prompts": .object([
+                    "type": .string("array"),
+                    "description": .string("Optional per-window prompts for hailuo-h3 only: "
+                        + "exactly 2 for 10 seconds or 3 for 15 seconds, in temporal order. "
+                        + "Omit to use the main prompt throughout."),
+                    "minItems": .number(2), "maxItems": .number(3),
+                    "items": .object([
+                        "type": .string("string"), "minLength": .number(1),
+                        "maxLength": .number(4000),
+                    ]),
+                ]),
             ],
             required: ["prompt"]
+        ),
+        Tool(
+            name: "queue_videos",
+            description: "Persist video prompts and return immediately. Generate 1–20 variations per prompt with distinct saved seeds, up to 200 unfinished clips, one render at a time. Clips and manifests go in batch folders. Leave the app open and the Mac powered with its lid open. A relaunch reconnects to saved jobs. Inspect video_queue before resubmitting after an uncertain response. Call list_video_models for supported controls.",
+            properties: [
+                "prompts": .object(["type": .string("array"), "minItems": .number(1), "maxItems": .number(200), "items": .object(["type": .string("string"), "minLength": .number(1), "maxLength": .number(12000)]), "description": .string("One prompt per shot, in scene order.")]),
+                "title": property("string", "Optional batch name."),
+                "variations": .object(["type": .string("integer"), "minimum": .number(1), "maximum": .number(20), "description": .string("Generations per prompt; default 1.")]),
+                "model_id": property("string", "Optional model ID; defaults to the app selection."),
+                "seconds": property("integer", "Supported clip length for the model, up to 15 seconds."),
+                "resolution": property("string", "480p, 720p or 1080p. Higher sizes may need more memory."),
+                "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional base seed, incremented per clip. Omit for random.")]),
+                "h3_turbo": property("boolean", "H3 only, when the node advertises this control: true = Turbo, false = slower full sampling at the same canvas, omit = renderer default. Slower is not guaranteed to look better."),
+                "h3_steps": h3StepsProperty,
+            ], required: ["prompts"]
+        ),
+        Tool(
+            name: "video_queue",
+            description: "Inspect or control the persistent queue. Pause stops future dispatch, not the active render. stop_following also stops the app waiting for the active clip, but does NOT cancel the remote GPU job; its receipt is preserved. Retry reconnects to a saved non-terminal job. Check the node and obtain user approval before confirm_new_render=true for an uncertain submission. Remove only affects unsubmitted entries; clear_finished keeps media and manifests.",
+            properties: [
+                "action": .object(["type": .string("string"), "enum": .array(["status", "pause", "resume", "retry", "remove", "stop_following", "clear_finished"].map(JSONValue.string)), "description": .string("Default status.")]),
+                "id": property("string", "Queue item ID for retry, remove or stop_following."),
+                "confirm_new_render": property("boolean", "Explicit user confirmation to create a new render after checking the original job."),
+            ], required: []
         ),
         Tool(
             name: "get_status",
@@ -509,10 +607,14 @@ enum Tools {
             let models: [ControlAPI.VideoModel] = try await client.get("/video/models")
             return models.map { model in
                 var line = "- \(model.name) [\(model.id)] — \(model.typicalDuration)"
+                line += ", \(model.supportedSeconds.map(String.init).joined(separator: "/")) s"
                 if model.supportsImageInput { line += ", can animate a still image" }
                 line += model.available
                     ? "\n  available now on \(model.node ?? "a node")"
-                    : "\n  NOT available — no reachable node offers video right now"
+                    : "\n  NOT available — no reachable node offers this model right now"
+                if let parameters = model.supportedParameters, !parameters.isEmpty {
+                    line += "\n  supported controls: \(parameters.joined(separator: ", "))"
+                }
                 line += "\n  \(model.summary)"
                 return line
             }.joined(separator: "\n")
@@ -521,12 +623,25 @@ enum Tools {
             guard let prompt = arguments["prompt"]?.stringValue else {
                 throw ToolError.missing("prompt")
             }
+            let chainPrompts: [String]?
+            if let value = arguments["h3_chain_prompts"] {
+                guard let values = value.arrayValue,
+                      values.allSatisfy({ $0.stringValue != nil }) else {
+                    throw ToolError.invalid("h3_chain_prompts must be an array of strings.")
+                }
+                chainPrompts = values.compactMap(\.stringValue)
+            } else {
+                chainPrompts = nil
+            }
+            let sampling = try videoSamplingArguments(arguments)
             let request = ControlAPI.VideoGenerateRequest(
                 prompt: prompt,
                 modelID: arguments["model_id"]?.stringValue,
                 seconds: arguments["seconds"]?.intValue,
                 resolution: arguments["resolution"]?.stringValue,
-                imagePath: arguments["image_path"]?.stringValue
+                imagePath: arguments["image_path"]?.stringValue,
+                h3ChainPrompts: chainPrompts, seed: try videoSeedArgument(arguments),
+                h3Turbo: sampling.turbo, h3Steps: sampling.steps
             )
             let clip: ControlAPI.VideoResponse = try await client.post(
                 "/video/generate", request
@@ -535,6 +650,39 @@ enum Tools {
                 + String(format: "%.0fs", clip.elapsedSeconds)
                 + ".\n  file: \(clip.file)"
                 + "\nThe clip is also in the app's Video tab under Recent clips."
+
+        case "queue_videos":
+            guard let values = arguments["prompts"]?.arrayValue,
+                  values.allSatisfy({ $0.stringValue != nil }) else {
+                throw ToolError.invalid("prompts must be an array of strings.")
+            }
+            let seed = try videoSeedArgument(arguments)
+            for key in ["variations", "seconds"] where arguments[key] != nil {
+                guard let value = arguments[key]?.doubleValue, value.isFinite,
+                      value.rounded() == value, value >= 1, value <= 200 else {
+                    throw ToolError.invalid("\(key) must be a positive integer in range.")
+                }
+            }
+            let sampling = try videoSamplingArguments(arguments)
+            let queue: ControlAPI.VideoQueueView = try await client.post("/video/queue", ControlAPI.VideoQueueRequest(
+                prompts: values.compactMap(\.stringValue), title: arguments["title"]?.stringValue,
+                variations: arguments["variations"]?.intValue, modelID: arguments["model_id"]?.stringValue,
+                seconds: arguments["seconds"]?.intValue, resolution: arguments["resolution"]?.stringValue,
+                seed: seed, h3Turbo: sampling.turbo, h3Steps: sampling.steps
+            ))
+            return describeQueue(queue)
+
+        case "video_queue":
+            let action = arguments["action"]?.stringValue ?? "status"
+            let queue: ControlAPI.VideoQueueView
+            if action == "status" { queue = try await client.get("/video/queue") }
+            else {
+                queue = try await client.post("/video/queue/control", ControlAPI.VideoQueueControl(
+                    action: action, id: arguments["id"]?.stringValue,
+                    confirmNewRender: arguments["confirm_new_render"]?.boolValue
+                ))
+            }
+            return describeQueue(queue)
 
         case "run_benchmark":
             let result: ControlAPI.BenchmarkResult = try await client.postEmpty("/benchmark")
@@ -553,12 +701,21 @@ enum Tools {
                 messages.append(.init(role: "system", content: system))
             }
             var images: [String] = []
-            for value in arguments["image_paths"]?.arrayValue ?? [] {
+            let imageValues = arguments["image_paths"]?.arrayValue ?? []
+            guard imageValues.count <= Self.maximumImageCount else {
+                throw ToolError.tooManyImages(Self.maximumImageCount)
+            }
+            var aggregateImageBytes = 0
+            for value in imageValues {
                 guard let path = value.stringValue else { continue }
-                guard let dataURL = Self.dataURL(forImageAt: path) else {
+                guard let attachment = Self.dataURL(forImageAt: path) else {
                     throw ToolError.unreadableImage(path)
                 }
-                images.append(dataURL)
+                aggregateImageBytes += attachment.bytes
+                guard aggregateImageBytes <= Self.maximumAggregateImageBytes else {
+                    throw ToolError.imagesTooLarge(Self.maximumAggregateImageBytes)
+                }
+                images.append(attachment.url)
             }
             messages.append(.init(role: "user", content: prompt, images: images))
 
@@ -601,32 +758,106 @@ enum Tools {
     }
 
     enum ToolError: Error, LocalizedError {
+        case invalid(String)
         case missing(String)
         case unknown(String)
         case unreadableImage(String)
+        case tooManyImages(Int)
+        case imagesTooLarge(Int)
 
         var errorDescription: String? {
             switch self {
+            case .invalid(let message): message
             case .missing(let field): "Required argument '\(field)' was not provided."
             case .unknown(let name): "Unknown tool '\(name)'."
             case .unreadableImage(let path):
-                "Could not read an image at '\(path)'. Give an absolute path to a PNG or JPEG."
+                "Could not safely read an image at '\(path)'. Use an owner-readable regular "
+                    + "PNG, JPEG, GIF, or WebP under \(Tools.maximumImageBytes / 1_048_576) "
+                    + "MB and 40 megapixels."
+            case .tooManyImages(let limit):
+                "At most \(limit) images may be attached to one request."
+            case .imagesTooLarge(let limit):
+                "The attached images exceed the \(limit / 1_048_576) MB aggregate limit."
             }
         }
     }
 
-    /// Inlines an image as a data URL, which is what the OpenAI vision schema expects.
-    static func dataURL(forImageAt path: String) -> String? {
-        let url = URL(fileURLWithPath: path)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let mime: String
-        switch url.pathExtension.lowercased() {
-        case "jpg", "jpeg": mime = "image/jpeg"
-        case "gif": mime = "image/gif"
-        case "webp": mime = "image/webp"
-        default: mime = "image/png"
+    static let maximumImageCount = 4
+    // Data-URL encoding expands bytes by roughly one third. The aggregate therefore stays
+    // below the control listener's 16 MiB authenticated JSON body ceiling with room for text.
+    static let maximumImageBytes = 10 * 1_048_576
+    static let maximumAggregateImageBytes = 10 * 1_048_576
+    static let maximumImagePixels = 40_000_000
+
+    /// Opens without following a final symlink, verifies owner/type/size and image metadata,
+    /// then reads through the admitted descriptor under a hard byte budget. This keeps devices,
+    /// FIFOs, symlink swaps, decompression bombs, and base64 duplication out of the MCP process.
+    static func dataURL(forImageAt path: String) -> (url: String, bytes: Int)? {
+        guard (path as NSString).isAbsolutePath else { return nil }
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        // O_NONBLOCK matters before fstat: opening an attacker-selected FIFO for reading can
+        // otherwise wait forever for a writer even though the later regular-file check rejects it.
+        let descriptor = open(normalized, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_uid == getuid(),
+              metadata.st_size >= 0,
+              metadata.st_size <= off_t(maximumImageBytes)
+        else { return nil }
+
+        var data = Data()
+        do {
+            while data.count <= maximumImageBytes {
+                let remaining = maximumImageBytes + 1 - data.count
+                guard remaining > 0,
+                      let chunk = try handle.read(upToCount: min(1_048_576, remaining)),
+                      !chunk.isEmpty
+                else { break }
+                data.append(chunk)
+            }
+        } catch {
+            return nil
         }
-        return "data:\(mime);base64,\(data.base64EncodedString())"
+        guard !data.isEmpty, data.count <= maximumImageBytes,
+              let mime = admittedImageMIME(data: data, extension: URL(
+                fileURLWithPath: normalized
+              ).pathExtension.lowercased()),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              width > 0, height > 0,
+              width <= maximumImagePixels / height
+        else { return nil }
+        return ("data:\(mime);base64,\(data.base64EncodedString())", data.count)
+    }
+
+    static func admittedImageMIME(data: Data, extension fileExtension: String) -> String? {
+        let bytes = [UInt8](data.prefix(12))
+        if fileExtension == "png",
+           bytes.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return "image/png"
+        }
+        if ["jpg", "jpeg"].contains(fileExtension),
+           bytes.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return "image/jpeg"
+        }
+        if fileExtension == "gif",
+           data.starts(with: Data("GIF87a".utf8)) || data.starts(with: Data("GIF89a".utf8)) {
+            return "image/gif"
+        }
+        if fileExtension == "webp", bytes.count >= 12,
+           Array(bytes[0..<4]) == Array("RIFF".utf8),
+           Array(bytes[8..<12]) == Array("WEBP".utf8) {
+            return "image/webp"
+        }
+        return nil
     }
 
     // MARK: - Rendering

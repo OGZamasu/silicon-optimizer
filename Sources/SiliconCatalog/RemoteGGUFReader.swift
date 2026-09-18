@@ -35,7 +35,11 @@ public struct RemoteGGUFReader: Sendable {
     public init(token: String? = nil) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: configuration)
+        self.init(session: URLSession(configuration: configuration), token: token)
+    }
+
+    init(session: URLSession, token: String? = nil) {
+        self.session = session
         self.token = token
     }
 
@@ -44,6 +48,7 @@ public struct RemoteGGUFReader: Sendable {
 
         while length <= Self.maximumChunk {
             let data = try await fetch(repository: repository, file: file, length: length)
+            guard data.count <= length else { throw ReadError.headerTooLarge }
             do {
                 return try GGUFReader().read(data: data)
             } catch GGUFReader.ReadError.truncated {
@@ -70,7 +75,7 @@ public struct RemoteGGUFReader: Sendable {
         request.setValue("bytes=0-\(length - 1)", forHTTPHeaderField: "Range")
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw HuggingFaceClient.ClientError.badResponse(0)
         }
@@ -80,6 +85,17 @@ public struct RemoteGGUFReader: Sendable {
             throw http.statusCode == 200
                 ? ReadError.rangeNotSupported
                 : HuggingFaceClient.ClientError.badResponse(http.statusCode)
+        }
+        guard http.expectedContentLength <= Int64(length) else {
+            throw ReadError.headerTooLarge
+        }
+        var data = Data()
+        if http.expectedContentLength > 0 {
+            data.reserveCapacity(Int(http.expectedContentLength))
+        }
+        for try await byte in bytes {
+            guard data.count < length else { throw ReadError.headerTooLarge }
+            data.append(byte)
         }
         return data
     }

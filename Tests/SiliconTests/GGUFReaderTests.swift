@@ -11,6 +11,9 @@ import Testing
 struct GGUFBuilder {
     enum Value {
         case uint32(UInt32)
+        case int64(Int64)
+        case uint64(UInt64)
+        case double(Double)
         case string(String)
         case stringArray([String])
     }
@@ -20,7 +23,7 @@ struct GGUFBuilder {
     /// name -> dimensions
     var tensors: [(String, [UInt64])] = []
 
-    func write(to url: URL) throws {
+    func data() -> Data {
         var data = Data()
 
         func appendUInt32(_ value: UInt32) {
@@ -50,6 +53,15 @@ struct GGUFBuilder {
             case .uint32(let number):
                 appendUInt32(4)
                 appendUInt32(number)
+            case .int64(let number):
+                appendUInt32(11)
+                appendUInt64(UInt64(bitPattern: number))
+            case .uint64(let number):
+                appendUInt32(10)
+                appendUInt64(number)
+            case .double(let number):
+                appendUInt32(12)
+                appendUInt64(number.bitPattern)
             case .string(let text):
                 appendUInt32(8)
                 appendString(text)
@@ -69,7 +81,27 @@ struct GGUFBuilder {
             appendUInt64(0)                             // data offset
         }
 
-        try data.write(to: url)
+        return data
+    }
+
+    func write(to url: URL) throws {
+        try data().write(to: url)
+    }
+}
+
+private extension Data {
+    mutating func appendLittleEndian(_ value: UInt32) {
+        Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendLittleEndian(_ value: UInt64) {
+        Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendGGUFString(_ value: String) {
+        let bytes = Array(value.utf8)
+        appendLittleEndian(UInt64(bytes.count))
+        append(contentsOf: bytes)
     }
 }
 
@@ -79,6 +111,26 @@ struct GGUFReaderTests {
     private func temporaryURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("gguf-test-\(UUID().uuidString).gguf")
+    }
+
+    private func prefix(tensors: UInt64 = 0, metadata: UInt64 = 0) -> Data {
+        var data = Data()
+        data.appendLittleEndian(UInt32(0x4655_4747))
+        data.appendLittleEndian(UInt32(3))
+        data.appendLittleEndian(tensors)
+        data.appendLittleEndian(metadata)
+        return data
+    }
+
+    private func expectInvalid(_ data: Data, sourceLocation: SourceLocation = #_sourceLocation) {
+        do {
+            _ = try GGUFReader().read(data: data)
+            Issue.record("malformed GGUF was accepted", sourceLocation: sourceLocation)
+        } catch GGUFReader.ReadError.invalidData {
+            // Expected typed rejection, distinct from a partial remote range.
+        } catch {
+            Issue.record("expected invalidData, got \(error)", sourceLocation: sourceLocation)
+        }
     }
 
     @Test func readsArchitectureAndDimensions() throws {
@@ -98,7 +150,8 @@ struct GGUFReaderTests {
                 ("qwen3moe.expert_feed_forward_length", .uint32(768)),
                 ("qwen3moe.context_length", .uint32(262_144)),
                 ("general.name", .string("Qwen3 30B A3B")),
-            ]
+            ],
+            tensors: [("token_embd.weight", [30_500_000_000])]
         ).write(to: url)
 
         let reader = GGUFReader()
@@ -188,6 +241,187 @@ struct GGUFReaderTests {
             shape: shape, quantization: .q4_K_M, configuration: LoadConfiguration()
         )
         #expect(plan.nonExpertWeights > .mib(8))
+    }
+
+    @Test func rejectsUnboundedCountsBeforeAllocationOrIteration() {
+        expectInvalid(prefix(metadata: UInt64.max))
+        expectInvalid(prefix(tensors: UInt64.max))
+
+        var oversizedString = prefix(metadata: 1)
+        oversizedString.appendLittleEndian(UInt64.max)
+        expectInvalid(oversizedString)
+
+        var oversizedArray = prefix(metadata: 1)
+        oversizedArray.appendGGUFString("array")
+        oversizedArray.appendLittleEndian(UInt32(9))       // array
+        oversizedArray.appendLittleEndian(UInt32(0))       // uint8 elements
+        oversizedArray.appendLittleEndian(UInt64.max)
+        expectInvalid(oversizedArray)
+
+        var excessiveWork = prefix(metadata: 1)
+        excessiveWork.appendGGUFString("strings")
+        excessiveWork.appendLittleEndian(UInt32(9))
+        excessiveWork.appendLittleEndian(UInt32(8))        // variable-width strings
+        excessiveWork.appendLittleEndian(UInt64(1_000_001))
+        expectInvalid(excessiveWork)
+    }
+
+    @Test func rejectsUnrepresentableTensorDimensionsAndProducts() {
+        var unrepresentable = prefix(tensors: 1)
+        unrepresentable.appendGGUFString("weight")
+        unrepresentable.appendLittleEndian(UInt32(1))
+        unrepresentable.appendLittleEndian(UInt64.max)
+        expectInvalid(unrepresentable)
+
+        var excessiveProduct = prefix(tensors: 1)
+        excessiveProduct.appendGGUFString("weight")
+        excessiveProduct.appendLittleEndian(UInt32(2))
+        excessiveProduct.appendLittleEndian(UInt64(Int64.max))
+        excessiveProduct.appendLittleEndian(UInt64(2))
+        expectInvalid(excessiveProduct)
+    }
+
+    @Test func rejectsNestedArraysAtTheDepthBudget() {
+        var data = prefix(metadata: 1)
+        data.appendGGUFString("nested")
+        data.appendLittleEndian(UInt32(9))                 // top-level array value
+        for _ in 0...16 {
+            data.appendLittleEndian(UInt32(9))             // one nested array
+            data.appendLittleEndian(UInt64(1))
+        }
+        data.appendLittleEndian(UInt32(0))                 // final uint8 array
+        data.appendLittleEndian(UInt64(0))
+        expectInvalid(data)
+    }
+
+    @Test func tensorTableTruncationAlwaysPropagates() throws {
+        let metadataOnly = GGUFBuilder(architecture: "llama").data()
+        let complete = GGUFBuilder(
+            architecture: "llama", tensors: [("weight", [128, 256])]
+        ).data()
+        #expect(complete.count > metadataOnly.count)
+
+        for length in metadataOnly.count..<complete.count {
+            do {
+                _ = try GGUFReader().read(data: complete.prefix(length))
+                Issue.record("accepted tensor table truncated at byte \(length)")
+            } catch GGUFReader.ReadError.truncated {
+                // The remote reader relies on this exact signal to double its range.
+            } catch {
+                Issue.record("expected truncated at byte \(length), got \(error)")
+            }
+        }
+        #expect(try GGUFReader().read(data: complete).parameterCount == 32_768)
+    }
+
+    @Test func shapeRejectsNonIntegralAndInconsistentNumericMetadata() {
+        let base: [String: GGUFReader.Value] = [
+            "llama.block_count": .integer(32),
+            "llama.embedding_length": .integer(4096),
+            "llama.attention.head_count": .integer(32),
+        ]
+
+        func shape(overrides: [String: GGUFReader.Value], parameters: Int64 = 10_000_000_000)
+            -> ModelShape? {
+            GGUFReader().shape(from: .init(
+                architecture: "llama",
+                name: nil,
+                tensorCount: 1,
+                values: base.merging(overrides) { _, replacement in replacement },
+                parameterCount: parameters
+            ))
+        }
+
+        #expect(shape(overrides: ["llama.block_count": .double(.nan)]) == nil)
+        #expect(shape(overrides: ["llama.embedding_length": .double(.infinity)]) == nil)
+        #expect(shape(overrides: ["llama.attention.head_count": .double(31.5)]) == nil)
+        #expect(shape(overrides: ["llama.block_count": .integer(0)]) == nil)
+        #expect(shape(overrides: [:], parameters: 0) == nil)
+        #expect(shape(overrides: [:], parameters: Int64.max) == nil)
+        #expect(shape(overrides: [
+            "llama.expert_count": .integer(8),
+            "llama.expert_used_count": .integer(9),
+            "llama.expert_feed_forward_length": .integer(1024),
+        ]) == nil)
+        #expect(shape(overrides: [
+            "llama.expert_count": .integer(8),
+            "llama.expert_used_count": .integer(2),
+            "llama.expert_feed_forward_length": .integer(1024),
+            "llama.leading_dense_block_count": .integer(33),
+        ]) == nil)
+        #expect(shape(overrides: [
+            "llama.expert_count": .integer(8),
+            "llama.expert_used_count": .integer(2),
+            "llama.expert_feed_forward_length": .integer(1024),
+            "llama.leading_dense_block_count": .integer(Int64.min),
+        ]) == nil)
+        #expect(shape(overrides: [:])?.isValidForPlanning == true)
+    }
+}
+
+private final class GGUFRangeProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var payload = Data()
+    nonisolated(unsafe) private static var requestedLengths: [Int] = []
+
+    static func configure(payload: Data) {
+        lock.withLock {
+            self.payload = payload
+            requestedLengths = []
+        }
+    }
+
+    static var requests: [Int] { lock.withLock { requestedLengths } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let end = request.value(forHTTPHeaderField: "Range")?
+            .split(separator: "-").last.flatMap { Int($0) } ?? 0
+        let length = end + 1
+        let responseData = Self.lock.withLock { () -> Data in
+            Self.requestedLengths.append(length)
+            return Data(Self.payload.prefix(length))
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 206, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Range": "bytes 0-\(responseData.count - 1)/*"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: responseData)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+@Suite("Remote GGUF parser security", .serialized)
+struct RemoteGGUFParserSecurityTests {
+    @Test func retriesWhenTheTensorTableFallsBeyondTheInitialRange() async throws {
+        let payload = GGUFBuilder(
+            architecture: "llama",
+            values: [
+                ("llama.block_count", .uint32(32)),
+                ("llama.embedding_length", .uint32(4096)),
+                ("llama.attention.head_count", .uint32(32)),
+                ("general.description", .string(String(
+                    repeating: "x", count: RemoteGGUFReader.initialChunk
+                ))),
+            ],
+            tensors: [("weight", [1_000_000_000])]
+        ).data()
+        GGUFRangeProtocol.configure(payload: payload)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GGUFRangeProtocol.self]
+        let reader = RemoteGGUFReader(session: URLSession(configuration: configuration))
+
+        let metadata = try await reader.readHeader(repository: "owner/model", file: "model.gguf")
+
+        #expect(metadata.parameterCount == 1_000_000_000)
+        #expect(GGUFRangeProtocol.requests == [
+            RemoteGGUFReader.initialChunk, RemoteGGUFReader.initialChunk * 2,
+        ])
     }
 }
 
@@ -324,7 +558,7 @@ struct CompanionFileTests {
 struct ConversationFolderTests {
 
     private func modelWithConversations(_ count: Int) -> AppModel {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         for _ in 0..<count { model.newConversation() }
         return model
     }
@@ -371,14 +605,14 @@ struct ConversationFolderTests {
     }
 
     @Test func renameRejectsBlankNames() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         let folder = model.createFolder(named: "Keep")
         model.renameFolder(folder.id, to: "   ")
         #expect(model.folders[0].name == "Keep")
     }
 
     @Test func unnamedFoldersStillGetALabel() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         let folder = model.createFolder(named: "  ")
         #expect(!folder.name.isEmpty)
     }

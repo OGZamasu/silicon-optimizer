@@ -48,6 +48,36 @@ struct CloudProviderTests {
         }
     }
 
+    @Test @MainActor
+    func directCloudRoutingRequiresTheEnabledDiscoveredModel() throws {
+        let app = AppModel(settings: .init())
+        let model = CloudModel(
+            id: "minimax/minimax-m3", displayName: "MiniMax M3", provider: .openRouter
+        )
+        var credentials = CloudCredentials()
+        credentials.set("test-secret", for: .openRouter)
+        app.cloudCredentials = credentials
+        app.cloudModels = [model]
+
+        app.settings.enabledCloudModels = []
+        #expect(throws: GatewayHostError.self) {
+            try app.cloudBackend(provider: CloudProvider.openRouter.rawValue, model: model.id)
+        }
+
+        app.settings.enabledCloudModels = [model.gatewayID]
+        let backend = try app.cloudBackend(
+            provider: CloudProvider.openRouter.rawValue, model: model.id
+        )
+        #expect(backend.backendModel == model.id)
+        #expect(backend.baseURL == CloudProvider.openRouter.chatBaseURL)
+        #expect(backend.bearerToken == "test-secret")
+
+        app.cloudModels = []
+        #expect(throws: GatewayHostError.self) {
+            try app.cloudBackend(provider: CloudProvider.openRouter.rawValue, model: model.id)
+        }
+    }
+
     // MARK: - Credentials
 
     /// Opting out has to be as complete as never having opted in: clearing the last key
@@ -390,22 +420,26 @@ struct CloudProviderTests {
     /// Music answers with the same URL three ways. Reading all three and de-duplicating is
     /// what keeps one renamed key upstream from becoming a failed render here.
     @Test func everySpellingOfTheResultURLIsRead() throws {
+        let base = URL(string: "https://console.gmicloud.ai")!
         let musicOutcome: [String: Any] = [
-            "audio_url": "https://example.test/song.mp3",
-            "medias": [["id": "0", "url": "https://example.test/song.mp3"]],
-            "media_urls": [["id": "0", "url": "https://example.test/song.mp3"]],
+            "audio_url": "https://cdn.example.com/song.mp3",
+            "medias": [["id": "0", "url": "https://cdn.example.com/song.mp3"]],
+            "media_urls": [["id": "0", "url": "https://cdn.example.com/song.mp3"]],
         ]
-        let fromMusic = CloudAudioRuntime.audioURLs(inOutcome: musicOutcome)
+        let fromMusic = CloudAudioRuntime.audioURLs(inOutcome: musicOutcome, base: base)
         #expect(fromMusic.count == 1, "the same URL three ways is still one file")
 
         // Speech uses media_urls alone.
         let speechOutcome: [String: Any] = [
-            "media_urls": [["id": "0", "url": "https://example.test/speech.mp3"]],
+            "media_urls": [["id": "0", "url": "https://cdn.example.com/speech.mp3"]],
             "voice_id": "",
         ]
-        #expect(CloudAudioRuntime.audioURLs(inOutcome: speechOutcome).count == 1)
+        #expect(CloudAudioRuntime.audioURLs(inOutcome: speechOutcome, base: base).count == 1)
 
-        #expect(CloudAudioRuntime.audioURLs(inOutcome: [:]).isEmpty)
+        #expect(CloudAudioRuntime.audioURLs(inOutcome: [:], base: base).isEmpty)
+        #expect(CloudAudioRuntime.audioURLs(
+            inOutcome: ["audio_url": "http://127.0.0.1/admin"], base: base
+        ).isEmpty)
     }
 
     /// A failed or cancelled job has to end the poll. Treating only "success" as terminal

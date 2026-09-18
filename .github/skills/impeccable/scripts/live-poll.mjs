@@ -114,7 +114,7 @@ export function requiresAgentReply(event) {
 export async function postReply(base, token, reply) {
   const res = await fetch(`${base}/poll`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': token },
     body: JSON.stringify(buildPollReplyPayload(token, reply)),
   });
   if (!res.ok) {

@@ -2,6 +2,88 @@ import Foundation
 import Testing
 @testable import SiliconControl
 
+@Suite("Gateway request authorization")
+struct GatewayAuthorizationTests {
+
+    private func request(
+        method: String = "GET", path: String = "/v1/models",
+        query: [String: String] = [:], headers: [String: String] = [:]
+    ) -> HTTPRequest {
+        HTTPRequest(method: method, path: path, query: query, headers: headers, body: Data())
+    }
+
+    @Test func privilegedAndBrowserCapabilitiesStaySeparate() {
+        let privileged = request(headers: ["authorization": "Bearer model-secret"])
+        #expect(GatewayServer.isPrivilegedRequestAuthorized(privileged, token: "model-secret"))
+
+        let browser = request(
+            path: "/ui/media", query: ["token": "ui-secret"]
+        )
+        #expect(!GatewayServer.isPrivilegedRequestAuthorized(browser, token: "model-secret"))
+        #expect(GatewayServer.isUIRequestAuthorized(
+            browser, token: "model-secret", uiToken: "ui-secret"
+        ))
+
+        let attemptedCompute = request(
+            method: "POST", path: "/v1/chat/completions",
+            query: ["token": "ui-secret"]
+        )
+        #expect(!GatewayServer.isPrivilegedRequestAuthorized(
+            attemptedCompute, token: "model-secret"
+        ))
+        #expect(!GatewayServer.isUIRequestAuthorized(
+            attemptedCompute, token: "model-secret", uiToken: "ui-secret"
+        ))
+
+        #expect(request(headers: ["authorization": "bearer model-secret"]).bearerToken
+            == "model-secret")
+        #expect(request(headers: ["authorization": "NotBearer model-secret"]).bearerToken == nil)
+        #expect(request(headers: ["authorization": "Bearer "]).bearerToken == nil)
+    }
+
+    @Test func queryCapabilitiesAreReadOnlyAndMediaSpecific() {
+        let media = request(path: "/ui/media", query: ["token": "ui-secret"])
+        #expect(GatewayServer.isUIRequestAuthorized(
+            media, token: "model-secret", uiToken: "ui-secret"
+        ))
+
+        for request in [
+            request(method: "POST", path: "/ui/reveal", query: ["token": "ui-secret"]),
+            request(path: "/ui/anything", query: ["token": "ui-secret"]),
+        ] {
+            #expect(!GatewayServer.isUIRequestAuthorized(
+                request, token: "model-secret", uiToken: "ui-secret"
+            ))
+        }
+        let header = request(
+            method: "POST", path: "/ui/reveal",
+            headers: ["authorization": "Bearer ui-secret"]
+        )
+        #expect(GatewayServer.isUIRequestAuthorized(
+            header, token: "model-secret", uiToken: "ui-secret"
+        ))
+    }
+
+    @Test func hostOriginAndContentTypeFailClosed() {
+        for host in ["127.0.0.1:9000", "localhost:9000", "[::1]:9000"] {
+            #expect(GatewayServer.isValidLoopbackHost(host))
+        }
+        for host in [nil, "gateway.example", "127.0.0.1.example:9000"] as [String?] {
+            #expect(!GatewayServer.isValidLoopbackHost(host))
+        }
+
+        #expect(GatewayServer.isTrustedLoopbackOrigin(nil))
+        #expect(GatewayServer.isTrustedLoopbackOrigin("http://127.0.0.1:8123"))
+        #expect(GatewayServer.isTrustedLoopbackOrigin("http://localhost:8123"))
+        #expect(!GatewayServer.isTrustedLoopbackOrigin("https://example.com"))
+        #expect(!GatewayServer.isTrustedLoopbackOrigin("null"))
+
+        #expect(GatewayServer.isJSONContentType("application/json; charset=utf-8"))
+        #expect(!GatewayServer.isJSONContentType("text/plain"))
+        #expect(!GatewayServer.isJSONContentType(nil))
+    }
+}
+
 @Suite("Gateway model ids")
 struct GatewayModelIDTests {
 
@@ -269,6 +351,17 @@ struct GatewayResponsesStreamTests {
         // Codex reads the SSE terminator too.
         let all = frames.map { String(decoding: $0, as: UTF8.self) }.joined()
         #expect(all.contains("data: [DONE]"))
+    }
+
+    @Test func invalidUsageCountersCannotOverflowTheTranslator() {
+        let translator = GatewayResponsesTranslator(model: "m")
+        _ = translator.translate(payload:
+            #"{"choices":[],"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}"#
+        )
+        let completed = decode(translator.translate(payload: "[DONE]"))
+            .last?["response"] as? [String: Any]
+        #expect(completed?["status"] as? String == "completed")
+        #expect(completed?["usage"] == nil)
     }
 
     @Test func toolCallsAccumulateAndCloseWhole() {

@@ -30,6 +30,18 @@ const SCANNABLE_EXTENSIONS = new Set([
 ]);
 
 const HTML_EXTENSIONS = new Set(['.html', '.htm']);
+export const MAX_SCAN_FILES = 2_000;
+export const MAX_SCAN_DEPTH = 64;
+export const MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024;
+export const MAX_SCAN_TOTAL_BYTES = 64 * 1024 * 1024;
+
+export class ScanBudgetError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ScanBudgetError';
+    this.code = 'SCAN_BUDGET_EXCEEDED';
+  }
+}
 
 function hasScannableExtension(filename) {
   const lower = filename.toLowerCase();
@@ -46,17 +58,58 @@ const IMPORT_SPECIFIER_PATTERNS = [
   /@(?:use|forward)\s+['"]([^'"]+)['"]/g,
 ];
 
-function walkDir(dir) {
+function walkDir(dir, options = {}) {
   const files = [];
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return files; }
-  for (const entry of entries) {
-    if (SKIP_DIRS.has(entry.name)) continue;
-    if (entry.isDirectory() && entry.name.startsWith('.') && !HIDDEN_SOURCE_DIRS.has(entry.name)) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...walkDir(full));
-    else if (hasScannableExtension(entry.name)) files.push(full);
-  }
+  const limits = {
+    maxFiles: options.maxFiles ?? MAX_SCAN_FILES,
+    maxDepth: options.maxDepth ?? MAX_SCAN_DEPTH,
+    maxFileBytes: options.maxFileBytes ?? MAX_SCAN_FILE_BYTES,
+    maxTotalBytes: options.maxTotalBytes ?? MAX_SCAN_TOTAL_BYTES,
+  };
+  let totalBytes = 0;
+  const visited = new Set();
+
+  const visit = (current, depth) => {
+    if (depth > limits.maxDepth) throw new ScanBudgetError(`directory depth exceeds ${limits.maxDepth}`);
+    let currentStat;
+    try { currentStat = fs.lstatSync(current); } catch { return; }
+    if (currentStat.isSymbolicLink()) {
+      if (depth === 0) throw new ScanBudgetError('scan root cannot be a symbolic link');
+      return;
+    }
+    if (!currentStat.isDirectory()) return;
+    let real;
+    try { real = fs.realpathSync(current); } catch { return; }
+    if (visited.has(real)) return;
+    visited.add(real);
+    let entries;
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry.name) || entry.isSymbolicLink()) continue;
+      if (entry.isDirectory() && entry.name.startsWith('.') && !HIDDEN_SOURCE_DIRS.has(entry.name)) continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        visit(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !hasScannableExtension(entry.name)) continue;
+      const stat = fs.lstatSync(full);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      if (stat.size > limits.maxFileBytes) {
+        throw new ScanBudgetError(`${full} exceeds the ${limits.maxFileBytes}-byte per-file limit`);
+      }
+      totalBytes += stat.size;
+      if (totalBytes > limits.maxTotalBytes) {
+        throw new ScanBudgetError(`scan inputs exceed the ${limits.maxTotalBytes}-byte aggregate limit`);
+      }
+      files.push(full);
+      if (files.length > limits.maxFiles) {
+        throw new ScanBudgetError(`scan input count exceeds ${limits.maxFiles} files`);
+      }
+    }
+  };
+
+  visit(dir, 0);
   return files;
 }
 
@@ -81,11 +134,23 @@ function resolveImport(specifier, fromDir, fileSet) {
   return null;
 }
 
-function buildImportGraph(files) {
+function buildImportGraph(files, options = {}) {
+  const maxFileBytes = options.maxFileBytes ?? MAX_SCAN_FILE_BYTES;
+  const maxTotalBytes = options.maxTotalBytes ?? MAX_SCAN_TOTAL_BYTES;
+  if (files.length > (options.maxFiles ?? MAX_SCAN_FILES)) {
+    throw new ScanBudgetError(`import graph input count exceeds ${options.maxFiles ?? MAX_SCAN_FILES} files`);
+  }
   const fileSet = new Set(files);
   const graph = new Map();
+  let totalBytes = 0;
 
   for (const file of files) {
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > maxFileBytes) {
+      throw new ScanBudgetError(`${file} exceeds the import-graph per-file limit`);
+    }
+    totalBytes += stat.size;
+    if (totalBytes > maxTotalBytes) throw new ScanBudgetError('import graph exceeds the aggregate byte limit');
     const content = fs.readFileSync(file, 'utf-8');
     const dir = path.dirname(file);
     const imports = new Set();

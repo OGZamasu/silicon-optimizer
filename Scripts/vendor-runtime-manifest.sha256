@@ -1,0 +1,33 @@
+# Accepted release runtime artifacts, one per line:
+# <lowercase SHA-256><two spaces><llama-server|node|filename.dylib>
+#
+# Vendor/ is intentionally not tracked. No artifact is accepted in this source checkout
+# until a maintainer records the exact reviewed release bytes here in a commit. Releases
+# fail closed while the required llama-server and node entries are absent.
+326a60d168a91419a42dacd329c1ec7c5fe87769f5dd910c91c9e572bd272997  llama-server
+27db838bb204ef7c21df2931f5656e4c8fb32e6e947f363a402b49714d32b5b1  node
+6c4fb0a5f203b6485152e2c5a567ce8cf2c3d9e57b03eddee81d069131ec85de  libggml-base.0.13.0.dylib
+6c4fb0a5f203b6485152e2c5a567ce8cf2c3d9e57b03eddee81d069131ec85de  libggml-base.0.dylib
+6c4fb0a5f203b6485152e2c5a567ce8cf2c3d9e57b03eddee81d069131ec85de  libggml-base.dylib
+fae1c6b6bc99b30ddc9fcc03d6461e177d7244d69eb419163943ed8892f8cde7  libggml-blas.0.13.0.dylib
+fae1c6b6bc99b30ddc9fcc03d6461e177d7244d69eb419163943ed8892f8cde7  libggml-blas.0.dylib
+fae1c6b6bc99b30ddc9fcc03d6461e177d7244d69eb419163943ed8892f8cde7  libggml-blas.dylib
+3f90f41154d074836fb1cfa886c3bae9b79bb0da8b18bde02a7a077facadf021  libggml-cpu.0.13.0.dylib
+3f90f41154d074836fb1cfa886c3bae9b79bb0da8b18bde02a7a077facadf021  libggml-cpu.0.dylib
+3f90f41154d074836fb1cfa886c3bae9b79bb0da8b18bde02a7a077facadf021  libggml-cpu.dylib
+3e855125b9dc1734d38804d31c4ab51f9ddb3c4c38ac98ae973556ccb9db5aca  libggml-metal.0.13.0.dylib
+3e855125b9dc1734d38804d31c4ab51f9ddb3c4c38ac98ae973556ccb9db5aca  libggml-metal.0.dylib
+3e855125b9dc1734d38804d31c4ab51f9ddb3c4c38ac98ae973556ccb9db5aca  libggml-metal.dylib
+0313e14b9f4ec185ee046763cfda32150f70e48285376364081c8c30ba4d7700  libggml.0.13.0.dylib
+0313e14b9f4ec185ee046763cfda32150f70e48285376364081c8c30ba4d7700  libggml.0.dylib
+0313e14b9f4ec185ee046763cfda32150f70e48285376364081c8c30ba4d7700  libggml.dylib
+4833957ea9f811541ffa45e94636902e0a2418b56a6f15b448118b3d3a9e6523  libllama-common.0.0.1.dylib
+4833957ea9f811541ffa45e94636902e0a2418b56a6f15b448118b3d3a9e6523  libllama-common.0.dylib
+4833957ea9f811541ffa45e94636902e0a2418b56a6f15b448118b3d3a9e6523  libllama-common.dylib
+1d0cc0e291d0dc06c21a580a8aa35024c3f643d20101749d26e98330b782aa61  libllama-server-impl.dylib
+51386433230ba8e2b05ee29eb000e47c39848f23c7afe9775b8e38b81f467270  libllama.0.0.1.dylib
+51386433230ba8e2b05ee29eb000e47c39848f23c7afe9775b8e38b81f467270  libllama.0.dylib
+51386433230ba8e2b05ee29eb000e47c39848f23c7afe9775b8e38b81f467270  libllama.dylib
+0f64496c2845712382ba8a738a3e95f577bce38d8239443cce6e8d2dc22d0824  libmtmd.0.0.1.dylib
+0f64496c2845712382ba8a738a3e95f577bce38d8239443cce6e8d2dc22d0824  libmtmd.0.dylib
+0f64496c2845712382ba8a738a3e95f577bce38d8239443cce6e8d2dc22d0824  libmtmd.dylib

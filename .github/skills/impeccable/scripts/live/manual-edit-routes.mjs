@@ -20,6 +20,9 @@ export function createManualEditRoutes({
   recordManualEditActivity,
   getManualEditStatus,
   chatAgentLikelyActive,
+  authorizePost,
+  readJson,
+  sendInputError,
   cwd = () => process.cwd(),
   env = () => process.env,
 } = {}) {
@@ -32,18 +35,8 @@ export function createManualEditRoutes({
     // Save stages entries; Apply commits the staged page batch through the
     // local AI copy-edit runner.
     if (p === '/manual-edit-stash' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        let msg;
-        try { msg = JSON.parse(body); } catch {
-          sendJson(res, 400, { error: 'Invalid JSON' });
-          return;
-        }
-        if (msg.token !== getToken()) {
-          sendJson(res, 401, { error: 'Unauthorized' });
-          return;
-        }
+      if (!authorizePost(req, res)) return true;
+      readJson(req).then((msg) => {
         const error = validateEvent({ ...msg, type: 'manual_edits' });
         if (error) {
           sendJson(res, 400, { error });
@@ -71,7 +64,7 @@ export function createManualEditRoutes({
           hintedFileCount: new Set((msg.ops || []).map((op) => summarizeManualLogFile(op.sourceHint?.file, projectCwd())).filter(Boolean)).size,
         });
         sendJson(res, 200, { ok: true, pendingCount, totalCount, perPage });
-      });
+      }).catch((error) => sendInputError(req, res, error));
       return true;
     }
 
@@ -92,8 +85,7 @@ export function createManualEditRoutes({
     }
 
     if (p === '/manual-edit-commit' && req.method === 'POST') {
-      const token = url.searchParams.get('token');
-      if (token !== getToken()) { res.writeHead(401); res.end('Unauthorized'); return true; }
+      if (!authorizePost(req, res)) return true;
       const pageUrl = url.searchParams.get('pageUrl');
       const asyncMode = /^(1|true|yes)$/i.test(url.searchParams.get('async') || '');
       const repairOnly = /^(1|true|yes)$/i.test(url.searchParams.get('repair') || '');
@@ -250,16 +242,8 @@ export function createManualEditRoutes({
     }
 
     if (p === '/manual-edit-repair-decision' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
-        let payload = {};
-        try { payload = body ? JSON.parse(body) : {}; } catch {
-          sendJson(res, 400, { error: 'Invalid JSON' });
-          return;
-        }
-        const token = payload.token || url.searchParams.get('token');
-        if (token !== getToken()) { res.writeHead(401); res.end('Unauthorized'); return; }
+      if (!authorizePost(req, res)) return true;
+      readJson(req).then((payload) => {
         const pageUrl = payload.pageUrl || url.searchParams.get('pageUrl') || null;
         const action = String(payload.action || url.searchParams.get('action') || '').trim().toLowerCase();
         if (action !== 'rollback') {
@@ -281,13 +265,12 @@ export function createManualEditRoutes({
         };
         recordManualEditActivity('manual_edit_repair_rollback_done', response);
         sendJson(res, 200, response);
-      });
+      }).catch((error) => sendInputError(req, res, error));
       return true;
     }
 
     if (p === '/manual-edit-discard' && req.method === 'POST') {
-      const token = url.searchParams.get('token');
-      if (token !== getToken()) { res.writeHead(401); res.end('Unauthorized'); return true; }
+      if (!authorizePost(req, res)) return true;
       const pageUrl = url.searchParams.get('pageUrl');
       let discarded;
       let discardedEntries = [];
@@ -329,6 +312,7 @@ export function createManualEditRoutes({
     }
 
     if (p === '/manual-edit' && req.method === 'POST') {
+      if (!authorizePost(req, res)) return true;
       sendJson(res, 410, { error: '/manual-edit is removed; use /manual-edit-stash and /manual-edit-commit for staged copy edits.' });
       return true;
     }

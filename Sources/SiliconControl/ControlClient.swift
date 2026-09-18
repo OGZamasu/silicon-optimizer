@@ -6,12 +6,15 @@ public struct ControlClient: Sendable {
     public enum ClientError: Error, LocalizedError {
         case appNotRunning
         case server(Int, String)
+        case transport(String)
 
         public var errorDescription: String? {
             switch self {
             case .appNotRunning:
                 "Silicon Optimizer is not running. Open the app, then try again."
             case .server(_, let message):
+                message
+            case .transport(let message):
                 message
             }
         }
@@ -20,12 +23,19 @@ public struct ControlClient: Sendable {
     private let session: URLSession
 
     public init() {
+        self.session = URLSession(configuration: Self.sessionConfiguration())
+    }
+
+    static func sessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
-        // Loading a large model can legitimately take minutes.
-        // Long enough for the longest tool: a cinematic video clip renders for about ten
-        // minutes on the node before the file comes back.
-        configuration.timeoutIntervalForRequest = 1800
-        self.session = URLSession(configuration: configuration)
+        // The app holds /video/generate open through the node's queue and render.
+        configuration.timeoutIntervalForRequest = TimeInterval(VideoGenerationBudget.controlSeconds)
+        configuration.timeoutIntervalForResource = TimeInterval(VideoGenerationBudget.controlSeconds)
+        return configuration
+    }
+
+    static func requestTimeout(for path: String) -> TimeInterval {
+        path == "/video/generate" ? TimeInterval(VideoGenerationBudget.controlSeconds) : 1800
     }
 
     /// Reads the handshake the running app publishes. Absent file means the app is not running.
@@ -68,6 +78,7 @@ public struct ControlClient: Sendable {
             url: URL(string: "http://127.0.0.1:\(handshake.port)\(path)")!
         )
         request.httpMethod = method
+        request.timeoutInterval = Self.requestTimeout(for: path)
         if authenticated {
             request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
         }
@@ -80,8 +91,7 @@ public struct ControlClient: Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            // A refused connection means the handshake file is stale — the app has quit.
-            throw ClientError.appNotRunning
+            throw Self.transportError(error)
         }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? 500
@@ -91,5 +101,20 @@ public struct ControlClient: Sendable {
             throw ClientError.server(status, message)
         }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    static func transportError(_ error: Error) -> Error {
+        guard let urlError = error as? URLError else { return error }
+        switch urlError.code {
+        case .cannotConnectToHost, .cannotFindHost:
+            return ClientError.appNotRunning
+        case .timedOut:
+            return ClientError.transport(
+                "The request exceeded its time limit. The app or node may still be working; "
+                + "check its job status before submitting again."
+            )
+        default:
+            return ClientError.transport("The connection to Silicon Optimizer failed: \(urlError.localizedDescription)")
+        }
     }
 }

@@ -20,6 +20,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildLiveScriptSrc } from './frameworks/script-src.mjs';
+import {
+  atomicWriteFileInside,
+  ensureDirectoryInside,
+  readFileInside,
+  removeFileInside,
+} from '../lib/security-boundaries.mjs';
 
 export const TANSTACK_MARKER_OPEN = '{/* impeccable-live-tanstack-start */}';
 export const TANSTACK_MARKER_CLOSE = '{/* impeccable-live-tanstack-end */}';
@@ -63,8 +69,9 @@ export function applyTanStackLiveAdapter({ cwd = process.cwd(), port, token, pro
   // Write the managed mount component.
   const componentAbs = path.join(cwd, project.componentFile);
   const componentBody = buildTanStackLiveRootComponent(Number(port), token);
-  const componentExisted = fs.existsSync(componentAbs);
-  if (componentExisted && !isManagedComponent(fs.readFileSync(componentAbs, 'utf-8'))) {
+  const existingComponent = readOptionalProjectFile(cwd, componentAbs);
+  const componentExisted = existingComponent !== null;
+  if (componentExisted && !isManagedComponent(existingComponent)) {
     // A non-Impeccable file already sits at our managed path — refuse to clobber.
     return {
       file: project.componentFile,
@@ -72,15 +79,15 @@ export function applyTanStackLiveAdapter({ cwd = process.cwd(), port, token, pro
       hint: `${project.componentFile} already exists and is not managed by Impeccable Live`,
     };
   }
-  fs.mkdirSync(path.dirname(componentAbs), { recursive: true });
-  fs.writeFileSync(componentAbs, componentBody, 'utf-8');
+  ensureDirectoryInside(cwd, path.dirname(componentAbs));
+  atomicWriteFileInside(cwd, componentAbs, componentBody, { encoding: 'utf8' });
 
   // Patch the root document to import + render the mount component.
   const rootAbs = path.join(cwd, project.rootRoute);
-  const before = fs.readFileSync(rootAbs, 'utf-8');
+  const before = readFileInside(cwd, rootAbs, { encoding: 'utf8' });
   const after = patchTanStackRoot(before, project.componentImport);
   const changed = after !== before;
-  if (changed) fs.writeFileSync(rootAbs, after, 'utf-8');
+  if (changed) atomicWriteFileInside(cwd, rootAbs, after, { encoding: 'utf8', allowCreate: false });
 
   return {
     file: project.rootRoute,
@@ -96,18 +103,19 @@ export function removeTanStackLiveAdapter({ cwd = process.cwd(), project = detec
   let removed = false;
 
   const rootAbs = path.join(cwd, project.rootRoute);
-  if (fs.existsSync(rootAbs)) {
-    const before = fs.readFileSync(rootAbs, 'utf-8');
+  const rootContent = readOptionalProjectFile(cwd, rootAbs);
+  if (rootContent !== null) {
+    const before = rootContent;
     const after = unpatchTanStackRoot(before);
     if (after !== before) {
-      fs.writeFileSync(rootAbs, after, 'utf-8');
+      atomicWriteFileInside(cwd, rootAbs, after, { encoding: 'utf8', allowCreate: false });
       removed = true;
     }
   }
 
   const componentAbs = path.join(cwd, project.componentFile);
-  if (fs.existsSync(componentAbs)) {
-    fs.rmSync(componentAbs, { force: true });
+  if (readOptionalProjectFile(cwd, componentAbs) !== null) {
+    removeFileInside(cwd, componentAbs);
     removed = true;
   }
   pruneEmptyDir(path.dirname(componentAbs), path.join(cwd, 'src'));
@@ -216,6 +224,14 @@ export default function ImpeccableLiveRoot() {
 // its leading comment and its script data-attribute; user files never do.
 function isManagedComponent(content) {
   return String(content || '').includes('impeccable-live-tanstack');
+}
+
+function readOptionalProjectFile(cwd, filePath) {
+  try { return readFileInside(cwd, filePath, { encoding: 'utf8' }); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 function findRootRouteFile(cwd) {

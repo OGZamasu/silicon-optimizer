@@ -112,6 +112,7 @@ public actor QwenCodeRuntime {
     public func start(
         webPort: Int,
         gatewayPort: Int,
+        gatewayToken: String,
         models: [ModelEntry],
         defaultModel: String,
         nodePath: String = "",
@@ -160,22 +161,29 @@ public actor QwenCodeRuntime {
         let token = Self.freshToken()
         do {
             let path = "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin"
+            var environment = [
+                "PATH": path,
+                "HOME": workspace.path,
+                // The provider entries in settings point at the gateway; the same
+                // per-launch bearer is used under both names Qwen's OpenAI paths read.
+                "OPENAI_BASE_URL": "http://127.0.0.1:\(gatewayPort)/v1",
+                "OPENAI_API_KEY": gatewayToken,
+                "SILICON_GATEWAY_KEY": gatewayToken,
+                "OPENAI_MODEL": defaultModel,
+                // Through the environment rather than `--token`, which would put the
+                // secret in the process list for every user on the machine to read.
+                "QWEN_SERVER_TOKEN": token,
+            ]
+            for harmless in ["LANG", "LC_ALL", "TMPDIR"] {
+                if let value = ProcessInfo.processInfo.environment[harmless] {
+                    environment[harmless] = value
+                }
+            }
             try await process.start(
                 executable: npx,
                 arguments: ["--yes", Self.packageSpec, "serve", "--port", String(webPort)],
-                environment: [
-                    "PATH": path,
-                    "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-                    // The provider entries in settings point at the gateway; these fill
-                    // the default model and the placeholder credential.
-                    "OPENAI_BASE_URL": "http://127.0.0.1:\(gatewayPort)/v1",
-                    "OPENAI_API_KEY": "local-gateway-needs-no-key",
-                    "SILICON_GATEWAY_KEY": "local-gateway-needs-no-key",
-                    "OPENAI_MODEL": defaultModel,
-                    // Through the environment rather than `--token`, which would put the
-                    // secret in the process list for every user on the machine to read.
-                    "QWEN_SERVER_TOKEN": token,
-                ],
+                environment: environment,
+                inheritEnvironment: false,
                 currentDirectory: workspace
             )
         } catch {

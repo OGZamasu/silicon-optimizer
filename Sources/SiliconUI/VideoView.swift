@@ -4,14 +4,23 @@ import SiliconRuntime
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The Video tab. Generation runs on a swarm node with a CUDA card — local video on
-/// Apple Silicon is not worth pretending about yet — so this tab is honest about which
-/// machine will do the work and what state it is in.
+/// The Video tab. Generation runs through a model-aware video node, which may be a
+/// paired CUDA machine or a loopback adapter for an Apple Silicon runtime such as
+/// Phosphene. The selected catalog entry decides which exact capability must be ready.
 struct VideoView: View {
     @Environment(AppModel.self) private var model
     @State private var recentClips: [URL] = []
     @State private var showsRecents = false
     @State private var selectedClip: URL?
+
+    private struct RecentsInput: Equatable {
+        var directory: URL
+        var files: [URL]
+    }
+    private var recentsInput: RecentsInput {
+        .init(directory: model.settings.resolvedVideoOutputDirectory,
+              files: model.videoBatchQueue.items.compactMap(\.file))
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -24,6 +33,7 @@ struct VideoView: View {
                         }
                         .frame(width: 400)
                         VStack(spacing: 16) {
+                            VideoQueueView()
                             resultCard
                             recentsPane
                         }
@@ -32,6 +42,7 @@ struct VideoView: View {
                 } else {
                     VStack(spacing: 16) {
                         composerCard
+                        VideoQueueView()
                         PersonaCards()
                         resultCard
                         recentsPane
@@ -44,17 +55,38 @@ struct VideoView: View {
         .navigationTitle("Video")
         .task {
             await model.refreshSwarm()
-            refreshRecents()
+        }
+        .task(id: recentsInput) {
+            let input = recentsInput
+            let scan = Task.detached(priority: .utility) {
+                RecentVideoFiles.scan(in: input.directory, queuedFiles: input.files)
+            }
+            let files = await withTaskCancellationHandler(operation: { await scan.value },
+                                                          onCancel: { scan.cancel() })
+            guard !Task.isCancelled else { return }
+            recentClips = files
         }
         .onChange(of: model.videoResults.count) {
-            refreshRecents()
             model.revealVideoPanel(.result)
+        }
+        .onChange(of: model.selectedVideoModel) {
+            guard let entry = selectedEntry else { return }
+            model.videoSeconds = entry.normalizedSeconds(model.videoSeconds)
+            model.videoSampling = .nodeDefault
+            model.videoH3Steps = 0
+        }
+        .onChange(of: model.videoSampling) {
+            if model.videoSampling != .full { model.videoH3Steps = 0 }
         }
         .onChange(of: selectedClip) { model.revealVideoPanel(.result) }
     }
 
     private var selectedEntry: VideoEntry? {
         VideoCatalog.entry(id: model.selectedVideoModel)
+    }
+
+    private var selectedNode: AppModel.PeerStatus? {
+        selectedEntry.flatMap { model.videoCapableNode(for: $0) }
     }
 
     /// What the player shows: a clip picked from recents, else this session's newest,
@@ -69,12 +101,18 @@ struct VideoView: View {
     private var composerCard: some View {
         @Bindable var model = model
         return CollapsibleCard(
-            title: "Make a clip", systemImage: "film",
-            badge: model.videoCapableNode.map { "on \($0.name)" },
+            title: model.videoBatchMode ? "Queue a batch" : "Make a clip", systemImage: "film",
+            badge: selectedNode.map { "on \($0.name)" },
             isExpanded: model.videoPanel(.clip)
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 nodeRow
+
+                Picker("Mode", selection: $model.videoBatchMode) {
+                    Text("Single clip").tag(false)
+                    Text("Batch & variations").tag(true)
+                }
+                .pickerStyle(.segmented)
 
                 Picker("Model", selection: $model.selectedVideoModel) {
                     ForEach(VideoCatalog.all) { entry in
@@ -88,14 +126,16 @@ struct VideoView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    TextEditor(text: $model.videoPrompt)
+                    TextEditor(text: model.videoBatchMode ? $model.videoBatchPrompts : $model.videoPrompt)
                         .font(.body)
-                        .frame(minHeight: 90)
+                        .frame(minHeight: model.videoBatchMode ? 170 : 90)
                         .padding(6)
                         .background(.background.secondary, in: .rect(cornerRadius: 7))
                         .overlay(alignment: .topLeading) {
-                            if model.videoPrompt.isEmpty {
-                                Text("Describe the shot — subject, motion, mood.")
+                            if (model.videoBatchMode ? model.videoBatchPrompts : model.videoPrompt).isEmpty {
+                                Text(model.videoBatchMode
+                                     ? "Describe each shot in its own paragraph. Separate shots with a blank line."
+                                     : "Describe the shot — subject, motion, mood.")
                                     .foregroundStyle(.tertiary)
                                     .padding(.top, 12)
                                     .padding(.leading, 11)
@@ -103,11 +143,25 @@ struct VideoView: View {
                             }
                         }
 
+                    if model.videoBatchMode {
+                        Text("One paragraph per shot. Blank lines separate shots; each variation uses a different saved seed.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextField("Batch name (optional)", text: $model.videoBatchTitle)
+                        Stepper("\(model.videoBatchVariations) variation\(model.videoBatchVariations == 1 ? "" : "s") per prompt",
+                                value: $model.videoBatchVariations, in: 1...VideoBatchQueue.maximumVariations)
+                        TextField("Base seed (blank = random)", text: $model.videoBatchSeed)
+                            .help("An integer from 0 to 4294967295. Each following clip increments it; use the same value to compare sampling settings.")
+                        Text("\(batchPromptCount) prompts × \(model.videoBatchVariations) = \(batchClipCount) clips · \(batchClipCount * model.videoSeconds) seconds of footage")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Room for \(max(0, VideoBatchQueue.maximumPending - model.videoBatchQueue.pendingCount)) more queued clips.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+
                     HStack {
                         Picker("Length", selection: $model.videoSeconds) {
-                            Text("3 s").tag(3)
-                            Text("5 s").tag(5)
-                            Text("8 s").tag(8)
+                            ForEach(entry.supportedSeconds, id: \.self) {
+                                Text("\($0) s").tag($0)
+                            }
                         }
                         Picker("Size", selection: $model.videoResolution) {
                             Text("480p").tag("480p")
@@ -116,7 +170,36 @@ struct VideoView: View {
                         }
                     }
 
-                    if entry.supportsImageInput {
+                    if entry.id == "hailuo-h3" {
+                        Picker("Sampling", selection: $model.videoSampling) {
+                            ForEach(VideoSampling.allCases, id: \.self) { sampling in
+                                Text(sampling.label).tag(sampling)
+                            }
+                        }
+                        .disabled(!model.supportsH3Sampling)
+                        Text(model.supportsH3Sampling
+                             ? "Full sampling uses the non-Turbo schedule at the same canvas size. It takes longer, but is not guaranteed to look better. Size can increase memory use."
+                             : "Per-clip sampling requires the updated local video node. Renderer default keeps the node’s configured setting.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Picker("Denoising steps", selection: $model.videoH3Steps) {
+                            Text("Auto — renderer schedule").tag(0)
+                            ForEach([9, 12, 16, 20, 30], id: \.self) { steps in
+                                Text("\(steps) points · \(steps - 1) passes/window").tag(steps)
+                            }
+                        }
+                        .disabled(!model.supportsH3Steps || model.videoSampling != .full)
+                        Text(!model.supportsH3Steps
+                             ? "Extra steps require an updated video node and a supported Phosphene release. Auto preserves the renderer schedule."
+                             : model.videoSampling != .full
+                             ? "Choose Full sampling to set steps. Turbo uses its own fixed schedule."
+                             : "Auto currently uses 9 points / 8 denoising passes per window. 20 or 30 adds processing at the same canvas, not a larger model. Quality may not improve; memory can rise slightly. Saved separately for every queued clip.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if entry.supportsImageInput && !model.videoBatchMode {
                         imageRow
                     }
 
@@ -133,57 +216,51 @@ struct VideoView: View {
                     }
 
                     HStack(spacing: 10) {
-                        Button {
-                            model.generateVideo()
-                        } label: {
-                            Label("Generate", systemImage: "sparkles")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(
-                            model.isGeneratingVideo
-                            || model.videoCapableNode == nil
-                            || model.videoPrompt.trimmingCharacters(
-                                in: .whitespacesAndNewlines
-                            ).isEmpty
-                        )
-
-                        if model.isGeneratingVideo {
-                            Button("Cancel") { model.cancelVideo() }
-                                .buttonStyle(.borderless)
-                                .font(.caption)
+                        if model.videoBatchMode {
+                            Button {
+                                model.enqueueVideoComposer()
+                            } label: {
+                                Label("Queue \(batchClipCount) clips", systemImage: "text.badge.plus")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(batchClipCount == 0 || batchClipCount + model.videoBatchQueue.pendingCount > VideoBatchQueue.maximumPending
+                                      || model.videoBatchQueue.storageError != nil || model.isEnqueuingVideoBatch)
+                        } else {
+                            Button {
+                                model.generateVideo()
+                            } label: {
+                                Label("Add to queue", systemImage: "text.badge.plus")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.videoBatchQueue.pendingCount >= VideoBatchQueue.maximumPending
+                                      || model.videoBatchQueue.storageError != nil
+                                      || model.videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
 
-                    // Its own row, full width. Squeezed in beside the buttons, the line that
-                    // says how far along the node is — the whole point of showing it — was
-                    // the first thing to be truncated away.
-                    if model.isGeneratingVideo {
-                        VStack(alignment: .leading, spacing: 4) {
-                            if let fraction = model.videoProgress {
-                                ProgressView(value: fraction)
-                                    .progressViewStyle(.linear)
-                            } else {
-                                ProgressView()
-                                    .progressViewStyle(.linear)
-                            }
-                            Text(model.videoStage ?? "Working")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                    Text("Single clips and batches share the Video queue. Add another prompt while a clip renders; its saved settings won’t change when you edit this composer.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Leave Silicon Optimizer open to run the queue. It prevents idle sleep while work is queued; keep the Mac powered and its lid open. Quitting saves the queue; reopening reconnects to the current job before starting the next.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let message = model.videoQueueMessage {
+                        Text(message).font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
         }
     }
 
+    private var batchPromptCount: Int { VideoBatchQueue.parsePrompts(model.videoBatchPrompts).count }
+    private var batchClipCount: Int { batchPromptCount * model.videoBatchVariations }
+
     /// What the render will actually cost. The catalog carries an estimate; a node
     /// that has run the thing carries a measurement, and a measurement wins.
     private func timingNote(for entry: VideoEntry) -> String {
-        guard let node = model.videoCapableNode,
-              let capability = node.capabilities.first(where: {
-                  $0.kind == NodeVideoRuntime.capabilityKind && $0.ready
-              }),
+        guard let node = model.videoCapableNode(for: entry),
+              let capability = model.videoCapability(for: entry, on: node),
               let seconds = capability.typicalSeconds, seconds > 0
         else { return "Typically \(entry.typicalDuration)." }
 
@@ -196,7 +273,7 @@ struct VideoView: View {
     /// The machine doing the work, stated plainly — with the truth when there is none.
     @ViewBuilder
     private var nodeRow: some View {
-        if let node = model.videoCapableNode {
+        if let node = selectedNode {
             HStack(spacing: 6) {
                 Circle().fill(Color.green).frame(width: 7, height: 7)
                 Text("Renders on \(node.name)")
@@ -204,12 +281,11 @@ struct VideoView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-        } else {
+        } else if let entry = selectedEntry {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Circle().fill(Color.orange).frame(width: 7, height: 7)
-                Text("No node can make video yet. Your silicon-node machine has the "
-                    + "card for it — the request to set it up is already filed on the "
-                    + "shared hub, and this tab lights up the moment it's ready.")
+                Text("No ready node offers \(entry.name). "
+                    + (entry.setupHint ?? "Enable its \(entry.capabilityID) capability."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -336,24 +412,6 @@ struct VideoView: View {
     private struct ClipFile: Identifiable {
         var id: String { url.path }
         var url: URL
-    }
-
-    private func refreshRecents() {
-        let directory = model.settings.resolvedVideoOutputDirectory
-        let contents = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]
-        )) ?? []
-        recentClips = contents
-            .filter { ["mp4", "webm", "mov"].contains($0.pathExtension.lowercased()) }
-            .sorted { a, b in
-                let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
-                    .contentModificationDate) ?? .distantPast
-                let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey])
-                    .contentModificationDate) ?? .distantPast
-                return dateA > dateB
-            }
-            .prefix(60)
-            .map { $0 }
     }
 }
 

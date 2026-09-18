@@ -107,19 +107,32 @@ extension AppModel: ControlHost {
         guard let entry = ModelCatalog.entry(id: request.modelID) else {
             throw ControlHostError.unknownModel(request.modelID)
         }
+        let contextLength = request.contextLength ?? 8192
+        guard contextLength >= 1, entry.maxContext >= 1, contextLength <= entry.maxContext else {
+            throw ControlHostError.badRequest(
+                "Context length must be between 1 and \(entry.maxContext) tokens for "
+                    + "\(entry.name)."
+            )
+        }
         let quantization = request.quantization
             .flatMap { Quantization(rawValue: $0) }
             ?? autoConfigurator().best(for: entry, otherAppsInUse: memoryUsedByOtherApps)?.quantization
             ?? .q4_K_M
 
         var configuration = LoadConfiguration(
-            contextLength: request.contextLength ?? 8192,
+            contextLength: contextLength,
             kvCachePrecision: request.kvCachePrecision
                 .flatMap { KVCachePrecision(rawValue: $0) } ?? .f16,
             flashAttention: request.flashAttention ?? true,
             threads: profile.performanceCores
         )
-        if let slots = request.expertSlots, let moe = entry.shape.moe {
+        if let slots = request.expertSlots {
+            guard let moe = entry.shape.moe, slots >= 1, moe.expertCount >= 1,
+                  slots <= moe.expertCount else {
+                throw ControlHostError.badRequest(
+                    "Expert slots must be between 1 and the model's expert count."
+                )
+            }
             configuration.expertStreaming = ExpertStreamingConfiguration(slotCount: slots)
             configuration.microBatchSize = ExpertStreamingConfiguration.maximumMicroBatch(
                 slotCount: slots, expertsUsedPerToken: moe.expertsUsedPerToken
@@ -181,8 +194,23 @@ extension AppModel: ControlHost {
         }
 
         var configuration = defaultConfiguration(for: target)
-        if let context = request.contextLength { configuration.contextLength = context }
-        if let slots = request.expertSlots, let moe = target.shape?.moe {
+        if let context = request.contextLength {
+            let catalogMaximum = target.catalogID.flatMap(ModelCatalog.entry(id:))?.maxContext
+            let maximum = catalogMaximum ?? target.shape?.trainingContextLength ?? 1_048_576
+            guard context >= 1, maximum >= 1, context <= maximum else {
+                throw ControlHostError.badRequest(
+                    "Context length must be between 1 and \(maximum) tokens for this model."
+                )
+            }
+            configuration.contextLength = context
+        }
+        if let slots = request.expertSlots {
+            guard let moe = target.shape?.moe, slots >= 1, moe.expertCount >= 1,
+                  slots <= moe.expertCount else {
+                throw ControlHostError.badRequest(
+                    "Expert slots must be between 1 and the model's expert count."
+                )
+            }
             configuration.expertStreaming = ExpertStreamingConfiguration(slotCount: slots)
             configuration.microBatchSize = ExpertStreamingConfiguration.maximumMicroBatch(
                 slotCount: slots, expertsUsedPerToken: moe.expertsUsedPerToken
@@ -439,7 +467,10 @@ extension AppModel {
 
         // Routing before the MFLUX guard, deliberately: a Mac without MFLUX — or a
         // weak one — is exactly the machine that should hand the job to a node.
-        if let node = imageRenderTarget {
+        let candidateNode = imageRenderTarget
+        if Self.shouldRouteImageRemotely(
+            localOnly: request.localOnly, hasCandidate: candidateNode != nil
+        ), let node = candidateNode {
             return try await generateImageOnNode(
                 request, configuration: configuration, node: node
             )
@@ -506,6 +537,12 @@ extension AppModel {
             model: entry.name,
             warning: warning
         )
+    }
+
+    nonisolated static func shouldRouteImageRemotely(
+        localOnly: Bool?, hasCandidate: Bool
+    ) -> Bool {
+        localOnly != true && hasCandidate
     }
 
     /// The control-API image path, rendered by a node (#136): same response shape,
@@ -587,6 +624,18 @@ extension AppModel {
         if let width = request.width { configuration.width = width }
         if let height = request.height { configuration.height = height }
         if let steps = request.steps { configuration.steps = steps }
+        guard (1...8192).contains(configuration.width),
+              (1...8192).contains(configuration.height),
+              configuration.width <= 40_000_000 / configuration.height
+        else {
+            throw ControlHostError.badRequest(
+                "Image dimensions must be positive, no more than 8192 per side, and "
+                    + "no more than 40 megapixels total."
+            )
+        }
+        guard (1...200).contains(configuration.steps) else {
+            throw ControlHostError.badRequest("Image steps must be between 1 and 200.")
+        }
         if let raw = request.quantization, let quantization = Quantization(rawValue: raw) {
             configuration.quantization = quantization
         }
@@ -600,7 +649,12 @@ extension AppModel {
             }
             configuration.initImage = url
             if let influence = request.initImageInfluence {
-                configuration.initImageInfluence = max(0, min(1, influence))
+                guard influence.isFinite, (0...1).contains(influence) else {
+                    throw ControlHostError.badRequest(
+                        "Initial-image influence must be a finite value from 0 through 1."
+                    )
+                }
+                configuration.initImageInfluence = influence
             }
         }
         return (entry, configuration)
@@ -744,101 +798,131 @@ extension AppModel {
 
     // MARK: - Video
 
-    /// The video catalog, with the honest availability answer per entry: video has no
-    /// local backend, so "available" means a reachable swarm node advertises the
-    /// capability ready right now.
+    /// The video catalog, with an availability answer per entry: a node advertising the
+    /// model's exact capability, or silicon-node's generic `text-to-video` for the
+    /// models it serves. A node that then lacks the weights refuses the submit itself.
     public func videoModels() async -> [ControlAPI.VideoModel] {
         await refreshSwarmIfStale()
-        let node = videoCapableNode
         return VideoCatalog.all.map { entry in
-            ControlAPI.VideoModel(
+            let node = videoCapableNode(for: entry)
+            return ControlAPI.VideoModel(
                 id: entry.id,
                 name: entry.name,
                 summary: entry.summary,
                 typicalDuration: entry.typicalDuration,
                 supportsImageInput: entry.supportsImageInput,
+                supportedSeconds: entry.supportedSeconds,
                 available: node != nil,
-                node: node?.name
+                node: node?.name,
+                supportedParameters: node.flatMap { videoCapability(for: entry, on: $0)?.supportedParameters }
             )
         }
     }
 
-    /// Renders a clip on the video-capable node, exactly the way the Video tab does —
-    /// same runtime, same state, same Recent clips list — so a clip asked for in chat
-    /// appears in the app like any other.
+    /// Queue a clip exactly like the Video tab, then wait for its file for legacy
+    /// synchronous callers. All rendering and recovery belongs to the queue worker.
     public func generateVideo(
         _ request: ControlAPI.VideoGenerateRequest
     ) async throws -> ControlAPI.VideoResponse {
         let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { throw ControlHostError.badRequest("The prompt is empty.") }
-        guard !isGeneratingVideo else {
-            throw ControlHostError.badRequest(
-                "A clip is already rendering; wait for it to finish."
-            )
-        }
-        await refreshSwarmIfStale()
-        guard let node = videoCapableNode,
-              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
-        else {
-            throw ControlHostError.badRequest(
-                "No swarm node offers video right now — the node may be off or still "
-                + "setting video up."
-            )
+        let explicitEntry: VideoEntry?
+        if let requestedID = request.modelID {
+            guard let entry = VideoCatalog.entry(id: requestedID) else {
+                let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
+                throw ControlHostError.badRequest(
+                    "Unknown video model \(requestedID). Known: \(known)"
+                )
+            }
+            explicitEntry = entry
+        } else {
+            explicitEntry = nil
         }
 
+        // A cold refresh may replace the historical Wan default with the first exact
+        // capability actually available. Resolve an omitted model only after that.
+        await refreshSwarmIfStale()
         let entryID = request.modelID ?? selectedVideoModel
-        guard VideoCatalog.entry(id: entryID) != nil else {
+        guard let entry = explicitEntry ?? VideoCatalog.entry(id: entryID) else {
             let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
             throw ControlHostError.badRequest("Unknown video model \(entryID). Known: \(known)")
         }
-
-        let videoRequest = VideoRequest(
-            entryID: entryID,
-            prompt: prompt,
-            image: request.imagePath.map { URL(fileURLWithPath: $0) },
-            seconds: max(1, min(10, request.seconds ?? videoSeconds)),
-            resolution: request.resolution ?? videoResolution,
-            outputDirectory: settings.resolvedVideoOutputDirectory
-        )
-
-        isGeneratingVideo = true
-        videoStage = "Starting"
-        videoProgress = nil
-        videoError = nil
-        noteActivity()
-        defer {
-            isGeneratingVideo = false
-            videoStage = nil
-            videoProgress = nil
-        }
-
-        let started = Date()
-        let token = swarmConfig?.bearer(forPeer: node.name)
-        do {
-            let result = try await videoRuntime.generate(
-                videoRequest, node: base, token: token
-            ) { progress in
-                Task { @MainActor in
-                    self.videoStage = progress.line(fallback: "Rendering on the node")
-                    self.videoProgress = progress.fraction
-                }
+        let seconds: Int
+        if let requestedSeconds = request.seconds {
+            guard entry.supportedSeconds.contains(requestedSeconds) else {
+                let choices = entry.supportedSeconds.map(String.init).joined(separator: ", ")
+                throw ControlHostError.badRequest(
+                    "\(entry.name) supports these clip lengths: \(choices) seconds."
+                )
             }
-            videoResults.insert(result, at: 0)
-            return ControlAPI.VideoResponse(
-                file: result.file.path,
-                node: node.name,
-                model: entryID,
-                elapsedSeconds: Date().timeIntervalSince(started)
+            seconds = requestedSeconds
+        } else {
+            seconds = entry.normalizedSeconds(
+                ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
+            )
+        }
+        let chainPrompts: [String]?
+        do {
+            chainPrompts = try ControlAPI.VideoGenerateRequest.validatedH3ChainPrompts(
+                request.h3ChainPrompts, modelID: entry.id, seconds: seconds
             )
         } catch {
-            videoError = error.localizedDescription
-            throw error
+            throw ControlHostError.badRequest(error.localizedDescription)
         }
+        guard let node = videoCapableNode(for: entry),
+              URL(string: node.baseURL.trimmingCharacters(in: .whitespaces)) != nil
+        else {
+            throw ControlHostError.badRequest(
+                "No ready swarm node offers \(entry.name) right now — the node may be "
+                + "off or still setting that model up."
+            )
+        }
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: request.h3Turbo, h3Steps: request.h3Steps, modelID: entry.id)
+        if request.h3Turbo != nil,
+           videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
+            throw ControlHostError.badRequest("This node does not support per-clip h3_turbo; update its video-node adapter or omit that field.")
+        }
+        if request.h3Steps != nil,
+           videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_steps") != true {
+            throw ControlHostError.badRequest("This node does not advertise h3_steps. Update its video-node adapter and Phosphene, or omit steps for Auto.")
+        }
+        // A synchronous caller cannot wait indefinitely for a manually paused
+        // queue. Reject before accepting anything; the async queue API can append
+        // to a paused queue intentionally. Never resume it on the caller's behalf.
+        guard !videoBatchQueue.isPaused else {
+            throw ControlHostError.badRequest("The video queue is paused. Resume it first, or use /video/queue to save clips for later. No clip was added.")
+        }
+
+        let videoRequest = VideoRequest(
+            entryID: entry.id,
+            prompt: prompt,
+            image: request.imagePath.map { URL(fileURLWithPath: $0) },
+            seconds: seconds,
+            resolution: request.resolution ?? videoResolution,
+            h3ChainPrompts: chainPrompts,
+            outputDirectory: settings.resolvedVideoOutputDirectory,
+            seed: request.seed, h3Turbo: request.h3Turbo, h3Steps: request.h3Steps
+        )
+
+        videoError = nil
+        // A disconnected synchronous client must not enqueue after a slow
+        // capability refresh. Once accepted, only its waiter is cancellable.
+        try Task.checkCancellation()
+        let item = try enqueueSingleVideo(videoRequest)
+        // Lease before the first suspension after acceptance, so even a very
+        // fast completion + clear cannot beat entry into the polling function.
+        videoBatchQueue.retainReceipt(item.id)
+        defer { videoBatchQueue.releaseReceipt(item.id) }
+        return try await waitForQueuedVideo(item.id)
     }
 
     /// A swarm answer older than the poll interval is re-fetched before it backs a
     /// claim like "no node offers video".
-    private func refreshSwarmIfStale() async {
+    /// Re-polls the swarm when the last look is more than twenty seconds old. The
+    /// video queue worker relies on this too: a batch can outlive the last poll by
+    /// hours, and a node that rebooted overnight has to be noticed without anyone
+    /// opening the Swarm or Video tab.
+    func refreshSwarmIfStale() async {
         let age = lastSwarmPoll.map { Date().timeIntervalSince($0) } ?? .infinity
         if age > 20 { await refreshSwarm() }
     }

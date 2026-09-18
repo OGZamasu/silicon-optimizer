@@ -1,9 +1,9 @@
-"""Video on your gaming PC, through Silicon Optimizer.
+"""Video on your own hardware, through Silicon Optimizer.
 
-The Mac does not render video; a paired Windows node with an NVIDIA card does, and
-the app routes to it. So ``get_status`` asks the app whether any video model is
-actually available right now — a node that is off is an honest UNAVAILABLE, not a
-render that fails five minutes in.
+A model-aware node may be a paired NVIDIA machine or a loopback Apple Silicon
+adapter such as Phosphene. ``get_status`` asks the app whether any exact video
+model is actually available right now — an offline or disabled runtime is an
+honest UNAVAILABLE, not a render that fails five minutes in.
 """
 
 from __future__ import annotations
@@ -35,14 +35,13 @@ class SiliconVideo(BaseTool):
     stability = ToolStability.BETA
     execution_mode = ExecutionMode.SYNC
     determinism = Determinism.STOCHASTIC
-    # A GPU, just not this machine's: the node on your own network.
+    # A GPU on one of the user's own machines, reached through the node contract.
     runtime = ToolRuntime.LOCAL_GPU
 
     dependencies: list[str] = []
     install_instructions = (
-        "Open Silicon Optimizer and pair a Windows PC with an NVIDIA card from its "
-        "Swarm tab (github.com/OGZamasu/silicon-node). Video renders there; the Mac "
-        "watches the progress."
+        "Open Silicon Optimizer and enable a model-aware video node: either pair an "
+        "NVIDIA machine from the Swarm tab or run the local Phosphene adapter on the Mac."
     )
 
     capabilities = ["text_to_video", "image_to_video", "offline_generation"]
@@ -58,8 +57,8 @@ class SiliconVideo(BaseTool):
         "iterating on a shot without a per-second meter running",
     ]
     not_good_for = [
-        "a swarm with no NVIDIA node paired",
-        "clips longer than the node's model allows (typically 5-8 s)",
+        "a setup with no ready model-aware video node",
+        "clip lengths outside the selected model's advertised choices",
     ]
 
     input_schema = {
@@ -72,13 +71,18 @@ class SiliconVideo(BaseTool):
             "duration_seconds": {"type": "integer", "description": "Omit to take the node's model default."},
             "resolution": {"type": "string", "description": "e.g. 1280x720. Omit for the model default."},
             "model": {"type": "string", "description": "An id from the app's Video tab. Omit for its current choice."},
+            "h3_chain_prompts": {
+                "type": "array", "minItems": 2, "maxItems": 3,
+                "items": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "description": "Optional hailuo-h3 prompts in temporal order: 2 for 10 seconds, 3 for 15 seconds. Omit to use prompt throughout.",
+            },
             "output_path": {"type": "string"},
         },
     }
 
     resource_profile = ResourceProfile(cpu_cores=1, ram_mb=256, vram_mb=0, disk_mb=200, network_required=True)
     retry_policy = RetryPolicy(max_retries=0)
-    idempotency_key_fields = ["prompt", "operation", "reference_image_path", "duration_seconds", "resolution", "model"]
+    idempotency_key_fields = ["prompt", "operation", "reference_image_path", "duration_seconds", "resolution", "model", "h3_chain_prompts"]
     side_effects = ["renders on the paired node; writes the clip to the app's output folder, and to output_path when given"]
     user_visible_verification = ["Play the clip — the app's Video tab also lists it"]
 
@@ -102,12 +106,25 @@ class SiliconVideo(BaseTool):
     def request_body(inputs: dict[str, Any]) -> dict[str, Any]:
         """The app's VideoGenerateRequest, from OpenMontage's input names."""
         image = inputs.get("reference_image_path") if inputs.get("operation", "text_to_video") == "image_to_video" else None
+        prompts = inputs.get("h3_chain_prompts")
+        if prompts is not None:
+            if inputs.get("model") not in (None, "hailuo-h3"):
+                raise ValueError("h3_chain_prompts is only supported for hailuo-h3")
+            seconds = inputs.get("duration_seconds")
+            if seconds is not None and seconds not in (10, 15):
+                raise ValueError("h3_chain_prompts requires 10 or 15 seconds")
+            if (not isinstance(prompts, list) or len(prompts) not in (2, 3)
+                    or not all(isinstance(p, str) and 0 < len(p.strip()) <= 4000 for p in prompts)
+                    or (seconds is not None and len(prompts) != seconds // 5)):
+                raise ValueError("h3_chain_prompts requires 2 prompts for 10 seconds or 3 for 15 seconds; each must contain 1–4000 characters")
+            prompts = [p.strip() for p in prompts]
         return _client.drop_none({
             "prompt": inputs["prompt"],
             "modelID": inputs.get("model"),
             "seconds": inputs.get("duration_seconds"),
             "resolution": inputs.get("resolution"),
             "imagePath": image,
+            "h3_chain_prompts": prompts,
         })
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
@@ -121,6 +138,8 @@ class SiliconVideo(BaseTool):
         started = time.time()
         try:
             answer = _client.post("/video/generate", self.request_body(inputs), _client.VIDEO_TIMEOUT_SECONDS)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc))
         except _client.SiliconUnavailable as exc:
             return ToolResult(success=False, error=f"{exc} {self.install_instructions}")
         except _client.SiliconError as exc:

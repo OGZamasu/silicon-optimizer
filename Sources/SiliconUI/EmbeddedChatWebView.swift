@@ -13,13 +13,16 @@ import WebKit
 struct EmbeddedChatWebView: NSViewRepresentable {
     let url: URL
     let gatewayPort: Int
+    let gatewayUIToken: String
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         let script = WKUserScript(
-            source: Self.mediaScript(gatewayPort: gatewayPort),
+            source: Self.mediaScript(
+                gatewayPort: gatewayPort, gatewayUIToken: gatewayUIToken
+            ),
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         )
@@ -32,10 +35,16 @@ struct EmbeddedChatWebView: NSViewRepresentable {
 
     /// The injected media enricher. Plain JS, no dependencies; everything it loads or
     /// asks for goes to the gateway, which only serves the app's own output folders.
-    static func mediaScript(gatewayPort: Int) -> String {
+    static func mediaScript(gatewayPort: Int, gatewayUIToken: String) -> String {
         """
         (function () {
           const GATEWAY = "http://127.0.0.1:\(gatewayPort)";
+          // This is intentionally the narrow UI capability, never the model/cloud bearer.
+          const UI_TOKEN = "\(gatewayUIToken)";
+          const AUTH_HEADERS = {
+            "authorization": "Bearer " + UI_TOKEN,
+            "content-type": "application/json"
+          };
           // Segments may hold single spaces ("Silicon Optimizer" is the default output
           // folder); the lookbehind keeps URLs out.
           const PATTERN = /(?<![:\\/\\w])(\\/(?:[\\w.\\-]+(?: [\\w.\\-]+)*\\/)*[\\w.\\-]+(?: [\\w.\\-]+)*\\.(?:mp4|mov|webm|png|jpe?g|webp|gif|wav|mp3|m4a|aiff|flac|glb|obj))\\b/gi;
@@ -59,7 +68,8 @@ struct EmbeddedChatWebView: NSViewRepresentable {
           document.head.appendChild(style);
 
           function mediaURL(path) {
-            return GATEWAY + "/ui/media?path=" + encodeURIComponent(path);
+            return GATEWAY + "/ui/media?path=" + encodeURIComponent(path)
+              + "&token=" + encodeURIComponent(UI_TOKEN);
           }
 
           function button(label, action) {
@@ -104,14 +114,16 @@ struct EmbeddedChatWebView: NSViewRepresentable {
             row.className = "so-row";
             if (["glb", "obj"].includes(kind)) {
               row.appendChild(button("Open in 3D viewer", (control) => {
-                fetch(GATEWAY + "/ui/open3d", { method: "POST", body: "{}" });
+                fetch(GATEWAY + "/ui/open3d", {
+                  method: "POST", headers: AUTH_HEADERS, body: "{}"
+                });
                 flash(control, "Opening…");
               }));
             }
             row.appendChild(button("Show in Finder", (control) => {
               fetch(GATEWAY + "/ui/reveal", {
                 method: "POST",
-                headers: { "content-type": "application/json" },
+                headers: AUTH_HEADERS,
                 body: JSON.stringify({ path }),
               }).then(r => flash(control, r.ok ? "Opened" : "Not allowed"));
             }));

@@ -284,11 +284,17 @@ function httpErrorCode(status) {
 }
 
 class SiliconAdapter extends LlmAdapter {
-  /** @param {() => string} baseURL - resolved per call so a config change lands next request. */
-  constructor(baseURL) {
+  /** Values resolve per call so a managed config or rotated process environment lands next request. */
+  constructor(baseURL, token) {
     super();
     this.baseURL = baseURL;
+    this.token = token;
     this.catalog = { at: 0, models: [] };
+  }
+
+  headers(extra = {}) {
+    const token = this.token();
+    return token ? { ...extra, authorization: `Bearer ${token}` } : extra;
   }
 
   providerInfo(provider) {
@@ -301,6 +307,7 @@ class SiliconAdapter extends LlmAdapter {
     // same second.
     if (Date.now() - this.catalog.at < 5000) return this.catalog.models;
     const response = await fetch(`${this.baseURL()}/models`, {
+      headers: this.headers(),
       signal: AbortSignal.timeout(5000),
     });
     if (!response.ok) {
@@ -356,7 +363,10 @@ class SiliconAdapter extends LlmAdapter {
     try {
       response = await fetch(`${this.baseURL()}/chat/completions`, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: "text/event-stream" },
+        headers: this.headers({
+          "content-type": "application/json",
+          accept: "text/event-stream",
+        }),
         body: JSON.stringify(request),
         signal: options.signal,
       });
@@ -390,6 +400,10 @@ export function apply(ctx, config) {
     // Tolerate a trailing slash; routes are appended bare.
     return (raw || "http://127.0.0.1:0/v1").replace(/\/+$/, "");
   };
-  const adapter = new SiliconAdapter(baseURL);
+  const token = () => {
+    const variable = typeof config?.tokenEnv === "string" ? config.tokenEnv : "";
+    return variable ? (process.env[variable] ?? "") : "";
+  };
+  const adapter = new SiliconAdapter(baseURL, token);
   ctx.llm.registerAdapter([PROVIDER], adapter);
 }

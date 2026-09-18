@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import ServiceManagement
 import SiliconCore
 import SiliconPlanner
@@ -49,6 +50,69 @@ public enum ChatEngine: String, Codable, Sendable, CaseIterable {
 }
 
 /// User preferences, persisted to `UserDefaults`.
+/// A credential can still decode from an older settings document for migration, but its
+/// encoded representation is always empty. The live value is persisted separately in Keychain.
+@propertyWrapper
+public struct KeychainCredential: Codable, Sendable, Equatable {
+    public var wrappedValue: String
+
+    public init(wrappedValue: String) { self.wrappedValue = wrappedValue }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.wrappedValue = (try? container.decode(String.self)) ?? ""
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode("")
+    }
+}
+
+private enum CredentialStore {
+    private static let service = "dev.siliconoptimizer.credentials"
+    private static let huggingFaceAccount = "hugging-face-access-token"
+
+    static func huggingFaceToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: huggingFaceAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data,
+              let token = String(data: data, encoding: .utf8), !token.isEmpty
+        else { return nil }
+        return token
+    }
+
+    @discardableResult
+    static func setHuggingFaceToken(_ rawValue: String) -> Bool {
+        let token = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: huggingFaceAccount,
+        ]
+        if token.isEmpty {
+            let status = SecItemDelete(query as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+        let data = Data(token.utf8)
+        let update: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if status == errSecSuccess { return true }
+        guard status == errSecItemNotFound else { return false }
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    }
+}
+
 public struct Settings: Codable, Sendable, Equatable {
 
     // Generation
@@ -136,13 +200,13 @@ public struct Settings: Codable, Sendable, Equatable {
     // Codex engine
     /// The gateway model id the Codex chat last used.
     public var codexModel: String?
-    /// The folder Codex works in. Empty means the user's home folder.
+    /// The folder Codex works in. Empty means Codex remains stopped until one is chosen.
     public var codexWorkingDirectory: String?
     /// Codex approval policy wire value ("on-request", "untrusted", "never").
     /// Nil or unrecognized means on-request.
     public var codexApprovalPolicy: String?
     /// Codex sandbox wire value ("read-only", "workspace-write", "danger-full-access").
-    /// Nil or unrecognized means workspace-write.
+    /// Nil or unrecognized means read-only; write authority is an explicit choice.
     public var codexSandbox: String?
 
     /// Saved load-settings presets, applied from the advanced sheet.
@@ -154,7 +218,7 @@ public struct Settings: Codable, Sendable, Equatable {
     }
 
     // Credentials
-    public var huggingFaceToken = ""
+    @KeychainCredential public var huggingFaceToken = ""
 
     // Output
 
@@ -383,9 +447,7 @@ public struct Settings: Codable, Sendable, Equatable {
         // save wrote the defaults over the lot — model library, output folders, tokens,
         // characters, all of it. One bad field is a bad field; it is not a reset.
         func value<T: Decodable>(_ key: CodingKeys, _ default: T) -> T {
-            guard let decoded = try? container.decodeIfPresent(T.self, forKey: key)
-            else { return `default` }
-            return decoded ?? `default`
+            (try? container.decode(T.self, forKey: key)) ?? `default`
         }
 
         temperature = value(.temperature, fallback.temperature)
@@ -469,15 +531,38 @@ public struct Settings: Codable, Sendable, Equatable {
     private static let defaultsKey = "dev.siliconoptimizer.settings"
 
     public static func load() -> Settings {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
-              let settings = try? JSONDecoder().decode(Settings.self, from: data)
-        else { return Settings() }
+        let data = UserDefaults.standard.data(forKey: defaultsKey)
+        var settings = data.flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+            ?? Settings()
+        let legacyToken = settings.huggingFaceToken.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let secureToken = CredentialStore.huggingFaceToken()
+        let migrationSucceeded = legacyToken.isEmpty
+            || secureToken != nil
+            || CredentialStore.setHuggingFaceToken(legacyToken)
+        settings.huggingFaceToken = CredentialStore.huggingFaceToken()
+            ?? secureToken
+            ?? legacyToken
+        // Remove the legacy copy only after Keychain confirms the credential is durable.
+        // When Keychain is locked or denied, leave the old document untouched so the next
+        // launch can retry instead of destroying the user's only usable credential.
+        if !legacyToken.isEmpty, migrationSucceeded,
+           let redacted = try? JSONEncoder().encode(settings) {
+            UserDefaults.standard.set(redacted, forKey: defaultsKey)
+        }
         return settings
     }
 
-    public func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
+    /// Returns false without rewriting preferences when secure credential persistence fails.
+    /// Existing fire-and-forget callers keep their previous durable settings instead of
+    /// silently replacing them with a redacted credential.
+    @discardableResult
+    public func save() -> Bool {
+        guard CredentialStore.setHuggingFaceToken(huggingFaceToken) else { return false }
+        guard let data = try? JSONEncoder().encode(self) else { return false }
         UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        return true
     }
 
     /// Registers or removes the login item to match `launchAtLogin`.

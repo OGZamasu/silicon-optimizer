@@ -2,26 +2,72 @@ import Foundation
 import OSLog
 import SiliconCatalog
 import SiliconCore
+import SiliconControl
 
-public struct VideoRequest: Sendable {
+public struct VideoRequest: Sendable, Codable {
     public var entryID: String
     public var prompt: String
     /// A still image to animate, for models that take one.
     public var image: URL?
     public var seconds: Int
     public var resolution: String
+    public var h3ChainPrompts: [String]?
+    public var seed: UInt32?
+    public var h3Turbo: Bool?
+    public var h3Steps: Int?
+    /// Stable client identity for node-side deduplication; not the model ID.
+    public var clientID: String?
     public var outputDirectory: URL
 
     public init(
         entryID: String, prompt: String, image: URL? = nil,
-        seconds: Int = 5, resolution: String = "720p", outputDirectory: URL
+        seconds: Int = 5, resolution: String = "720p", h3ChainPrompts: [String]? = nil,
+        outputDirectory: URL, seed: UInt32? = nil, h3Turbo: Bool? = nil,
+        clientID: String? = nil, h3Steps: Int? = nil
     ) {
         self.entryID = entryID
         self.prompt = prompt
         self.image = image
         self.seconds = seconds
         self.resolution = resolution
+        self.h3ChainPrompts = h3ChainPrompts
         self.outputDirectory = outputDirectory
+        self.seed = seed
+        self.h3Turbo = h3Turbo
+        self.h3Steps = h3Steps
+        self.clientID = clientID
+    }
+
+    /// Shared by UI and control requests; validate before submitting any node job.
+    func nodeBody() throws -> Data {
+        let chainPrompts = try ControlAPI.VideoGenerateRequest.validatedH3ChainPrompts(
+            h3ChainPrompts, modelID: entryID, seconds: seconds
+        )
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: h3Turbo, h3Steps: h3Steps, modelID: entryID)
+        var body: [String: Any] = [
+            "model": entryID, "prompt": prompt, "seconds": seconds, "resolution": resolution,
+        ]
+        if let chainPrompts { body["h3_chain_prompts"] = chainPrompts }
+        if let seed { body["seed"] = seed }
+        if let h3Turbo { body["h3_turbo"] = h3Turbo }
+        if let h3Steps { body["h3_steps"] = h3Steps }
+        if let clientID { body["entry_id"] = clientID }
+        if let image {
+            let data = try Data(contentsOf: image)
+            body["image_b64"] = data.base64EncodedString()
+            body["image_name"] = image.lastPathComponent
+        }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+}
+
+public struct VideoNodeJob: Sendable, Codable, Equatable {
+    public var id: String
+    public var submittedAt: Date
+
+    public init(id: String, submittedAt: Date = Date()) {
+        self.id = id
+        self.submittedAt = submittedAt
     }
 }
 
@@ -62,9 +108,8 @@ public enum VideoRuntimeError: LocalizedError {
 }
 
 /// Runs video generation on a swarm node — the same shape as the LATO.2 client: submit
-/// the job, poll its status, download what it produced. Local video generation on Apple
-/// Silicon is not worth pretending about yet, so there is no local branch to fall back
-/// to; the honest answer without a capable node is "not yet", said in the UI.
+/// the job, poll its status, download what it produced. A node can be a paired GPU
+/// machine or the local Apple Silicon adapter; both advertise exact model capabilities.
 public actor NodeVideoRuntime {
 
     /// Delegated jobs run on another machine and fail in ways nothing local can see.
@@ -76,12 +121,24 @@ public actor NodeVideoRuntime {
 
     /// The capability kind a node advertises when it can make video.
     public static let capabilityKind = "video"
+    private static let maximumArtifactBytes: Int64 = 1_024 * 1_024 * 1_024
+    private static let maximumJobBytes: Int64 = 1_024 * 1_024 * 1_024
+    private static let maximumArtifactURLs = 8
 
     private var session: URLSession
     private var cancelled = false
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public init(session: URLSession? = nil) {
+        self.session = session ?? URLSession(configuration: Self.sessionConfiguration())
+    }
+
+    static func sessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        // Per-request idle limits below are shorter for submit/status operations.
+        // A finite resource limit also bounds a server that keeps trickling bytes.
+        configuration.timeoutIntervalForRequest = TimeInterval(VideoGenerationBudget.networkResourceSeconds)
+        configuration.timeoutIntervalForResource = TimeInterval(VideoGenerationBudget.networkResourceSeconds)
+        return configuration
     }
 
     public func cancel() { cancelled = true }
@@ -91,6 +148,8 @@ public actor NodeVideoRuntime {
         _ request: VideoRequest,
         node baseURL: URL,
         token: String?,
+        resuming job: VideoNodeJob? = nil,
+        onSubmitted: @escaping @Sendable (VideoNodeJob) async throws -> Void = { _ in },
         onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> VideoResult {
         guard let entry = VideoCatalog.entry(id: request.entryID) else {
@@ -99,39 +158,54 @@ public actor NodeVideoRuntime {
         cancelled = false
         let started = Date()
 
-        onProgress(.stage("Sending the job"))
-        var body: [String: Any] = [
-            "model": entry.id,
-            "prompt": request.prompt,
-            "seconds": request.seconds,
-            "resolution": request.resolution,
-        ]
-        if let image = request.image, let data = try? Data(contentsOf: image) {
-            body["image_b64"] = data.base64EncodedString()
-            body["image_name"] = image.lastPathComponent
+        let acceptedJob: VideoNodeJob
+        if let job {
+            acceptedJob = job
+            onProgress(.stage("Reconnecting to the saved job"))
+        } else {
+            onProgress(.stage("Sending the job"))
+            var submit = URLRequest(url: baseURL.appendingPathComponent("v1/text-to-video"))
+            submit.httpMethod = "POST"
+            submit.timeoutInterval = 120
+            submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+            submit.httpBody = try request.nodeBody()
+
+            let jobID = try await submitJob(
+                submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL
+            )
+            acceptedJob = VideoNodeJob(id: jobID)
+            // Persist the receipt before any polling. A relaunch must never submit
+            // another render merely because the previous download was interrupted.
+            try await onSubmitted(acceptedJob)
         }
-
-        var submit = URLRequest(url: baseURL.appendingPathComponent("v1/text-to-video"))
-        submit.httpMethod = "POST"
-        submit.timeoutInterval = 120
-        submit.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        submit.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let jobID = try await submitJob(submit, nodeName: baseURL.host ?? "the node")
+        let jobID = acceptedJob.id
+        guard let statusURL = RemotePathIdentifier.appending(
+            jobID, to: baseURL.appendingPathComponent("v1/jobs")
+        ) else {
+            throw VideoRuntimeError.failed("The node returned an invalid job id.")
+        }
         Self.log.notice("video job \(jobID, privacy: .public) submitted to \(baseURL.absoluteString, privacy: .public)")
 
-        // Poll until the node says it is done. Video is minutes, not seconds, so the
-        // interval is generous and the cap is a full hour.
-        let deadline = Date().addingTimeInterval(3600)
-        while Date() < deadline {
+        // Includes time waiting behind other renders. Keep outer control/MCP timeouts
+        // longer than this budget plus submission and the final artifact transfer.
+        let deadline = acceptedJob.submittedAt.addingTimeInterval(TimeInterval(VideoGenerationBudget.nodeJobSeconds))
+        // Check even an old receipt once: the node may have finished while the app
+        // was closed, and the original deadline must not prevent downloading it.
+        var firstPoll = true
+        while firstPoll || Date() < deadline {
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
-            try? await Task.sleep(for: .seconds(5))
+            if !firstPoll { try? await Task.sleep(for: .seconds(5)) }
+            firstPoll = false
+            if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
 
-            var poll = URLRequest(url: baseURL.appendingPathComponent("v1/jobs/\(jobID)"))
+            var poll = URLRequest(url: statusURL)
             poll.timeoutInterval = 30
             if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-            guard let (data, _) = try? await session.data(for: poll) else {
+            guard let (data, _) = try? await RemoteHTTP.data(
+                for: poll, session: session, policy: .peerHost(baseURL),
+                credentialOrigin: baseURL
+            ) else {
                 Self.log.notice("video job \(jobID, privacy: .public): poll failed, retrying")
                 continue
             }
@@ -143,11 +217,16 @@ public actor NodeVideoRuntime {
 
             onProgress(NodeJobProgress(from: status))
 
-            let state = (status["status"] as? String ?? "").lowercased()
+            guard let rawState = status["status"] as? String, !rawState.isEmpty else {
+                throw VideoRuntimeError.failed(Self.reason(in: data)
+                    ?? "The node returned no status for saved video job \(jobID). Check the peer and job before rendering again.")
+            }
+            let state = rawState.lowercased()
             Self.log.notice("video job \(jobID, privacy: .public): status=\(state, privacy: .public)")
             if ["failed", "error", "cancelled"].contains(state) {
-                let detail = status["error"] as? String ?? status["detail"] as? String
-                throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
+                let detail = (status["error"] as? String ?? status["detail"] as? String)
+                    .map { String($0.prefix(512)) }
+                throw VideoNodeFailed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
                 onProgress(.stage("Downloading the clip"))
@@ -159,7 +238,7 @@ public actor NodeVideoRuntime {
                     )
                 }
                 let file = try await download(
-                    remote, token: token, into: request.outputDirectory
+                    remote, baseURL: baseURL, token: token, into: request.outputDirectory
                 )
                 Self.log.notice("video job \(jobID, privacy: .public): wrote \(file.path, privacy: .public)")
                 return VideoResult(
@@ -170,7 +249,10 @@ public actor NodeVideoRuntime {
             }
         }
         Self.log.error("video job \(jobID, privacy: .public): gave up waiting")
-        throw VideoRuntimeError.failed("The job didn't finish within an hour.")
+        throw VideoRuntimeError.failed(
+            "Video job \(jobID) did not finish within the 12-hour queue/render limit. "
+            + "Check the node's job status before submitting again; an older node may still be rendering."
+        )
     }
 
     /// Sends a portrait and a performance to a node that can animate one with the
@@ -203,23 +285,34 @@ public actor NodeVideoRuntime {
         if let token { submit.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         submit.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let jobID = try await submitJob(submit, nodeName: baseURL.host ?? "the node")
+        let jobID = try await submitJob(
+            submit, nodeName: baseURL.host ?? "the node", baseURL: baseURL
+        )
+        guard let statusURL = RemotePathIdentifier.appending(
+            jobID, to: baseURL.appendingPathComponent("v1/jobs")
+        ) else {
+            throw VideoRuntimeError.failed("The node returned an invalid job id.")
+        }
         let deadline = Date().addingTimeInterval(1800)
         while Date() < deadline {
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
             try? await Task.sleep(for: .seconds(3))
 
-            var poll = URLRequest(url: baseURL.appendingPathComponent("v1/jobs/\(jobID)"))
+            var poll = URLRequest(url: statusURL)
             poll.timeoutInterval = 30
             if let token { poll.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-            guard let (data, _) = try? await session.data(for: poll),
+            guard let (data, _) = try? await RemoteHTTP.data(
+                    for: poll, session: session, policy: .peerHost(baseURL),
+                    credentialOrigin: baseURL
+                  ),
                   let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
 
             onProgress(NodeJobProgress(from: status))
             let state = (status["status"] as? String ?? "").lowercased()
             if ["failed", "error", "cancelled"].contains(state) {
-                let detail = status["error"] as? String ?? status["detail"] as? String
+                let detail = (status["error"] as? String ?? status["detail"] as? String)
+                    .map { String($0.prefix(512)) }
                 throw VideoRuntimeError.failed(detail ?? "The node reported the job failed.")
             }
             if ["done", "completed", "succeeded", "finished"].contains(state) {
@@ -229,16 +322,23 @@ public actor NodeVideoRuntime {
                         "The job finished but the node listed no video file."
                     )
                 }
-                return try await download(remote, token: token, into: outputDirectory)
+                return try await download(
+                    remote, baseURL: baseURL, token: token, into: outputDirectory
+                )
             }
         }
         throw VideoRuntimeError.failed("The job didn't finish in time.")
     }
 
-    private func submitJob(_ request: URLRequest, nodeName: String) async throws -> String {
+    private func submitJob(
+        _ request: URLRequest, nodeName: String, baseURL: URL
+    ) async throws -> String {
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await RemoteHTTP.data(
+                for: request, session: session, policy: .peerHost(baseURL),
+                credentialOrigin: baseURL
+            )
         } catch {
             throw VideoRuntimeError.noNode("Could not reach \(nodeName).")
         }
@@ -274,11 +374,13 @@ public actor NodeVideoRuntime {
     static func reason(in data: Data) -> String? {
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             for key in ["error", "detail", "message", "reason"] {
-                if let text = json[key] as? String, !text.isEmpty { return text }
+                if let text = json[key] as? String, !text.isEmpty {
+                    return String(text.prefix(512))
+                }
                 // FastAPI nests validation errors under `detail` as a list.
                 if let items = json[key] as? [[String: Any]] {
                     let joined = items.compactMap { $0["msg"] as? String }.joined(separator: "; ")
-                    if !joined.isEmpty { return joined }
+                    if !joined.isEmpty { return String(joined.prefix(512)) }
                 }
             }
         }
@@ -288,22 +390,30 @@ public actor NodeVideoRuntime {
         return text
     }
 
-    private func download(_ remote: URL, token: String?, into directory: URL) async throws -> URL {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var request = URLRequest(url: remote)
-        request.timeoutInterval = 600
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              !data.isEmpty
-        else {
-            throw VideoRuntimeError.failed("Downloading the finished clip failed.")
-        }
+    private func download(
+        _ remote: URL, baseURL: URL, token: String?, into directory: URL
+    ) async throws -> URL {
         let name = Self.outputName(extension: remote.pathExtension.isEmpty
             ? "mp4" : remote.pathExtension)
         let destination = directory.appendingPathComponent(name)
-        try data.write(to: destination)
-        return destination
+        do {
+            return try await RemoteArtifactTransfer.download(
+                from: remote,
+                policy: .peerHost(baseURL),
+                credentialOrigin: baseURL,
+                bearerToken: token,
+                to: destination,
+                maximumBytes: Self.maximumArtifactBytes,
+                budget: RemoteByteBudget(limit: Self.maximumJobBytes),
+                timeout: 600,
+                allowedContentTypes: ["video/*", "application/octet-stream"],
+                sessionConfiguration: session.configuration
+            )
+        } catch {
+            throw VideoRuntimeError.failed(
+                "Downloading the finished clip failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     // MARK: - Liberal status parsing
@@ -313,26 +423,28 @@ public actor NodeVideoRuntime {
     /// nested schema across two codebases is how integrations rot.
     static func videoURLs(in json: Any, base: URL) -> [URL] {
         var found: [URL] = []
-        collectVideoStrings(json, into: &found, base: base)
+        collectVideoStrings(json, into: &found, base: base, depth: 0)
         return found
     }
 
-    private static func collectVideoStrings(_ value: Any, into found: inout [URL], base: URL) {
+    private static func collectVideoStrings(
+        _ value: Any, into found: inout [URL], base: URL, depth: Int
+    ) {
+        guard depth <= 32, found.count < maximumArtifactURLs else { return }
         if let text = value as? String {
-            let lowered = text.lowercased()
-            if ["mp4", "webm", "mov"].contains(where: { lowered.hasSuffix(".\($0)") }) {
-                if text.hasPrefix("http") {
-                    URL(string: text).map { found.append($0) }
-                } else {
-                    found.append(base.appendingPathComponent(
-                        text.hasPrefix("/") ? String(text.dropFirst()) : text
-                    ))
-                }
+            let policy = RemoteURLPolicy.peerHost(base)
+            if let url = policy.resolve(text, relativeTo: base),
+               ["mp4", "webm", "mov"].contains(url.pathExtension.lowercased()) {
+                found.append(url)
             }
         } else if let dictionary = value as? [String: Any] {
-            for entry in dictionary.values { collectVideoStrings(entry, into: &found, base: base) }
+            for entry in dictionary.values {
+                collectVideoStrings(entry, into: &found, base: base, depth: depth + 1)
+            }
         } else if let array = value as? [Any] {
-            for entry in array { collectVideoStrings(entry, into: &found, base: base) }
+            for entry in array {
+                collectVideoStrings(entry, into: &found, base: base, depth: depth + 1)
+            }
         }
     }
 

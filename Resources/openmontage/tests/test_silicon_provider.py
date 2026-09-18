@@ -9,6 +9,7 @@ the way the control server does.
 from __future__ import annotations
 
 import json
+import io
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,7 +33,7 @@ class _FakeApp:
     def __init__(self, tmp_path: Path):
         self.tmp_path = tmp_path
         self.requests: list[tuple[str, dict]] = []
-        self.video_available = True
+        self.video_models_available = {"ltx2-distilled"}
         self.refuse_with: str | None = None
         fake = self
 
@@ -57,7 +58,20 @@ class _FakeApp:
                 if not self._authed():
                     return self._send(401, {"error": "Invalid or missing control token."})
                 if self.path == "/video/models":
-                    return self._send(200, [{"id": "wan22", "available": fake.video_available, "node": "silicon-node"}])
+                    models = [
+                        ("wan22-ti2v-5b", [3, 5, 8]),
+                        ("ltx2-distilled", [3, 5, 8, 10, 15]),
+                        ("hailuo-h3", [3, 5, 10, 15]),
+                    ]
+                    return self._send(200, [
+                        {
+                            "id": model,
+                            "available": model in fake.video_models_available,
+                            "node": "silicon-node",
+                            "supportedSeconds": seconds,
+                        }
+                        for model, seconds in models
+                    ])
                 return self._send(404, {"error": "no such route"})
 
             def do_POST(self):
@@ -150,10 +164,12 @@ def test_a_stale_handshake_is_not_trusted(tmp_path, monkeypatch, app):
         _client.resolve()
 
 
-def test_video_is_unavailable_when_no_node_offers_it(app):
+def test_video_status_tracks_each_models_availability(app):
     assert SiliconVideo().get_status() == ToolStatus.AVAILABLE
-    app.video_available = False
+    app.video_models_available.clear()
     assert SiliconVideo().get_status() == ToolStatus.UNAVAILABLE
+    app.video_models_available.add("hailuo-h3")
+    assert SiliconVideo().get_status() == ToolStatus.AVAILABLE
 
 
 # --- the wire -------------------------------------------------------------------------
@@ -173,11 +189,13 @@ def test_image_translates_names_and_delivers_to_output_path(app, tmp_path):
     assert path == "/image/generate"
     # OpenMontage names → the app's ImageRequest names, and nothing null sent.
     assert body == {"prompt": "a lighthouse at dusk", "width": 1024, "height": 576, "seed": 7,
-                    "initImagePath": "/tmp/ref.png", "initImageInfluence": 0.6}
+                    "initImagePath": "/tmp/ref.png", "initImageInfluence": 0.6,
+                    "localOnly": True}
     assert out.read_bytes() == b"PNG"
     assert result.artifacts == [str(out)]
     assert result.cost_usd == 0.0
     assert result.model == "flux-schnell"
+    assert result.data["execution_destination"] == "this Mac"
 
 
 def test_video_only_sends_the_still_for_image_to_video(app, tmp_path):
@@ -197,6 +215,52 @@ def test_video_refuses_image_to_video_without_a_still(app):
     result = SiliconVideo().execute({"prompt": "waves", "operation": "image_to_video"})
     assert not result.success and "reference_image_path" in result.error
     assert app.requests == [], "a request the app would reject is never sent"
+
+
+@pytest.mark.parametrize("seconds", [10, 15])
+def test_h3_window_prompts_are_forwarded_in_order(app, seconds):
+    prompts = [f" window {n}\n" for n in range(seconds // 5)]
+    result = SiliconVideo().execute({"prompt": "continuous shot", "model": "hailuo-h3",
+                                     "duration_seconds": seconds, "h3_chain_prompts": prompts})
+    assert result.success, result.error
+    _, body = app.requests[-1]
+    assert body["h3_chain_prompts"] == [p.strip() for p in prompts]
+    assert body["seconds"] == seconds
+    assert "h3_chain_prompts" in SiliconVideo.idempotency_key_fields
+
+
+@pytest.mark.parametrize("model,seconds,prompts", [
+    ("ltx2-distilled", 10, ["first", "second"]),
+    ("hailuo-h3", 5, ["first", "second"]),
+    ("hailuo-h3", 15, ["first", "second"]),
+    ("hailuo-h3", 10, ["first", " \n"]),
+    ("hailuo-h3", 10, ["x" * 4001, "second"]),
+    ("hailuo-h3", 10, ["first", 42]),
+    ("hailuo-h3", 10, "not an array"),
+])
+def test_invalid_h3_window_prompts_do_not_submit_a_job(app, model, seconds, prompts):
+    result = SiliconVideo().execute({"prompt": "shot", "model": model,
+                                     "duration_seconds": seconds, "h3_chain_prompts": prompts})
+    assert not result.success and "h3_chain_prompts" in result.error
+    assert app.requests == []
+
+
+def test_video_timeout_covers_the_job_and_finite_transfer_budgets():
+    # The control budget is pinned by VideoGenerationContractTests in the app;
+    # this outer tool also covers delivery of the control response.
+    assert _client.VIDEO_CONTROL_TIMEOUT_SECONDS == 45060
+    assert _client.VIDEO_TIMEOUT_SECONDS == 45120
+    assert _client.VIDEO_TIMEOUT_SECONDS > _client.VIDEO_CONTROL_TIMEOUT_SECONDS
+
+
+def test_timed_out_render_returns_an_actionable_error(app, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(_client.request, "urlopen", timeout)
+    result = SiliconVideo().execute({"prompt": "shot"})
+    assert not result.success
+    assert "may still be working" in result.error
+    assert "before submitting again" in result.error
 
 
 def test_3d_delivers_the_glb_and_keeps_the_obj(app, tmp_path):
@@ -234,3 +298,34 @@ def test_a_remote_mac_needs_its_token(monkeypatch):
         _client.resolve()
     monkeypatch.setenv("SILICON_OPTIMIZER_TOKEN", "swarm-secret")
     assert _client.resolve() == _client.Endpoint("http://10.0.0.5:8791", "swarm-secret")
+
+
+def test_success_body_is_capped_even_without_content_length(monkeypatch):
+    class Response(io.BytesIO):
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    monkeypatch.setattr(_client, "MAX_RESPONSE_BYTES", 8)
+    monkeypatch.setattr(_client.request, "urlopen", lambda *_args, **_kwargs: Response(b"123456789"))
+    with pytest.raises(_client.SiliconError, match="8-byte limit"):
+        _client._open(_client.request.Request("http://127.0.0.1/test"), 1)
+
+
+def test_error_body_and_diagnostic_are_bounded(monkeypatch):
+    monkeypatch.setattr(_client, "MAX_ERROR_BYTES", 16)
+    failure = _client.error.HTTPError(
+        "http://127.0.0.1/test", 500, "failure", {}, io.BytesIO(b"x" * 17)
+    )
+
+    def raise_failure(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(_client.request, "urlopen", raise_failure)
+    with pytest.raises(_client.SiliconError, match="16-byte limit") as raised:
+        _client._open(_client.request.Request("http://127.0.0.1/test"), 1)
+    assert len(str(raised.value)) < 200

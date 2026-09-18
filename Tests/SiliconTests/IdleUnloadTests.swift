@@ -11,11 +11,11 @@ import Testing
 struct WorkInFlightTests {
 
     @Test func aFreshModelHasNothingRunning() {
-        #expect(AppModel().hasWorkInFlight == false)
+        #expect(AppModel(settings: .init()).hasWorkInFlight == false)
     }
 
     @Test func aDetachedGenerationCountsAsWorkInFlight() async {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         await model.whileGenerating {
             #expect(model.hasWorkInFlight)
         }
@@ -26,7 +26,7 @@ struct WorkInFlightTests {
     /// idle unload and pin the machine awake for the rest of the session.
     @Test func aThrownErrorStillClearsTheFlag() async {
         struct Failure: Error {}
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         await #expect(throws: Failure.self) {
             try await model.whileGenerating { throw Failure() }
         }
@@ -35,7 +35,7 @@ struct WorkInFlightTests {
 
     /// Concurrent requests share one server, and the last one to finish is what releases it.
     @Test func overlappingGenerationsReleaseOnlyOnTheLast() async {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         await model.whileGenerating {
             await model.whileGenerating {
                 #expect(model.hasWorkInFlight)

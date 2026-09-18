@@ -89,6 +89,11 @@ public final class AppModel {
     /// The loopback server that lists every model this app can reach and routes external
     /// harness requests to whichever machine serves the one they named.
     var gatewayServer: GatewayServer?
+    /// Full per-launch model/cloud authority, passed only to managed sidecars and the
+    /// owner-readable discovery file.
+    let gatewayToken = UUID().uuidString
+    /// Browser-visible capability limited by GatewayServer to media and UI helper routes.
+    let gatewayUIToken = UUID().uuidString
     /// The gateway's request ledger — what the Fleet tab shows.
     var gatewayLedger: GatewayLedger?
 
@@ -105,9 +110,10 @@ public final class AppModel {
     /// Start, never by auto-starting the model (picking a size is a preference, not a
     /// launch command).
     var pendingNodeContext: [String: Int] = [:]
-    /// Peers that could not mint the last approved member their own token, so the
-    /// shared credential went out instead — named in the invite sheet.
-    var pairingLegacyShared: [String] = []
+    /// Set before any credentials are delivered when one or more nodes cannot mint the
+    /// joiner's individual key. The owner can retry or deny; the admin token is never used
+    /// as a compatibility fallback.
+    var pairingApprovalError: String?
     /// Peers already asked for this Mac's own client token this run.
     var clientTokenAttempted: Set<String> = []
     /// Resolved once per session from the persisted choice, like the harness ports.
@@ -991,6 +997,7 @@ public final class AppModel {
         public var description: String?
         public var enabled: Bool?
         public var settings: [String: String] = [:]
+        public var supportedParameters: [String] = []
     }
 
     /// One GPU job on a peer, as its queue reports it (hub #128). `running` jobs carry
@@ -1116,6 +1123,7 @@ public final class AppModel {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
         lastSwarmPoll = Date()
+        reconcileInitialVideoSelection()
         syncSwarmChatProviders()
         // Give this Mac its own per-client identity wherever a node can mint one, so
         // node activity logs name us instead of "swarm (shared token)".
@@ -1133,7 +1141,10 @@ public final class AppModel {
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
 
         let started = Date()
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        let peerPolicy = RemoteURLPolicy.peerHost(base)
+        guard let (data, response) = try? await RemoteHTTP.data(
+                for: request, policy: peerPolicy, credentialOrigin: base
+              ),
               let http = response as? HTTPURLResponse else {
             status.error = "Unreachable."
             return status
@@ -1153,12 +1164,16 @@ public final class AppModel {
         // which is what the menu bar's remote controls and the harness's model picker
         // both run on.
         if status.capabilities.contains(where: { $0.kind == "llm" }) {
-            if let llmJSON = await fetchJSON(base.appendingPathComponent("v1/llm"), token: token) {
+            if let llmJSON = await fetchJSON(
+                base.appendingPathComponent("v1/llm"), token: token,
+                policy: peerPolicy, credentialOrigin: base
+            ) {
                 var llm = parseLLM(llmJSON)
                 // Proposed but not yet shipped on every node; a 404 just means the one
                 // loaded model is the whole list.
                 if let listJSON = await fetchJSON(
-                    base.appendingPathComponent("v1/llm/models"), token: token
+                    base.appendingPathComponent("v1/llm/models"), token: token,
+                    policy: peerPolicy, credentialOrigin: base
                 ) {
                     llm.availableModels = parseModelList(listJSON)
                 }
@@ -1167,9 +1182,10 @@ public final class AppModel {
                 // have disagreed in the wild ("qwen3.8.27b" vs "qwen3.8-27b"), and every
                 // chat request 404s until the engine's spelling wins.
                 if llm.running, let baseString = llm.openAIBase,
-                   let engineBase = URL(string: baseString),
+                   let engineBase = peerBackendURL(baseString, relativeTo: base),
                    let served = await fetchJSON(
-                       engineBase.appendingPathComponent("models"), token: token
+                       engineBase.appendingPathComponent("models"), token: token,
+                       policy: peerPolicy, credentialOrigin: base
                    ) {
                     let ids = parseModelList(served)
                     if let match = ids.first(where: { $0 == llm.model }) ?? ids.first {
@@ -1182,15 +1198,24 @@ public final class AppModel {
         return status
     }
 
-    private nonisolated static func fetchJSON(_ url: URL, token: String?) async -> [String: Any]? {
+    private nonisolated static func fetchJSON(
+        _ url: URL, token: String?, policy: RemoteURLPolicy, credentialOrigin: URL
+    ) async -> [String: Any]? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await RemoteHTTP.data(
+                for: request, policy: policy, credentialOrigin: credentialOrigin
+              ),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode)
         else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    /// A peer can publish an engine on another port, but not another machine or scheme.
+    nonisolated static func peerBackendURL(_ advertised: String, relativeTo peerBase: URL) -> URL? {
+        RemoteURLPolicy.peerHost(peerBase).resolve(advertised, relativeTo: peerBase)
     }
 
     nonisolated static func parseLLM(_ json: [String: Any]) -> PeerLLM {
@@ -1200,7 +1225,9 @@ public final class AppModel {
             healthy: json["healthy"] as? Bool ?? false,
             model: json["model"] as? String,
             uptimeSeconds: number(json["uptime_s"]),
-            contextLength: number(json["context_length"]).map { Int($0) }
+            contextLength: number(json["context_length"]).flatMap {
+                $0.rounded() == $0 && (1...1_000_000).contains($0) ? Int($0) : nil
+            }
         )
         llm.engine = json["engine"] as? String
         if let api = json["api"] as? [String: Any], let raw = api["openai"] as? String {
@@ -1273,11 +1300,11 @@ public final class AppModel {
     /// without it answers 404, which is translated to that exact explanation.
     public func cancelPeerJob(_ peer: PeerStatus, jobID: String) async {
         guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
-              let encoded = jobID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+              let url = RemotePathIdentifier.appending(
+                jobID, to: base.appendingPathComponent("v1/queue")
+              )
         else { return }
-        var request = URLRequest(
-            url: base.appendingPathComponent("v1/queue").appendingPathComponent(encoded)
-        )
+        var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
         if let token = swarmConfig?.bearer(forPeer: peer.name) {
@@ -1305,12 +1332,11 @@ public final class AppModel {
         settings: [String: String]? = nil
     ) async {
         guard let base = URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)),
-              let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+              let url = RemotePathIdentifier.appending(
+                id, to: base.appendingPathComponent("v1/capabilities")
+              )
         else { return }
-        var request = URLRequest(
-            url: base.appendingPathComponent("v1/capabilities")
-                .appendingPathComponent(encoded)
-        )
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1423,7 +1449,8 @@ public final class AppModel {
                     detail: entry["detail"] as? String,
                     description: entry["description"] as? String,
                     enabled: entry["enabled"] as? Bool,
-                    settings: settings
+                    settings: settings,
+                    supportedParameters: entry["supported_parameters"] as? [String] ?? []
                 )
             }
         }
@@ -1457,11 +1484,16 @@ public final class AppModel {
     /// and a field that parses on one shape and not another is a silent blank on the
     /// dashboard. One door for all of them.
     private nonisolated static func number(_ value: Any?) -> Double? {
+        let result: Double?
         switch value {
-        case let double as Double: return double
-        case let int as Int: return Double(int)
-        default: return nil
+        case let double as Double: result = double
+        case let int as Int: result = Double(int)
+        default: result = nil
         }
+        guard let result, result.isFinite, abs(result) <= 1_000_000_000_000 else {
+            return nil
+        }
+        return result
     }
 
     // MARK: - In-app repairs
@@ -2262,8 +2294,25 @@ public final class AppModel {
     public var videoImage: URL?
     public var videoSeconds = 5
     public var videoResolution = "720p"
+    public var videoSampling: VideoSampling = .nodeDefault
+    /// 0 = Auto in the composer; the wire and queue use nil for omission.
+    public var videoH3Steps = 0
+    public var videoBatchMode = false
+    public internal(set) var isEnqueuingVideoBatch = false
+    public var videoBatchPrompts = ""
+    public var videoBatchTitle = ""
+    public var videoBatchVariations = 1
+    public var videoBatchSeed = ""
+    public let videoBatchQueue: VideoBatchQueue
+    public internal(set) var activeVideoQueueID: String?
+    public internal(set) var videoQueueMessage: String?
+    @ObservationIgnored var videoQueueTask: Task<Void, Never>?
+    @ObservationIgnored var videoQueueRenderTask: Task<VideoResult, any Error>?
+    /// Reconcile the historical Wan default once a real model-aware advertisement is
+    /// available. Later manual choices, including unavailable ones, remain untouched.
+    private var hasReconciledInitialVideoSelection = false
 
-    let videoRuntime = NodeVideoRuntime()
+    let videoRuntime: NodeVideoRuntime
     // internal(set), not private(set): the control API renders clips through the same
     // state so a chat-requested clip shows its progress in the Video tab too.
     public internal(set) var isGeneratingVideo = false
@@ -2274,72 +2323,116 @@ public final class AppModel {
     public internal(set) var videoResults: [VideoResult] = []
     public var videoError: String?
 
-    /// The first reachable node advertising a ready video capability — video's whole
-    /// backend, until Apple Silicon ports are worth wiring.
-    public var videoCapableNode: PeerStatus? {
-        swarmPeers.first { peer in
-            peer.reachable && peer.capabilities.contains {
-                $0.kind == NodeVideoRuntime.capabilityKind && $0.ready
-            }
+    /// A capability serves one catalog entry only. Matching the generic `video` kind
+    /// made every model look available as soon as any video runner came online.
+    nonisolated static func isReadyVideoCapability(
+        _ capability: PeerCapability, for entry: VideoEntry
+    ) -> Bool {
+        // silicon-node advertises one generic `text-to-video` capability and picks the
+        // model from the request's `model` field, so that capability serves every entry
+        // its /v1/text-to-video accepts (Wan, both LTX variants). A node that cannot run
+        // one of them refuses the submit with a message the app surfaces. Exact ids are
+        // for nodes that advertise per model, like the local Phosphene/LTX adapter.
+        let modelMatches = capability.id == entry.capabilityID
+            || (capability.id == VideoCatalog.genericCapabilityID
+                && entry.acceptsGenericTextToVideo)
+        return capability.kind == NodeVideoRuntime.capabilityKind
+            && modelMatches
+            && capability.ready
+            && capability.enabled != false
+    }
+
+    nonisolated static func videoCapability(
+        for entry: VideoEntry, on peer: PeerStatus
+    ) -> PeerCapability? {
+        peer.capabilities.first { isReadyVideoCapability($0, for: entry) }
+    }
+
+    nonisolated static func videoCapableNode(
+        for entry: VideoEntry, among peers: [PeerStatus]
+    ) -> PeerStatus? {
+        peers.first { peer in
+            peer.reachable && videoCapability(for: entry, on: peer) != nil
         }
+    }
+
+    /// The first reachable node advertising the selected model's exact capability.
+    public var videoCapableNode: PeerStatus? {
+        guard let entry = VideoCatalog.entry(id: selectedVideoModel) else { return nil }
+        return videoCapableNode(for: entry)
+    }
+
+    public func videoCapableNode(for entry: VideoEntry) -> PeerStatus? {
+        Self.videoCapableNode(for: entry, among: swarmPeers)
+    }
+
+    public func videoCapability(
+        for entry: VideoEntry, on peer: PeerStatus
+    ) -> PeerCapability? {
+        Self.videoCapability(for: entry, on: peer)
+    }
+
+    private func reconcileInitialVideoSelection() {
+        guard !hasReconciledInitialVideoSelection,
+              let firstAvailable = VideoCatalog.all.first(where: {
+                  Self.videoCapableNode(for: $0, among: swarmPeers) != nil
+              })
+        else { return }
+        hasReconciledInitialVideoSelection = true
+
+        // Only the untouched historical default is eligible for an automatic switch.
+        // A user may deliberately select H3 while its large install is still underway.
+        guard selectedVideoModel == VideoCatalog.wan22.id,
+              Self.videoCapableNode(for: VideoCatalog.wan22, among: swarmPeers) == nil
+        else {
+            return
+        }
+        selectedVideoModel = firstAvailable.id
+        videoSeconds = firstAvailable.normalizedSeconds(videoSeconds)
     }
 
     public func generateVideo() {
         let prompt = videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !isGeneratingVideo else { return }
-        guard let node = videoCapableNode,
-              let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
-        else {
-            videoError = "No swarm node offers video yet."
+        guard !prompt.isEmpty else { return }
+        guard let entry = VideoCatalog.entry(id: selectedVideoModel) else {
+            videoError = "Unknown video model \(selectedVideoModel)."
             return
         }
-        isGeneratingVideo = true
-        videoStage = "Starting"
-        videoProgress = nil
+        let seconds = entry.normalizedSeconds(
+            ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
+        )
+        videoSeconds = seconds
+        if entry.id == "hailuo-h3", videoSampling.h3Turbo != nil,
+           videoCapableNode(for: entry) != nil, !supportsH3Sampling {
+            videoError = "Update the video node to use per-clip sampling, or choose Renderer default."
+            return
+        }
         videoError = nil
-        noteActivity()
 
         let request = VideoRequest(
-            entryID: selectedVideoModel,
+            entryID: entry.id,
             prompt: prompt,
-            image: videoImage,
-            seconds: videoSeconds,
+            image: entry.supportsImageInput ? videoImage : nil,
+            seconds: seconds,
             resolution: videoResolution,
-            outputDirectory: settings.resolvedVideoOutputDirectory
+            outputDirectory: settings.resolvedVideoOutputDirectory,
+            h3Turbo: entry.id == "hailuo-h3" ? videoSampling.h3Turbo : nil,
+            h3Steps: composerH3Steps
         )
-        let token = swarmConfig?.bearer(forPeer: node.name)
-        Task {
-            defer {
-                isGeneratingVideo = false
-                videoStage = nil
-                videoProgress = nil
-            }
-            do {
-                let result = try await videoRuntime.generate(
-                    request, node: base, token: token
-                ) { progress in
-                    Task { @MainActor in
-                        self.videoStage = progress.line(fallback: "Rendering on the node")
-                        self.videoProgress = progress.fraction
-                    }
-                }
-                videoResults.insert(result, at: 0)
-                NodeVideoRuntime.log.notice(
-                    "video result added: \(result.file.path, privacy: .public)"
-                )
-            } catch {
-                // Both places, deliberately: the banner is for the person, the log is
-                // for whoever has to work out why a job vanished without one.
-                videoError = error.localizedDescription
-                NodeVideoRuntime.log.error(
-                    "video job failed: \(error.localizedDescription, privacy: .public)"
-                )
-            }
+        do {
+            _ = try enqueueSingleVideo(request)
+            // Only clear the draft once the queue has durably accepted it.
+            videoPrompt = ""
+            videoImage = nil
+        } catch {
+            videoError = error.localizedDescription
         }
     }
 
-    public func cancelVideo() {
-        Task { await videoRuntime.cancel() }
+    /// Stop local following, not the remote renderer. Retain the receipt for recovery.
+    public func cancelVideo(_ requestedID: String? = nil) {
+        guard let id = requestedID ?? activeVideoQueueID else { return }
+        videoQueueAction("stop_following", id: id)
     }
 
     // MARK: - Personas
@@ -2408,9 +2501,20 @@ public final class AppModel {
 
     // MARK: - Init
 
-    public init() {
+    public init(
+        videoQueue: VideoBatchQueue? = nil,
+        videoRuntime: NodeVideoRuntime = NodeVideoRuntime(),
+        settings: Settings? = nil
+    ) {
         self.profile = HardwareProbe.detect()
-        self.settings = Settings.load()
+        // Tests and previews inject settings instead of reading the user's Keychain.
+        // The ordinary application still loads/migrates its saved credentials.
+        self.settings = settings ?? Settings.load()
+        self.videoRuntime = videoRuntime
+        self.videoBatchQueue = videoQueue ?? VideoBatchQueue(
+            storeURL: ControlAPI.handshakeURL.deletingLastPathComponent()
+                .appendingPathComponent("video-queue.json")
+        )
     }
 
     /// Whether the app has been launched before on this machine. Backed by `UserDefaults` so
@@ -2436,6 +2540,7 @@ public final class AppModel {
         beginSampling()
         startControlServer()
         startGatewayServer()
+        startVideoQueueWorker()
         measureStorageIfNeeded()
 
         Task {
@@ -2851,7 +2956,8 @@ public final class AppModel {
     /// keyboard, which is precisely what macOS reads as a machine that may as well sleep.
     private var mustStayAwake: Bool {
         hasWorkInFlight || isGeneratingImage || isGeneratingMesh
-            || isGeneratingVideo || isSpeaking || isTranscribing
+            || isGeneratingVideo || (!videoBatchQueue.isPaused && videoBatchQueue.pendingCount > 0
+                && videoBatchQueue.storageError == nil) || isSpeaking || isTranscribing
     }
 
     /// Takes or releases the sleep assertion to match what is running.

@@ -42,14 +42,20 @@ public struct NodeJobProgress: Sendable, Equatable {
         let state = ((status["status"] ?? status["state"]) as? String)?.lowercased() ?? ""
         isQueued = ["queued", "pending", "waiting"].contains(state)
         queuePosition = Self.integer(status, "queue_position", "position", "queue_index")
+            .flatMap { (0...1_000_000).contains($0) ? $0 : nil }
 
         stage = (status["stage"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         step = Self.integer(status, "step", "current_step")
+            .flatMap { (0...1_000_000_000).contains($0) ? $0 : nil }
         stepsTotal = Self.integer(status, "steps_total", "total_steps", "steps")
+            .flatMap { (1...1_000_000_000).contains($0) ? $0 : nil }
         eta = Self.number(status, "eta_seconds", "eta_s", "eta")
+            .flatMap { (0...31_536_000).contains($0) ? $0 : nil }
         elapsed = Self.number(status, "elapsed_s", "elapsed_seconds", "elapsed")
+            .flatMap { (0...31_536_000).contains($0) ? $0 : nil }
 
-        if let raw = Self.number(status, "progress", "percent", "percent_complete") {
+        if let raw = Self.number(status, "progress", "percent", "percent_complete"),
+           (0...100).contains(raw) {
             // Some services count 0–1 and some count 0–100. Anything above 1 can only be the
             // second kind, and clamping keeps a 105% bar off the screen.
             let normalised = raw > 1 ? raw / 100 : raw
@@ -93,7 +99,8 @@ public struct NodeJobProgress: Sendable, Equatable {
     public static func durationText(_ seconds: TimeInterval) -> String { duration(seconds) }
 
     static func duration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
+        guard seconds.isFinite else { return "—" }
+        let total = Int(min(max(seconds.rounded(), 0), 31_536_000))
         let (hours, minutes, remainder) = (total / 3600, (total % 3600) / 60, total % 60)
         return hours > 0
             ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
@@ -102,9 +109,14 @@ public struct NodeJobProgress: Sendable, Equatable {
 
     private static func number(_ status: [String: Any], _ keys: String...) -> Double? {
         for key in keys {
-            if let value = status[key] as? Double { return value }
-            if let value = status[key] as? Int { return Double(value) }
-            if let text = status[key] as? String, let value = Double(text) { return value }
+            let value: Double?
+            if let double = status[key] as? Double { value = double }
+            else if let int = status[key] as? Int { value = Double(int) }
+            else if let text = status[key] as? String { value = Double(text) }
+            else { value = nil }
+            if let value, value.isFinite, abs(value) <= 1_000_000_000_000 {
+                return value
+            }
         }
         return nil
     }
@@ -112,7 +124,10 @@ public struct NodeJobProgress: Sendable, Equatable {
     private static func integer(_ status: [String: Any], _ keys: String...) -> Int? {
         for key in keys {
             if let value = status[key] as? Int { return value }
-            if let value = status[key] as? Double { return Int(value) }
+            if let value = status[key] as? Double, value.isFinite,
+               value.rounded() == value, abs(value) <= 1_000_000_000_000 {
+                return Int(value)
+            }
             if let text = status[key] as? String, let value = Int(text) { return value }
         }
         return nil

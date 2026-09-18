@@ -49,6 +49,11 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { extractPlatform, loadContext } from './context.mjs';
 import { IMPECCABLE_COMMAND } from './lib/provider.mjs';
+import {
+  appendFileInside,
+  ensureDirectoryInside,
+  isPathInside,
+} from './lib/security-boundaries.mjs';
 // `detector.extensions` (issue #316) is shared with Live's source search, which
 // needs the same answer for `.heex` / `.blade.php` when it hunts for session
 // markers. lib/template-extensions.mjs owns the shape; re-exported here because
@@ -1562,10 +1567,27 @@ export function writeAuditLog(env, entry, cwd = process.cwd()) {
   // config reads and relative log paths resolve against this, since the hook
   // process cwd can differ from the project being edited.
   const baseCwd = entry && typeof entry.cwd === 'string' && entry.cwd ? entry.cwd : cwd;
-  // Env wins; otherwise fall back to the unified config's hook.auditLog path.
+  // Environment and local config are machine-owned. A shared config is
+  // repository-controlled, so its target must remain inside that repository:
+  // checking the source independently prevents the merged config from losing
+  // the trust boundary that determines where writes are authorized.
   let target = env?.IMPECCABLE_HOOK_LOG;
+  let source = 'env';
   if (!target || typeof target !== 'string') {
-    try { target = readConfig(baseCwd).auditLog; } catch { target = null; }
+    target = null;
+    source = null;
+    try {
+      const shared = hookSection(safeReadJson(getConfigPath(baseCwd)));
+      if (typeof shared?.auditLog === 'string' && shared.auditLog.trim()) {
+        target = shared.auditLog.trim();
+        source = 'shared';
+      }
+      const local = hookSection(safeReadJson(getLocalConfigPath(baseCwd)));
+      if (typeof local?.auditLog === 'string' && local.auditLog.trim()) {
+        target = local.auditLog.trim();
+        source = 'local';
+      }
+    } catch { target = null; source = null; }
   }
   if (!target || typeof target !== 'string') return false;
   try {
@@ -1577,9 +1599,19 @@ export function writeAuditLog(env, entry, cwd = process.cwd()) {
     } else {
       expanded = path.resolve(baseCwd, target);
     }
-    fs.mkdirSync(path.dirname(expanded), { recursive: true });
     const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n';
-    fs.appendFileSync(expanded, line);
+    const absoluteBase = path.resolve(baseCwd);
+    const insideProject = isPathInside(absoluteBase, path.resolve(expanded));
+    if (source === 'shared' && !insideProject) return false;
+    if (insideProject) {
+      ensureDirectoryInside(absoluteBase, path.dirname(expanded));
+      appendFileInside(absoluteBase, expanded, line);
+    } else {
+      // A machine-local override may intentionally use a central log. Its
+      // parent must already exist and the leaf is opened O_NOFOLLOW; this
+      // avoids creating an attacker-selected external directory hierarchy.
+      appendFileInside(path.dirname(expanded), expanded, line);
+    }
     return true;
   } catch {
     return false;

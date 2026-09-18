@@ -1,5 +1,6 @@
 import Foundation
 import SiliconCore
+import SiliconControl
 
 /// Manages the DeepSeek Harness (`dsh`) sidecar that powers the agentic chat experience.
 ///
@@ -23,6 +24,7 @@ public actor HarnessRuntime {
     /// The dummy credential for a local server that requires none. The harness's provider
     /// plugin refuses to run without *a* key, but llama-server ignores the header entirely.
     static let apiKeyVariable = "SILICON_LOCAL_API_KEY"
+    static let gatewayKeyVariable = "SILICON_GATEWAY_KEY"
 
     private var process: ServerProcess?
     public private(set) var processIdentifier: Int32?
@@ -511,6 +513,7 @@ public actor HarnessRuntime {
               name: '\(escaped)'
               config:
                 baseURL: http://127.0.0.1:\(gatewayPort)/v1
+                tokenEnv: \(gatewayKeyVariable)
 
         """
         if let mcpServerPath {
@@ -522,8 +525,8 @@ public actor HarnessRuntime {
                     serverName: silicon
                     transport: stdio
                     command: '\(escapedServer)'
-                    # The longest tool renders a video clip on the node for ~10 minutes.
-                    toolCallTimeoutMs: 1800000
+                    # Covers the node's video queue/render budget and artifact download.
+                    toolCallTimeoutMs: \(VideoGenerationBudget.toolMilliseconds)
 
             """
         }
@@ -577,6 +580,7 @@ public actor HarnessRuntime {
         nodePath: String = "",
         advertising model: AdvertisedModel = AdvertisedModel(),
         gatewayPort: Int? = nil,
+        gatewayToken: String? = nil,
         onState: @escaping @Sendable (RuntimeState) -> Void
     ) async {
         await stop()
@@ -613,7 +617,8 @@ public actor HarnessRuntime {
         // The plugin is a nicety, never a gatekeeper: any failure here leaves the harness
         // to boot exactly as it did before the gateway existed.
         var overlayPath: String?
-        if let gatewayPort, let source = Self.siliconPluginSource() {
+        if let gatewayPort, let gatewayToken, !gatewayToken.isEmpty,
+           let source = Self.siliconPluginSource() {
             if let pluginIndex = try? Self.ensureSiliconPluginInstalled(home: home, source: source),
                let overlay = try? Self.writeSiliconOverlay(
                    home: home, pluginIndexPath: pluginIndex.path, gatewayPort: gatewayPort,
@@ -641,15 +646,26 @@ public actor HarnessRuntime {
             // PATH must contain node's directory: npx is a script whose shebang resolves
             // `env node`, and a launchd-spawned app offers almost nothing in PATH.
             let path = "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin"
+            var environment = [
+                "DSH_HOME": home.path,
+                "HOME": home.path,
+                "PATH": path,
+                Self.apiKeyVariable: "local-server-needs-no-key",
+            ]
+            for harmless in ["LANG", "LC_ALL", "TMPDIR"] {
+                if let value = ProcessInfo.processInfo.environment[harmless] {
+                    environment[harmless] = value
+                }
+            }
+            if let gatewayToken, !gatewayToken.isEmpty {
+                environment[Self.gatewayKeyVariable] = gatewayToken
+            }
             try await process.start(
                 executable: npx,
                 arguments: arguments,
-                environment: [
-                    "DSH_HOME": home.path,
-                    "PATH": path,
-                    Self.apiKeyVariable: "local-server-needs-no-key",
-                ],
-                currentDirectory: FileManager.default.homeDirectoryForCurrentUser
+                environment: environment,
+                inheritEnvironment: false,
+                currentDirectory: home
             )
         } catch {
             onState(.failed(message: error.localizedDescription))

@@ -471,6 +471,9 @@ public enum ControlAPI {
         public var steps: Int?
         public var quantization: String?
         public var seed: Int?
+        /// Enforced routing capability: true forbids handing the prompt or source image to
+        /// a paired node even when remote rendering is otherwise configured.
+        public var localOnly: Bool?
         /// Revision: path to an existing image to start from instead of noise.
         public var initImagePath: String?
         /// How strongly that image steers the result, 0–1 (mflux influence semantics).
@@ -479,7 +482,8 @@ public enum ControlAPI {
         public init(
             prompt: String, modelID: String? = nil, width: Int? = nil, height: Int? = nil,
             steps: Int? = nil, quantization: String? = nil, seed: Int? = nil,
-            initImagePath: String? = nil, initImageInfluence: Double? = nil
+            initImagePath: String? = nil, initImageInfluence: Double? = nil,
+            localOnly: Bool? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -488,6 +492,7 @@ public enum ControlAPI {
             self.steps = steps
             self.quantization = quantization
             self.seed = seed
+            self.localOnly = localOnly
             self.initImagePath = initImagePath
             self.initImageInfluence = initImageInfluence
         }
@@ -623,49 +628,128 @@ public enum ControlAPI {
         }
     }
 
-    /// One video model, with whether any swarm node can serve it right now. Video is the
-    /// one capability with no local backend, so availability is a claim about the swarm.
+    /// One video model, with whether any model-aware node can serve it right now. That
+    /// node may be remote or a loopback adapter, but it must advertise this exact model.
     public struct VideoModel: Codable, Sendable {
         public var id: String
         public var name: String
         public var summary: String
         public var typicalDuration: String
         public var supportsImageInput: Bool
+        public var supportedSeconds: [Int]
         public var available: Bool
         /// The node that would run it, when one is ready.
         public var node: String?
 
+        /// Optional renderer controls; absent on older nodes.
+        public var supportedParameters: [String]?
+
         public init(
             id: String, name: String, summary: String, typicalDuration: String,
-            supportsImageInput: Bool, available: Bool, node: String?
+            supportsImageInput: Bool, supportedSeconds: [Int], available: Bool,
+            node: String?, supportedParameters: [String]? = nil
         ) {
             self.id = id
             self.name = name
             self.summary = summary
             self.typicalDuration = typicalDuration
             self.supportsImageInput = supportsImageInput
+            self.supportedSeconds = supportedSeconds
             self.available = available
             self.node = node
+            self.supportedParameters = supportedParameters
         }
     }
 
     public struct VideoGenerateRequest: Codable, Sendable {
+        /// The wire-level duration contract shared by the app UI and MCP bridge. Nodes may
+        /// offer fewer choices, but callers never send a value outside this range.
+        public static let minimumSeconds = 1
+        public static let maximumSeconds = 15
+        public static let pickerSeconds = [3, 5, 8, 10, 15]
+
+        public static func clampedSeconds(_ seconds: Int) -> Int {
+            max(minimumSeconds, min(maximumSeconds, seconds))
+        }
+
         public var prompt: String
         public var modelID: String?
         public var seconds: Int?
         public var resolution: String?
         /// Optional still to animate (image-to-video), as an absolute path.
         public var imagePath: String?
+        /// Optional prompt for each five-second H3 window, in temporal order.
+        public var h3ChainPrompts: [String]?
+        public var seed: UInt32?
+        public var h3Turbo: Bool?
+        /// Optional H3 sigma-point count (4–30); requires explicit Full sampling.
+        public var h3Steps: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case prompt, modelID, seconds, resolution, imagePath, seed
+            case h3ChainPrompts = "h3_chain_prompts"
+            case h3Turbo = "h3_turbo"
+            case h3Steps = "h3_steps"
+        }
+
+        public enum ValidationError: LocalizedError {
+            case invalidChainPrompts(String)
+            public var errorDescription: String? {
+                switch self { case .invalidChainPrompts(let message): message }
+            }
+        }
+
+        public static func validateSampling(h3Turbo: Bool?, h3Steps: Int? = nil, modelID: String) throws {
+            if h3Turbo != nil, modelID != "hailuo-h3" {
+                throw ValidationError.invalidChainPrompts("h3_turbo is only supported for hailuo-h3.")
+            }
+            if let h3Steps {
+                guard modelID == "hailuo-h3", (4...30).contains(h3Steps) else {
+                    throw ValidationError.invalidChainPrompts("h3_steps must be an integer from 4 through 30, only for hailuo-h3. Omit it for Auto.")
+                }
+                guard h3Turbo == false else {
+                    throw ValidationError.invalidChainPrompts("h3_steps requires h3_turbo: false (Full sampling). Turbo pins its own schedule.")
+                }
+            }
+        }
+
+        /// Validate after resolving the app's current model and duration defaults.
+        /// The runtime uses the same check for callers that do not use the control API.
+        public static func validatedH3ChainPrompts(
+            _ prompts: [String]?, modelID: String, seconds: Int
+        ) throws -> [String]? {
+            guard let prompts else { return nil }
+            guard modelID == "hailuo-h3", seconds == 10 || seconds == 15 else {
+                throw ValidationError.invalidChainPrompts(
+                    "h3_chain_prompts is only supported for hailuo-h3 at 10 or 15 seconds."
+                )
+            }
+            let trimmed = prompts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard trimmed.count == seconds / 5,
+                  trimmed.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.count <= 4000 }) else {
+                throw ValidationError.invalidChainPrompts(
+                    "h3_chain_prompts requires exactly \(seconds / 5) nonempty prompts, "
+                    + "each at most 4000 characters."
+                )
+            }
+            return trimmed
+        }
 
         public init(
             prompt: String, modelID: String? = nil, seconds: Int? = nil,
-            resolution: String? = nil, imagePath: String? = nil
+            resolution: String? = nil, imagePath: String? = nil,
+            h3ChainPrompts: [String]? = nil, seed: UInt32? = nil, h3Turbo: Bool? = nil,
+            h3Steps: Int? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
             self.seconds = seconds
             self.resolution = resolution
             self.imagePath = imagePath
+            self.h3ChainPrompts = h3ChainPrompts
+            self.seed = seed
+            self.h3Turbo = h3Turbo
+            self.h3Steps = h3Steps
         }
     }
 
@@ -760,6 +844,9 @@ public protocol ControlHost: AnyObject, Sendable {
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse
     func videoModels() async -> [ControlAPI.VideoModel]
+    func videoQueue() async -> ControlAPI.VideoQueueView
+    func enqueueVideos(_ request: ControlAPI.VideoQueueRequest) async throws -> ControlAPI.VideoQueueView
+    func controlVideoQueue(_ request: ControlAPI.VideoQueueControl) async throws -> ControlAPI.VideoQueueView
     func generateVideo(
         _ request: ControlAPI.VideoGenerateRequest
     ) async throws -> ControlAPI.VideoResponse

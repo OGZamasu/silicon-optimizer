@@ -32,6 +32,30 @@ set -uo pipefail
 
 WITH_MUSIC=0
 [[ "${1:-}" == "--music" ]] && WITH_MUSIC=1
+CURL_BIN="${CURL_BIN:-curl}"
+command -v "$CURL_BIN" >/dev/null || { echo "curl executable not found: $CURL_BIN" >&2; exit 1; }
+
+# curl exposes literal -H arguments to every same-user process through the process list.
+# Put bearer headers in owner-only config files instead and remove them on every exit path.
+AUTH_DIR="$(mktemp -d)"
+chmod 700 "$AUTH_DIR"
+AUTH_SEQUENCE=0
+cleanup() { rm -rf "$AUTH_DIR"; }
+trap cleanup EXIT HUP INT TERM
+
+make_auth_config() {       # bearer, output-variable
+  local bearer="$1" output_var="$2" escaped path
+  case "$bearer" in
+    *$'\n'*|*$'\r'*) echo 'bearer token contains a newline' >&2; return 1 ;;
+  esac
+  AUTH_SEQUENCE=$((AUTH_SEQUENCE+1))
+  path="$AUTH_DIR/auth-${AUTH_SEQUENCE}.conf"
+  escaped="${bearer//\\/\\\\}"
+  escaped="${escaped//\"/\\\"}"
+  ( umask 077; printf 'header = "Authorization: Bearer %s"\n' "$escaped" > "$path" )
+  chmod 600 "$path"
+  printf -v "$output_var" '%s' "$path"
+}
 
 pass=0; fail=0; skip=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -48,7 +72,7 @@ jqp() { python3 -c "$1" 2>/dev/null; }
 # key and it runs. This pulls out a single KEY=VALUE line and nothing else.
 #
 # No associative array: macOS ships bash 3.2, which has none.
-ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.env"
+ENV_FILE="${SILICON_ENV_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.env}"
 
 dotenv_get() {            # var-name
   [[ -r "$ENV_FILE" ]] || return 0
@@ -85,9 +109,11 @@ key_for() {               # env-var-name, slug
 
 verify_chat() {           # name, base, key, model-filter
   local name="$1" base="$2" key="$3" filter="$4"
+  local auth_config
+  make_auth_config "$key" auth_config || { bad "${name}: invalid bearer token"; return; }
 
   local models
-  models=$(curl -s --max-time 30 -H "Authorization: Bearer ${key}" "${base}/models")
+  models=$("$CURL_BIN" -q --config "$auth_config" -s --max-time 30 "${base}/models")
   local count
   count=$(printf '%s' "$models" | jqp 'import json,sys; print(len(json.load(sys.stdin)["data"]))')
   if [[ -z "$count" ]]; then
@@ -100,22 +126,21 @@ verify_chat() {           # name, base, key, model-filter
   # Prefer a model matching the filter, else the first one. Discovered, never assumed —
   # the same rule the app follows.
   local model
-  model=$(printf '%s' "$models" | jqp "
-import json,sys
-d = json.load(sys.stdin)['data']
-m = [x['id'] for x in d if '${filter}' in x['id'].lower()] or [x['id'] for x in d]
-print(m[0] if m else '')")
+  model=$(printf '%s' "$models" | MODEL_FILTER="$filter" python3 -c '
+import json,os,sys
+d = json.load(sys.stdin)["data"]
+m = [x["id"] for x in d if os.environ["MODEL_FILTER"].lower() in x["id"].lower()] or [x["id"] for x in d]
+print(m[0] if m else "")' 2>/dev/null)
   if [[ -z "$model" ]]; then bad "${name}: no usable model id"; return; fi
   note "using ${model}"
 
   local body reply
-  body=$(python3 -c "
-import json
-print(json.dumps({'model': '${model}',
-                  'messages': [{'role': 'user', 'content': 'Reply with exactly: pong'}],
-                  'max_tokens': 512}))")
-  reply=$(curl -s --max-time 120 -X POST "${base}/chat/completions" \
-    -H "Authorization: Bearer ${key}" -H 'Content-Type: application/json' -d "$body")
+  body=$(python3 -c 'import json,sys
+print(json.dumps({"model": sys.argv[1],
+                  "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
+                  "max_tokens": 512}))' "$model")
+  reply=$("$CURL_BIN" -q --config "$auth_config" -s --max-time 120 -X POST "${base}/chat/completions" \
+    -H 'Content-Type: application/json' -d "$body")
 
   # A reasoning model can answer with an empty `content` and its thinking somewhere else, so
   # "no content" is not the same as "no answer" and must not be reported as one.
@@ -151,17 +176,16 @@ else:
 # and never sent anywhere: speech quotes its numerics and music does not, which is the kind
 # of detail that is either right or embarrassing.
 
-verify_audio() {          # label, model, payload-json
-  local label="$1" model="$2" payload="$3"
+verify_audio() {          # label, model, payload-json, auth-config
+  local label="$1" model="$2" payload="$3" auth_config="$4"
   local queue="https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests"
 
   local body submitted request_id
-  body=$(python3 -c "
-import json
-print(json.dumps({'model': '${model}', 'payload': json.loads('''${payload}''')}))")
+  body=$(python3 -c 'import json,sys
+print(json.dumps({"model": sys.argv[1], "payload": json.loads(sys.argv[2])}))' "$model" "$payload")
   local status_code
-  submitted=$(curl -s --max-time 60 -w '\n%{http_code}' -X POST "$queue" \
-    -H "Authorization: Bearer ${GMI_KEY}" -H 'Content-Type: application/json' -d "$body")
+  submitted=$("$CURL_BIN" -q --config "$auth_config" -s --max-time 60 -w '\n%{http_code}' -X POST "$queue" \
+    -H 'Content-Type: application/json' -d "$body")
   status_code="${submitted##*$'\n'}"
   submitted="${submitted%$'\n'*}"
 
@@ -177,7 +201,7 @@ print(json.dumps({'model': '${model}', 'payload': json.loads('''${payload}''')})
   # Terminal states are success / failed / cancelled — poll on anything else.
   local waited=0 status='' out=''
   while (( waited < 300 )); do
-    out=$(curl -s --max-time 30 -H "Authorization: Bearer ${GMI_KEY}" "${queue}/${request_id}")
+    out=$("$CURL_BIN" -q --config "$auth_config" -s --max-time 30 "${queue}/${request_id}")
     status=$(printf '%s' "$out" | jqp 'import json,sys; print(json.load(sys.stdin).get("status","").lower())')
     case "$status" in
       success|succeeded|failed|error|cancelled|canceled) break ;;
@@ -251,14 +275,20 @@ fi
 
 section 'GMI Cloud'
 if [[ -n "$GMI_KEY" ]]; then
+  GMI_AUTH_CONFIG=''
+  make_auth_config "$GMI_KEY" GMI_AUTH_CONFIG || { bad 'GMI Cloud: invalid bearer token'; GMI_AUTH_CONFIG=''; }
+fi
+if [[ -n "${GMI_AUTH_CONFIG:-}" ]]; then
   verify_chat 'GMI Cloud' 'https://api.gmi-serving.com/v1' "$GMI_KEY" 'minimax'
 
   verify_audio 'speech' 'minimax-tts-speech-2.6-turbo' \
-    '{"text": "The wire contract holds.", "voice_id": "English_expressive_narrator", "format": "mp3", "speed": "1"}'
+    '{"text": "The wire contract holds.", "voice_id": "English_expressive_narrator", "format": "mp3", "speed": "1"}' \
+    "$GMI_AUTH_CONFIG"
 
   if (( WITH_MUSIC )); then
     verify_audio 'music' 'minimax-music-3.0' \
-      '{"lyrics": "[verse]\\nSilicon hums in the dark\\n[chorus]\\nEverything runs where you are", "prompt": "warm lo-fi, mellow piano", "format": "mp3", "sample_rate": 44100}'
+      '{"lyrics": "[verse]\\nSilicon hums in the dark\\n[chorus]\\nEverything runs where you are", "prompt": "warm lo-fi, mellow piano", "format": "mp3", "sample_rate": 44100}' \
+      "$GMI_AUTH_CONFIG"
   else
     none 'music (pass --music; it takes 30-60s)'
   fi

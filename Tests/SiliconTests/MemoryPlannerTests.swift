@@ -480,3 +480,72 @@ struct IQQuantizationTests {
         #expect(!asIfFallenBack.verdict.isUsable)
     }
 }
+
+@Suite("Planner numeric validation")
+struct PlannerNumericValidationTests {
+    @Test func everyCuratedModelRemainsWithinPlanningBounds() {
+        for entry in ModelCatalog.all {
+            #expect(entry.shape.isValidForPlanning, "\(entry.id) was rejected")
+        }
+    }
+
+    @Test func extremeModelNumbersFailClosedWithoutTrapping() {
+        var shape = ModelCatalog.qwen3_8B.shape
+        shape.totalParameters = Int64.max
+        shape.blockCount = Int.max
+
+        #expect(!shape.isValidForPlanning)
+        #expect(MemoryPlanner.weightBytes(Int64.max, .f16).rawValue == Int64.max)
+        let plan = MemoryPlanner(profile: m3Max36).plan(
+            shape: shape, quantization: .f16, configuration: LoadConfiguration()
+        )
+        #expect(plan.verdict == .impossible)
+        #expect(plan.resident == .zero)
+    }
+
+    @Test func extremeMoEProductsCannotOverflowDerivedProperties() {
+        let shape = ModelShape(
+            totalParameters: Int64.max,
+            blockCount: Int.max,
+            embeddingLength: Int.max,
+            feedForwardLength: Int.max,
+            headCount: Int.max,
+            headCountKV: Int.max,
+            trainingContextLength: Int.max,
+            moe: MoEShape(
+                expertCount: Int.max,
+                expertsUsedPerToken: Int.max,
+                expertFeedForwardLength: Int.max,
+                moeLayerCount: Int.max,
+                activeParameters: 0
+            )
+        )
+
+        #expect(!shape.isValidForPlanning)
+        #expect(shape.moe?.parametersPerExpertSlot(embeddingLength: Int.max) == Int64.max)
+        #expect(shape.effectiveActiveParameters == Int64.max)
+        #expect(MemoryPlanner.parametersPerExpertSlot(shape) == Int64.max)
+        #expect(MemoryPlanner.nonExpertParameters(shape) == Int64.max)
+    }
+
+    @Test func extremeContextAndMicroBatchAreRejectedBeforeByteConversion() {
+        let shape = ModelCatalog.qwen3_8B.shape
+        let planner = MemoryPlanner(profile: m3Max36)
+        let hugeContext = planner.plan(
+            shape: shape,
+            quantization: .q4_K_M,
+            configuration: LoadConfiguration(contextLength: Int.max)
+        )
+        let hugeMicroBatch = planner.plan(
+            shape: shape,
+            quantization: .q4_K_M,
+            configuration: LoadConfiguration(microBatchSize: Int.max)
+        )
+
+        #expect(hugeContext.verdict == .impossible)
+        #expect(hugeMicroBatch.verdict == .impossible)
+        #expect(MemoryPlanner.kvCacheBytes(
+            shape, context: Int.max, precision: .f16
+        ).rawValue == Int64.max)
+    }
+}

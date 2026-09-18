@@ -26,9 +26,8 @@ cask "silicon-optimizer" do
   ]
 
   caveats <<~EOS
-    Silicon Optimizer is signed but not notarized, so macOS may refuse the
-    first launch. If that happens:
-      xattr -d com.apple.quarantine "/Applications/Silicon Optimizer.app"
+    Silicon Optimizer releases must pass Gatekeeper. Do not bypass a warning;
+    download the current release again and report the failure to the project.
 
     Chat and language models work out of the box — the llama.cpp engine and
     Node.js runtime ship inside the app. Optional extras (image generation,

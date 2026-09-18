@@ -24,7 +24,7 @@ struct IdleWarningTests {
 
     /// Nothing loaded, nothing to warn about — the countdown must not appear on a fresh app.
     @Test func noCountdownWithoutALoadedModel() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         #expect(model.secondsUntilIdleUnload == nil)
         #expect(model.modelFacingIdleUnload == nil)
     }
@@ -32,7 +32,7 @@ struct IdleWarningTests {
     /// The button resets the clock rather than switching the setting off: rescuing one model
     /// is not a decision that models should never be released.
     @Test func keepingItLoadedLeavesTheSettingAlone() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         model.settings.unloadWhenIdle = true
         model.keepModelLoaded()
         #expect(model.settings.unloadWhenIdle)

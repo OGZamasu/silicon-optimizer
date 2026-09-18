@@ -21,9 +21,15 @@
  * Output is human-readable; the harness will pass it back to the user.
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
 import { IMPECCABLE_COMMAND } from './lib/provider.mjs';
+import {
+  atomicWriteFileInside,
+  ensureDirectoryInside,
+  readFileInside,
+  removeFileInside,
+  resolvePathInside,
+} from './lib/security-boundaries.mjs';
 
 import {
   getConfigPath,
@@ -54,6 +60,42 @@ const STATUS_MESSAGE = 'Checking UI changes';
 // scripts/lib/transformers/hooks.js in the repo.
 const STOP_TIMEOUT_SECONDS = 30;
 const STOP_STATUS_MESSAGE = 'Design deep pass';
+const PROJECT_ROOT = process.cwd();
+const MAX_MANAGED_FILE_BYTES = 2 * 1024 * 1024;
+
+function managedFileExists(filePath) {
+  try {
+    resolvePathInside(PROJECT_ROOT, filePath, { kind: 'file' });
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function managedDirectoryExists(filePath) {
+  try {
+    resolvePathInside(PROJECT_ROOT, filePath, { kind: 'directory' });
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function readManagedText(filePath) {
+  return readFileInside(PROJECT_ROOT, filePath, { encoding: 'utf8', maxBytes: MAX_MANAGED_FILE_BYTES });
+}
+
+function writeManagedText(filePath, value) {
+  ensureDirectoryInside(PROJECT_ROOT, path.dirname(filePath));
+  return atomicWriteFileInside(PROJECT_ROOT, filePath, value, { encoding: 'utf8', mode: 0o600 });
+}
+
+function removeManagedFile(filePath) {
+  try { removeFileInside(PROJECT_ROOT, filePath); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
+}
 
 function stopManifestEntry(command) {
   return {
@@ -158,12 +200,10 @@ const HOOK_MANIFEST_TARGETS = [
 ];
 
 function readRawConfigFile(filePath) {
-  if (!fs.existsSync(filePath)) return { exists: false, malformed: false, raw: null };
-  try {
-    return { exists: true, malformed: false, raw: JSON.parse(fs.readFileSync(filePath, 'utf-8')) };
-  } catch {
-    return { exists: true, malformed: true, raw: null };
-  }
+  if (!managedFileExists(filePath)) return { exists: false, malformed: false, raw: null };
+  const text = readManagedText(filePath);
+  try { return { exists: true, malformed: false, raw: JSON.parse(text) }; }
+  catch { return { exists: true, malformed: true, raw: null }; }
 }
 
 const DETECTOR_CONFIG_KEYS = new Set(['ignoreRules', 'ignoreFiles', 'ignoreValues', 'designSystem', 'advisoryRules']);
@@ -229,8 +269,7 @@ function writeHookConfig(cwd, hookConfig, opts = {}) {
       ...mergeDetectorConfig(existingDetector, mergeDetectorConfig(legacyDetector)),
     };
   }
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(next, null, 2) + '\n');
+  writeManagedText(filePath, JSON.stringify(next, null, 2) + '\n');
   return filePath;
 }
 
@@ -251,8 +290,7 @@ function writeDetectorConfig(cwd, detectorConfig, opts = {}) {
   };
   if (Object.keys(nextHook).length > 0) next.hook = nextHook;
   else delete next.hook;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(next, null, 2) + '\n');
+  writeManagedText(filePath, JSON.stringify(next, null, 2) + '\n');
   return filePath;
 }
 
@@ -358,7 +396,7 @@ function statusReport(cwd) {
     `  maxFindings:  ${cfg.limits.maxFindings}`,
     `  maxChars:     ${cfg.limits.maxChars}`,
     `  env override: ${envState}`,
-    `  cache file:   ${fs.existsSync(getCachePath(cwd)) ? cachePath : `${cachePath} (not present)`}`,
+    `  cache file:   ${managedFileExists(getCachePath(cwd)) ? cachePath : `${cachePath} (not present)`}`,
   ];
   return lines.join('\n');
 }
@@ -393,7 +431,7 @@ function setEnabled(cwd, value) {
 function repairHookManifests(cwd) {
   const result = { written: [], already: [], backups: [] };
   for (const target of HOOK_MANIFEST_TARGETS) {
-    if (!fs.existsSync(path.join(cwd, target.skillRel))) continue;
+    if (!managedDirectoryExists(path.join(cwd, target.skillRel))) continue;
     const dest = path.join(cwd, target.destRel);
     const sharedDest = target.sharedDestRel ? path.join(cwd, target.sharedDestRel) : null;
 
@@ -405,34 +443,33 @@ function repairHookManifests(cwd) {
 
     const fresh = target.manifest();
     let next = fresh;
-    if (fs.existsSync(dest)) {
+    if (managedFileExists(dest)) {
       try {
-        next = mergeHookManifests(JSON.parse(fs.readFileSync(dest, 'utf-8')), fresh);
+        next = mergeHookManifests(JSON.parse(readManagedText(dest)), fresh);
       } catch {
         const backup = `${dest}.bak`;
-        fs.copyFileSync(dest, backup);
+        writeManagedText(backup, readManagedText(dest));
         result.backups.push(backup);
       }
     }
 
     const serialized = `${JSON.stringify(next, null, 2)}\n`;
-    const current = fs.existsSync(dest) ? safeReadText(dest) : null;
+    const current = managedFileExists(dest) ? safeReadText(dest) : null;
     if (current === serialized) {
       result.already.push(target.provider);
       continue;
     }
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, serialized);
+    writeManagedText(dest, serialized);
     result.written.push(target.provider);
   }
   return result;
 }
 
 function safeReadText(filePath) {
-  try {
-    return fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return null;
+  try { return readManagedText(filePath); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
   }
 }
 
@@ -461,10 +498,10 @@ function mergeHookManifests(existing, fresh) {
 }
 
 function fileHasImpeccableHookMarker(filePath) {
-  if (!fs.existsSync(filePath)) return false;
+  if (!managedFileExists(filePath)) return false;
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    parsed = JSON.parse(readManagedText(filePath));
   } catch {
     return false;
   }
@@ -513,7 +550,7 @@ function pruneImpeccableHookFromManifest(manifestPath) {
   if (!fileHasImpeccableHookMarker(manifestPath)) return false;
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    parsed = JSON.parse(readManagedText(manifestPath));
   } catch {
     return false;
   }
@@ -537,9 +574,9 @@ function pruneImpeccableHookFromManifest(manifestPath) {
   }
 
   if (Object.keys(next).length === 0) {
-    fs.rmSync(manifestPath, { force: true });
+    removeManagedFile(manifestPath);
   } else {
-    fs.writeFileSync(manifestPath, `${JSON.stringify(next, null, 2)}\n`);
+    writeManagedText(manifestPath, `${JSON.stringify(next, null, 2)}\n`);
   }
   return true;
 }
@@ -749,9 +786,9 @@ function reset(cwd) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (!('hook' in raw) && !('detector' in raw))) continue;
       const { hook, detector, ...rest } = raw;
       if (Object.keys(rest).length === 0) {
-        fs.unlinkSync(filePath);
+        removeManagedFile(filePath);
       } else {
-        fs.writeFileSync(filePath, JSON.stringify(rest, null, 2) + '\n');
+        writeManagedText(filePath, JSON.stringify(rest, null, 2) + '\n');
       }
       removed.push(path.relative(cwd, filePath) || filePath);
     } catch { /* ignore */ }
@@ -759,8 +796,8 @@ function reset(cwd) {
   // State files are wholly ours; delete outright.
   for (const filePath of [getCachePath(cwd), getPendingPath(cwd)]) {
     try {
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+      if (managedFileExists(filePath)) {
+        removeManagedFile(filePath);
         removed.push(path.relative(cwd, filePath) || filePath);
       }
     } catch { /* ignore */ }

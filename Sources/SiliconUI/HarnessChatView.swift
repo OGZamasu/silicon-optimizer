@@ -49,7 +49,10 @@ struct HarnessChatView: View {
                         banner(warning, actionTitle: nil, action: nil)
                         Divider()
                     }
-                    EmbeddedChatWebView(url: endpoint, gatewayPort: model.gatewayPort())
+                    EmbeddedChatWebView(
+                        url: endpoint, gatewayPort: model.gatewayPort(),
+                        gatewayUIToken: model.gatewayUIToken
+                    )
                 }
                 .task {
                     // The banner's claims about peers must be as fresh as the page.
@@ -166,4 +169,3 @@ struct HarnessChatView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-

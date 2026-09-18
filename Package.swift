@@ -22,7 +22,7 @@ let package = Package(
         .target(name: "SiliconHardware", dependencies: ["SiliconCore"]),
         .target(name: "SiliconCatalog", dependencies: ["SiliconCore"]),
         .target(name: "SiliconPlanner", dependencies: ["SiliconCore", "SiliconHardware", "SiliconCatalog"]),
-        .target(name: "SiliconRuntime", dependencies: ["SiliconCore", "SiliconCatalog", "SiliconPlanner"]),
+        .target(name: "SiliconRuntime", dependencies: ["SiliconCore", "SiliconCatalog", "SiliconPlanner", "SiliconControl"]),
         // Deliberately depends on nothing but Foundation and Network: the MCP bridge links it,
         // and that binary must stay small and independent of the app's domain layer.
         .target(name: "SiliconControl"),
@@ -42,6 +42,7 @@ let package = Package(
             "SiliconCore", "SiliconHardware", "SiliconPlanner", "SiliconCatalog", "SiliconRuntime",
             "SiliconControl", "SiliconUI",
         ]),
+        .testTarget(name: "SiliconMCPTests", dependencies: ["SiliconMCP"]),
     ],
     swiftLanguageModes: [.v6]
 )

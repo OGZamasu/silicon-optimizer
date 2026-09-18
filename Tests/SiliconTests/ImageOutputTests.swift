@@ -76,6 +76,16 @@ struct ImageOutputTests {
         #expect(decoded.imageOutputDirectory == "/Volumes/Scratch/Images")
     }
 
+    @Test func codingNeverSerializesTheHuggingFaceCredential() throws {
+        var settings = Settings()
+        settings.huggingFaceToken = "hf_must_not_reach_preferences"
+        let data = try JSONEncoder().encode(settings)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(!text.contains("hf_must_not_reach_preferences"))
+        let decoded = try JSONDecoder().decode(Settings.self, from: data)
+        #expect(decoded.huggingFaceToken.isEmpty)
+    }
+
     /// Settings written by an older build have no such key, and must decode rather than throw.
     @Test func decodesSettingsSavedBeforeThisOptionExisted() throws {
         let legacy = Data(#"{"temperature":0.7,"huggingFaceToken":""}"#.utf8)

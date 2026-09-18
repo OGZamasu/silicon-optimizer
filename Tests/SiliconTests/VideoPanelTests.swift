@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SiliconRuntime
 @testable import SiliconUI
 
 /// The Video tab is six panels of tools plus the player. Opening them all at once made the
@@ -17,7 +18,7 @@ struct VideoPanelTests {
     }
 
     @Test func togglingAPanelWritesItToSettings() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         let tracking = model.videoPanel(.tracking)
         #expect(tracking.wrappedValue == false)
 
@@ -33,7 +34,7 @@ struct VideoPanelTests {
     /// Opening a panel twice must not stack duplicates in the stored list, which would then
     /// need two closes to shut.
     @Test func openingTwiceIsStillOneEntry() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         model.videoPanel(.live).wrappedValue = true
         model.videoPanel(.live).wrappedValue = true
         #expect(model.settings.expandedVideoPanels.filter { $0 == VideoPanel.live.rawValue }
@@ -44,7 +45,7 @@ struct VideoPanelTests {
 
     /// A finished clip landing inside a folded panel is the obvious way this could go wrong.
     @Test func aNewResultOpensTheResultPanel() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         #expect(model.videoPanel(.result).wrappedValue == false)
         model.revealVideoPanel(.result)
         #expect(model.videoPanel(.result).wrappedValue)
@@ -70,5 +71,20 @@ struct VideoPanelTests {
         let decoded = try JSONDecoder().decode(Settings.self, from: data)
         #expect(decoded.expandedVideoPanels == [VideoPanel.clip.rawValue,
                                                 VideoPanel.camera.rawValue])
+    }
+
+    @Test func recentsIncludeQueueOwnedClipsAfterRelaunchWithoutDuplicatesOrMissingFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("video-recents-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let batch = root.appendingPathComponent("Batches/test")
+        try FileManager.default.createDirectory(at: batch, withIntermediateDirectories: true)
+        let legacy = root.appendingPathComponent("legacy.mp4")
+        let queued = batch.appendingPathComponent("single.mp4")
+        let missing = batch.appendingPathComponent("removed.mp4")
+        try Data("legacy".utf8).write(to: legacy)
+        try Data("queued".utf8).write(to: queued)
+        let recent = RecentVideoFiles.scan(in: root, queuedFiles: [queued, legacy, missing])
+        #expect(Set(recent) == Set([legacy, queued].map { $0.resolvingSymlinksInPath() }))
+        #expect(recent.count == 2)
     }
 }

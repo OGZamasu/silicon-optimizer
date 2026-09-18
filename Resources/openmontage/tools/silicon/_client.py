@@ -26,10 +26,26 @@ from urllib import error, request
 
 PROVIDER = "silicon_optimizer"
 
-#: Long enough for a video render on a node. Matches the app's own client.
-VIDEO_TIMEOUT_SECONDS = 1800
+#: Mirrors Sources/SiliconControl/VideoGenerationBudget.swift. The adapter bounds
+#: accepted jobs (including queue time) to twelve hours. Leave room for submission,
+#: a final in-flight status request, download, and the control response. The node's
+#: resource cap accounts for a peer that sends bytes just before each idle timeout.
+#: This outer tool allows one more response margin, matching Harness and Codex.
+VIDEO_JOB_TIMEOUT_SECONDS = 12 * 60 * 60
+VIDEO_NETWORK_RESOURCE_SECONDS = 600
+VIDEO_DOWNLOAD_SECONDS = 600
+VIDEO_RESPONSE_OVERHEAD_SECONDS = 60
+VIDEO_CONTROL_TIMEOUT_SECONDS = (VIDEO_JOB_TIMEOUT_SECONDS + 2 * VIDEO_NETWORK_RESOURCE_SECONDS
+                                 + VIDEO_DOWNLOAD_SECONDS + VIDEO_RESPONSE_OVERHEAD_SECONDS)
+VIDEO_TIMEOUT_SECONDS = VIDEO_CONTROL_TIMEOUT_SECONDS + VIDEO_RESPONSE_OVERHEAD_SECONDS
 IMAGE_TIMEOUT_SECONDS = 600
 MESH_TIMEOUT_SECONDS = 1800
+
+# Control replies contain job metadata and local output paths, never media bytes. Keeping the
+# refusal budget smaller also prevents an error page from becoming an agent-sized diagnostic.
+MAX_RESPONSE_BYTES = 1 * 1024 * 1024
+MAX_ERROR_BYTES = 64 * 1024
+MAX_ERROR_DETAIL_CHARS = 4096
 
 
 class SiliconUnavailable(RuntimeError):
@@ -107,21 +123,59 @@ def resolve() -> Endpoint:
     return Endpoint(base_url=f"http://127.0.0.1:{port}", token=token)
 
 
+def _read_limited(stream: Any, limit: int, kind: str) -> bytes:
+    """Read at most ``limit`` bytes, including for chunked/lengthless responses."""
+    length = None
+    headers = getattr(stream, "headers", None)
+    if headers is not None:
+        try:
+            raw_length = headers.get("Content-Length")
+            length = int(raw_length) if raw_length is not None else None
+        except (TypeError, ValueError, OverflowError):
+            length = None
+    if length is not None and length > limit:
+        raise SiliconError(f"Silicon Optimizer {kind} exceeded the {limit}-byte limit.")
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(min(64 * 1024, limit + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise SiliconError(f"Silicon Optimizer {kind} exceeded the {limit}-byte limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _open(req: request.Request, timeout: float) -> Any:
     try:
         with request.urlopen(req, timeout=timeout) as response:
-            body = response.read()
+            body = _read_limited(response, MAX_RESPONSE_BYTES, "response")
     except error.HTTPError as exc:
         # The app answers refusals as {"error": "..."} with a 4xx/5xx. Those words are
         # the diagnosis — "model won't fit", "no node offers video" — so they are what
         # the agent should see, not a status code.
-        detail = exc.read().decode("utf-8", "replace")
         try:
-            detail = json.loads(detail).get("error", detail)
-        except ValueError:
+            detail = _read_limited(exc, MAX_ERROR_BYTES, "error response").decode(
+                "utf-8", "replace"
+            )
+        except SiliconError as size_error:
+            raise SiliconError(f"Silicon Optimizer answered {exc.code}: {size_error}") from exc
+        try:
+            parsed = json.loads(detail)
+            if isinstance(parsed, dict):
+                detail = parsed.get("error", detail)
+        except (TypeError, ValueError):
             pass
+        detail = str(detail)[:MAX_ERROR_DETAIL_CHARS]
         raise SiliconError(f"Silicon Optimizer answered {exc.code}: {detail}")
+    except TimeoutError as exc:
+        raise SiliconError("The request exceeded its time limit. The app or node may still be working; check its job status before submitting again.") from exc
     except error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise SiliconError("The request exceeded its time limit. The app or node may still be working; check its job status before submitting again.") from exc
         raise SiliconUnavailable(f"Could not reach Silicon Optimizer: {exc.reason}")
     return json.loads(body) if body else {}
 

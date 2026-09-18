@@ -13,7 +13,10 @@ struct QwenChatView: View {
         Group {
             switch model.qwenState {
             case .ready(let endpoint):
-                EmbeddedChatWebView(url: endpoint, gatewayPort: model.gatewayPort())
+                EmbeddedChatWebView(
+                    url: endpoint, gatewayPort: model.gatewayPort(),
+                    gatewayUIToken: model.gatewayUIToken
+                )
             case .starting(let stage):
                 startingView(stage: stage)
             case .idle:

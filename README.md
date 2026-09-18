@@ -2,6 +2,10 @@
 
 [optimize.zamasu.dev](https://optimize.zamasu.dev)
 
+**Video batches:** queue multiple prompts and variations, let them render one at
+a time, and review clips with saved seeds in batch folders. See the
+[batch queue and sampling guide](docs/VIDEO-BATCH-QUEUE.md).
+
 A free Mac app that runs AI on your own computer. Chat, coding, images, voice, video and
 3D — running directly on your Mac, with nothing sent to the cloud. No subscription, no API
 key, and your conversations never leave your machine.
@@ -82,6 +86,21 @@ Describe a shot and a paired node renders the clip; drive a portrait with a reco
 and the face moves the way yours did. Build a character, put your webcam behind it, and send
 it to OBS as a browser source. Motion tracking reads face, shoulders and fingers and speaks
 VMC, so VSeeFace, VTube Studio and Warudo take it without a plugin.
+
+Video can also run on this Mac through the bundled [local video node](Resources/video-node/README.md).
+It connects MiniMax Hailuo H3 in Phosphene or an LTX-2 MLX installation to the same Video tab,
+control API, MCP tools, and OpenMontage provider. H3 supports 3, 5, 10, and 15 seconds;
+longer clips use two or three five-second windows. An optional prompt for each window lets
+an agent describe successive actions. On a swarm node, Wan 2.2 and LTX-2 distilled render
+3- or 5-second clips and the LTX-2.3 merge up to 10 seconds — the lengths the node actually
+delivers, which each model's picker and `list_video_models` publish. Model availability is
+checked against the selected node before a job starts.
+
+The node has a persistent queue, authenticated loopback access, and verified MP4 output
+with model metadata. The [batch example](Resources/video-node/examples/README.md) includes
+twenty honey-badger prompts, resumable submission, explicit retries, and a local review
+gallery. Follow the setup guide to install the external renderer and model weights, then
+install or update the node from the checkout or the app bundle.
 
 ### Turns images into 3D
 

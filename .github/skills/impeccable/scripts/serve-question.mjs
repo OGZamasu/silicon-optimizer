@@ -110,8 +110,24 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { openSystemBrowser } from './lib/open-system-browser.mjs';
+import {
+  atomicWriteFileInside,
+  ensureDirectoryInside,
+  readFileInside,
+  removeFileInside,
+  resolveFuturePathInside,
+  resolvePathInside,
+  safeQuestionKey,
+} from './lib/security-boundaries.mjs';
+import {
+  applyDefensiveServerTimeouts,
+  readBoundedJson,
+  sendHttpInputError,
+  validateLoopbackRequest,
+} from './lib/http-security.mjs';
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -200,14 +216,108 @@ const idleGraceMs = (Number.isFinite(idleGraceArg) && idleGraceArg > 0 ? idleGra
 // watch claims a hand delivered moments before the idle deadline.
 const NEXT_CLAIM_GRACE_MS = 10000;
 const portArg = Number(arg('port', '0'));
-const QUESTION_DIR = path.join(process.cwd(), '.impeccable', 'questions');
-const stateFile = (key) => path.join(QUESTION_DIR, `${key}.state.json`);
-const answerFile = (key) => path.join(QUESTION_DIR, `${key}.answer.json`);
+const PROJECT_ROOT = process.cwd();
+const QUESTION_DIR = path.join(PROJECT_ROOT, '.impeccable', 'questions');
+const MAX_QUESTION_BODY_BYTES = 64 * 1024;
+const MAX_QUESTION_PAYLOAD_BYTES = 1024 * 1024;
+const MAX_QUESTION_IMAGE_BYTES = 16 * 1024 * 1024;
+const QUESTION_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+const QUESTION_TOKEN = randomBytes(32).toString('hex');
+
+function ensureQuestionStorage() {
+  return ensureDirectoryInside(PROJECT_ROOT, QUESTION_DIR);
+}
+
+function questionStatePath(key, suffix) {
+  const safeKey = safeQuestionKey(key);
+  ensureQuestionStorage();
+  const target = path.join(QUESTION_DIR, `${safeKey}.${suffix}`);
+  try {
+    return resolvePathInside(PROJECT_ROOT, target, { kind: 'file' });
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    return resolvePathInside(PROJECT_ROOT, target, { mustExist: false });
+  }
+}
+
+function readQuestionState(key, suffix, encoding = 'utf8') {
+  return readFileInside(PROJECT_ROOT, questionStatePath(key, suffix), {
+    encoding,
+    maxBytes: MAX_QUESTION_PAYLOAD_BYTES,
+  });
+}
+
+function writeQuestionState(key, suffix, value) {
+  return atomicWriteFileInside(PROJECT_ROOT, questionStatePath(key, suffix), value, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+}
+
+function removeQuestionState(key, suffix) {
+  try { removeFileInside(PROJECT_ROOT, questionStatePath(key, suffix)); } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+function requireQuestionKey(value, usage) {
+  try { return safeQuestionKey(value); }
+  catch {
+    console.error(`serve-question: ${usage} needs a valid 8-64 character lowercase hex key or UUID`);
+    process.exit(1);
+  }
+}
+
+function readPayloadFile(filePath) {
+  return readFileInside(PROJECT_ROOT, filePath, { encoding: 'utf8', maxBytes: MAX_QUESTION_PAYLOAD_BYTES });
+}
+
+function isValidStoredQuestionState(state, key) {
+  if (!state || typeof state !== 'object' || state.key !== key
+      || !Number.isInteger(state.pid) || state.pid <= 0
+      || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535
+      || !/^[a-f0-9]{64}$/.test(state.token || '')
+      || state.script !== fileURLToPath(import.meta.url)) return false;
+  try {
+    const url = new URL(state.url);
+    return url.protocol === 'http:' && url.hostname === '127.0.0.1'
+      && Number(url.port) === state.port && url.pathname === '/'
+      && url.searchParams.get('token') === state.token;
+  } catch { return false; }
+}
+
 // A code-to-comp flip mid-round: the page records it here and --wait
 // surfaces it as its own event, because the agent must start generating
 // comps while the round is still open. Comp-to-code needs no event; it is
 // free and rides the final ANSWER.
-const flipFile = (key) => path.join(QUESTION_DIR, `${key}.flip.json`);
+const nextRoundFile = (key) => questionStatePath(key, 'next.json');
+
+function questionStateExists(key, suffix) {
+  try {
+    resolvePathInside(PROJECT_ROOT, questionStatePath(key, suffix), { kind: 'file' });
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function questionStateMtime(key, suffix) {
+  const filePath = resolvePathInside(PROJECT_ROOT, questionStatePath(key, suffix), { kind: 'file' });
+  return fs.statSync(filePath).mtimeMs;
+}
+
+async function readStdinBounded(maxBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) throw new Error(`stdin payload exceeds ${maxBytes} bytes`);
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks, total).toString('utf8');
+}
 
 if (hasFlag('schema')) {
   console.log(JSON.stringify({
@@ -230,11 +340,10 @@ if (hasFlag('schema')) {
 }
 
 if (hasFlag('wait')) {
-  const key = arg('key');
-  if (!key) { console.error('serve-question: --wait needs --key'); process.exit(1); }
+  const key = requireQuestionKey(arg('key'), '--wait');
   const pollSec = Number(arg('poll', '60'));
   const deadline = Date.now() + pollSec * 1000;
-  const answered = () => fs.existsSync(answerFile(key));
+  const answered = () => questionStateExists(key, 'answer.json');
   // Liveness must survive sandboxes: a sandboxed --wait cannot signal the
   // daemon (kill throws EPERM even for a living process), so a fresh page
   // heartbeat in the state file is the primary proof of life, the kill probe
@@ -243,7 +352,7 @@ if (hasFlag('wait')) {
   // the user had walked away while they were still reading the board.
   const alive = () => {
     try {
-      const state = JSON.parse(fs.readFileSync(stateFile(key), 'utf8'));
+      const state = JSON.parse(readQuestionState(key, 'state.json'));
       if (state.lastBeat && Date.now() - state.lastBeat < 12000) return true;
       try { process.kill(state.pid, 0); return true; }
       catch (err) { return err.code === 'EPERM'; }
@@ -254,8 +363,8 @@ if (hasFlag('wait')) {
     if (answered()) break;
     // A build-path flip is its own event, not an answer: the round stays
     // open, and the agent's job right now is comps, not code.
-    if (fs.existsSync(flipFile(key))) {
-      try { fs.rmSync(flipFile(key)); } catch { /* consumed elsewhere */ }
+    if (questionStateExists(key, 'flip.json')) {
+      removeQuestionState(key, 'flip.json');
       console.log('BUILD PATH FLIPPED: comp (for this session only; never write it to settings). The table is still open and the page shows shimmer where the images will land: generate each open card’s comp into its declared path now, lead first, then collect the answer with --wait again. A card whose comp already exists needs nothing.');
       process.exit(0);
     }
@@ -264,14 +373,14 @@ if (hasFlag('wait')) {
       process.exit(2);
     }
     try {
-      const state = JSON.parse(fs.readFileSync(stateFile(key), 'utf8'));
+      const state = JSON.parse(readQuestionState(key, 'state.json'));
       // A silent page is not a closed one while a freshly delivered next
       // hand sits unclaimed: a stalled page stops beating by design and its
       // watch reloads, beating again, within seconds of the file landing.
       // The suppression is age-bound because a closed tab never claims the
       // hand: a file still there after the grace means no page is coming.
       const midDelivery = (() => {
-        try { if (Date.now() - fs.statSync(path.join(QUESTION_DIR, `${key}.next.json`)).mtimeMs < NEXT_CLAIM_GRACE_MS) return true; }
+        try { if (Date.now() - questionStateMtime(key, 'next.json') < NEXT_CLAIM_GRACE_MS) return true; }
         catch { /* nothing delivered */ }
         // The claim deletes that file before the reloaded page can beat: the
         // claim stamp the server persisted covers the same bounded gap.
@@ -286,7 +395,7 @@ if (hasFlag('wait')) {
     process.exit(4);
   }
   if (!answered()) { console.log(`WAITING: no answer yet after ${pollSec}s; run --wait --key ${key} again`); process.exit(3); }
-  const collected = fs.readFileSync(answerFile(key), 'utf8').trim();
+  const collected = readQuestionState(key, 'answer.json').trim();
   printAnswer(collected);
   // A re-roll or a followup-round pick keeps the table open: the server stays
   // alive awaiting --update, so only the answer file is consumed. Terminal
@@ -296,27 +405,48 @@ if (hasFlag('wait')) {
     const parsedAnswer = JSON.parse(collected);
     keepsTableOpen = parsedAnswer.optionId === 'reroll' || parsedAnswer.followup === true;
   } catch { /* treat as terminal */ }
-  try { fs.rmSync(answerFile(key)); } catch { /* already gone */ }
-  if (!keepsTableOpen) { try { fs.rmSync(stateFile(key)); } catch { /* already gone */ } }
+  removeQuestionState(key, 'answer.json');
+  if (!keepsTableOpen) removeQuestionState(key, 'state.json');
   process.exit(0);
 }
 
 if (hasFlag('stop')) {
-  const key = arg('key');
-  if (!key) { console.error('serve-question: --stop needs --key'); process.exit(1); }
-  try { process.kill(JSON.parse(fs.readFileSync(stateFile(key), 'utf8')).pid); } catch { /* dead already */ }
-  try { fs.rmSync(answerFile(key)); } catch {}
-  try { fs.rmSync(stateFile(key)); } catch {}
+  const key = requireQuestionKey(arg('key'), '--stop');
+  let state;
+  try { state = JSON.parse(readQuestionState(key, 'state.json')); } catch { state = null; }
+  if (isValidStoredQuestionState(state, key)) {
+    await new Promise((resolve) => {
+      const request = http.request({
+        hostname: '127.0.0.1', port: state.port, method: 'POST', path: '/stop',
+        headers: {
+          Host: `127.0.0.1:${state.port}`,
+          Origin: `http://127.0.0.1:${state.port}`,
+          'Content-Type': 'application/json',
+          'Content-Length': '2',
+          'X-Impeccable-Question': state.token,
+        },
+        timeout: 5000,
+      }, (response) => { response.resume(); response.once('end', resolve); });
+      request.once('timeout', () => { request.destroy(); resolve(); });
+      request.once('error', resolve);
+      request.end('{}');
+    });
+  }
+  removeQuestionState(key, 'answer.json');
+  removeQuestionState(key, 'flip.json');
+  removeQuestionState(key, 'next.json');
+  removeQuestionState(key, 'state.json');
   console.log('stopped');
   process.exit(0);
 }
 
 if (hasFlag('update')) {
-  const key = arg('key');
-  if (!key || !payloadPath) { console.error('serve-question: --update needs --key and --payload'); process.exit(1); }
+  const key = requireQuestionKey(arg('key'), '--update');
+  if (!payloadPath) { console.error('serve-question: --update needs --key and --payload'); process.exit(1); }
   // A hand the server cannot load must fail here, at the sender: delivered
   // anyway, the page would see ready:true for a round that never renders.
-  const nextRound = JSON.parse(fs.readFileSync(payloadPath, 'utf8'));
+  const nextRoundRaw = readPayloadFile(payloadPath);
+  const nextRound = JSON.parse(nextRoundRaw);
   if (!nextRound || !Array.isArray(nextRound.options) || nextRound.options.length === 0) {
     console.error('serve-question: --update payload needs an options array; nothing was delivered. Fix the payload and rerun --update on the same key.');
     process.exit(1);
@@ -327,35 +457,29 @@ if (hasFlag('update')) {
   // false "no live server" here strands the page mid-shuffle.
   const live = (() => {
     try {
-      const state = JSON.parse(fs.readFileSync(stateFile(key), 'utf8'));
+      const state = JSON.parse(readQuestionState(key, 'state.json'));
       if (state.lastBeat && Date.now() - state.lastBeat < 12000) return true;
       try { process.kill(state.pid, 0); return true; }
       catch (err) { return err.code === 'EPERM'; }
     } catch { return false; }
   })();
   if (!live) { console.error('serve-question: no live question server for that key; the page it served is gone too. Re-present the round with --start and a fresh key, or fall back to the structured question tool.'); process.exit(2); }
-  const deliveredFile = path.join(QUESTION_DIR, `${key}.next.json`);
-  fs.copyFileSync(payloadPath, deliveredFile);
-  // The file's mtime is the delivery clock --wait's grace reads: stamp it
-  // here, because a copy that preserves the source payload's older mtime
-  // would start the grace already spent.
-  const deliveredAt = new Date();
-  fs.utimesSync(deliveredFile, deliveredAt, deliveredAt);
+  writeQuestionState(key, 'next.json', nextRoundRaw);
   console.log('next round delivered; the page reloads itself');
   process.exit(0);
 }
 
 if (hasFlag('start')) {
   if (!payloadPath) { console.error('serve-question: --start needs --payload <file>'); process.exit(1); }
-  JSON.parse(fs.readFileSync(payloadPath, 'utf8'));
-  fs.mkdirSync(QUESTION_DIR, { recursive: true });
-  const key = arg('key') || Math.random().toString(16).slice(2, 10);
+  JSON.parse(readPayloadFile(payloadPath));
+  ensureQuestionStorage();
+  const key = arg('key') ? requireQuestionKey(arg('key'), '--start') : randomBytes(16).toString('hex');
   // In start mode the agent is alive and owns browser routing; the server
   // only opens the system browser itself when --open forces it.
   // The daemon's output lands in a per-key log so a startup failure can say
   // what actually went wrong instead of only that it did.
-  const logFile = path.join(QUESTION_DIR, `${key}.log`);
-  const logFd = fs.openSync(logFile, 'a');
+  const logFile = questionStatePath(key, 'log');
+  const logFd = fs.openSync(logFile, fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW || 0), 0o600);
   const child = spawn(process.execPath, [
     fileURLToPath(import.meta.url), '--payload', payloadPath, '--detached-serve', '--key', key,
     '--timeout', String(timeoutSec), ...(arg('idle-grace') ? ['--idle-grace', arg('idle-grace')] : []),
@@ -364,15 +488,15 @@ if (hasFlag('start')) {
   child.unref();
   fs.closeSync(logFd);
   const deadline = Date.now() + 8000;
-  while (Date.now() < deadline && !fs.existsSync(stateFile(key))) await new Promise((r) => setTimeout(r, 100));
-  if (!fs.existsSync(stateFile(key))) {
+  while (Date.now() < deadline && !questionStateExists(key, 'state.json')) await new Promise((r) => setTimeout(r, 100));
+  if (!questionStateExists(key, 'state.json')) {
     let tail = '';
-    try { tail = fs.readFileSync(logFile, 'utf8').trim().split('\n').slice(-4).join('\n  '); } catch { /* log never written */ }
+    try { tail = readQuestionState(key, 'log').trim().split('\n').slice(-4).join('\n  '); } catch { /* log never written */ }
     console.error(`serve-question: server failed to start${tail ? `\n  ${tail}` : ''}`);
     console.error(`serve-question: log at ${path.relative(process.cwd(), logFile) || logFile}. A sandboxed exec that cannot listen on localhost causes exactly this; rerun this command once through the harness's network-enabled or unsandboxed command tool before falling back.`);
     process.exit(1);
   }
-  const state = JSON.parse(fs.readFileSync(stateFile(key), 'utf8'));
+  const state = JSON.parse(readQuestionState(key, 'state.json'));
   console.log(`QUESTION URL: ${state.url}`);
   console.log(`QUESTION KEY: ${key}`);
   console.log('Open the URL for the user now: in-app browser when the harness has one, otherwise the system opener (macOS `open`, Linux `xdg-open`), otherwise show the URL.');
@@ -381,8 +505,8 @@ if (hasFlag('start')) {
 }
 
 let raw;
-if (payloadPath) raw = fs.readFileSync(payloadPath, 'utf8');
-else raw = fs.readFileSync(0, 'utf8');
+if (payloadPath) raw = readPayloadFile(payloadPath);
+else raw = await readStdinBounded(MAX_QUESTION_PAYLOAD_BYTES);
 
 // Round state is mutable: a re-roll keeps this server alive and --update
 // swaps in the next hand, so payload, options, and the local-image table
@@ -396,6 +520,7 @@ let localImages = [];
 // even when the round never rendered a toggle.
 let buildPathDefault = null;
 let liveBuildPath = null;
+let answerLocked = false;
 // True between a collected re-roll or followup answer and the --update that
 // replaces the round: the window where GET / must serve the wait, not the
 // answered cards. The timestamp anchors the delivery deadline server-side,
@@ -409,14 +534,40 @@ function loadRound(json) {
   if (!parsed || !Array.isArray(parsed.options) || parsed.options.length === 0) {
     throw new Error('payload needs an options array');
   }
+  const optionIds = new Set();
+  for (const option of parsed.options) {
+    if (!option || typeof option !== 'object' || typeof option.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(option.id)) {
+      throw new Error('every option needs a bounded identifier');
+    }
+    if (option.id === 'reroll' || option.id === 'canon' || optionIds.has(option.id)) {
+      throw new Error(`reserved or duplicate option id: ${option.id}`);
+    }
+    optionIds.add(option.id);
+  }
   localImages = [];
+  const localImagePath = (value, { allowMissing = false } = {}) => {
+    if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('local image paths must be non-empty strings');
+    const extension = path.extname(value).toLowerCase();
+    if (!QUESTION_IMAGE_EXTENSIONS.has(extension)) throw new Error(`unsupported local image type: ${extension || '(none)'}`);
+    try {
+      return resolvePathInside(PROJECT_ROOT, value, { kind: 'file' });
+    } catch (error) {
+      if (!allowMissing || error?.code !== 'ENOENT') throw error;
+      return resolveFuturePathInside(PROJECT_ROOT, value);
+    }
+  };
+  const registerLocalImage = (absolutePath) => {
+    localImages.push(absolutePath);
+    return `/img/${localImages.length - 1}?token=${encodeURIComponent(QUESTION_TOKEN)}`;
+  };
   const imageSrc = (value) => {
     if (!value) return null;
     if (/^https?:\/\//.test(value)) return value;
-    const abs = path.resolve(value);
-    if (!fs.existsSync(abs)) return null;
-    localImages.push(abs);
-    return `/img/${localImages.length - 1}`;
+    try { return registerLocalImage(localImagePath(value)); }
+    catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    }
   };
   // Comps stream in after the page is served, so their slots register
   // whether or not the file exists yet; /img answers 404 until it lands and
@@ -424,8 +575,7 @@ function loadRound(json) {
   const compSrc = (value) => {
     if (!value) return null;
     if (/^https?:\/\//.test(value)) return value;
-    localImages.push(path.resolve(value));
-    return `/img/${localImages.length - 1}`;
+    return registerLocalImage(localImagePath(value, { allowMissing: true }));
   };
   payload = parsed;
   const decorate = (option) => ({
@@ -455,10 +605,11 @@ function loadRound(json) {
   // Last: a round that failed to load anywhere above must leave the waiting
   // window open, never resurrect the answered cards.
   awaitingNext = false;
+  answerLocked = false;
 }
 try { loadRound(raw); } catch (error) { console.error(`serve-question: ${error.message}`); process.exit(1); }
-const detachedKey = hasFlag('detached-serve') ? arg('key') : null;
-const nextFile = () => detachedKey ? path.join(QUESTION_DIR, `${detachedKey}.next.json`) : null;
+const detachedKey = hasFlag('detached-serve') ? requireQuestionKey(arg('key'), '--detached-serve') : null;
+const nextFile = () => detachedKey ? nextRoundFile(detachedKey) : null;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -1012,6 +1163,11 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
   ${payload.canon && !payload.canonCard ? '<button id="canon" title="Skip the roll: build the page this category ships, executed impeccably">Play it straight</button>' : ''}
 </footer>
 <script>
+  const QUESTION_TOKEN = ${JSON.stringify(QUESTION_TOKEN)};
+  const qfetch = (url, options = {}) => fetch(url, {
+    ...options,
+    headers: { ...(options.headers || {}), 'X-Impeccable-Question': QUESTION_TOKEN },
+  });
   const steer = () => document.getElementById('steer')?.value || '';
   // A followup round's pick keeps the tab: the next round arrives via
   // --update, so the page shows the loading hand instead of goodbye. Detached
@@ -1019,7 +1175,7 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
   // exits on any pick and has no update channel, so a followup payload there
   // still gets the goodbye screen, never a loading hand nothing will resolve.
   const FOLLOWUP = ${payload.followup === true && Boolean(detachedKey) ? 'true' : 'false'};
-  const beat = () => { try { navigator.sendBeacon('/heartbeat'); } catch { fetch('/heartbeat', { method: 'POST' }); } };
+  const beat = () => qfetch('/heartbeat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {});
   ${waiting && waitBudgetMs <= 0 ? '' : 'beat();'}
   const beatTimer = setInterval(beat, 5000);
   // A dead server must fail loudly: awaiting a rejected fetch here used to
@@ -1030,7 +1186,7 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
     // is in flight would overwrite the answer being collected.
     document.querySelectorAll('.reroll-btn, #canon').forEach(b => b.setAttribute('disabled', ''));
     try {
-      await fetch('/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ optionId, steer: steer() }) });
+      await qfetch('/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ optionId, steer: steer() }) });
     } catch {
       document.body.innerHTML = '<div class="done">The question server went away before this choice could land.<br>Tell the agent your pick in the chat instead.</div>';
       return;
@@ -1304,7 +1460,7 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
     };
     const apply = (value) => {
       set(value);
-      fetch('/build-path', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value }) });
+      qfetch('/build-path', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value }) });
       if (value === 'comp') enterComp(); else exitComp();
     };
     // Flipping to comp starts real generation, so it confirms first; the
@@ -1472,7 +1628,7 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
     // re-roll and renewed the delivery deadline.
     document.querySelectorAll('.reroll-btn, #canon').forEach(b => b.setAttribute('disabled', ''));
     try {
-      await fetch('/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ optionId: 'reroll', steer: steer(), ...(register ? { register } : {}) }) });
+      await qfetch('/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ optionId: 'reroll', steer: steer(), ...(register ? { register } : {}) }) });
     } catch {
       document.body.innerHTML = '<div class="done">The question server went away before this choice could land.<br>Tell the agent your pick in the chat instead.</div>';
       return;
@@ -1503,12 +1659,12 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
       // and reloads into it. /next-status never beats, so the daemon's idle
       // grace still reclaims a flow nobody resumes.
       const watch = setInterval(async () => {
-        try { if ((await (await fetch('/next-status')).json()).ready) { clearInterval(watch); location.reload(); } } catch { /* server gone; the screen already says so */ }
+        try { if ((await (await qfetch('/next-status')).json()).ready) { clearInterval(watch); location.reload(); } } catch { /* server gone; the screen already says so */ }
       }, 1500);
       grid.innerHTML = '<div class="stall"><p>' + message + '</p><button type="button" class="choose">Reload</button></div>';
       grid.querySelector('.stall .choose').addEventListener('click', async () => {
         try {
-          if ((await (await fetch('/next-status')).json()).ready) { location.reload(); return; }
+          if ((await (await qfetch('/next-status')).json()).ready) { location.reload(); return; }
           grid.querySelector('.stall p').textContent = 'Still nothing to deal. Check the agent session, or answer in the chat instead.';
         } catch {
           grid.querySelector('.stall p').textContent = 'The question server went away. Ask the agent to restart it, or answer in the chat instead.';
@@ -1544,7 +1700,7 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
     // never gives up on a server that would still accept the hand.
     poll = setInterval(async () => {
       try {
-        const status = await (await fetch('/next-status')).json();
+        const status = await (await qfetch('/next-status')).json();
         misses = 0;
         if (status.ready) { clearInterval(poll); location.reload(); }
         else if (Date.now() - shuffleStart > budgetMs) stall('The next hand never arrived. Check the agent session, then reload.');
@@ -1566,15 +1722,27 @@ ${buildPath?.toggle ? `<div id="bp-confirm" role="dialog" aria-modal="true" aria
 </script>`;
 }
 
-const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/') {
+const server = applyDefensiveServerTimeouts(http.createServer(async (req, res) => {
+  const port = server.address()?.port;
+  if (!Number.isInteger(port) || !validateLoopbackRequest(req, res, {
+    port,
+    token: QUESTION_TOKEN,
+    allowQueryToken: req.method === 'GET',
+  })) return;
+
+  let requestUrl;
+  try { requestUrl = new URL(req.url, `http://127.0.0.1:${port}`); }
+  catch { res.writeHead(400); res.end('Bad request'); return; }
+  const pathname = requestUrl.pathname;
+
+  if (req.method === 'GET' && pathname === '/') {
     const pending = nextFile();
-    if (pending && fs.existsSync(pending)) {
+    if (pending && questionStateExists(detachedKey, 'next.json')) {
       // A next file the round cannot load has to leave the disk either way:
       // kept, /next-status stays ready:true and the waiting page reloads
       // into the same failure without bound.
-      try { loadRound(fs.readFileSync(pending, 'utf8')); } catch { /* keep current round */ }
-      try { fs.rmSync(pending); } catch { /* already gone */ }
+      try { loadRound(readQuestionState(detachedKey, 'next.json')); } catch { /* keep current round */ }
+      removeQuestionState(detachedKey, 'next.json');
       // The claim consumes the file the idle-exit hold reads, and the
       // reloading page cannot beat until it has parsed: stamp the claim so
       // the same bounded grace covers the gap between them. Persisted too,
@@ -1583,17 +1751,25 @@ const server = http.createServer((req, res) => {
       server.lastClaimAt = Date.now();
       if (detachedKey) {
         try {
-          const state = JSON.parse(fs.readFileSync(stateFile(detachedKey), 'utf8'));
+          const state = JSON.parse(readQuestionState(detachedKey, 'state.json'));
           state.claimedAt = server.lastClaimAt;
-          fs.writeFileSync(stateFile(detachedKey), JSON.stringify(state));
+          writeQuestionState(detachedKey, 'state.json', JSON.stringify(state));
         } catch { /* state file recreated on next beat */ }
       }
     }
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-security-policy': "default-src 'self' http: https: data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' http: https: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+    });
     res.end(page(awaitingNext));
     return;
   }
-  if (req.method === 'POST' && req.url === '/heartbeat') {
+  if (req.method === 'POST' && pathname === '/heartbeat') {
+    try { await readBoundedJson(req, { maxBytes: 1024, timeoutMs: 5000 }); }
+    catch (error) { sendHttpInputError(req, res, error); return; }
     res.writeHead(204); res.end();
     server.lastBeatSeen = Date.now();
     if (detachedKey) {
@@ -1601,103 +1777,124 @@ const server = http.createServer((req, res) => {
       if (!server.lastBeatWrite || now - server.lastBeatWrite > 4000) {
         server.lastBeatWrite = now;
         try {
-          const state = JSON.parse(fs.readFileSync(stateFile(detachedKey), 'utf8'));
+          const state = JSON.parse(readQuestionState(detachedKey, 'state.json'));
           state.lastBeat = now;
-          fs.writeFileSync(stateFile(detachedKey), JSON.stringify(state));
+          writeQuestionState(detachedKey, 'state.json', JSON.stringify(state));
         } catch { /* state file recreated on next beat */ }
       }
     }
     return;
   }
-  if (req.method === 'GET' && req.url === '/next-status') {
+  if (req.method === 'GET' && pathname === '/next-status') {
     const pending = nextFile();
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ready: Boolean(pending && fs.existsSync(pending)) }));
+    res.end(JSON.stringify({ ready: Boolean(pending && questionStateExists(detachedKey, 'next.json')) }));
     return;
   }
-  const imageMatch = req.method === 'GET' && req.url?.match(/^\/img\/(\d+)(?:\?.*)?$/);
+  const imageMatch = req.method === 'GET' && pathname.match(/^\/img\/(\d+)$/);
   if (imageMatch) {
     const abs = localImages[Number(imageMatch[1])];
-    if (!abs || !fs.existsSync(abs)) { res.writeHead(404); res.end(); return; }
-    const type = abs.endsWith('.webp') ? 'image/webp'
-      : abs.endsWith('.png') ? 'image/png'
-      : abs.endsWith('.svg') ? 'image/svg+xml'
-      : abs.endsWith('.gif') ? 'image/gif'
+    let image;
+    try { image = readFileInside(PROJECT_ROOT, abs, { maxBytes: MAX_QUESTION_IMAGE_BYTES }); }
+    catch { res.writeHead(404); res.end(); return; }
+    const extension = path.extname(abs).toLowerCase();
+    const type = extension === '.webp' ? 'image/webp'
+      : extension === '.png' ? 'image/png'
+      : extension === '.gif' ? 'image/gif'
       : 'image/jpeg';
-    res.writeHead(200, { 'content-type': type });
-    fs.createReadStream(abs).pipe(res);
+    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    res.end(image);
     return;
   }
-  if (req.method === 'POST' && req.url === '/build-path') {
-    let body = '';
-    req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"ok":true}');
-      let value = null;
-      try { value = JSON.parse(body).value; } catch { /* ignore */ }
-      if (value !== 'comp' && value !== 'code') return;
-      const wasComp = liveBuildPath === 'comp';
-      liveBuildPath = value;
-      // Only a flip TO comp needs the agent mid-round: comps must start
-      // rendering into the declared slots. The reverse is free.
-      if (detachedKey && value === 'comp' && !wasComp) {
-        fs.mkdirSync(QUESTION_DIR, { recursive: true });
-        fs.writeFileSync(flipFile(detachedKey), JSON.stringify({ buildPath: 'comp' }) + '\n');
-      }
-    });
+  if (req.method === 'POST' && pathname === '/build-path') {
+    let body;
+    try { body = await readBoundedJson(req, { maxBytes: MAX_QUESTION_BODY_BYTES, timeoutMs: 5000 }); }
+    catch (error) { sendHttpInputError(req, res, error); return; }
+    if (answerLocked || awaitingNext) { res.writeHead(409); res.end('Round already answered'); return; }
+    const value = body && typeof body === 'object' ? body.value : null;
+    if (!buildPathDefault?.toggle || (value !== 'comp' && value !== 'code')) {
+      res.writeHead(422, { 'content-type': 'application/json' }); res.end('{"error":"invalid build path"}'); return;
+    }
+    const wasComp = liveBuildPath === 'comp';
+    liveBuildPath = value;
+    if (detachedKey && value === 'comp' && !wasComp) {
+      writeQuestionState(detachedKey, 'flip.json', JSON.stringify({ buildPath: 'comp' }) + '\n');
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
     return;
   }
-  if (req.method === 'POST' && req.url === '/answer') {
-    let body = '';
-    req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"ok":true}');
-      let parsed = {};
-      try { parsed = JSON.parse(body); } catch { /* empty steer */ }
-      const chosen = options.find((o) => o.id === parsed.optionId);
-      const isReroll = parsed.optionId === 'reroll';
-      // A followup round's pick is not terminal: the table stays open for the
-      // next round (--update), exactly like a re-roll. Detached mode only;
-      // the blocking mode has no update channel, so its picks stay terminal.
-      const followupOpen = Boolean(detachedKey) && payload.followup === true && !isReroll;
-      const answer = JSON.stringify({
-        optionId: parsed.optionId ?? null,
-        steer: parsed.steer ?? '',
-        ...(isReroll && (parsed.register === 'safer' || parsed.register === 'bolder') ? { register: parsed.register } : {}),
-        ...(followupOpen ? { followup: true } : {}),
-        ...(chosen?.hero || chosen?.board ? { hero: chosen.hero ?? null, board: chosen.board ?? null } : {}),
-        ...((chosen?.comp ?? chosen?.sketch) ? { comp: chosen.comp ?? chosen.sketch } : {}),
-        ...(liveBuildPath && !isReroll ? { buildPath: liveBuildPath, buildPathFlipped: liveBuildPath !== (buildPathDefault?.value ?? null) } : {}),
-      });
-      // The delivery deadline is single-issue: a duplicate answer racing the
-      // page's disable must not restamp the allowance already inherited.
-      const wasAwaiting = awaitingNext;
-      awaitingNext = (isReroll || followupOpen) && Boolean(detachedKey);
-      if (awaitingNext && !wasAwaiting) awaitingNextSince = Date.now();
-      if (detachedKey) {
-        fs.mkdirSync(QUESTION_DIR, { recursive: true });
-        fs.writeFileSync(answerFile(detachedKey), answer + '\n');
-      } else {
-        printAnswer(answer);
-      }
-      // A re-roll or followup pick in detached mode keeps the table open: the
-      // client shows a loading hand and reloads when --update delivers the
-      // next round.
-      if (!((isReroll || followupOpen) && detachedKey)) setTimeout(() => process.exit(0), 150);
+  if (req.method === 'POST' && pathname === '/answer') {
+    let parsed;
+    try { parsed = await readBoundedJson(req, { maxBytes: MAX_QUESTION_BODY_BYTES, timeoutMs: 5000 }); }
+    catch (error) { sendHttpInputError(req, res, error); return; }
+    if (answerLocked || awaitingNext) { res.writeHead(409); res.end('Round already answered'); return; }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.optionId !== 'string') {
+      res.writeHead(422, { 'content-type': 'application/json' }); res.end('{"error":"invalid answer"}'); return;
+    }
+    const chosen = options.find((option) => option.id === parsed.optionId);
+    const isReroll = parsed.optionId === 'reroll' && Boolean(payload.reroll);
+    const isCanon = parsed.optionId === 'canon' && Boolean(payload.canon || payload.canonCard);
+    if (!chosen && !isReroll && !isCanon) {
+      res.writeHead(422, { 'content-type': 'application/json' }); res.end('{"error":"unknown option"}'); return;
+    }
+    if (parsed.steer !== undefined && (typeof parsed.steer !== 'string' || parsed.steer.length > 2000)) {
+      res.writeHead(422, { 'content-type': 'application/json' }); res.end('{"error":"invalid steer"}'); return;
+    }
+    const registers = Array.isArray(payload.reroll?.registers) ? payload.reroll.registers : [];
+    if (parsed.register !== undefined && (!isReroll || !registers.includes(parsed.register))) {
+      res.writeHead(422, { 'content-type': 'application/json' }); res.end('{"error":"invalid register"}'); return;
+    }
+    answerLocked = true;
+    const followupOpen = Boolean(detachedKey) && payload.followup === true && !isReroll;
+    const answer = JSON.stringify({
+      optionId: parsed.optionId,
+      steer: parsed.steer ?? '',
+      ...(isReroll && parsed.register ? { register: parsed.register } : {}),
+      ...(followupOpen ? { followup: true } : {}),
+      ...(chosen?.hero || chosen?.board ? { hero: chosen.hero ?? null, board: chosen.board ?? null } : {}),
+      ...((chosen?.comp ?? chosen?.sketch) ? { comp: chosen.comp ?? chosen.sketch } : {}),
+      ...(liveBuildPath && !isReroll ? { buildPath: liveBuildPath, buildPathFlipped: liveBuildPath !== (buildPathDefault?.value ?? null) } : {}),
     });
+    const wasAwaiting = awaitingNext;
+    awaitingNext = (isReroll || followupOpen) && Boolean(detachedKey);
+    if (awaitingNext && !wasAwaiting) awaitingNextSince = Date.now();
+    try {
+      if (detachedKey) writeQuestionState(detachedKey, 'answer.json', answer + '\n');
+      else printAnswer(answer);
+    } catch (error) {
+      answerLocked = false;
+      res.writeHead(500); res.end('Failed to record answer');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+    if (!((isReroll || followupOpen) && detachedKey)) setTimeout(() => process.exit(0), 150);
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/stop' && detachedKey) {
+    try { await readBoundedJson(req, { maxBytes: 1024, timeoutMs: 5000 }); }
+    catch (error) { sendHttpInputError(req, res, error); return; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+    setTimeout(() => process.exit(0), 50);
     return;
   }
   res.writeHead(404); res.end();
-});
+}));
 
 server.listen(portArg, '127.0.0.1', () => {
   const { port } = server.address();
-  const url = `http://127.0.0.1:${port}/`;
+  const url = `http://127.0.0.1:${port}/?token=${QUESTION_TOKEN}`;
   if (hasFlag('detached-serve')) {
-    fs.mkdirSync(QUESTION_DIR, { recursive: true });
-    fs.writeFileSync(stateFile(arg('key')), JSON.stringify({ pid: process.pid, port, url }));
+    writeQuestionState(detachedKey, 'state.json', JSON.stringify({
+      pid: process.pid,
+      port,
+      url,
+      token: QUESTION_TOKEN,
+      key: detachedKey,
+      script: fileURLToPath(import.meta.url),
+    }));
   } else {
     console.log(`QUESTION URL: ${url}`);
     console.log('Waiting for the user to choose in the browser (Ctrl-C aborts)...');
@@ -1731,7 +1928,7 @@ server.listen(portArg, '127.0.0.1', () => {
       // the hand just claimed.
       const pending = nextFile();
       let deliveredAt = 0;
-      if (pending) { try { deliveredAt = fs.statSync(pending).mtimeMs; } catch { /* nothing delivered */ } }
+      if (pending) { try { deliveredAt = questionStateMtime(detachedKey, 'next.json'); } catch { /* nothing delivered */ } }
       if (Date.now() - Math.max(deliveredAt, server.lastClaimAt || 0) > NEXT_CLAIM_GRACE_MS) {
         console.log('serve-question: the page stopped beating and never came back; exiting');
         process.exit(2);

@@ -146,6 +146,7 @@ public actor FaceCamRuntime {
         if options.mouthMask { arguments.append("--mouth-mask") }
         if options.manyFaces { arguments.append("--many-faces") }
 
+        let token = UUID().uuidString
         let process = ServerProcess()
         self.process = process
         onState(.starting(stage: "Starting the face engine…"))
@@ -156,12 +157,13 @@ public actor FaceCamRuntime {
                 arguments: arguments,
                 environment: [
                     "PYTHONUNBUFFERED": "1",
+                    "SILICON_SENSOR_TOKEN": token,
                     // Keras picks a backend at import; without this the content
                     // check drags in a framework that has no wheels here.
                     "KERAS_BACKEND": "torch",
                 ],
                 onLogLine: { line in
-                    if let state = Self.interpret(line, port: options.port) {
+                    if let state = Self.interpret(line, port: options.port, token: token) {
                         onState(state)
                     }
                 }
@@ -173,14 +175,13 @@ public actor FaceCamRuntime {
 
     /// Turns the driver's output into something worth showing. It prints its stages,
     /// its frame rate, and one `fatal:` line when it gives up.
-    static func interpret(_ line: String, port: Int) -> State? {
+    static func interpret(_ line: String, port: Int, token: String = "") -> State? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("ready: ") {
-            let text = String(trimmed.dropFirst("ready: ".count))
-            return URL(string: text).map { .live(url: $0, fps: 0) }
+            return sensorURL(port: port, token: token).map { .live(url: $0, fps: 0) }
         }
         if trimmed.hasPrefix("fps: "), let fps = Double(trimmed.dropFirst(5)) {
-            return URL(string: "http://127.0.0.1:\(port)/").map { .live(url: $0, fps: fps) }
+            return sensorURL(port: port, token: token).map { .live(url: $0, fps: fps) }
         }
         if trimmed.hasPrefix("fatal: ") {
             return .failed(message: Self.explain(String(trimmed.dropFirst("fatal: ".count))))
@@ -189,6 +190,16 @@ public actor FaceCamRuntime {
             return .starting(stage: String(trimmed.dropFirst("stage: ".count)))
         }
         return nil
+    }
+
+    static func sensorURL(port: Int, token: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = port
+        components.path = "/"
+        if !token.isEmpty { components.queryItems = [URLQueryItem(name: "token", value: token)] }
+        return components.url
     }
 
     /// The driver's terse reasons, said the way a person would.

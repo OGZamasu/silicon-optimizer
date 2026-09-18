@@ -1,0 +1,148 @@
+{
+  "batch": "Honey Badger MiniMax H3 Example",
+  "model": "hailuo-h3",
+  "seconds": 10,
+  "resolution": "480p",
+  "clips": [
+    {
+      "id": "HB001",
+      "title": "Sunrise Barista",
+      "slug": "sunrise_barista",
+      "seed": 830001,
+      "prompt": "Single continuous 10-second cinematic shot, whimsical high-end 3D animation. One charming adult honey badger with a silver-gray mantle, charcoal face and legs, cream nose stripe, and teal neckerchief works as a tiny outdoor barista at sunrise. It tamps espresso, pulls a gleaming lever, then proudly presents a foamy leaf latte toward camera while steam curls in golden light. Gentle dolly-in, coherent anatomy, natural paw motion, stable character, no cuts, no text. Audio: soft birds, espresso hiss, ceramic clink, pleased honey-badger chirp."
+    },
+    {
+      "id": "HB002",
+      "title": "Lunar Rover Mechanic",
+      "slug": "lunar_rover_mechanic",
+      "seed": 830002,
+      "prompt": "Single continuous 10-second cinematic shot, whimsical high-end 3D animation. One adult honey badger in a compact clear space helmet kneels beside a toy-sized lunar rover, tightens a loose wheel with a wrench, taps the tire, then gives the camera a triumphant thumbs-up as Earth glows above the horizon. Slow low-gravity orbiting camera, floating dust, consistent striped fur and anatomy, no cuts, no text. Audio: muffled tool clicks, radio crackle, gentle suit breathing."
+    },
+    {
+      "id": "HB003",
+      "title": "Sunflower Gardener",
+      "slug": "sunflower_gardener",
+      "seed": 830003,
+      "prompt": "Single continuous 10-second cinematic shot, warm storybook 3D animation. One adult honey badger in green overalls waters a row of enormous sunflowers; one blossom suddenly opens above it, showering pollen, and the badger sneezes before laughing and waving. Smooth side-tracking camera through the garden, bright morning light, stable silver mantle and dark face, natural motion, no cuts, no text. Audio: watering can trickle, bees humming, comic sneeze, leaves rustling."
+    },
+    {
+      "id": "HB004",
+      "title": "Neon Forest DJ",
+      "slug": "neon_forest_dj",
+      "seed": 830004,
+      "prompt": "Single continuous 10-second cinematic shot, playful stylized 3D animation. One confident honey badger wearing tiny headphones DJs on a glowing mushroom turntable in a moonlit forest, scratches a record, nods to the beat, then triggers a pulse of colorful fireflies that spiral overhead. Energetic but smooth push-in camera, coherent paws and equipment, stable character, no cuts, no writing. Audio: funky electronic beat, vinyl scratch, delighted woodland chirps."
+    },
+    {
+      "id": "HB005",
+      "title": "Tropical Surfer",
+      "slug": "tropical_surfer",
+      "seed": 830005,
+      "prompt": "Single continuous 10-second cinematic action shot, polished family-friendly 3D animation. One athletic honey badger rides a turquoise surfboard along a curling tropical wave, crouches through sparkling spray, then pops upright and raises both paws as the board glides onto calm water. Camera tracks alongside at water level, stable anatomy and board, vivid sun, no cuts, no text. Audio: rolling surf, rushing spray, joyful whoop, distant gulls."
+    },
+    {
+      "id": "HB006",
+      "title": "Miniature Librarian",
+      "slug": "miniature_librarian",
+      "seed": 830006,
+      "prompt": "Single continuous 10-second cozy cinematic shot, detailed storybook 3D animation. A tiny bespectacled honey badger librarian pushes a ladder along towering wooden bookshelves, climbs two rungs, retrieves a glowing book, opens it, and watches golden paper butterflies flutter out. Slow crane down to eye level, consistent character and paws, warm lamplight, no cuts, no readable text. Audio: ladder wheels, page flutter, quiet library ambience, tiny gasp."
+    },
+    {
+      "id": "HB007",
+      "title": "Rainy-Night Detective",
+      "slug": "rainy_night_detective",
+      "seed": 830007,
+      "prompt": "Single continuous 10-second noir-comedy shot, stylized cinematic 3D animation. One honey badger detective in a tan trench coat examines pawprints beneath a streetlamp, follows them through a puddle, then discovers they lead to its own muddy tail and gives camera a dry embarrassed look. Slow handheld follow, rain reflections, consistent anatomy and clothing, no cuts, no text. Audio: steady rain, distant saxophone, puddle splash, comic sting."
+    },
+    {
+      "id": "HB008",
+      "title": "Woodland Train Conductor",
+      "slug": "woodland_train_conductor",
+      "seed": 830008,
+      "prompt": "Single continuous 10-second cheerful cinematic shot, handcrafted 3D animation. One honey badger in a blue conductor cap leans from a miniature steam train, checks a silver pocket watch, blows a whistle, and waves as the colorful train begins rolling through an autumn woodland station. Camera dollies parallel with the engine, stable character and train geometry, no cuts, no text. Audio: steam chuffs, bright whistle, bell ding, forest birds."
+    },
+    {
+      "id": "HB009",
+      "title": "Alpine Watercolor Painter",
+      "slug": "alpine_watercolor_painter",
+      "seed": 830009,
+      "prompt": "Single continuous 10-second serene cinematic shot, painterly 3D animation. One honey badger in a burgundy beret paints an alpine lake at a small easel, adds one final blue stroke, then a real butterfly lands on the painted flower and the badger smiles in surprise. Gentle arc around the easel revealing snowy peaks, coherent paws and brush, no cuts, no text. Audio: mountain breeze, brush on paper, cowbell far away, soft chuckle."
+    },
+    {
+      "id": "HB010",
+      "title": "Picnic Sandwich Artist",
+      "slug": "picnic_sandwich_artist",
+      "seed": 830010,
+      "prompt": "Single continuous 10-second sunny comedy shot, polished 3D animation. One focused honey badger on a gingham picnic blanket stacks an absurdly tall vegetable sandwich, carefully places the final tomato, then catches the wobbling tower with both paws and takes a proud bite. Subtle push-in camera, stable food and anatomy, family-friendly, no cuts, no text. Audio: meadow ambience, crunchy vegetables, wobble sound, satisfying bite."
+    },
+    {
+      "id": "HB011",
+      "title": "Desert Archaeologist",
+      "slug": "desert_archaeologist",
+      "seed": 830011,
+      "prompt": "Single continuous 10-second adventure-comedy shot, cinematic stylized 3D animation. One honey badger archaeologist in a sun hat brushes sand from a tiny carved doorway, opens it cautiously, and a procession of miniature glowing beetles marches out around its boots. Low camera slowly circles the discovery, warm desert light, stable anatomy and props, no cuts, no writing. Audio: wind over dunes, brush strokes, stone creak, delicate beetle chimes."
+    },
+    {
+      "id": "HB012",
+      "title": "Snow Sculptor",
+      "slug": "snow_sculptor",
+      "seed": 830012,
+      "prompt": "Single continuous 10-second winter comedy shot, charming 3D animation. One bundled honey badger pats snow into a sculpture shaped like a giant honey jar, steps back to admire it, and the soft top plops gently onto its wool hat. Smooth semicircle camera, sparkling blue snow, consistent fur and limbs, no cuts, no text. Audio: crunchy snow, mitten pats, soft plop, amused badger snort."
+    },
+    {
+      "id": "HB013",
+      "title": "Meadow Beekeeper",
+      "slug": "meadow_beekeeper",
+      "seed": 830013,
+      "prompt": "Single continuous 10-second golden-hour shot, warm stylized 3D animation. One calm honey badger beekeeper wearing a mesh veil lifts a honeycomb frame, watches friendly bees dance in a heart-shaped swirl, then tastes one drop of honey and beams. Slow macro-to-medium pullback, coherent paws, bees and equipment, no cuts, no text. Audio: gentle buzzing, meadow wind, wooden hive creak, happy hum."
+    },
+    {
+      "id": "HB014",
+      "title": "Festival Drummer",
+      "slug": "festival_drummer",
+      "seed": 830014,
+      "prompt": "Single continuous 10-second festive performance shot, vibrant 3D animation. One honey badger in a red sash plays a large hand drum at a lantern festival, builds a lively rhythm, spins one drumstick, catches it cleanly, and lands a final beat as lanterns flare. Rhythmic forward camera move, stable hands and drum, no cuts, no text. Audio: resonant hand drums, crowd cheer, lantern crackle."
+    },
+    {
+      "id": "HB015",
+      "title": "Bubble Scientist",
+      "slug": "bubble_scientist",
+      "seed": 830015,
+      "prompt": "Single continuous 10-second bright laboratory comedy, high-end stylized 3D animation. One honey badger scientist in round safety goggles mixes two colorful liquids, creates an enormous iridescent bubble, gets briefly lifted by it, then floats gently back onto a stool. Camera tilts upward and down with the action, stable glassware and anatomy, no cuts, no labels or text. Audio: liquid bubbling, rubbery boing, delighted squeak, soft landing."
+    },
+    {
+      "id": "HB016",
+      "title": "Sunrise Yoga",
+      "slug": "sunrise_yoga",
+      "seed": 830016,
+      "prompt": "Single continuous 10-second peaceful comedy shot, beautiful stylized 3D animation. One honey badger on a cliffside yoga mat moves from a stretch into a wobbly tree pose, steadies itself, then opens its eyes to see a tiny bird copying the pose. Slow sunrise orbit, natural balanced motion, consistent anatomy, no cuts, no text. Audio: soft wind, distant stream, calm chime, bird tweet."
+    },
+    {
+      "id": "HB017",
+      "title": "Mushroom-Village Postie",
+      "slug": "mushroom_village_postie",
+      "seed": 830017,
+      "prompt": "Single continuous 10-second storybook shot, richly detailed 3D animation. One honey badger postal carrier pedals a tiny red bicycle through a mushroom village, brakes beside a round blue door, and delivers a sparkling parcel to a delighted hedgehog. Smooth tracking camera, stable bicycle wheels, characters and packages, no cuts, no readable text. Audio: bicycle bell, birds, soft brake squeak, magical parcel shimmer."
+    },
+    {
+      "id": "HB018",
+      "title": "Pottery Wheel Artist",
+      "slug": "pottery_wheel_artist",
+      "seed": 830018,
+      "prompt": "Single continuous 10-second cozy workshop shot, tactile stylized 3D animation. One honey badger potter shapes wet clay on a spinning wheel, the vase leans dangerously, and with one precise paw movement it becomes a charming crooked teapot; the badger bows proudly. Gentle close orbit, realistic clay motion, coherent paws, no cuts, no text. Audio: wheel whir, wet clay squish, little ceramic ping, approving chuckle."
+    },
+    {
+      "id": "HB019",
+      "title": "Desert Stargazer",
+      "slug": "desert_stargazer",
+      "seed": 830019,
+      "prompt": "Single continuous 10-second magical night shot, cinematic stylized 3D animation. One honey badger in a knitted scarf peers through a brass telescope in the desert, adjusts the lens, then a brilliant meteor streak reflects in its wide eyes and it points excitedly skyward. Slow push from wide silhouette to close reaction, stable telescope and anatomy, no cuts, no text. Audio: soft desert wind, telescope click, meteor whoosh, awed gasp."
+    },
+    {
+      "id": "HB020",
+      "title": "Hot-Air-Balloon Pilot",
+      "slug": "hot_air_balloon_pilot",
+      "seed": 830020,
+      "prompt": "Single continuous 10-second uplifting aerial shot, polished family-friendly 3D animation. One honey badger pilot in goggles stands in a woven hot-air-balloon basket above patchwork countryside, pulls the burner cord, rises through a soft cloud, then emerges into sunlight and waves toward camera. Graceful crane alongside the balloon, stable basket and character, no cuts, no text. Audio: burner roar, wicker creak, high breeze, joyful laugh."
+    }
+  ]
+}

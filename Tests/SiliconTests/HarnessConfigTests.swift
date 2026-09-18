@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SiliconControl
 @testable import SiliconRuntime
 
 @Suite("Harness provider configuration")
@@ -224,9 +225,7 @@ struct HarnessConfigTests {
         #expect(overlay.contains(
             "command: '/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp'"
         ))
-        // A video render holds the tool call for up to ten minutes; the default 60s
-        // timeout would kill every clip.
-        #expect(overlay.contains("toolCallTimeoutMs: 1800000"))
+        #expect(overlay.contains("toolCallTimeoutMs: \(VideoGenerationBudget.toolMilliseconds)"))
         // One insert list, two rows: both dashes sit at the same indentation.
         let modelsIndent = overlay.range(of: "- id: silicon-models").map {
             overlay[..<$0.lowerBound].reversed().prefix { $0 == " " }.count

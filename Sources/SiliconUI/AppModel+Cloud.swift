@@ -96,7 +96,12 @@ extension AppModel {
         request.timeoutInterval = 30
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await RemoteHTTP.data(
+            for: request,
+            session: session,
+            policy: .publicHTTPS,
+            credentialOrigin: provider.chatBaseURL
+        )
         let status = (response as? HTTPURLResponse)?.statusCode ?? 502
         guard status == 200 else {
             throw CloudError.listing(status, Self.providerMessage(inBody: data) ?? "no detail")
@@ -133,10 +138,10 @@ extension AppModel {
         guard let root = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
         else { return nil }
         if let error = root["error"] as? [String: Any], let message = error["message"] as? String {
-            return message
+            return String(message.prefix(512))
         }
-        if let message = root["message"] as? String { return message }
-        if let error = root["error"] as? String { return error }
+        if let message = root["message"] as? String { return String(message.prefix(512)) }
+        if let error = root["error"] as? String { return String(error.prefix(512)) }
         return nil
     }
 
@@ -180,6 +185,16 @@ extension AppModel {
     func cloudBackend(provider rawProvider: String, model: String) throws -> GatewayReadyBackend {
         guard let provider = CloudProvider(rawValue: rawProvider) else {
             throw GatewayHostError.unknownModel("cloud/\(rawProvider)/\(model)")
+        }
+        let gatewayID = GatewayAPI.modelID(cloudProvider: provider.rawValue, model: model)
+        let enabled = Set(settings.enabledCloudModels ?? [])
+        guard enabled.contains(gatewayID),
+              cloudModels.contains(where: { $0.gatewayID == gatewayID })
+        else {
+            // Enumeration and direct routing must enforce the same authority. Discovery is
+            // deliberately part of the decision so a stale setting cannot resurrect a model
+            // the provider no longer reports.
+            throw GatewayHostError.unknownModel(gatewayID)
         }
         guard let key = cloudCredentials.key(for: provider) else {
             throw CloudError.noKey(provider.displayName)

@@ -1,21 +1,23 @@
 import Foundation
 
-/// A well-known file naming the gateway's loopback endpoint, so local agents find it
-/// without spelunking through `lsof`. No secrets ever go in here — the gateway is
-/// loopback-only and token-free by design, and this file must stay as harmless as it
-/// is convenient.
+/// A well-known, owner-readable file naming the gateway's loopback endpoint and per-launch
+/// bearer. Sandboxed helpers can be granted this capability without making every same-host
+/// process or hostile web origin an implicit gateway administrator.
 public enum GatewayDiscovery {
 
     public static func fileURL(directory: URL) -> URL {
         directory.appendingPathComponent("gateway.json")
     }
 
-    public static func write(port: Int, pid: Int32, version: String, directory: URL) {
+    public static func write(
+        port: Int, pid: Int32, version: String, token: String, directory: URL
+    ) {
         let payload: [String: Any] = [
             "service": "silicon-optimizer-gateway",
             "base_url": "http://127.0.0.1:\(port)/v1",
             "port": port,
             "pid": Int(pid),
+            "token": token,
             "version": version,
             "started_at": ISO8601DateFormatter().string(from: Date()),
         ]
@@ -23,9 +25,19 @@ public enum GatewayDiscovery {
             withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
         ) else { return }
         try? FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
-        try? data.write(to: fileURL(directory: directory), options: .atomic)
+        // createDirectory leaves an existing directory's mode unchanged. Tighten it before
+        // the atomic writer creates its temporary file so there is no world-readable window.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: directory.path
+        )
+        let url = fileURL(directory: directory)
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: url.path
+        )
     }
 
     public static func remove(directory: URL) {

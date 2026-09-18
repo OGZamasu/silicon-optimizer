@@ -1,9 +1,9 @@
 import Foundation
 import SiliconCore
 
-/// How a video model runs. Local video generation on Apple Silicon is still a research
-/// exercise — minutes per second of footage through unported pipelines — so the first
-/// backends are the swarm's CUDA nodes, the way LATO.2 already works for 3D.
+/// How a video model runs. Video engines live behind the swarm job contract so the app
+/// can use a paired CUDA node or a loopback Apple Silicon adapter without knowing which
+/// runtime actually renders the clip.
 public enum VideoBackend: String, Sendable, Codable {
     /// A swarm node advertising a video capability runs the job; this Mac sends the
     /// prompt and receives the clip.
@@ -23,19 +23,28 @@ public struct VideoEntry: Sendable, Identifiable {
     public var backend: VideoBackend
     /// The capability id a node advertises when it can run this model.
     public var capabilityID: String
+    /// Whether a node advertising the generic `text-to-video` capability can run this
+    /// model. silicon-node advertises that one capability for every video model it
+    /// serves and picks the engine from the request's `model` field; only the local
+    /// Apple Silicon adapter advertises per-model ids.
+    public var acceptsGenericTextToVideo: Bool
     public var weightsSize: Bytes
     public var typicalDuration: String
     public var outputs: String
     public var rating: Int
     /// Whether a still image can seed the clip (image-to-video).
     public var supportsImageInput: Bool
+    /// Clip lengths this model/runtime contract can actually serve.
+    public var supportedSeconds: [Int]
     public var setupHint: String?
 
     public init(
         id: String, name: String, author: String, license: String, summary: String,
-        backend: VideoBackend, capabilityID: String, weightsSize: Bytes,
+        backend: VideoBackend, capabilityID: String,
+        acceptsGenericTextToVideo: Bool = false, weightsSize: Bytes,
         typicalDuration: String, outputs: String, rating: Int,
-        supportsImageInput: Bool = false, setupHint: String? = nil
+        supportsImageInput: Bool = false, supportedSeconds: [Int],
+        setupHint: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -44,18 +53,32 @@ public struct VideoEntry: Sendable, Identifiable {
         self.summary = summary
         self.backend = backend
         self.capabilityID = capabilityID
+        self.acceptsGenericTextToVideo = acceptsGenericTextToVideo
         self.weightsSize = weightsSize
         self.typicalDuration = typicalDuration
         self.outputs = outputs
         self.rating = rating
         self.supportsImageInput = supportsImageInput
+        self.supportedSeconds = supportedSeconds
         self.setupHint = setupHint
+    }
+
+    /// The closest duration this model supports. Picker values are already valid, but
+    /// this also makes a persisted selection safe when the user switches models.
+    public func normalizedSeconds(_ seconds: Int) -> Int {
+        supportedSeconds.min {
+            abs($0 - seconds) < abs($1 - seconds)
+        } ?? seconds
     }
 }
 
 public enum VideoCatalog {
 
-    public static let all: [VideoEntry] = [wan22, ltx2, ltx23Uncensored]
+    public static let all: [VideoEntry] = [wan22, ltx2, ltx23Uncensored, hailuoH3]
+
+    /// The one capability id silicon-node advertises for video, whichever of its models
+    /// are installed; `POST /v1/text-to-video` selects the model from the body.
+    public static let genericCapabilityID = "text-to-video"
 
     public static func entry(id: String) -> VideoEntry? {
         all.first { $0.id == id }
@@ -71,12 +94,15 @@ public enum VideoCatalog {
         summary: "The cinematic pick: real 720p motion from a prompt or a still image. "
             + "Worth the ~10 minute wait when the clip matters.",
         backend: .nodeRemote,
-        capabilityID: "text-to-video",
+        capabilityID: "wan22-ti2v-5b",
+        acceptsGenericTextToVideo: true,
         weightsSize: .gib(10),
         typicalDuration: "~10 min per 5 s clip (remote)",
         outputs: "MP4, 720p 24 fps",
         rating: 5,
         supportsImageInput: true,
+        // silicon-node caps Wan at 121 frames (5 s at 24 fps) and clamps silently.
+        supportedSeconds: [3, 5],
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
     )
@@ -91,12 +117,17 @@ public enum VideoCatalog {
         summary: "The iteration pick: clips in a fraction of Wan's time, so you can try "
             + "five ideas and then render the winner properly.",
         backend: .nodeRemote,
-        capabilityID: "text-to-video",
+        capabilityID: "ltx2-distilled",
+        acceptsGenericTextToVideo: true,
         weightsSize: .gib(13),
         typicalDuration: "1–3 min per clip (remote)",
         outputs: "MP4, up to 1080p",
         rating: 4,
         supportsImageInput: true,
+        // The same 121-frame cap as Wan on silicon-node. The loopback MLX adapter would
+        // take up to 15 s, but there is no per-node way to say so yet; the catalog
+        // publishes what every node that advertises this id can deliver.
+        supportedSeconds: [3, 5],
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
     )
@@ -114,14 +145,39 @@ public enum VideoCatalog {
             + "in — eight steps, sound with the picture, adult content allowed. Holds a face "
             + "through image-to-video better than stock.",
         backend: .nodeRemote,
-        capabilityID: "text-to-video",
+        capabilityID: "ltx23-uncensored",
+        acceptsGenericTextToVideo: true,
         weightsSize: .gib(16.5),
         typicalDuration: "2–5 min per 5 s clip (remote)",
         outputs: "MP4 with audio, up to 720p 24 fps",
         rating: 4,
         supportsImageInput: true,
+        // silicon-node lets the merge run to 241 frames (10 s); longer is clamped.
+        supportedSeconds: [3, 5, 8, 10],
         setupHint: "Runs on a swarm node with an NVIDIA card, on top of the LTX-2 distilled "
             + "install it borrows the text encoder and decoders from. Install it from the "
             + "node's Store page; it is not in the recommended set."
+    )
+
+    /// Hailuo H3 through Phosphene — a large local Apple Silicon pipeline whose longer
+    /// clips are composed from chained five-second windows to keep memory bounded.
+    public static let hailuoH3 = VideoEntry(
+        id: "hailuo-h3",
+        name: "MiniMax Hailuo H3",
+        author: "MiniMax",
+        license: "MiniMax-H3 Model License (authorization required in excluded territories)",
+        summary: "The high-motion Apple Silicon option through Phosphene. It can render "
+            + "three- or five-second shots and chain them into coherent 10- or 15-second clips.",
+        backend: .nodeRemote,
+        capabilityID: "hailuo-h3",
+        weightsSize: .gib(98),
+        typicalDuration: "several minutes per clip (Phosphene Q8)",
+        outputs: "MP4, 480p–1080p",
+        rating: 5,
+        supportsImageInput: true,
+        supportedSeconds: [3, 5, 10, 15],
+        setupHint: "Install MiniMax-H3 in Phosphene after accepting its license and obtaining "
+            + "any authorization it requires, then enable the model-aware video adapter so it "
+            + "advertises the hailuo-h3 capability."
     )
 }

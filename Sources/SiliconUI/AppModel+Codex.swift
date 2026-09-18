@@ -64,11 +64,22 @@ extension AppModel {
         if let stored = settings.codexWorkingDirectory, !stored.isEmpty {
             return URL(fileURLWithPath: stored)
         }
-        return FileManager.default.homeDirectoryForCurrentUser
+        // A harmless display/picker seed only. startCodexIfNeeded refuses to trust or start
+        // against it until the user explicitly chooses a folder.
+        return CodexRuntime.homeDirectory.appendingPathComponent("workspace", isDirectory: true)
+    }
+
+    public var hasExplicitCodexWorkingDirectory: Bool {
+        guard let stored = settings.codexWorkingDirectory else { return false }
+        return !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Starts the Codex sidecar unless it is already up or on its way.
     public func startCodexIfNeeded() {
+        guard hasExplicitCodexWorkingDirectory else {
+            codexState = .idle
+            return
+        }
         switch codexState {
         case .ready, .starting: return
         case .idle, .failed, .stopping: break
@@ -88,7 +99,7 @@ extension AppModel {
         let workingDirectory = codexWorkingDirectory.path
         Task {
             let events = await runtime.start(
-                nodePath: nodePath, gatewayPort: gateway,
+                nodePath: nodePath, gatewayPort: gateway, gatewayToken: gatewayToken,
                 defaultModel: model.isEmpty ? "local/none" : model,
                 trustedProjectPath: workingDirectory
             ) { [weak self] state in
@@ -167,7 +178,7 @@ extension AppModel {
         let sandbox = Self.codexPolicyValue(
             settings.codexSandbox,
             allowed: ["read-only", "workspace-write", "danger-full-access"],
-            fallback: "workspace-write"
+            fallback: "read-only"
         )
 
         Task {

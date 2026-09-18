@@ -24,27 +24,39 @@ public enum SwarmPairing {
         return "\(digits.prefix(3)) \(digits.suffix(3))"
     }
 
-    /// This machine's tailscale IPv4, found by interface scan: the CGNAT range
-    /// 100.64.0.0/10 is tailscale's and effectively nobody else's on a Mac.
+    /// This machine's Tailscale IPv4, accepted only when the authenticated local
+    /// Tailscale client identifies it as this node. CGNAT membership alone is not
+    /// transport identity: another VPN can legitimately use the same address range.
     public static func tailnetIPv4() -> String? {
-        var addresses: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&addresses) == 0, let first = addresses else { return nil }
-        defer { freeifaddrs(addresses) }
+        let candidates = [
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale",
+        ]
+        guard let binary = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }) else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["status", "--json"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return localIPv4(inStatusJSON: data)
+    }
 
-        var cursor: UnsafeMutablePointer<ifaddrs>? = first
-        while let current = cursor {
-            defer { cursor = current.pointee.ifa_next }
-            guard let address = current.pointee.ifa_addr,
-                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            guard getnameinfo(
-                address, socklen_t(address.pointee.sa_len),
-                &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST
-            ) == 0 else { continue }
-            let ip = String(cString: host)
-            if isTailnetIPv4(ip) { return ip }
-        }
-        return nil
+    /// Pure half of `tailnetIPv4`, retained for hostile/partial status fixtures.
+    public static func localIPv4(inStatusJSON data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["BackendState"] as? String == "Running",
+              let local = json["Self"] as? [String: Any],
+              let ips = local["TailscaleIPs"] as? [String]
+        else { return nil }
+        return ips.first(where: isTailnetIPv4)
     }
 
     /// 100.64.0.0/10 membership — 100.64.x.x through 100.127.x.x.
@@ -54,10 +66,25 @@ public enum SwarmPairing {
         return (64...127).contains(parts[1])
     }
 
+    /// Names become opaque path components when an administrator mints or revokes a
+    /// per-member token. Keep the friendly display form while excluding path/control syntax.
+    public static func normalizedClientName(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String(trimmed.prefix(64))
+        guard !name.isEmpty,
+              name.utf8.count <= 256,
+              name != ".", name != "..",
+              name.rangeOfCharacter(from: .controlCharacters) == nil,
+              !name.contains("/"), !name.contains("\\"), !name.contains("%")
+        else { return nil }
+        return name
+    }
+
     /// Parses `tailscale status --json` into probe targets. Pure so it is testable;
     /// running the CLI is the caller's business.
     public static func peers(inStatusJSON data: Data) -> [TailscalePeerInfo] {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["BackendState"] as? String == "Running",
               let peerMap = json["Peer"] as? [String: [String: Any]]
         else { return [] }
         return peerMap.values.compactMap { peer in
@@ -174,6 +201,8 @@ public actor PairingServer {
 
     private let hostName: String
     private var listener: NWListener?
+    private var activeConnections = 0
+    private static let maximumConnections = 16
     private var slot: Slot?
     private let requestLifetime: TimeInterval
 
@@ -194,8 +223,7 @@ public actor PairingServer {
         let listener = try NWListener(using: parameters)
         self.listener = listener
         listener.newConnectionHandler = { [weak self] connection in
-            connection.start(queue: .global(qos: .userInitiated))
-            Task { await self?.serve(connection) }
+            Task { await self?.accept(connection) }
         }
         listener.start(queue: .global(qos: .userInitiated))
     }
@@ -236,8 +264,21 @@ public actor PairingServer {
 
     // MARK: Serving
 
+    private func accept(_ connection: NWConnection) {
+        guard activeConnections < Self.maximumConnections else {
+            connection.cancel()
+            return
+        }
+        activeConnections += 1
+        connection.start(queue: .global(qos: .userInitiated))
+        Task { await serve(connection) }
+    }
+
     private func serve(_ connection: NWConnection) async {
-        defer { connection.cancel() }
+        defer {
+            connection.cancel()
+            activeConnections -= 1
+        }
         guard let request = try? await HTTPRequest.read(from: connection) else { return }
         let response = handle(request)
         try? await response.write(to: connection)
@@ -256,11 +297,11 @@ public actor PairingServer {
                 return .error(409, "Another pairing request is already being decided.")
             }
             guard let join = try? request.decode(PairingJoinRequest.self),
-                  !join.name.trimmingCharacters(in: .whitespaces).isEmpty
+                  let clientName = SwarmPairing.normalizedClientName(join.name)
             else { return .error(400, "The request names no device.") }
             let pending = PendingPairing(
                 id: UUID().uuidString,
-                name: String(join.name.prefix(64)),
+                name: clientName,
                 code: SwarmPairing.makeCode(),
                 receivedAt: Date()
             )

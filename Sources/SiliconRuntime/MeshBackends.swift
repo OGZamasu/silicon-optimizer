@@ -259,6 +259,9 @@ public actor HunyuanRuntime: MeshRuntime {
 /// clear error here, not a crash.
 public actor Lato2Runtime: MeshRuntime {
 
+    private static let maximumArtifacts = 4
+    private static let maximumArtifactBytes: Int64 = 512 * 1_024 * 1_024
+    private static let maximumJobBytes: Int64 = 768 * 1_024 * 1_024
     public private(set) var state: RuntimeState = .idle
     private let baseURL: URL
     private var cancelled = false
@@ -271,7 +274,9 @@ public actor Lato2Runtime: MeshRuntime {
     public static func probe(baseURL: URL) async -> Bool {
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))
         request.timeoutInterval = 4
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
+        guard let (_, response) = try? await RemoteHTTP.data(
+                for: request, policy: .peerHost(baseURL), credentialOrigin: baseURL
+              ),
               let http = response as? HTTPURLResponse else { return false }
         return (200..<300).contains(http.statusCode)
     }
@@ -333,14 +338,26 @@ public actor Lato2Runtime: MeshRuntime {
                 )
                 var glb: URL?
                 var obj: URL?
-                for remote in fileURLs {
+                let budget = RemoteByteBudget(limit: Self.maximumJobBytes)
+                for remote in fileURLs.prefix(Self.maximumArtifacts) {
                     let ext = remote.pathExtension.lowercased()
                     guard ext == "glb" || ext == "obj" else { continue }
                     let local = request.outputDirectory
                         .appendingPathComponent(request.baseName)
                         .appendingPathExtension(ext)
-                    let (data, _) = try await URLSession.shared.data(from: remote)
-                    try data.write(to: local)
+                    try await RemoteArtifactTransfer.download(
+                        from: remote,
+                        policy: .peerHost(baseURL),
+                        credentialOrigin: baseURL,
+                        to: local,
+                        maximumBytes: Self.maximumArtifactBytes,
+                        budget: budget,
+                        timeout: 600,
+                        allowedContentTypes: [
+                            "model/gltf-binary", "model/obj", "application/octet-stream",
+                            "text/plain",
+                        ]
+                    )
                     if ext == "glb" { glb = local } else { obj = local }
                 }
                 guard glb != nil || obj != nil else {
@@ -415,7 +432,9 @@ public actor Lato2Runtime: MeshRuntime {
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await RemoteHTTP.data(
+                for: request, policy: .peerHost(baseURL), credentialOrigin: baseURL
+            )
         } catch {
             throw MeshRuntimeError.remoteUnreachable(
                 "Could not reach the LATO.2 service at \(baseURL.absoluteString): "
@@ -430,9 +449,13 @@ public actor Lato2Runtime: MeshRuntime {
             )
         }
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let jobID = (json?["job_id"] ?? json?["id"]) as? String else {
+        guard let jobID = (json?["job_id"] ?? json?["id"]) as? String,
+              RemotePathIdentifier.appending(
+                jobID, to: baseURL.appendingPathComponent("v1/jobs")
+              ) != nil
+        else {
             throw MeshRuntimeError.generationFailed(
-                "The LATO.2 service did not return a job id."
+                "The LATO.2 service did not return a valid job id."
             )
         }
         return jobID
@@ -453,11 +476,18 @@ public actor Lato2Runtime: MeshRuntime {
     }
 
     private static func jobStatus(jobID: String, baseURL: URL) async throws -> JobSnapshot {
-        var request = URLRequest(url: baseURL.appendingPathComponent("v1/jobs/\(jobID)"))
+        guard let statusURL = RemotePathIdentifier.appending(
+            jobID, to: baseURL.appendingPathComponent("v1/jobs")
+        ) else {
+            throw MeshRuntimeError.generationFailed("The LATO.2 job id is invalid.")
+        }
+        var request = URLRequest(url: statusURL)
         request.timeoutInterval = 30
         let (data, _): (Data, URLResponse)
         do {
-            (data, _) = try await URLSession.shared.data(for: request)
+            (data, _) = try await RemoteHTTP.data(
+                for: request, policy: .peerHost(baseURL), credentialOrigin: baseURL
+            )
         } catch {
             throw MeshRuntimeError.remoteUnreachable(
                 "Lost the LATO.2 service mid-job: \(error.localizedDescription)"
@@ -474,16 +504,18 @@ public actor Lato2Runtime: MeshRuntime {
         // Every string in the response that looks like a mesh URL counts as a result file —
         // resilient to the service naming them result_urls, glb_url, files, or anything else.
         var files: [URL] = []
-        func collect(_ value: Any) {
+        let policy = RemoteURLPolicy.peerHost(baseURL)
+        func collect(_ value: Any, depth: Int = 0) {
+            guard depth <= 32, files.count < maximumArtifacts else { return }
             if let text = value as? String,
-               let url = URL(string: text, relativeTo: baseURL)?.absoluteURL,
+               let url = policy.resolve(text, relativeTo: baseURL),
                ["glb", "obj"].contains(url.pathExtension.lowercased())
             {
                 files.append(url)
             } else if let array = value as? [Any] {
-                array.forEach(collect)
+                for entry in array { collect(entry, depth: depth + 1) }
             } else if let object = value as? [String: Any] {
-                object.values.forEach(collect)
+                for entry in object.values { collect(entry, depth: depth + 1) }
             }
         }
         collect(json)
@@ -493,7 +525,8 @@ public actor Lato2Runtime: MeshRuntime {
         case "done", "completed", "complete", "succeeded", "finished":
             return JobSnapshot(state: .done, progress: 1.0, files: files, reported: nil)
         case "failed", "error":
-            let message = (json["error"] as? String) ?? "The LATO.2 job failed."
+            let message = (json["error"] as? String).map { String($0.prefix(512)) }
+                ?? "The LATO.2 job failed."
             return JobSnapshot(state: .failed(message), progress: progress, files: [])
         default:
             return JobSnapshot(

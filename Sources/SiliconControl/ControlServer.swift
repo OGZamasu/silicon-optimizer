@@ -12,6 +12,13 @@ public actor ControlServer {
 
     private let host: any ControlHost
     private var listener: NWListener?
+    private var activeConnections = 0
+    private static let maximumConnections = 64
+    // Durable video waits must not occupy every socket needed to inspect or
+    // control the queue. Reject overflow before the host can enqueue anything.
+    static let maximumSynchronousVideos = 8
+    private var activeSynchronousVideos = 0
+    private let handshakeURL: URL
     private let token: String
     private var port: Int = 0
     /// The shared swarm secret, accepted alongside the per-launch token when set.
@@ -30,8 +37,9 @@ public actor ControlServer {
         return URL(string: "http://127.0.0.1:\(port)/overlay?token=\(token)")
     }
 
-    public init(host: any ControlHost) {
+    public init(host: any ControlHost, handshakeURL: URL = ControlAPI.handshakeURL) {
         self.host = host
+        self.handshakeURL = handshakeURL
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
         self.token = UUID().uuidString
     }
@@ -73,7 +81,7 @@ public actor ControlServer {
     public func stop() {
         listener?.cancel()
         listener = nil
-        try? FileManager.default.removeItem(at: ControlAPI.handshakeURL)
+        try? FileManager.default.removeItem(at: handshakeURL)
     }
 
     /// Writes the port and token where clients can find them.
@@ -85,9 +93,14 @@ public actor ControlServer {
             port: port, pid: ProcessInfo.processInfo.processIdentifier,
             token: token, version: "0.1.0"
         )
-        let url = ControlAPI.handshakeURL
+        let url = handshakeURL
         try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: url.deletingLastPathComponent().path
         )
         guard let data = try? JSONEncoder().encode(handshake) else { return }
         try? data.write(to: url, options: .atomic)
@@ -100,19 +113,41 @@ public actor ControlServer {
     // MARK: - Connection handling
 
     private func accept(_ connection: NWConnection) {
+        guard activeConnections < Self.maximumConnections else {
+            connection.cancel()
+            return
+        }
+        activeConnections += 1
         connection.start(queue: .global(qos: .userInitiated))
         Task { await serve(connection) }
     }
 
     private func serve(_ connection: NWConnection) async {
+        defer {
+            connection.cancel()
+            activeConnections -= 1
+        }
         do {
             let request = try await HTTPRequest.read(from: connection)
-            let response = await route(request)
+            let response: HTTPResponse
+            if request.method == "POST", request.path == "/video/generate" {
+                // One request per connection: after its body, EOF/error means
+                // this client no longer wants the synchronous response. Keep a
+                // receive outstanding so Network.framework notices a FIN/RST
+                // while the route is waiting, not only at response.write().
+                let waiting = Task { await route(request) }
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
+                    if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
+                }
+                response = await waiting.value
+                guard !waiting.isCancelled else { return }
+            } else {
+                response = await route(request)
+            }
             try await response.write(to: connection)
         } catch {
             // A client that hangs up mid-request is routine, not worth surfacing.
         }
-        connection.cancel()
     }
 
     private func route(_ request: HTTPRequest) async -> HTTPResponse {
@@ -207,7 +242,22 @@ public actor ControlServer {
                 return try .encode(await host.meshModels())
             case ("GET", "/video/models"):
                 return try .encode(await host.videoModels())
+            case ("GET", "/video/queue"):
+                return try .encode(await host.videoQueue())
+            case ("POST", "/video/queue"):
+                return try .encode(await host.enqueueVideos(
+                    try request.decode(ControlAPI.VideoQueueRequest.self)
+                ))
+            case ("POST", "/video/queue/control"):
+                return try .encode(await host.controlVideoQueue(
+                    try request.decode(ControlAPI.VideoQueueControl.self)
+                ))
             case ("POST", "/video/generate"):
+                guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
+                    return .error(429, "Too many synchronous video requests. No clip was added. Use POST /video/queue to save work without holding a connection, then GET /video/queue to follow it.")
+                }
+                activeSynchronousVideos += 1
+                defer { activeSynchronousVideos -= 1 }
                 return try .encode(await host.generateVideo(
                     try request.decode(ControlAPI.VideoGenerateRequest.self)
                 ))
@@ -242,9 +292,16 @@ struct HTTPRequest {
     var body: Data
 
     var bearerToken: String? {
-        headers["authorization"]?
-            .replacingOccurrences(of: "Bearer ", with: "")
-            .trimmingCharacters(in: .whitespaces)
+        guard let value = headers["authorization"] else { return nil }
+        let parts = value.split(
+            maxSplits: 1, omittingEmptySubsequences: true,
+            whereSeparator: { $0 == " " || $0 == "\t" }
+        )
+        guard parts.count == 2,
+              parts[0].caseInsensitiveCompare("Bearer") == .orderedSame
+        else { return nil }
+        let token = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? nil : token
     }
 
     func decode<T: Decodable>(_ type: T.Type) throws -> T {
@@ -266,6 +323,16 @@ struct HTTPRequest {
     /// Reads one request. Bodies are small JSON payloads, so a simple accumulate-until-complete
     /// loop is sufficient and avoids pulling in a whole HTTP stack.
     static func read(from connection: NWConnection) async throws -> HTTPRequest {
+        // Absolute request-header/body deadline. Canceling the connection unblocks any
+        // pending Network.framework receive, so a byte-at-a-time client cannot retain a
+        // listener slot forever.
+        let deadline = Task<Void, Never> {
+            do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            guard !Task.isCancelled else { return }
+            connection.cancel()
+        }
+        defer { deadline.cancel() }
+
         var buffer = Data()
         var headerEnd: Range<Data.Index>?
 
@@ -287,18 +354,27 @@ struct HTTPRequest {
 
         var headers: [String: String] = [:]
         for line in lines {
-            guard let separator = line.firstIndex(of: ":") else { continue }
+            guard let separator = line.firstIndex(of: ":") else { throw ParseError.malformed }
             let key = line[..<separator].lowercased().trimmingCharacters(in: .whitespaces)
             let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty, headers[key] == nil else { throw ParseError.malformed }
             headers[key] = value
         }
 
         var body = buffer[headerEnd.upperBound...]
-        if let lengthValue = headers["content-length"], let length = Int(lengthValue) {
+        guard headers["transfer-encoding"] == nil else { throw ParseError.malformed }
+        if let lengthValue = headers["content-length"] {
+            guard let length = Int(lengthValue), (0...16_777_216).contains(length),
+                  body.count <= length
+            else { throw ParseError.malformed }
             while body.count < length {
                 body.append(try await receive(from: connection))
                 if body.count > 16_777_216 { throw ParseError.malformed }
             }
+        } else if !body.isEmpty {
+            // This minimal server intentionally does not infer body framing from a socket
+            // close. Reject ambiguous bytes instead of treating a pipelined request as data.
+            throw ParseError.malformed
         }
 
         let components = URLComponents(string: "http://localhost\(target)")
@@ -397,6 +473,7 @@ struct HTTPResponse {
         case 401: "Unauthorized"
         case 403: "Forbidden"
         case 404: "Not Found"
+        case 429: "Too Many Requests"
         default: "Error"
         }
     }

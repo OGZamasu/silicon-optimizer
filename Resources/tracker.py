@@ -15,12 +15,15 @@ Usage:
 """
 
 import argparse
+import hmac
 import json
 import math
+import os
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 STATE = {
     "tracking": False,
@@ -44,6 +47,43 @@ STATE = {
     "error": None,
 }
 LOCK = threading.Lock()
+TOKEN = ""
+
+
+def token_matches(supplied, expected):
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
+def request_is_authorized(path, authorization, expected_token):
+    """Accept a scoped query capability or an exact Bearer credential."""
+    if not expected_token:
+        return False
+    supplied = parse_qs(urlsplit(path).query).get("token", [""])[0]
+    if supplied and token_matches(supplied, expected_token):
+        return True
+    scheme, separator, credential = (authorization or "").partition(" ")
+    return (
+        bool(separator)
+        and scheme.lower() == "bearer"
+        and token_matches(credential.strip(), expected_token)
+    )
+
+
+def trusted_loopback_origin(origin):
+    if not origin:
+        return None
+    parsed = urlsplit(origin)
+    if (
+        parsed.scheme == "http"
+        and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.path in ("", "/")
+    ):
+        return origin
+    return None
 
 
 def log(message):
@@ -56,8 +96,14 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path.split("?")[0] not in ("/", "/state"):
+        path = urlsplit(self.path).path
+        if path not in ("/", "/state"):
             self.send_error(404)
+            return
+        if not request_is_authorized(
+            self.path, self.headers.get("Authorization"), TOKEN
+        ):
+            self.send_error(401, "Missing or invalid sensor token")
             return
         with LOCK:
             body = json.dumps(STATE).encode()
@@ -65,9 +111,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        # The overlay is served by the app on a different port; without this the
-        # browser refuses to read tracking at all.
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # The overlay is served by the app on another loopback port. Echo only a
+        # syntactically valid loopback origin; public pages never receive readable data.
+        origin = trusted_loopback_origin(self.headers.get("Origin"))
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -117,6 +167,7 @@ class Smoother:
 
 
 def main():
+    global TOKEN
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     # A camera index, or a video file: recorded performances are a real workflow,
@@ -132,6 +183,10 @@ def main():
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     arguments = parser.parse_args()
+    TOKEN = os.environ.get("SILICON_SENSOR_TOKEN", "")
+    if not TOKEN:
+        print("fatal: sensor token unavailable", flush=True)
+        return 2
 
     log("Loading the tracker")
     import cv2

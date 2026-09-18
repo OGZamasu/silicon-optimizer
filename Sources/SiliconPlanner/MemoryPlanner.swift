@@ -10,6 +10,9 @@ import SiliconHardware
 /// uses. Where a number is empirical it is called out in a comment.
 public struct MemoryPlanner: Sendable {
 
+    private static let maximumPlanBytes: Double = 1_000_000_000_000_000
+    private static let maximumMicroBatchSize = 1_048_576
+
     public let profile: SystemProfile
 
     public init(profile: SystemProfile) {
@@ -20,21 +23,27 @@ public struct MemoryPlanner: Sendable {
 
     /// Parameters held in a single expert slot, summed over every MoE layer.
     public static func parametersPerExpertSlot(_ shape: ModelShape) -> Int64 {
+        guard shape.isValidForPlanning else { return Int64.max }
         guard let moe = shape.moe else { return 0 }
         return moe.parametersPerExpertSlot(embeddingLength: shape.embeddingLength)
     }
 
     /// Parameters that are not routed experts: embeddings, attention, norms, shared experts.
     public static func nonExpertParameters(_ shape: ModelShape) -> Int64 {
+        guard shape.isValidForPlanning else { return Int64.max }
         guard let moe = shape.moe else { return shape.totalParameters }
-        let expertTotal = parametersPerExpertSlot(shape) * Int64(moe.expertCount)
+        let perExpert = parametersPerExpertSlot(shape)
+        guard let expertCount = Int64(exactly: moe.expertCount) else { return Int64.max }
+        let (expertTotal, overflow) = perExpert.multipliedReportingOverflow(by: expertCount)
+        guard !overflow else { return Int64.max }
         // Clamp: catalog parameter counts are rounded, and a negative remainder would be worse
         // than a slightly optimistic one.
         return max(shape.totalParameters / 20, shape.totalParameters - expertTotal)
     }
 
     public static func weightBytes(_ parameters: Int64, _ quantization: Quantization) -> Bytes {
-        Bytes(Int64(Double(parameters) * quantization.bitsPerWeight / 8.0))
+        guard parameters >= 0 else { return Bytes(Int64.max) }
+        return boundedBytes(Double(parameters) * quantization.bitsPerWeight / 8.0)
     }
 
     // MARK: - KV cache
@@ -45,14 +54,18 @@ public struct MemoryPlanner: Sendable {
     /// attention is why modern models can afford 128K context: `head_count_kv` is often an
     /// eighth of `head_count`.
     public static func kvBytesPerToken(_ shape: ModelShape, precision: KVCachePrecision) -> Double {
-        Double(2 * shape.blockCount * shape.headCountKV * shape.headDimension)
-            * precision.bytesPerElement
+        guard shape.isValidForPlanning else { return Self.maximumPlanBytes }
+        return 2 * Double(shape.blockCount) * Double(shape.headCountKV)
+            * Double(shape.headDimension) * precision.bytesPerElement
     }
 
     public static func kvCacheBytes(
         _ shape: ModelShape, context: Int, precision: KVCachePrecision
     ) -> Bytes {
-        Bytes(Int64(kvBytesPerToken(shape, precision: precision) * Double(context)))
+        guard context > 0, context <= ModelShape.maximumContextLength else {
+            return Bytes(Int64.max)
+        }
+        return boundedBytes(kvBytesPerToken(shape, precision: precision) * Double(context))
     }
 
     // MARK: - Compute buffers
@@ -67,6 +80,12 @@ public struct MemoryPlanner: Sendable {
     public static func computeBufferBytes(
         _ shape: ModelShape, configuration: LoadConfiguration
     ) -> Bytes {
+        guard shape.isValidForPlanning,
+              configuration.contextLength > 0,
+              configuration.contextLength <= ModelShape.maximumContextLength,
+              configuration.microBatchSize > 0,
+              configuration.microBatchSize <= Self.maximumMicroBatchSize
+        else { return Bytes(Int64.max) }
         let ubatch = Double(max(1, configuration.microBatchSize))
         let hidden = Double(shape.embeddingLength)
         let ffn = Double(max(shape.feedForwardLength, shape.moe?.expertFeedForwardLength ?? 0))
@@ -79,7 +98,7 @@ public struct MemoryPlanner: Sendable {
         }
 
         // Metal keeps a residency floor for the command buffers and the model's own descriptors.
-        return Bytes(Int64(max(bytes, 192 * 1_048_576)))
+        return boundedBytes(max(bytes, 192 * 1_048_576))
     }
 
     // MARK: - Planning
@@ -90,6 +109,30 @@ public struct MemoryPlanner: Sendable {
         configuration: LoadConfiguration,
         otherAppsInUse: Bytes = .zero
     ) -> MemoryPlan {
+        guard shape.isValidForPlanning,
+              configuration.contextLength > 0,
+              configuration.contextLength <= ModelShape.maximumContextLength,
+              configuration.microBatchSize > 0,
+              configuration.microBatchSize <= Self.maximumMicroBatchSize
+        else {
+            return invalidPlan(
+                reason: "The model or load configuration contains invalid dimensions.",
+                otherAppsInUse: otherAppsInUse
+            )
+        }
+        if let streaming = configuration.expertStreaming, let moe = shape.moe {
+            guard streaming.slotCount > 0,
+                  streaming.slotCount <= moe.expertCount,
+                  streaming.layerCount >= 0,
+                  streaming.layerCount <= moe.moeLayerCount
+            else {
+                return invalidPlan(
+                    reason: "The expert-streaming configuration is outside the model's bounds.",
+                    otherAppsInUse: otherAppsInUse
+                )
+            }
+        }
+
         let nonExpertParams = Self.nonExpertParameters(shape)
         let nonExpertWeights = Self.weightBytes(nonExpertParams, quantization)
 
@@ -128,6 +171,23 @@ public struct MemoryPlanner: Sendable {
         )
         let compute = Self.computeBufferBytes(shape, configuration: configuration)
 
+        let components = [
+            nonExpertWeights.rawValue, expertWeights.rawValue, kvCache.rawValue, compute.rawValue,
+        ]
+        var resident: Int64 = 0
+        for component in components {
+            let (sum, overflow) = resident.addingReportingOverflow(component)
+            guard component >= 0, component != Int64.max, !overflow,
+                  Double(sum) <= Self.maximumPlanBytes
+            else {
+                return invalidPlan(
+                    reason: "The requested memory plan is outside representable bounds.",
+                    otherAppsInUse: otherAppsInUse
+                )
+            }
+            resident = sum
+        }
+
         // `otherAppsInUse` is other processes' *wired* memory — the part macOS genuinely cannot
         // take back. Ordinary application memory is compressible and evictable, and the kernel
         // will page it out to make room for the model, so subtracting all in-use memory would
@@ -136,7 +196,11 @@ public struct MemoryPlanner: Sendable {
         // A share of wired memory belongs to macOS itself and is already priced into
         // `safeModelBudget`, so only the excess above that is charged again here.
         let systemWiredAllowance = profile.totalMemory * 0.10
-        let unavoidable = Bytes(max(0, otherAppsInUse.rawValue - systemWiredAllowance.rawValue))
+        let reportedOtherUse = max(0, otherAppsInUse.rawValue)
+        let allowance = max(0, systemWiredAllowance.rawValue)
+        let unavoidable = Bytes(
+            reportedOtherUse > allowance ? reportedOtherUse - allowance : 0
+        )
         // Never let the budget fall so far that nothing is loadable; at that point the honest
         // answer is a "close some apps" remediation, not a zero-sized budget.
         let budget = Bytes(max(
@@ -162,6 +226,28 @@ public struct MemoryPlanner: Sendable {
             for: plan, shape: shape, quantization: quantization, configuration: configuration
         )
         return plan
+    }
+
+    private static func boundedBytes(_ value: Double) -> Bytes {
+        guard value.isFinite, value >= 0,
+              value <= min(Double(Int64.max), Self.maximumPlanBytes)
+        else { return Bytes(Int64.max) }
+        return Bytes(Int64(value))
+    }
+
+    private func invalidPlan(reason: String, otherAppsInUse: Bytes) -> MemoryPlan {
+        MemoryPlan(
+            nonExpertWeights: .zero,
+            expertWeights: .zero,
+            kvCache: .zero,
+            computeBuffers: .zero,
+            streamedFromDisk: .zero,
+            budget: profile.safeModelBudget,
+            otherAppsInUse: otherAppsInUse,
+            verdict: .impossible,
+            remediations: [],
+            notes: [reason]
+        )
     }
 
     private func verdict(for plan: MemoryPlan) -> MemoryPlan.Verdict {

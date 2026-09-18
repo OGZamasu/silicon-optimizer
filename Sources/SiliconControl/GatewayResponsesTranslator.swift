@@ -141,13 +141,17 @@ public final class GatewayResponsesTranslator {
         if let wireUsage = chunk["usage"] as? [String: Any] {
             let prompt = (wireUsage["prompt_tokens"] as? Int) ?? 0
             let completion = (wireUsage["completion_tokens"] as? Int) ?? 0
-            usage = [
-                "input_tokens": prompt,
-                "input_tokens_details": ["cached_tokens": 0],
-                "output_tokens": completion,
-                "output_tokens_details": ["reasoning_tokens": 0],
-                "total_tokens": prompt + completion,
-            ]
+            let (total, overflow) = prompt.addingReportingOverflow(completion)
+            if !overflow, (0...1_000_000_000).contains(prompt),
+               (0...1_000_000_000).contains(completion), total <= 1_000_000_000 {
+                usage = [
+                    "input_tokens": prompt,
+                    "input_tokens_details": ["cached_tokens": 0],
+                    "output_tokens": completion,
+                    "output_tokens_details": ["reasoning_tokens": 0],
+                    "total_tokens": total,
+                ]
+            }
         }
         return out
     }
@@ -212,6 +216,7 @@ public final class GatewayResponsesTranslator {
         if let existing = toolItemsByChatIndex[chatIndex] {
             index = existing
         } else {
+            guard toolItemsByChatIndex.count < 256 else { return [] }
             index = items.count
             toolItemsByChatIndex[chatIndex] = index
             callCounter += 1

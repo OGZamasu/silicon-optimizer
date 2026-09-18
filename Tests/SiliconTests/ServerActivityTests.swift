@@ -39,7 +39,7 @@ struct ServerActivityTests {
     // MARK: - What it protects
 
     @Test func aBusyServerCountsAsWorkInFlight() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         #expect(model.hasWorkInFlight == false)
 
         model.noteServerBusy()
@@ -49,7 +49,7 @@ struct ServerActivityTests {
     /// Work the app cannot see still has to hold off the idle unload, which reads
     /// `hasWorkInFlight` before anything else.
     @Test func aServerQuietSinceBeforeTheGraceStopsCounting() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         model.noteServerBusy(at: Date() - (grace + 5))
         #expect(model.hasWorkInFlight == false)
     }
@@ -57,7 +57,7 @@ struct ServerActivityTests {
     /// Observing the server is also what stamps the activity clock, so a long conversation
     /// never accumulates the idle time that would arm the unload in the first place.
     @Test func observingABusyServerAlsoCountsAsActivity() {
-        let model = AppModel()
+        let model = AppModel(settings: .init())
         model.noteServerBusy(at: Date() - (grace + 5))
         // Outside the grace, so not "working" — but the clock was still stamped then, which is
         // what keeps a turn with long gaps from ever reaching the idle threshold.

@@ -60,6 +60,15 @@ import {
   sweepInactiveSvelteComponentSessions,
 } from './live/svelte-component.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
+import { matchesTemplateExtension, resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
+import { atomicWriteFileInside, readFileInside, resolvePathInside } from './lib/security-boundaries.mjs';
+import {
+  applyDefensiveServerTimeouts,
+  readBoundedBody,
+  readBoundedJson,
+  requireRequestToken,
+  sendHttpInputError,
+} from './lib/http-security.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Anchor the whole process on the live roots manifest before anything derives
@@ -163,6 +172,9 @@ const manualApply = createManualApplyController({
 
 const manualEditRoutes = createManualEditRoutes({
   getToken: () => state.token,
+  authorizePost: (req, res) => requireLivePostAuth(req, res),
+  readJson: (req) => readBoundedJson(req, { maxBytes: MAX_LIVE_JSON_BYTES }),
+  sendInputError: (req, res, error) => sendHttpInputError(req, res, error),
   manualApply,
   recordManualEditActivity,
   getManualEditStatus,
@@ -180,6 +192,22 @@ function chatAgentLikelyActive() {
 // Cap per-annotation upload size. A full 1920×1080 PNG is typically <1 MB;
 // cap at 10 MB to guard against runaway writes from a misbehaving client.
 const MAX_ANNOTATION_BYTES = 10 * 1024 * 1024;
+const MAX_LIVE_JSON_BYTES = 1024 * 1024;
+const LIVE_SOURCE_AUX_EXTENSIONS = Object.freeze(['.css', '.scss', '.sass', '.less']);
+
+function requireLivePostAuth(req, res) {
+  return requireRequestToken(req, res, state.token, { headerName: 'x-impeccable-token' });
+}
+
+function isAllowedLiveSource(filePath) {
+  if (matchesTemplateExtension(filePath, resolveLiveTemplateExtensions(process.cwd()))) return true;
+  const lower = filePath.toLowerCase();
+  if (LIVE_SOURCE_AUX_EXTENSIONS.some((extension) => lower.endsWith(extension))) return true;
+  if (!lower.endsWith('.json')) return false;
+  const relative = path.relative(process.cwd(), filePath).split(path.sep).join('/');
+  return relative.startsWith('.impeccable/live/')
+    || relative.startsWith('node_modules/.impeccable-live/');
+}
 
 function enqueueEvent(event) {
   if (!event) return;
@@ -667,8 +695,22 @@ function hasProjectContext() {
   return !!resolveProjectContext().hasProduct;
 }
 
-function statOrNull(filePath) {
-  try { return fs.statSync(filePath); } catch { return null; }
+function readAuthorizedContextFile(filePath, roots) {
+  if (!filePath) return null;
+  for (const root of [...new Set(roots.filter(Boolean).map((value) => path.resolve(value)))]) {
+    try {
+      const authorized = resolvePathInside(root, filePath, { kind: 'file' });
+      return {
+        path: authorized,
+        stat: fs.lstatSync(authorized),
+        content: readFileInside(root, authorized, { encoding: 'utf8', maxBytes: MAX_LIVE_JSON_BYTES }),
+      };
+    } catch (error) {
+      if (error?.code === 'PATH_OUTSIDE_ROOT') continue;
+      return null;
+    }
+  }
+  return null;
 }
 
 // Strict loopback-origin test for CORS. Parses the Origin as a URL (never a
@@ -711,7 +753,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
       res.setHeader('Vary', 'Origin');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Impeccable-Token');
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const p = url.pathname;
@@ -784,17 +826,11 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
     // event with screenshotPath already set. Keeps bytes out of the SSE/poll
     // bridge and preserves the "one shot from the user's POV" UX.
     if (p === '/annotation' && req.method === 'POST') {
-      const token = url.searchParams.get('token');
-      if (token !== state.token) { res.writeHead(401); res.end('Unauthorized'); return; }
+      if (!requireLivePostAuth(req, res)) return;
       const eventId = url.searchParams.get('eventId');
       if (!eventId || !/^[A-Za-z0-9_-]{1,64}$/.test(eventId)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid eventId' }));
-        return;
-      }
-      if ((req.headers['content-type'] || '').toLowerCase() !== 'image/png') {
-        res.writeHead(415, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Content-Type must be image/png' }));
         return;
       }
       if (!state.sessionDir) {
@@ -802,26 +838,14 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         res.end(JSON.stringify({ error: 'Session dir unavailable' }));
         return;
       }
-      const chunks = [];
-      let total = 0;
-      let aborted = false;
-      req.on('data', (c) => {
-        if (aborted) return;
-        total += c.length;
-        if (total > MAX_ANNOTATION_BYTES) {
-          aborted = true;
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Payload too large' }));
-          req.destroy();
-          return;
-        }
-        chunks.push(c);
-      });
-      req.on('end', () => {
-        if (aborted) return;
+      readBoundedBody(req, {
+        maxBytes: MAX_ANNOTATION_BYTES,
+        timeoutMs: 10_000,
+        contentType: 'image/png',
+      }).then((body) => {
         const absPath = path.join(state.sessionDir, eventId + '.png');
         try {
-          fs.writeFileSync(absPath, Buffer.concat(chunks));
+          atomicWriteFileInside(process.cwd(), absPath, body, { encoding: null, mode: 0o600 });
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Write failed: ' + err.message }));
@@ -829,13 +853,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, path: absPath }));
-      });
-      req.on('error', () => {
-        if (!aborted) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Upload failed' }));
-        }
-      });
+      }).catch((error) => sendHttpInputError(req, res, error));
       return;
     }
 
@@ -885,17 +903,23 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
       const projectContext = resolveProjectContext();
       const mdPath = projectContext.resolvedDesignPath;
       const jsonPath = resolveDesignSidecarPath(process.cwd(), projectContext.designContextDir || projectContext.contextDir) || getDesignSidecarPath(process.cwd());
-      const mdStat = statOrNull(mdPath);
-      const jsonStat = statOrNull(jsonPath);
+      const authorizedRoots = [
+        process.cwd(),
+        projectContext.contextDir,
+        projectContext.designContextDir,
+        LIVE_ROOTS?.contextRoot,
+      ];
+      const mdFile = readAuthorizedContextFile(mdPath, authorizedRoots);
+      const jsonFile = readAuthorizedContextFile(jsonPath, authorizedRoots);
 
       if (p === '/design-system/raw') {
-        if (!mdStat) { res.writeHead(404); res.end('Not found'); return; }
+        if (!mdFile) { res.writeHead(404); res.end('Not found'); return; }
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
-        res.end(fs.readFileSync(mdPath, 'utf-8'));
+        res.end(mdFile.content);
         return;
       }
 
-      if (!mdStat && !jsonStat) {
+      if (!mdFile && !jsonFile) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ present: false }));
         return;
@@ -903,22 +927,22 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
 
       const response = {
         present: true,
-        hasMd: !!mdStat,
-        hasSidecar: !!jsonStat,
-        mdNewerThanJson: !!(mdStat && jsonStat && mdStat.mtimeMs > jsonStat.mtimeMs + 1000),
+        hasMd: !!mdFile,
+        hasSidecar: !!jsonFile,
+        mdNewerThanJson: !!(mdFile && jsonFile && mdFile.stat.mtimeMs > jsonFile.stat.mtimeMs + 1000),
       };
 
-      if (mdStat) {
+      if (mdFile) {
         try {
-          response.parsed = parseDesignMd(fs.readFileSync(mdPath, 'utf-8'));
+          response.parsed = parseDesignMd(mdFile.content);
         } catch (err) {
           response.parseError = err.message;
         }
       }
 
-      if (jsonStat) {
+      if (jsonFile) {
         try {
-          response.sidecar = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+          response.sidecar = JSON.parse(jsonFile.content);
         } catch (err) {
           response.sidecarError = 'Failed to parse .impeccable/design.json: ' + err.message;
         }
@@ -935,17 +959,14 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
       if (token !== state.token) { res.writeHead(401); res.end('Unauthorized'); return; }
       const filePath = url.searchParams.get('path');
       if (!filePath || filePath.includes('..')) { res.writeHead(400); res.end('Bad path'); return; }
-      const absPath = path.resolve(process.cwd(), filePath);
-      // Confine to the project root. A bare `startsWith(cwd)` string check lets a
-      // sibling dir whose name extends the root name (projeto -> projeto-backup)
-      // slip through; compare on the relative path instead (same pattern as
-      // sessionFileMetadataFromPollReply below). An empty rel means the request
-      // resolved to the root directory itself, which this file route never serves.
-      const rel = path.relative(process.cwd(), absPath);
-      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { res.writeHead(403); res.end('Forbidden'); return; }
+      const lexicalPath = path.resolve(process.cwd(), filePath);
+      if (!isAllowedLiveSource(lexicalPath)) { res.writeHead(403); res.end('Forbidden'); return; }
       let content;
-      try { content = fs.readFileSync(absPath, 'utf-8'); }
-      catch { res.writeHead(404); res.end('File not found'); return; }
+      try { content = readFileInside(process.cwd(), filePath, { encoding: 'utf8', maxBytes: MAX_LIVE_JSON_BYTES }); }
+      catch (error) {
+        const status = ['PATH_OUTSIDE_ROOT', 'SYMLINK_REJECTED'].includes(error?.code) ? 403 : 404;
+        res.writeHead(status); res.end(status === 403 ? 'Forbidden' : 'File not found'); return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(content);
       return;
@@ -994,20 +1015,8 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
 
     // --- Browser→server events (replaces WebSocket messages) ---
     if (p === '/events' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        let msg;
-        try { msg = JSON.parse(body); } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid JSON' }));
-          return;
-        }
-        if (msg.token !== state.token) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Unauthorized' }));
-          return;
-        }
+      if (!requireLivePostAuth(req, res)) return;
+      readBoundedJson(req, { maxBytes: MAX_LIVE_JSON_BYTES }).then((msg) => {
         // Defense in depth: manual copy edits must use the staged stash/apply
         // endpoints. The direct Save event path is disabled in the browser.
         if (msg.type === 'manual_edits') {
@@ -1090,14 +1099,13 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
-      });
+      }).catch((error) => sendHttpInputError(req, res, error));
       return;
     }
 
     // --- Stop ---
-    if (p === '/stop') {
-      const token = url.searchParams.get('token');
-      if (token !== state.token) { res.writeHead(401); res.end('Unauthorized'); return; }
+    if (p === '/stop' && req.method === 'POST') {
+      if (!requireLivePostAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('stopping');
       shutdown();
@@ -1202,7 +1210,10 @@ function sessionFileMetadataFromPollReply(file) {
   }
 
   try {
-    const manifest = JSON.parse(fs.readFileSync(full, 'utf-8'));
+    const manifest = JSON.parse(readFileInside(process.cwd(), full, {
+      encoding: 'utf8',
+      maxBytes: MAX_LIVE_JSON_BYTES,
+    }));
     if (manifest?.previewMode !== 'svelte-component'
         || !manifest.sourceFile) return base;
     return {
@@ -1252,20 +1263,8 @@ function inferSourceEventType(msg = {}, pendingEvents = state.pendingEvents) {
 }
 
 function handlePollPost(req, res) {
-  let body = '';
-  req.on('data', (c) => { body += c; });
-  req.on('end', () => {
-    let msg;
-    try { msg = JSON.parse(body); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid JSON' }));
-      return;
-    }
-    if (msg.token !== state.token) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Unauthorized' }));
-      return;
-    }
+  if (!requireLivePostAuth(req, res)) return;
+  readBoundedJson(req, { maxBytes: MAX_LIVE_JSON_BYTES }).then((msg) => {
     const pendingApplyDeferred = manualApply.getDeferred(msg.id);
     if (pendingApplyDeferred) {
       const validation = manualApply.validateResultMessage(msg, pendingApplyDeferred);
@@ -1422,7 +1421,7 @@ function handlePollPost(req, res) {
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
-  });
+  }).catch((error) => sendHttpInputError(req, res, error));
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,7 +1552,10 @@ if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
   try {
     const { info } = readLiveServerInfo(process.cwd()) || {};
-    const res = await fetch(`http://localhost:${info.port}/stop?token=${info.token}`);
+    const res = await fetch(`http://localhost:${info.port}/stop?token=${info.token}`, {
+      method: 'POST',
+      headers: { 'X-Impeccable-Token': info.token },
+    });
     if (res.ok) console.log(`Stopped live server on port ${info.port}.`);
   } catch {
     console.log('No running live server found.');
@@ -1653,7 +1655,7 @@ fs.mkdirSync(annotRoot, { recursive: true });
 state.sessionDir = fs.mkdtempSync(path.join(annotRoot, 'session-'));
 
 const { detectScript, liveScriptParts } = loadBrowserScripts();
-httpServer = http.createServer(createRequestHandler({ detectScript, liveScriptParts }));
+httpServer = applyDefensiveServerTimeouts(http.createServer(createRequestHandler({ detectScript, liveScriptParts })));
 
 httpServer.listen(state.port, '127.0.0.1', () => {
   writeLiveServerInfo(process.cwd(), { pid: process.pid, port: state.port, token: state.token });

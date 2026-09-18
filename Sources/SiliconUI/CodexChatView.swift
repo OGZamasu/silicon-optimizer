@@ -14,17 +14,21 @@ struct CodexChatView: View {
 
     var body: some View {
         Group {
-            switch model.codexState {
-            case .ready:
-                conversation
-            case .starting(let stage):
-                startingView(stage: stage)
-            case .idle:
-                startingView(stage: "Starting…")
-            case .stopping:
-                startingView(stage: "Stopping…")
-            case .failed(let message):
-                failureView(message: message)
+            if !model.hasExplicitCodexWorkingDirectory {
+                workspaceChoice
+            } else {
+                switch model.codexState {
+                case .ready:
+                    conversation
+                case .starting(let stage):
+                    startingView(stage: stage)
+                case .idle:
+                    startingView(stage: "Starting…")
+                case .stopping:
+                    startingView(stage: "Stopping…")
+                case .failed(let message):
+                    failureView(message: message)
+                }
             }
         }
         .chatWindowExpansion(help: "Give Codex the whole window")
@@ -118,19 +122,7 @@ struct CodexChatView: View {
 
     private var folderPicker: some View {
         Button {
-            let panel = NSOpenPanel()
-            panel.canChooseFiles = false
-            panel.canChooseDirectories = true
-            panel.allowsMultipleSelection = false
-            panel.directoryURL = model.codexWorkingDirectory
-            panel.message = "Choose the folder Codex works in"
-            if panel.runModal() == .OK, let url = panel.url {
-                model.settings.codexWorkingDirectory = url.path
-                model.settings.save()
-                // A restart, not just a fresh thread: the new folder must be written into
-                // the Codex config as a trusted project before it can host a turn.
-                model.restartCodex()
-            }
+            chooseWorkingFolder(restarting: true)
         } label: {
             Label(model.codexWorkingDirectory.lastPathComponent, systemImage: "folder")
                 .lineLimit(1)
@@ -161,7 +153,7 @@ struct CodexChatView: View {
                     AppModel.codexPolicyValue(
                         model.settings.codexSandbox,
                         allowed: ["read-only", "workspace-write", "danger-full-access"],
-                        fallback: "workspace-write"
+                        fallback: "read-only"
                     )
                 },
                 set: { model.settings.codexSandbox = $0; model.settings.save() }
@@ -271,6 +263,41 @@ struct CodexChatView: View {
     }
 
     // MARK: - Lifecycle states
+
+    private var workspaceChoice: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "folder.badge.questionmark")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("Choose Codex’s working folder")
+                .font(.title3.weight(.semibold))
+            Text("Codex will start read-only and ask before commands. Only the folder you "
+                 + "choose will be marked trusted; your home folder is never selected for you.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 480)
+            Button("Choose Folder…") { chooseWorkingFolder(restarting: false) }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func chooseWorkingFolder(restarting: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = model.hasExplicitCodexWorkingDirectory
+            ? model.codexWorkingDirectory : nil
+        panel.message = "Choose the folder Codex may work in"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        model.settings.codexWorkingDirectory = url.standardizedFileURL.path
+        if model.settings.codexSandbox == nil { model.settings.codexSandbox = "read-only" }
+        model.settings.save()
+        if restarting { model.restartCodex() } else { model.startCodexIfNeeded() }
+    }
 
     private func startingView(stage: String) -> some View {
         VStack(spacing: 12) {

@@ -86,7 +86,7 @@ public actor PiRuntime {
     /// Starts Pi in RPC mode and returns its event stream: one raw JSON line per
     /// event, parsed by the consumer (dictionaries are not Sendable; lines are).
     public func start(
-        gatewayPort: Int, mcpServerPath: String?, nodePath: String,
+        gatewayPort: Int, gatewayToken: String, mcpServerPath: String?, nodePath: String,
         onState: @escaping @Sendable (State) -> Void
     ) async -> AsyncStream<String>? {
         await stop()
@@ -118,13 +118,22 @@ public actor PiRuntime {
         ]
         process.currentDirectoryURL = workspace
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] =
-            "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin"
-        environment["SILICON_GATEWAY_PORT"] = String(gatewayPort)
-        // The gateway is loopback and token-free; the provider config references
-        // this variable so Pi never prompts for a key.
-        environment["SILICON_GATEWAY_KEY"] = "local"
+        // Pi is installed from a package registry at first use. Give it only the ambient
+        // process state it needs, rather than forwarding every credential that happened to
+        // be present in the app's launch environment.
+        var environment = [
+            "HOME": workspace.path,
+            "PATH": "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
+            "SILICON_GATEWAY_PORT": String(gatewayPort),
+        ]
+        for harmless in ["LANG", "LC_ALL", "TMPDIR"] {
+            if let value = ProcessInfo.processInfo.environment[harmless] {
+                environment[harmless] = value
+            }
+        }
+        // The provider config references this variable, keeping the per-launch bearer
+        // out of generated files while still letting Pi authenticate every request.
+        environment["SILICON_GATEWAY_KEY"] = gatewayToken
         if let mcpServerPath {
             environment["SILICON_MCP_PATH"] = mcpServerPath
         }
