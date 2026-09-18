@@ -275,6 +275,46 @@ extension AppModel: ControlHost {
         )
     }
 
+    /// Who answers a decision. `auto` prefers the model loaded here — nothing leaves the
+    /// Mac and there is nothing to pay — and falls back to TypeSafe when a key is set.
+    /// Naming a lane makes it a hard requirement instead.
+    public func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
+        try request.validate()
+        let provider = (request.provider ?? "auto").lowercased()
+        var localEndpoint: URL?
+        if case .ready(let endpoint) = runtimeState { localEndpoint = endpoint }
+
+        func local() async throws -> ControlAPI.DecideResponse {
+            guard let endpoint = localEndpoint, let loaded = loadedModel else {
+                throw ControlHostError.noModelLoaded
+            }
+            noteActivity()
+            let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
+            return try await whileGenerating { try await decider.decide(request) }
+        }
+        func typeSafe() async throws -> ControlAPI.DecideResponse {
+            // The Keychain is consulted here and not before: a local answer never needs it.
+            guard let key = TypeSafeCredential.read() else { throw SystemOneError.noAPIKey }
+            return try await SystemOneClient(apiKey: key).decide(request)
+        }
+
+        switch provider {
+        case "local": return try await local()
+        case "typesafe": return try await typeSafe()
+        case "auto":
+            if localEndpoint != nil { return try await local() }
+            if TypeSafeCredential.isSet { return try await typeSafe() }
+            throw ControlHostError.badRequest(
+                "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
+                + "API key in Settings → TypeSafe (Jev)."
+            )
+        default:
+            throw ControlHostError.badRequest(
+                "Unknown provider \"\(request.provider ?? "")\". Use auto, local or typesafe."
+            )
+        }
+    }
+
     public func benchmark() async throws -> ControlAPI.BenchmarkResult {
         guard let runtime = activeRuntime, runtimeState.isRunning,
               let loaded = loadedModel, let shape = loaded.shape,

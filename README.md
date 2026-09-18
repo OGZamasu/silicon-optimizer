@@ -228,6 +228,7 @@ Building from source instead? `Scripts/install-mcp.sh` compiles the bridge, inst
 | `list_image_models` | Which image models exist here, and what each would peak at |
 | `plan_image` | Phase-by-phase memory for a given size, steps and precision |
 | `generate_image` | Draw it locally, with a warning first if it looks too big |
+| `decide` | Typed, probabilistic decisions in the TypeSafe/Jev shape: a state plus noul, choice and score questions in, probabilities out. Answered by the loaded model in one forward pass per question, or by Jev with a key |
 | `run_benchmark` | Measure this model here, and recalibrate its estimates |
 | `get_status` | What is loaded, at what settings, how fast |
 

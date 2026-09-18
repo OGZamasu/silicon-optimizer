@@ -306,6 +306,20 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
+            Section("TypeSafe (Jev)") {
+                TypeSafeKeyRow()
+                Text(
+                    "Optional. Lets the decide tool and POST /decide ask TypeSafe's Jev for typed "
+                    + "decisions ($0.042 per million input tokens, output free). Without a key the "
+                    + "same questions are answered by the model loaded here, one forward pass each, "
+                    + "and nothing leaves the Mac."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Link("Get a key at console.typesafe.ai", destination: URL(string: "https://console.typesafe.ai/settings/keys")!)
+                    .font(.caption)
+            }
+
             Section("Model library") {
                 LabeledContent {
                     HStack {
@@ -999,6 +1013,33 @@ struct SettingsView: View {
         panel.directoryURL = model.settings.resolvedMeshOutputDirectory
         if panel.runModal() == .OK, let url = panel.url {
             model.settings.meshOutputDirectory = url.path
+        }
+    }
+}
+
+/// The TypeSafe key field. A saved key is not read back into the field — the app has no
+/// reason to show a credential it already holds — so the row says whether one is stored and
+/// takes a replacement or a removal.
+private struct TypeSafeKeyRow: View {
+    @State private var draft = ""
+    @State private var stored = TypeSafeCredential.isSet
+    @State private var failed = false
+
+    var body: some View {
+        HStack {
+            SecureField(stored ? "Key stored — paste a new one to replace it" : "API key (sk-…)", text: $draft)
+                .textFieldStyle(.roundedBorder)
+            Button(stored && draft.isEmpty ? "Remove" : "Save") {
+                failed = !TypeSafeCredential.write(draft)
+                stored = TypeSafeCredential.isSet
+                draft = ""
+            }
+            .disabled(!stored && draft.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        if failed {
+            Text("The Keychain refused to store the key.")
+                .font(.caption)
+                .foregroundStyle(.red)
         }
     }
 }

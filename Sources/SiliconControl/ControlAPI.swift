@@ -836,6 +836,8 @@ public protocol ControlHost: AnyObject, Sendable {
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status
     func unload() async
     func chat(_ request: ControlAPI.ChatRequest) async throws -> ControlAPI.ChatResponse
+    /// Typed probabilistic decisions: `POST /decide`, also at `/v1/systemone`.
+    func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse
     func benchmark() async throws -> ControlAPI.BenchmarkResult
     func imageModels() async -> [ControlAPI.ImageModel]
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan
