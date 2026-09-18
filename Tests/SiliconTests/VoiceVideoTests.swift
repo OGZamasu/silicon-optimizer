@@ -199,6 +199,22 @@ struct VideoTests {
         #expect(VideoCatalog.all.allSatisfy { $0.backend == .nodeRemote })
         #expect(VideoCatalog.all.allSatisfy { $0.capabilityID == "text-to-video" })
         #expect(VideoCatalog.entry(id: "wan22-ti2v-5b")?.supportsImageInput == true)
+        // Ids are what the node keys jobs on, so they must be unique and stable.
+        #expect(Set(VideoCatalog.all.map(\.id)).count == VideoCatalog.all.count)
+        #expect(VideoCatalog.all.map(\.id) == [
+            "wan22-ti2v-5b", "ltx2-distilled", "ltx23-uncensored",
+        ])
+    }
+
+    /// The uncensored LTX-2.3 merge is a third id the node has to recognise; its entry
+    /// says what it is (adult content, audio) instead of hiding behind a neutral name.
+    @Test func uncensoredLTXEntryIsExplicitAboutItself() throws {
+        let entry = try #require(VideoCatalog.entry(id: "ltx23-uncensored"))
+        #expect(entry.backend == .nodeRemote)
+        #expect(entry.supportsImageInput)
+        #expect(entry.summary.localizedCaseInsensitiveContains("adult"))
+        #expect(entry.outputs.localizedCaseInsensitiveContains("audio"))
+        #expect(entry.setupHint?.contains("Store") == true)
     }
 
     /// The liberal artifact scan: any string ending in a video extension, however the

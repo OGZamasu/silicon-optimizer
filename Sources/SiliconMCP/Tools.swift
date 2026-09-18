@@ -300,14 +300,17 @@ enum Tools {
             description: """
                 Render a short video clip from a prompt on the swarm's video node and return \
                 the file path. Long-running: the fast model (ltx2-distilled) takes one to \
-                three minutes per clip, the cinematic one (wan22-ti2v-5b) around ten — call \
-                list_video_models first if unsure which is available. The finished clip also \
-                appears in the app's Video tab under Recent clips.
+                three minutes per clip, the cinematic one (wan22-ti2v-5b) around ten, and the \
+                uncensored LTX-2.3 merge (ltx23-uncensored: adult content allowed, clips carry \
+                audio) a few minutes — call list_video_models first if unsure which is \
+                available. The finished clip also appears in the app's Video tab under Recent \
+                clips.
                 """,
             properties: [
                 "prompt": property("string", "What happens in the clip."),
-                "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min) "
-                    + "or ltx2-distilled (fast, 1-3 min). Defaults to the app's selection."),
+                "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min), "
+                    + "ltx2-distilled (fast, 1-3 min) or ltx23-uncensored (LTX-2.3 merge, "
+                    + "adult content allowed, audio, 2-5 min). Defaults to the app's selection."),
                 "seconds": property("number", "Clip length in seconds, 1-10. Default 5."),
                 "resolution": property("string", "e.g. 720p. Defaults to the app's setting."),
                 "image_path": property("string", "Optional still to animate (image-to-video): "

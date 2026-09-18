@@ -55,7 +55,7 @@ public struct VideoEntry: Sendable, Identifiable {
 
 public enum VideoCatalog {
 
-    public static let all: [VideoEntry] = [wan22, ltx2]
+    public static let all: [VideoEntry] = [wan22, ltx2, ltx23Uncensored]
 
     public static func entry(id: String) -> VideoEntry? {
         all.first { $0.id == id }
@@ -99,5 +99,29 @@ public enum VideoCatalog {
         supportsImageInput: true,
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
+    )
+
+    /// LTX-2.3 Uncensored v1.4 — a community merge of LTX-2.3 with the Eros10, DMD-distilled
+    /// and in-context detailer LoRAs baked into the weights. The node runs it as a GGUF
+    /// transformer dropped into the same diffusers pipeline as the distilled model, so it
+    /// rides on that install and costs one extra file of disk, not a second 95 GB tree.
+    public static let ltx23Uncensored = VideoEntry(
+        id: "ltx23-uncensored",
+        name: "LTX-2.3 Uncensored v1.4",
+        author: "ChrisColeTech (Lightricks base)",
+        license: "Unknown (LTX-2.3 merge)",
+        summary: "The unfiltered pick: LTX-2.3 with the Eros10 and DMD-distilled LoRAs baked "
+            + "in — eight steps, sound with the picture, adult content allowed. Holds a face "
+            + "through image-to-video better than stock.",
+        backend: .nodeRemote,
+        capabilityID: "text-to-video",
+        weightsSize: .gib(16.5),
+        typicalDuration: "2–5 min per 5 s clip (remote)",
+        outputs: "MP4 with audio, up to 720p 24 fps",
+        rating: 4,
+        supportsImageInput: true,
+        setupHint: "Runs on a swarm node with an NVIDIA card, on top of the LTX-2 distilled "
+            + "install it borrows the text encoder and decoders from. Install it from the "
+            + "node's Store page; it is not in the recommended set."
     )
 }
