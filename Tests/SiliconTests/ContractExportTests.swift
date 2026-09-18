@@ -28,17 +28,34 @@ struct ContractExportTests {
         }
     }
 
-    @Test func theRouteTableIsCompleteAndUnambiguous() {
+    /// Pinned exactly, not spot-checked. A route added to `ControlServer` without a fixture
+    /// is a mobile client somebody has to write by hand, so it fails here first.
+    @Test func theRouteTableIsExactlyWhatTheServerAnswers() {
         let names = Self.routes.map { "\($0.method) \($0.path)" }
         #expect(Set(names).count == names.count)
-        // Every route the server can answer is here; a new one without a fixture is a
-        // client that has to be written by hand.
-        #expect(names.contains("POST /buddy/pair"))
-        #expect(names.contains("POST /chat/stream"))
-        #expect(names.contains("GET /events"))
-        #expect(names.contains("POST /conversations/{id}/messages"))
+        #expect(Set(names) == [
+            "POST /buddy/pair", "GET /buddy/devices", "DELETE /buddy/devices/{id}",
+            "POST /chat/stream", "GET /events",
+            "GET /conversations", "POST /conversations", "GET /conversations/{id}",
+            "POST /conversations/{id}/messages",
+            "GET /health", "GET /profile", "GET /metrics", "GET /status", "GET /installed",
+            "GET /catalog", "GET /recommend", "POST /plan", "POST /install", "POST /load",
+            "POST /unload", "POST /chat", "POST /decide", "POST /v1/systemone",
+            "POST /benchmark", "GET /swarm", "GET /v1/node",
+            "GET /image/models", "POST /image/plan", "POST /image/generate",
+            "GET /mesh/models", "POST /mesh/plan", "POST /mesh/generate",
+            "GET /video/models", "GET /video/queue", "POST /video/queue",
+            "POST /video/queue/control", "POST /video/generate",
+        ])
         #expect(Self.routes.filter(\.isStream).count == 3)
         #expect(Self.routes.allSatisfy { !$0.summary.isEmpty })
+        // Every route says what it answers when it says no, so a generated client has the
+        // failure shapes as well as the happy one.
+        #expect(Self.routes.allSatisfy { !$0.errors.isEmpty })
+        // File names carry no spaces and no braces, so a generator can use them as symbols.
+        #expect(Self.routes.allSatisfy {
+            !$0.fileName.contains(" ") && !$0.fileName.contains("{")
+        })
     }
 
     @Test func exportsWhenAskedTo() throws {
@@ -48,6 +65,16 @@ struct ContractExportTests {
 
         let root = URL(fileURLWithPath: directory, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        var expected = Set(Self.routes.map(\.fileName))
+        expected.insert("routes.md")
+        // A renamed or deleted route leaves a fixture behind, and a stale fixture is worse
+        // than a missing one — a generator would build a client for a route that is gone.
+        for stale in try FileManager.default.contentsOfDirectory(atPath: root.path)
+        where !expected.contains(stale) && (stale.hasSuffix(".json") || stale == "routes.md") {
+            try FileManager.default.removeItem(at: root.appendingPathComponent(stale))
+        }
+
         for route in Self.routes {
             try route.fixture().write(
                 to: root.appendingPathComponent(route.fileName), options: .atomic
@@ -57,8 +84,8 @@ struct ContractExportTests {
             to: root.appendingPathComponent("routes.md"), options: .atomic
         )
 
-        let written = try FileManager.default.contentsOfDirectory(atPath: root.path)
-        #expect(written.count == Self.routes.count + 1)
+        let written = Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
+        #expect(written.isSuperset(of: expected))
     }
 
     // MARK: - Shapes
@@ -92,6 +119,9 @@ struct ContractExportTests {
         var response: Example?
         /// SSE event name to payload example, for the routes that answer a stream.
         var events: [(String, Example)] = []
+        /// What this route says when it says no, keyed by status. Every entry is an
+        /// `ErrorResponse`, which is the only failure envelope this server has.
+        var errors: [Int: String] = [:]
 
         var isStream: Bool { !events.isEmpty }
 
@@ -100,14 +130,47 @@ struct ContractExportTests {
             if let request { all.append(("request", request)) }
             if let response { all.append(("response", response)) }
             all.append(contentsOf: events.map { ("event \($0.0)", $0.1) })
+            all.append(contentsOf: errors.sorted { $0.key < $1.key }.map {
+                ("error \($0.key)", .of(ControlAPI.ErrorResponse(error: $0.value)))
+            })
             return all
+        }
+
+        /// The refusals every authenticated route shares, so each entry below only has to
+        /// name what is particular to it.
+        static func commonErrors(auth: String) -> [Int: String] {
+            guard auth != "none" else {
+                return [
+                    403: BuddyRegistry.wrongCode,
+                    429: "Too many pairing attempts. Wait a minute.",
+                ]
+            }
+            var shared = [
+                401: "Invalid or missing control token.",
+                411: "This server needs a Content-Length. Chunked bodies are not read.",
+                413: "That request body is larger than this device may send (4194304 bytes).",
+            ]
+            if auth == "control" {
+                shared[403] = "Only this Mac can list paired devices."
+            } else {
+                shared[403] = "This device is paired for chat only. Pair it again with full "
+                    + "control from Settings → Silicon Buddy on the Mac."
+            }
+            return shared
         }
 
         /// A path cannot be a file name, so its slashes become underscores. The mapping is
         /// exact in both directions, which is what lets a generator read the route back out
         /// of the file name.
+        /// A path is not a file name, so `/`, `{` and `}` all become `_`. The mapping is
+        /// documented in `routes.md` and the result has no spaces or braces in it, which is
+        /// what lets a generator turn a file name into a symbol.
         var fileName: String {
-            "\(method) \(path.replacingOccurrences(of: "/", with: "_")).json"
+            let flattened = path
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "{", with: "_")
+                .replacingOccurrences(of: "}", with: "_")
+            return "\(method)_\(flattened).json"
         }
 
         func fixture() throws -> Data {
@@ -122,6 +185,13 @@ struct ContractExportTests {
                 body["events"] = frames
                 body["contentType"] = "text/event-stream"
             }
+            var refusals: [String: Any] = [:]
+            for (status, message) in errors {
+                refusals[String(status)] = try json(
+                    .of(ControlAPI.ErrorResponse(error: message))
+                )
+            }
+            body["errors"] = refusals
             return try JSONSerialization.data(
                 withJSONObject: body, options: [.prettyPrinted, .sortedKeys]
             )
@@ -151,8 +221,17 @@ struct ContractExportTests {
             "`POST /buddy/pair` and is what a phone holds; the control token satisfies those",
             "routes too, but not the other way round.",
             "",
-            "Fixture file names map `/` to `_`, so `POST /chat/stream` is",
-            "`POST _chat_stream.json`.",
+            "Every body must carry a `Content-Length`; chunked requests are answered 411.",
+            "A device may send at most 4 MiB, 8 images per message and about 1.5 MB per",
+            "image; over that is a 413. Failures are always `{\"error\": \"...\"}`, and each",
+            "fixture lists the ones its route can produce.",
+            "",
+            "Fixture file names replace `/`, `{` and `}` with `_`, so",
+            "`POST /conversations/{id}/messages` is `POST__conversations__id__messages.json`.",
+            "",
+            "`full` and `chat` are the two device scopes. A `chat` device may use the",
+            "read-only routes, `/chat`, `/chat/stream`, `/decide`, `/v1/systemone` and every",
+            "`/conversations` route; everything else answers 403.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -166,7 +245,14 @@ struct ContractExportTests {
 
     // MARK: - The table
 
-    static let routes: [Route] = buddyRoutes + coreRoutes + mediaRoutes
+    /// Each entry below names only the refusals particular to it; the ones every route of
+    /// its auth class shares are folded in here, so they cannot drift apart.
+    static let routes: [Route] = (buddyRoutes + coreRoutes + mediaRoutes).map { route in
+        var decorated = route
+        decorated.errors = Route.commonErrors(auth: route.auth)
+            .merging(route.errors) { _, particular in particular }
+        return decorated
+    }
 
     // MARK: Silicon Buddy's own
 
@@ -180,7 +266,7 @@ struct ContractExportTests {
             response: .of(ControlAPI.BuddyPairResponse(
                 deviceID: "7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C",
                 token: "V0hBVC1BLVRPS0VOLVdPVUxELUxPT0stTElLRS1IRVJF",
-                macName: "Mac Studio", port: 8788
+                macName: "Mac Studio", port: 8788, scope: "full"
             ))
         ),
         Route(
@@ -190,8 +276,9 @@ struct ContractExportTests {
         ),
         Route(
             method: "DELETE", path: "/buddy/devices/{id}", auth: "control",
-            summary: "Revoke one device. Its token stops working on the next request.",
-            response: .of(["status": "revoked"])
+            summary: "Revoke one device. Its token stops working at once, streams included.",
+            response: .of(["status": "revoked"]),
+            errors: [404: "No paired device with id 7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C."]
         ),
         Route(
             method: "POST", path: "/chat/stream", auth: "device",
@@ -201,8 +288,9 @@ struct ContractExportTests {
                 ("token", .of(ControlAPI.StreamToken(text: "Because "))),
                 ("reasoning", .of(ControlAPI.StreamToken(text: "The user asked about "))),
                 ("finished", .of(exampleMetrics)),
-                ("error", .of(ControlAPI.ErrorResponse(error: "No model is loaded."))),
-            ]
+                ("error", .of(ControlAPI.ErrorResponse(error: "The device stopped reading."))),
+            ],
+            errors: [400: "No model is loaded."]
         ),
         Route(
             method: "GET", path: "/events", auth: "device",
@@ -219,7 +307,8 @@ struct ContractExportTests {
                     title: "Opening shot", fraction: 0.33
                 ))),
                 ("heartbeat", .of(ControlAPI.HeartbeatEvent(at: "2026-09-18T09:41:00Z"))),
-            ]
+            ],
+            errors: [429: "Too many open streams. Close one before opening another."]
         ),
         Route(
             method: "GET", path: "/conversations", auth: "device",
@@ -239,13 +328,15 @@ struct ContractExportTests {
                 id: "3F5C1A88-9C1D-4E2B-8A70-1D2E3F405162",
                 title: "Weekend in Lisbon",
                 updatedAt: "2026-09-18T09:41:12Z",
+                isGenerating: false,
                 messages: [
                     .init(role: "user", content: "Three days in Lisbon — what would you do?",
                           createdAt: "2026-09-18T09:40:58Z"),
                     .init(role: "assistant", content: "Start in Alfama, early.",
                           createdAt: "2026-09-18T09:41:12Z"),
                 ]
-            ))
+            )),
+            errors: [404: "No conversation with id 3F5C1A88-9C1D-4E2B-8A70-1D2E3F405162."]
         ),
         Route(
             method: "POST", path: "/conversations/{id}/messages", auth: "device",
@@ -257,7 +348,13 @@ struct ContractExportTests {
                 ("token", .of(ControlAPI.StreamToken(text: "Start "))),
                 ("reasoning", .of(ControlAPI.StreamToken(text: "Three days is "))),
                 ("finished", .of(exampleMetrics)),
-                ("error", .of(ControlAPI.ErrorResponse(error: "No model is loaded."))),
+                ("error", .of(ControlAPI.ErrorResponse(error: "The device stopped reading."))),
+            ],
+            errors: [
+                400: "No model is loaded.",
+                404: "No conversation with id 3F5C1A88-9C1D-4E2B-8A70-1D2E3F405162.",
+                409: "That conversation is still being answered. Wait for it to finish, or "
+                    + "start another one.",
             ]
         ),
     ]
@@ -351,6 +448,22 @@ struct ContractExportTests {
         Route(
             method: "POST", path: "/decide", auth: "device",
             summary: "Typed probabilistic decisions, in the TypeSafe/Jev shape.",
+            request: .of(ControlAPI.DecideRequest(
+                state: .string("Customer was charged twice and wants it fixed."),
+                questions: [
+                    "refund": .init(type: "noul", instructions: .string("Asks for money back")),
+                ]
+            )),
+            response: .of(ControlAPI.DecideResponse(
+                model: "Qwen3-Coder 30B A3B",
+                usage: .init(inputTokens: 120, outputTokens: 1),
+                answers: ["refund": .noul(0.94)],
+                provider: "local"
+            ))
+        ),
+        Route(
+            method: "POST", path: "/v1/systemone", auth: "device",
+            summary: "The same route as /decide, at the path TypeSafe's own clients use.",
             request: .of(ControlAPI.DecideRequest(
                 state: .string("Customer was charged twice and wants it fixed."),
                 questions: [
@@ -513,7 +626,7 @@ struct ContractExportTests {
 
     static let exampleDevice = ControlAPI.BuddyDeviceSummary(
         id: "7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C", name: "Galaxy S24 Ultra",
-        platform: "android", pairedAt: "2026-09-18T09:12:44Z",
+        platform: "android", scope: "full", pairedAt: "2026-09-18T09:12:44Z",
         lastSeen: "2026-09-18T09:40:02Z"
     )
 
