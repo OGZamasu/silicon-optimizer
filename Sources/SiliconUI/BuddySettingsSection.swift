@@ -10,7 +10,9 @@ import SwiftUI
 /// this makes anything public; a phone that is not on the tailnet cannot see the Mac at all.
 struct BuddySettingsSection: View {
     @Environment(AppModel.self) private var model
-    @State private var buddy = BuddyCenter.shared
+    /// A singleton, so this is a reference rather than something the view owns. Observation
+    /// still tracks it: `@Observable` watches the properties `body` reads, not the wrapper.
+    private let buddy = BuddyCenter.shared
     @State private var showingPairing = false
 
     var body: some View {
@@ -51,9 +53,8 @@ struct BuddySettingsSection: View {
         }
         .task { await buddy.refresh(server: model.controlServer) }
         .sheet(isPresented: $showingPairing) {
-            BuddyPairingSheet(buddy: buddy) {
+            BuddyPairingSheet(buddy: buddy, server: model.controlServer) {
                 showingPairing = false
-                Task { await buddy.cancelInvitation() }
             }
         }
         .onChange(of: showingPairing) { _, shown in
@@ -68,13 +69,16 @@ struct BuddySettingsSection: View {
     }
 
     private var statusText: String {
+        // The server's own reason comes first: "no tailscale address" and "swarm LAN access
+        // is on" are different problems with different fixes, and guessing between them
+        // sends people to the wrong screen.
         if let problem = buddy.problem { return problem }
         guard buddy.allowsTailnetDevices else {
-            return "Off. The control API stays on 127.0.0.1, as it always has."
+            return "Off. The control API stays on 127.0.0.1, as it always has, and paired "
+                + "devices are suspended until you turn this back on."
         }
         guard let address = buddy.reachAddress else {
-            return "On, but this Mac has no tailscale address yet. Join the tailnet and "
-                + "the listener comes up on its own."
+            return "On, but the listener is not up yet. Nothing is reachable until it is."
         }
         return "Reachable from your tailnet at \(address). Nothing is published beyond it."
     }
@@ -94,6 +98,7 @@ struct BuddySettingsSection: View {
 
     static func describe(_ device: ControlAPI.BuddyDeviceSummary) -> String {
         var parts = [device.platform]
+        parts.append((BuddyScope(rawValue: device.scope) ?? .full).label.lowercased())
         if let paired = ControlAPI.date(fromTimestamp: device.pairedAt) {
             parts.append("paired \(paired.formatted(date: .abbreviated, time: .omitted))")
         }
@@ -108,17 +113,27 @@ struct BuddySettingsSection: View {
     }
 }
 
-/// The pairing sheet: one QR, one code, five minutes.
+/// The pairing sheet: one QR, one code, five minutes — and the one decision only the owner
+/// standing over the device can make, which is how much of the Mac it gets.
 struct BuddyPairingSheet: View {
     let buddy: BuddyCenter
+    let server: ControlServer?
     let onClose: () -> Void
+
+    @State private var paired = false
 
     var body: some View {
         VStack(spacing: 16) {
             Text("Pair a device")
                 .font(.headline)
 
-            if let invitation = buddy.invitation {
+            scopePicker
+
+            if paired {
+                Label("Paired.", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .frame(width: 280)
+            } else if let invitation = buddy.invitation {
                 code(invitation)
             } else {
                 VStack(spacing: 8) {
@@ -133,12 +148,44 @@ struct BuddyPairingSheet: View {
 
             HStack {
                 Spacer()
-                Button("Done", action: onClose)
+                Button(paired ? "Done" : "Cancel", action: onClose)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
         .frame(width: 340)
+        // The device tells the Mac it has paired by spending the code, so the sheet watches
+        // for that rather than waiting to be reopened before it shows the new row.
+        .task {
+            while !Task.isCancelled, !paired {
+                if await buddy.followPairing(server: server) { paired = true }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var scopePicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("This device gets", selection: Binding(
+                get: { buddy.nextScope },
+                set: { scope in
+                    // Changing the answer has to change the code: one already on screen was
+                    // issued for the old one.
+                    Task { await buddy.pairDevice(server: server, scope: scope) }
+                }
+            )) {
+                ForEach(BuddyScope.allCases, id: \.self) { scope in
+                    Text(scope.label).tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(paired)
+            Text(buddy.nextScope.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 280)
     }
 
     @ViewBuilder

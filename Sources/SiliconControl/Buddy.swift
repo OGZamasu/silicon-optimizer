@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 /// What the owner has decided about their phones and tablets, kept in
 /// `~/Library/Application Support/SiliconOptimizer/buddy.json`.
@@ -64,11 +65,39 @@ public struct BuddyConfig: Codable, Sendable, Equatable {
     }
 }
 
+/// What a paired device is allowed to do.
+///
+/// The owner picks this while they are holding the device, which is the only moment they
+/// can be sure which one they are answering for. Full control is the default because the
+/// product is remote parity with the Mac; chat-only exists for a device that is lent out,
+/// left at the office, or simply does not need to be able to start a 20 GB download.
+public enum BuddyScope: String, Codable, Sendable, Equatable, CaseIterable {
+    case full
+    case chat
+
+    public var label: String {
+        switch self {
+        case .full: "Full control"
+        case .chat: "Chat only"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .full: "Everything this Mac can do: models, images, video, 3D."
+        case .chat: "Read the Mac's state and talk to the loaded model. Nothing else."
+        }
+    }
+}
+
 /// One paired phone or tablet.
 public struct BuddyDevice: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var name: String
     public var platform: String
+    /// Absent in a file written before scopes existed, which can only have been a device
+    /// the owner approved when full control was the only thing on offer.
+    public var scope: BuddyScope?
     /// Hex SHA-256 of the 32-byte token handed to the device at pairing. The token itself
     /// exists once, in the pairing response, and is never written anywhere on this Mac.
     public var tokenHash: String
@@ -76,20 +105,23 @@ public struct BuddyDevice: Codable, Sendable, Equatable, Identifiable {
     public var lastSeen: Date?
 
     public init(
-        id: String, name: String, platform: String,
+        id: String, name: String, platform: String, scope: BuddyScope = .full,
         tokenHash: String, pairedAt: Date, lastSeen: Date? = nil
     ) {
         self.id = id
         self.name = name
         self.platform = platform
+        self.scope = scope
         self.tokenHash = tokenHash
         self.pairedAt = pairedAt
         self.lastSeen = lastSeen
     }
 
+    public var effectiveScope: BuddyScope { scope ?? .full }
+
     public var summary: ControlAPI.BuddyDeviceSummary {
         ControlAPI.BuddyDeviceSummary(
-            id: id, name: name, platform: platform,
+            id: id, name: name, platform: platform, scope: effectiveScope.rawValue,
             pairedAt: ControlAPI.timestamp(pairedAt),
             lastSeen: lastSeen.map(ControlAPI.timestamp)
         )
@@ -110,7 +142,17 @@ public enum BuddyPairing {
     /// Six digits. Short because someone has to read it off a screen; safe only because
     /// `BuddyRegistry` makes guessing it expensive.
     public static func makeCode() -> String {
-        String(format: "%06d", Int.random(in: 0...999_999))
+        // Rejection sampling rather than a modulo: 2^32 is not a multiple of a million, and
+        // a code generator with a favourite range is not a thing to ship in a credential.
+        let limit = UInt32.max - (UInt32.max % 1_000_000)
+        while true {
+            var bytes = [UInt8](repeating: 0, count: 4)
+            if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+                preconditionFailure("The system random number generator refused.")
+            }
+            let value = bytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            if value < limit { return String(format: "%06d", Int(value % 1_000_000)) }
+        }
     }
 
     /// Spaced for reading aloud. The URL and the wire always carry the bare digits.
@@ -119,10 +161,16 @@ public enum BuddyPairing {
         return "\(code.prefix(3)) \(code.suffix(3))"
     }
 
-    /// 32 random bytes, base64url so it survives a header, a QR and a keychain unchanged.
+    /// 32 bytes from the system CSPRNG, base64url so the token survives a header, a QR and
+    /// a keychain unchanged. `SecRandomCopyBytes` rather than `Int.random`: this is the only
+    /// thing standing between a tailnet and the model on this Mac.
     public static func makeDeviceToken() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
-        for index in bytes.indices { bytes[index] = UInt8.random(in: 0...255) }
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            // Documented never to fail on Darwin, but a silently weak token is the one
+            // outcome worth trapping for.
+            preconditionFailure("The system random number generator refused.")
+        }
         return Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -163,12 +211,19 @@ public struct BuddyInvitation: Sendable, Equatable {
     public var code: String
     public var host: String
     public var port: Int
+    /// Chosen on the Mac before the code goes on screen — the one moment the owner knows
+    /// which device they are answering for.
+    public var scope: BuddyScope
     public var expiresAt: Date
 
-    public init(code: String, host: String, port: Int, expiresAt: Date) {
+    public init(
+        code: String, host: String, port: Int,
+        scope: BuddyScope = .full, expiresAt: Date
+    ) {
         self.code = code
         self.host = host
         self.port = port
+        self.scope = scope
         self.expiresAt = expiresAt
     }
 

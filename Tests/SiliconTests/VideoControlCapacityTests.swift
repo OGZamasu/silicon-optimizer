@@ -231,5 +231,5 @@ private actor WaitingVideoHost: ControlHost {
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
         throw TestControlError.unexpectedRoute
     }
-    func beginEventUpdates() async {}
+    func beginEventUpdates(postingTo hub: BuddyEventHub) async {}
 }

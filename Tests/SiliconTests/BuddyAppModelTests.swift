@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import SiliconControl
 @testable import SiliconRuntime
@@ -15,16 +16,29 @@ struct BuddyAppModelTests {
             .appendingPathComponent("buddy-\(UUID()).json")
     }
 
+    /// An `AppModel` built here schedules the same debounced save as the real one, and its
+    /// default target is the owner's own chat history. Every test that touches
+    /// `conversations` redirects that first; a run must not be able to overwrite it.
+    private func isolatedModel() -> AppModel {
+        BuddyTestStore.redirect()
+        return AppModel(settings: .init())
+    }
+
     // MARK: - Conversations
 
     @Test func aConversationStartedFromAPhoneIsTheMacsOwn() async throws {
-        let model = AppModel(settings: .init())
+        let model = isolatedModel()
         let summary = await model.createConversation(title: "Weekend plans")
 
         #expect(summary.title == "Weekend plans" && summary.messageCount == 0)
-        // Selected, so the owner looking over sees what the phone started.
-        #expect(model.selectedConversationID?.uuidString == summary.id)
         #expect(await model.conversationList().map(\.id) == [summary.id])
+
+        // At the top of the sidebar, but a second one must not move the cursor out from
+        // under whoever is typing at the Mac.
+        let selected = model.selectedConversationID
+        let second = await model.createConversation(title: "Something else")
+        #expect(model.conversations.first?.id.uuidString == second.id)
+        #expect(model.selectedConversationID == selected)
 
         // An untitled request keeps the Mac's own placeholder rather than inventing one.
         let blank = await model.createConversation(title: "   ")
@@ -32,7 +46,7 @@ struct BuddyAppModelTests {
     }
 
     @Test func aTranscriptComesBackWithoutItsImages() async throws {
-        let model = AppModel(settings: .init())
+        let model = isolatedModel()
         let summary = await model.createConversation(title: "Kitchen")
         let index = try #require(model.conversations.firstIndex { $0.id.uuidString == summary.id })
         model.conversations[index].messages = [
@@ -58,7 +72,7 @@ struct BuddyAppModelTests {
     }
 
     @Test func anUnknownConversationIsNamedRatherThanCrashed() async {
-        let model = AppModel(settings: .init())
+        let model = isolatedModel()
         let missing = UUID().uuidString
         await #expect(throws: BuddyHostError.noSuchConversation(missing)) {
             _ = try await model.conversation(id: missing)
@@ -68,7 +82,7 @@ struct BuddyAppModelTests {
     /// Nothing streams without a model, and nothing is written to the transcript either —
     /// a phone that asks too early must not leave an empty exchange behind.
     @Test func streamingWithoutALoadedModelChangesNothing() async throws {
-        let model = AppModel(settings: .init())
+        let model = isolatedModel()
         let summary = await model.createConversation(title: "Too early")
 
         await #expect(throws: ControlHostError.self) {
@@ -125,6 +139,25 @@ struct BuddyAppModelTests {
 
     // MARK: - The Settings section
 
+    /// A phone sending a hundred photographs is refused before any of them reach a model.
+    @Test func attachmentsHaveACeiling() async throws {
+        let model = isolatedModel()
+        let summary = await model.createConversation(title: "Album")
+        let many = (0..<BuddyLimits.imagesPerMessage + 1).map { "data:image/png;base64,\($0)" }
+        #expect(BuddyLimits.refusal(forImages: many)?.contains("At most") == true)
+        let huge = [String(repeating: "a", count: BuddyLimits.imageCharacters + 1)]
+        #expect(BuddyLimits.refusal(forImages: huge)?.contains("too large") == true)
+        #expect(BuddyLimits.refusal(forImages: ["data:image/png;base64,AAA"]) == nil)
+
+        // Refused before the transcript is touched, like every other early refusal.
+        await #expect(throws: ControlHostError.self) {
+            _ = try await model.replyInConversation(
+                id: summary.id, to: .init(content: "look", images: many)
+            )
+        }
+        #expect(try await model.conversation(id: summary.id).messages.isEmpty)
+    }
+
     @Test func theToggleDrivesTheRegisterAndPairingRefusesWhileItIsOff() async {
         let file = temporaryFile()
         defer { try? FileManager.default.removeItem(at: file) }
@@ -154,6 +187,7 @@ struct BuddyAppModelTests {
         let registry = BuddyRegistry(url: file)
         let center = BuddyCenter(registry: registry)
 
+        await registry.setAllowsTailnetDevices(true)
         let invitation = await registry.invite(host: "100.64.0.9", port: 8788)
         guard case .paired(let response) = await registry.pair(
             .init(code: invitation.code, deviceName: "Galaxy S24 Ultra", platform: "android"),
@@ -162,6 +196,7 @@ struct BuddyAppModelTests {
 
         await center.refresh(server: nil)
         #expect(center.devices.map(\.name) == ["Galaxy S24 Ultra"])
+        #expect(center.devices.map(\.scope) == ["full"])
         await center.revoke(response.deviceID)
         #expect(center.devices.isEmpty)
     }
@@ -186,8 +221,112 @@ struct BuddyAppModelTests {
             pairedAt: ControlAPI.timestamp(Date()), lastSeen: nil
         )
         #expect(BuddySettingsSection.describe(paired).contains("never seen"))
+        #expect(BuddySettingsSection.describe(paired).contains("full control"))
         var seen = paired
         seen.lastSeen = ControlAPI.timestamp(Date())
+        seen.scope = "chat"
         #expect(BuddySettingsSection.describe(seen).contains("last seen"))
+        #expect(BuddySettingsSection.describe(seen).contains("chat only"))
     }
 }
+
+/// Points the conversation store at a scratch file, once, before any `AppModel` in this
+/// process can write. The app reads the variable on every save, so setting it here is
+/// enough — and the alternative is a test run silently replacing someone's chat history.
+enum BuddyTestStore {
+    private static let redirected: Bool = {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-test-conversations-\(UUID()).json")
+        setenv("SILICON_CONVERSATIONS_PATH", url.path, 1)
+        return true
+    }()
+
+    static func redirect() { _ = redirected }
+}
+
+/// The one test that runs the whole chain: a real `AppModel` as the host, a real control
+/// server, and a real socket. Serialized because the event pump is a process-wide singleton
+/// — it has to be, since `AppModel` is `@Observable` and an extension cannot hold its task.
+@Suite("Silicon Buddy live events", .serialized)
+@MainActor
+struct BuddyLiveEventTests {
+
+    @Test func aChangeOnTheMacReachesASubscriberAsAStatusFrame() async throws {
+        BuddyTestStore.redirect()
+        BuddyEventPump.shared.stop()
+        defer { BuddyEventPump.shared.stop() }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-live-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let model = AppModel(settings: .init())
+        let hub = BuddyEventHub()
+        let handshakeURL = directory.appendingPathComponent("control.json")
+        let server = ControlServer(
+            host: model, handshakeURL: handshakeURL,
+            buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
+            events: hub, discoverTailnetAddress: { nil }
+        )
+        try await server.start()
+        defer { Task { await server.stop() } }
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !FileManager.default.fileExists(atPath: handshakeURL.path) {
+            guard ContinuousClock.now < deadline else { throw BuddyLiveError.timeout }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let handshake = try JSONDecoder().decode(
+            ControlAPI.Handshake.self, from: try Data(contentsOf: handshakeURL)
+        )
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        // Moved while the stream is open, so the frame that carries it can only have come
+        // from the watcher noticing — not from the snapshot taken at connect.
+        let changing = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            model.lastGeneration = GenerationMetrics(
+                promptTokens: 12, generatedTokens: 34, generationTokensPerSecond: 77.5
+            )
+        }
+        defer { changing.cancel() }
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(handshake.port)/events")!)
+        request.setValue("Bearer \(handshake.token)", forHTTPHeaderField: "Authorization")
+
+        // Read inside a task, so cancelling it really hangs up: breaking out of the loop
+        // leaves the URLSession task — and therefore the subscription — alive.
+        let reading = Task { () -> Bool in
+            let (bytes, response) = try await session.bytes(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            var name = ""
+            for try await line in bytes.lines {
+                if line.hasPrefix("event: ") {
+                    name = String(line.dropFirst("event: ".count))
+                } else if line.hasPrefix("data: "), name == "status" {
+                    let payload = Data(line.dropFirst("data: ".count).utf8)
+                    let status = try JSONDecoder().decode(ControlAPI.Status.self, from: payload)
+                    if status.lastGenerationTokensPerSecond == 77.5 { return true }
+                }
+            }
+            return false
+        }
+        #expect(try await reading.value)
+        reading.cancel()
+
+        // And the watcher stops on its own once nobody is reading, rather than sampling the
+        // app once a second for the rest of the session.
+        let idle = ContinuousClock.now + .seconds(10)
+        while BuddyEventPump.shared.isRunning, ContinuousClock.now < idle {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(!BuddyEventPump.shared.isRunning)
+    }
+}
+
+private enum BuddyLiveError: Error { case timeout }
