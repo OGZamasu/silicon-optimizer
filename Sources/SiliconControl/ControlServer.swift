@@ -273,6 +273,10 @@ public actor ControlServer {
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):
                 return try .encode(await host.chat(try request.decode(ControlAPI.ChatRequest.self)))
+            case ("POST", "/decide"), ("POST", "/v1/systemone"):
+                // The second path is TypeSafe's own, so a client written for Jev can be
+                // pointed here with only its base URL changed.
+                return try .encode(await host.decide(try request.decode(ControlAPI.DecideRequest.self)))
             default:
                 return .error(404, "Unknown endpoint \(request.method) \(request.path)")
             }

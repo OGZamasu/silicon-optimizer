@@ -224,6 +224,41 @@ enum Tools {
             required: ["prompt"]
         ),
         Tool(
+            name: "decide",
+            description: """
+                Typed, probabilistic decisions — a System One call in the TypeSafe/Jev shape. \
+                Give a state (text or JSON) and named questions; get back, per question, a typed \
+                answer with probabilities and a confidence, never free text. Three question \
+                kinds: {"type":"noul","instructions":"…"} answers a yes/no as a 0–1 probability; \
+                {"type":"choice","instructions":"…","criteria":{"label":"when it applies",…}} \
+                picks a label; {"type":"score","instructions":"…","criteria":["level 0","level \
+                1",…]} rates on an ordered rubric and returns the expected level. Ask several \
+                questions in one call. By default the model loaded on this Mac answers (one \
+                forward pass per question, nothing leaves the machine, uncalibrated \
+                probabilities); with a TypeSafe key in Settings, provider "typesafe" asks Jev \
+                (calibrated, ~$0.0003 per call). Use it for routing, gating, scoring and \
+                classification inside a loop, not for anything that needs generated text.
+                """,
+            properties: [
+                "state": .object([
+                    "description": .string(
+                        "What to decide about: a string, or a JSON object/array. Send only "
+                        + "the fields the questions need."
+                    ),
+                ]),
+                "questions": .object([
+                    "type": .string("object"),
+                    "description": .string(
+                        "Named questions. Each value is {type: noul|choice|score, "
+                        + "instructions?, criteria?} as described above."
+                    ),
+                ]),
+                "provider": property("string", "auto (default), local, or typesafe."),
+                "model": property("string", "TypeSafe model alias, default jev-latest. Ignored locally."),
+            ],
+            required: ["state", "questions"]
+        ),
+        Tool(
             name: "run_benchmark",
             description: """
                 Measure what the loaded model actually does on this Mac: generation speed, prompt \
@@ -751,6 +786,35 @@ enum Tools {
                 output = "<reasoning>\n" + reasoning + "\n</reasoning>\n\n" + output
             }
             return output + footer
+
+        case "decide":
+            guard let state = arguments["state"] else { throw ToolError.missing("state") }
+            guard let questions = arguments["questions"]?.objectValue, !questions.isEmpty else {
+                throw ToolError.missing("questions")
+            }
+            // Both sides are Codable JSON, so the MCP value becomes the wire request by
+            // going through bytes once; a malformed question fails right here, by name.
+            var envelope: [String: JSONValue] = ["state": state, "questions": .object(questions)]
+            if let provider = arguments["provider"]?.stringValue { envelope["provider"] = .string(provider) }
+            if let model = arguments["model"]?.stringValue { envelope["model"] = .string(model) }
+            let request: ControlAPI.DecideRequest
+            do {
+                request = try JSONDecoder().decode(
+                    ControlAPI.DecideRequest.self, from: JSONEncoder().encode(JSONValue.object(envelope))
+                )
+                try request.validate()
+            } catch {
+                throw ToolError.invalid("Bad decide request: \(error.localizedDescription)")
+            }
+            let response: ControlAPI.DecideResponse = try await client.post("/decide", request)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let answers = String(decoding: try encoder.encode(response.answers), as: UTF8.self)
+            let latency = response.latencyMS.map { String(format: "%.0f ms", $0) } ?? "-"
+            return answers + String(
+                format: "\n\n---\n%@ · %@ · %d input tokens · %@",
+                response.provider ?? "unknown lane", response.model, response.usage.inputTokens, latency
+            )
 
         default:
             throw ToolError.unknown(name)
