@@ -86,3 +86,37 @@ struct BonsaiCatalogTests {
         #expect(!offered.contains { $0.contains("PTQ1_0") || $0.contains("PQ2_0") }, "\(offered)")
     }
 }
+
+@Suite("OrcaBonsai adapter entry")
+struct OrcaBonsaiCatalogTests {
+    private let orca = ModelCatalog.orcaBonsai27B
+    private let bonsai = ModelCatalog.bonsai2_27B
+
+    /// Same files as Bonsai — that is what lets an install clone instead of re-download —
+    /// plus a pinned, digest-checked adapter on every variant.
+    @Test func isBonsaiPlusAnAdapter() throws {
+        #expect(ModelCatalog.all.map(\.id).prefix(2) == ["bonsai-2-27b", "orcabonsai-27b-uncensored"])
+        #expect(orca.shape == bonsai.shape)
+        #expect(orca.needsPrismRuntime)
+        for (a, b) in zip(orca.variants, bonsai.variants) {
+            #expect(a.repository == b.repository && a.filename == b.filename)
+            #expect(a.visionProjector == b.visionProjector)
+            let lora = try #require(a.lora)
+            #expect(lora.filename == "bonsai-abliterate-lora.gguf")
+            #expect(lora.size == Bytes(9_682_464))
+            #expect(lora.sha256.count == 64)
+            #expect(lora.url.absoluteString.contains("947a80cd1d3b4f9a97417025e6c2c62223571287"))
+            #expect(lora.defaultScale == 1.0)
+        }
+        #expect(bonsai.variants.allSatisfy { $0.lora == nil })
+        #expect(!orca.isFeatured)
+    }
+
+    /// An index written before adapters existed still decodes; a model with one keeps it.
+    @Test func adapterFieldsAreOptionalOnDisk() throws {
+        let legacy = Data(#"{"id":"x","name":"x","quantization":"Q4_K_M","format":"GGUF","primaryFile":"file:///m.gguf","allFiles":["file:///m.gguf"],"sizeOnDisk":{"rawValue":1},"installedAt":"2026-09-18T00:00:00Z","capabilities":0}"#.utf8)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let model = try decoder.decode(InstalledModel.self, from: legacy)
+        #expect(model.loraFile == nil && model.loraScale == nil)
+    }
+}

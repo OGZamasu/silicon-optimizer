@@ -51,6 +51,33 @@ public enum ModelCategory: String, Sendable, Codable, CaseIterable, Identifiable
     }
 }
 
+/// A LoRA adapter applied at load, never merged into the weights. llama.cpp builds it into
+/// the graph as two extra matmuls, so the base file stays byte-identical and the effect is
+/// exact and reversible — which is the only way to edit a ternary model without paying a
+/// re-quantization for it. Fetched from a pinned URL and checked against its digest.
+public struct LoRAAdapter: Sendable, Codable, Hashable {
+    public var url: URL
+    public var filename: String
+    public var size: Bytes
+    public var sha256: String
+    /// llama.cpp's `--lora-scaled` factor; 1 is the adapter as published.
+    public var defaultScale: Double
+    /// What it does, in the words the UI shows.
+    public var summary: String
+
+    public init(
+        url: URL, filename: String, size: Bytes, sha256: String,
+        defaultScale: Double = 1.0, summary: String
+    ) {
+        self.url = url
+        self.filename = filename
+        self.size = size
+        self.sha256 = sha256
+        self.defaultScale = defaultScale
+        self.summary = summary
+    }
+}
+
 /// One downloadable artifact — a specific quantization of a specific model.
 public struct ModelVariant: Sendable, Codable, Hashable, Identifiable {
     public var quantization: Quantization
@@ -64,6 +91,8 @@ public struct ModelVariant: Sendable, Codable, Hashable, Identifiable {
     public var downloadSize: Bytes
     /// Optional companion projector file for vision models.
     public var visionProjector: String?
+    /// Optional adapter applied at load (see `LoRAAdapter`).
+    public var lora: LoRAAdapter?
 
     public var id: String { "\(repository)/\(filename)" }
 
@@ -75,7 +104,8 @@ public struct ModelVariant: Sendable, Codable, Hashable, Identifiable {
         filename: String,
         downloadSize: Bytes,
         additionalShards: [String] = [],
-        visionProjector: String? = nil
+        visionProjector: String? = nil,
+        lora: LoRAAdapter? = nil
     ) {
         self.quantization = quantization
         self.repository = repository
@@ -83,6 +113,7 @@ public struct ModelVariant: Sendable, Codable, Hashable, Identifiable {
         self.downloadSize = downloadSize
         self.additionalShards = additionalShards
         self.visionProjector = visionProjector
+        self.lora = lora
     }
 }
 

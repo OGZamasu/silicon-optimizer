@@ -12,9 +12,22 @@ public struct ModelResolver: Sendable {
         public var repository: String
         public var files: [HuggingFaceClient.RepoFile]
         public var projector: HuggingFaceClient.RepoFile?
+        /// An adapter fetched from its own pinned URL, not the repository.
+        public var lora: LoRAAdapter?
+
+        public init(
+            repository: String, files: [HuggingFaceClient.RepoFile],
+            projector: HuggingFaceClient.RepoFile?, lora: LoRAAdapter? = nil
+        ) {
+            self.repository = repository
+            self.files = files
+            self.projector = projector
+            self.lora = lora
+        }
 
         public var totalSize: Bytes {
             files.reduce(Bytes.zero) { $0 + $1.size } + (projector?.size ?? .zero)
+                + (lora?.size ?? .zero)
         }
         public var isSharded: Bool { files.count > 1 }
     }
@@ -61,7 +74,10 @@ public struct ModelResolver: Sendable {
             ? selectProjector(from: ggufFiles, hint: variant.visionProjector)
             : nil
 
-        return Resolution(repository: variant.repository, files: matched, projector: projector)
+        return Resolution(
+            repository: variant.repository, files: matched, projector: projector,
+            lora: variant.lora
+        )
     }
 
     /// Everything an MLX model directory needs, weights first — so the first file

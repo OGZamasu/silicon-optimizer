@@ -12,6 +12,10 @@ public struct InstalledModel: Sendable, Codable, Hashable, Identifiable {
     public var primaryFile: URL
     public var allFiles: [URL]
     public var projectorFile: URL?
+    /// A LoRA adapter passed to the runtime at load, when the catalog entry ships one.
+    public var loraFile: URL?
+    /// Its `--lora-scaled` factor; nil means the adapter as published (1.0).
+    public var loraScale: Double?
     public var sizeOnDisk: Bytes
     public var installedAt: Date
     /// Architecture read from the GGUF header at install time, which supersedes catalog estimates.
@@ -27,7 +31,8 @@ public struct InstalledModel: Sendable, Codable, Hashable, Identifiable {
         id: String, name: String, catalogID: String?, quantization: Quantization,
         format: ModelFormat, primaryFile: URL, allFiles: [URL], projectorFile: URL?,
         sizeOnDisk: Bytes, installedAt: Date, shape: ModelShape?, capabilities: ModelCapabilities,
-        managedDirectory: URL? = nil, managedRoot: URL? = nil
+        managedDirectory: URL? = nil, managedRoot: URL? = nil,
+        loraFile: URL? = nil, loraScale: Double? = nil
     ) {
         self.id = id
         self.name = name
@@ -37,6 +42,8 @@ public struct InstalledModel: Sendable, Codable, Hashable, Identifiable {
         self.primaryFile = primaryFile
         self.allFiles = allFiles
         self.projectorFile = projectorFile
+        self.loraFile = loraFile
+        self.loraScale = loraScale
         self.sizeOnDisk = sizeOnDisk
         self.installedAt = installedAt
         self.shape = shape
@@ -187,7 +194,9 @@ public actor ModelLibrary {
         entry: ModelEntry,
         quantization: Quantization,
         files: [URL],
-        projector: URL?
+        projector: URL?,
+        lora: URL? = nil,
+        loraScale: Double? = nil
     ) throws -> InstalledModel {
         guard let primary = files.first else {
             throw CocoaError(.fileNoSuchFile)
@@ -213,7 +222,9 @@ public actor ModelLibrary {
             shape: shape,
             capabilities: entry.capabilities,
             managedDirectory: ownership?.directory,
-            managedRoot: ownership?.root
+            managedRoot: ownership?.root,
+            loraFile: lora,
+            loraScale: loraScale
         )
         try add(model)
         return model
@@ -274,7 +285,7 @@ public actor ModelLibrary {
         try encoder.encode(Array(index.values)).write(to: indexURL, options: .atomic)
     }
 
-    nonisolated static func fileSize(_ url: URL) -> Bytes {
+    public nonisolated static func fileSize(_ url: URL) -> Bytes {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return Bytes((attributes?[.size] as? NSNumber)?.int64Value ?? 0)
     }

@@ -88,6 +88,13 @@ struct ModelDetailSheet: View {
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if let lora = entry.variants.first?.lora {
+                Label(lora.summary, systemImage: "slider.horizontal.3")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if entry.needsPrismRuntime {
                 PrismRuntimeNotice(entry: entry, showsWhenReady: true)
             }
