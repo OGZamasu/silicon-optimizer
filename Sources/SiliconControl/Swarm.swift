@@ -15,6 +15,10 @@ public struct SwarmPeer: Codable, Sendable, Identifiable, Hashable {
     /// what let a node's activity log say *which* machine asked — and let one member
     /// be revoked without rotating everyone.
     public var token: String?
+    /// What the node said that token grants when it minted it: "admin" for this Mac's
+    /// own identity on a node it administers, "member" otherwise. Nil for tokens minted
+    /// before nodes reported roles, which is what makes the app ask again.
+    public var role: String?
 
     public var id: String { name }
 
@@ -22,12 +26,14 @@ public struct SwarmPeer: Codable, Sendable, Identifiable, Hashable {
         case name
         case baseURL = "base_url"
         case token
+        case role
     }
 
-    public init(name: String, baseURL: String, token: String? = nil) {
+    public init(name: String, baseURL: String, token: String? = nil, role: String? = nil) {
         self.name = name
         self.baseURL = baseURL
         self.token = token
+        self.role = role
     }
 }
 
@@ -70,10 +76,12 @@ public struct SwarmConfig: Codable, Sendable, Equatable {
         return effectiveToken
     }
 
-    /// Records a freshly minted per-client token for one peer.
-    public mutating func setToken(_ token: String?, forPeer name: String) {
+    /// Records a freshly minted per-client token for one peer, and the role the node
+    /// said it carries.
+    public mutating func setToken(_ token: String?, forPeer name: String, role: String? = nil) {
         guard let index = peers.firstIndex(where: { $0.name == name }) else { return }
         peers[index].token = token
+        peers[index].role = role
     }
 
     public static var configURL: URL {

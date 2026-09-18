@@ -77,7 +77,7 @@ extension AppModel {
                 switch await self.mintClientToken(
                     on: peer, clientName: joinerName, admin: config.effectiveToken
                 ) {
-                case .minted(let token):
+                case .minted(let token, _):
                     mintedPeers.append(SwarmPeer(
                         name: peer.name, baseURL: peer.baseURL, token: token
                     ))
@@ -105,7 +105,7 @@ extension AppModel {
     }
 
     enum ClientTokenMintResult: Equatable, Sendable {
-        case minted(String)
+        case minted(String, role: String? = nil)
         case unsupported
         case failed
     }
@@ -116,7 +116,7 @@ extension AppModel {
     /// reach this path, replace it (revoke, re-mint) so pairing the same machine
     /// twice heals rather than fails.
     func mintClientToken(
-        on peer: SwarmPeer, clientName: String, admin: String?
+        on peer: SwarmPeer, clientName: String, admin: String?, role: String = "member"
     ) async -> ClientTokenMintResult {
         guard let admin,
               let clientName = SwarmPairing.normalizedClientName(clientName)
@@ -130,7 +130,7 @@ extension AppModel {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(admin)", forHTTPHeaderField: "Authorization")
             request.httpBody = try? JSONSerialization.data(
-                withJSONObject: ["name": clientName]
+                withJSONObject: ["name": clientName, "role": role]
             )
             guard let (data, response) = try? await URLSession.shared.data(for: request),
                   let http = response as? HTTPURLResponse else { return nil }
@@ -160,7 +160,9 @@ extension AppModel {
               let rawToken = object["token"] as? String
         else { return .failed }
         let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        return token.isEmpty ? .failed : .minted(token)
+        // Nodes that know about roles say which one they minted; older ones don't.
+        let role = (object["role"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? .failed : .minted(token, role: role.flatMap { $0.isEmpty ? nil : $0 })
     }
 
     @discardableResult
@@ -274,7 +276,11 @@ extension AppModel {
 
     /// Gives THIS Mac its own per-client identity on every node that can mint one, so
     /// node activity logs attribute our jobs by name instead of "swarm (shared token)".
-    /// Runs after swarm refreshes, once per peer per app run; legacy nodes are skipped
+    /// This Mac holds the swarm token, so it asks for the admin role: a hardened node
+    /// treats a plain client token as a member and refuses operator calls (installing
+    /// weights, loading a GGUF, toggling abilities) that the shared token would allow.
+    /// A token minted before nodes reported roles is re-minted once per app run until
+    /// a node confirms the role. Runs after swarm refreshes; legacy nodes are skipped
     /// silently and keep receiving the shared token.
     func ensureOwnClientTokens() async {
         guard var config = SwarmConfig.load(), let admin = config.effectiveToken
@@ -282,15 +288,15 @@ extension AppModel {
         let ourName = localMachineName
         var changed = false
         for peer in config.peers {
-            guard peer.token == nil,
+            guard peer.token == nil || peer.role != "admin",
                   !clientTokenAttempted.contains(peer.name),
                   swarmPeers.first(where: { $0.name == peer.name })?.reachable == true
             else { continue }
             clientTokenAttempted.insert(peer.name)
-            if case .minted(let token) = await mintClientToken(
-                on: peer, clientName: ourName, admin: admin
+            if case .minted(let token, let role) = await mintClientToken(
+                on: peer, clientName: ourName, admin: admin, role: "admin"
             ) {
-                config.setToken(token, forPeer: peer.name)
+                config.setToken(token, forPeer: peer.name, role: role)
                 changed = true
             }
         }

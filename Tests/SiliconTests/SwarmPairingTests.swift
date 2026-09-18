@@ -257,3 +257,31 @@ struct SwarmBearerTests {
         #expect(back.peers.first?.token == "t-1")
     }
 }
+
+@Suite("Client token roles")
+struct ClientTokenRoleTests {
+    /// A node that reports the role it minted hands it back; an older node's silence
+    /// leaves it nil, which is what makes the app re-mint until a node confirms admin.
+    @Test func roleRidesTheMintResponse() {
+        let withRole = Data(#"{"name":"mac","token":"tok-1","role":"admin"}"#.utf8)
+        #expect(AppModel.classifyClientTokenResponse(status: 200, body: withRole)
+                == .minted("tok-1", role: "admin"))
+        let legacy = Data(#"{"name":"mac","token":"tok-2"}"#.utf8)
+        #expect(AppModel.classifyClientTokenResponse(status: 200, body: legacy)
+                == .minted("tok-2", role: nil))
+    }
+
+    @Test func roleIsRememberedWithTheTokenAndOptionalOnDisk() throws {
+        var config = SwarmConfig(
+            swarmToken: "s", peers: [SwarmPeer(name: "node", baseURL: "http://n:1")]
+        )
+        config.setToken("tok", forPeer: "node", role: "admin")
+        #expect(config.peers[0].role == "admin")
+        #expect(config.bearer(forPeer: "node") == "tok")
+
+        // A swarm.json written before roles existed still loads.
+        let legacy = Data(#"{"swarm_token":"s","peers":[{"name":"node","base_url":"http://n:1","token":"t"}]}"#.utf8)
+        let decoded = try JSONDecoder().decode(SwarmConfig.self, from: legacy)
+        #expect(decoded.peers[0].role == nil)
+    }
+}
