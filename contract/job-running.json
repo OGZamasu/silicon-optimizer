@@ -1,0 +1,10 @@
+{
+  "elapsed_s": 88.4,
+  "eta_seconds": 121,
+  "job_id": "job-4f2c1a9b7d3e5f608a12",
+  "progress": 0.42,
+  "stage": "video-denoise",
+  "status": "running",
+  "step": 13,
+  "steps_total": 30
+}
