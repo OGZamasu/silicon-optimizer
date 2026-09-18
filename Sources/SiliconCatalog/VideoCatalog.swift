@@ -23,6 +23,11 @@ public struct VideoEntry: Sendable, Identifiable {
     public var backend: VideoBackend
     /// The capability id a node advertises when it can run this model.
     public var capabilityID: String
+    /// Whether a node advertising the generic `text-to-video` capability can run this
+    /// model. silicon-node advertises that one capability for every video model it
+    /// serves and picks the engine from the request's `model` field; only the local
+    /// Apple Silicon adapter advertises per-model ids.
+    public var acceptsGenericTextToVideo: Bool
     public var weightsSize: Bytes
     public var typicalDuration: String
     public var outputs: String
@@ -35,7 +40,8 @@ public struct VideoEntry: Sendable, Identifiable {
 
     public init(
         id: String, name: String, author: String, license: String, summary: String,
-        backend: VideoBackend, capabilityID: String, weightsSize: Bytes,
+        backend: VideoBackend, capabilityID: String,
+        acceptsGenericTextToVideo: Bool = false, weightsSize: Bytes,
         typicalDuration: String, outputs: String, rating: Int,
         supportsImageInput: Bool = false, supportedSeconds: [Int],
         setupHint: String? = nil
@@ -47,6 +53,7 @@ public struct VideoEntry: Sendable, Identifiable {
         self.summary = summary
         self.backend = backend
         self.capabilityID = capabilityID
+        self.acceptsGenericTextToVideo = acceptsGenericTextToVideo
         self.weightsSize = weightsSize
         self.typicalDuration = typicalDuration
         self.outputs = outputs
@@ -69,6 +76,10 @@ public enum VideoCatalog {
 
     public static let all: [VideoEntry] = [wan22, ltx2, ltx23Uncensored, hailuoH3]
 
+    /// The one capability id silicon-node advertises for video, whichever of its models
+    /// are installed; `POST /v1/text-to-video` selects the model from the body.
+    public static let genericCapabilityID = "text-to-video"
+
     public static func entry(id: String) -> VideoEntry? {
         all.first { $0.id == id }
     }
@@ -84,6 +95,7 @@ public enum VideoCatalog {
             + "Worth the ~10 minute wait when the clip matters.",
         backend: .nodeRemote,
         capabilityID: "wan22-ti2v-5b",
+        acceptsGenericTextToVideo: true,
         weightsSize: .gib(10),
         typicalDuration: "~10 min per 5 s clip (remote)",
         outputs: "MP4, 720p 24 fps",
@@ -105,6 +117,7 @@ public enum VideoCatalog {
             + "five ideas and then render the winner properly.",
         backend: .nodeRemote,
         capabilityID: "ltx2-distilled",
+        acceptsGenericTextToVideo: true,
         weightsSize: .gib(13),
         typicalDuration: "1–3 min per clip (remote)",
         outputs: "MP4, up to 1080p",
@@ -129,6 +142,7 @@ public enum VideoCatalog {
             + "through image-to-video better than stock.",
         backend: .nodeRemote,
         capabilityID: "ltx23-uncensored",
+        acceptsGenericTextToVideo: true,
         weightsSize: .gib(16.5),
         typicalDuration: "2–5 min per 5 s clip (remote)",
         outputs: "MP4 with audio, up to 720p 24 fps",

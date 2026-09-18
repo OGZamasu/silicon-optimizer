@@ -798,8 +798,9 @@ extension AppModel {
 
     // MARK: - Video
 
-    /// The video catalog, with an availability answer for each exact model capability.
-    /// A generic video node must not make models it cannot serve appear ready.
+    /// The video catalog, with an availability answer per entry: a node advertising the
+    /// model's exact capability, or silicon-node's generic `text-to-video` for the
+    /// models it serves. A node that then lacks the weights refuses the submit itself.
     public func videoModels() async -> [ControlAPI.VideoModel] {
         await refreshSwarmIfStale()
         return VideoCatalog.all.map { entry in

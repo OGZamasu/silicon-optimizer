@@ -349,7 +349,7 @@ enum Tools {
         Tool(
             name: "generate_video",
             description: """
-                Render a short video clip from a prompt on the node advertising that exact \
+                Render a short video clip from a prompt on a swarm node that can run that \
                 model and return the file path. Long-running: ltx2-distilled generally takes \
                 one to three minutes, wan22-ti2v-5b around ten, the uncensored LTX-2.3 merge \
                 (ltx23-uncensored: adult content allowed, clips carry audio) a few minutes, \

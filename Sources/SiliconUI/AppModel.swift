@@ -2328,11 +2328,14 @@ public final class AppModel {
     nonisolated static func isReadyVideoCapability(
         _ capability: PeerCapability, for entry: VideoEntry
     ) -> Bool {
-        // Before capabilities became model-aware, `text-to-video` meant the one model
-        // nodes could run: Wan. Keep that alias one-way so old Wan nodes still work,
-        // but never let it claim LTX or H3.
+        // silicon-node advertises one generic `text-to-video` capability and picks the
+        // model from the request's `model` field, so that capability serves every entry
+        // its /v1/text-to-video accepts (Wan, both LTX variants). A node that cannot run
+        // one of them refuses the submit with a message the app surfaces. Exact ids are
+        // for nodes that advertise per model, like the local Phosphene/LTX adapter.
         let modelMatches = capability.id == entry.capabilityID
-            || (capability.id == "text-to-video" && entry.id == VideoCatalog.wan22.id)
+            || (capability.id == VideoCatalog.genericCapabilityID
+                && entry.acceptsGenericTextToVideo)
         return capability.kind == NodeVideoRuntime.capabilityKind
             && modelMatches
             && capability.ready

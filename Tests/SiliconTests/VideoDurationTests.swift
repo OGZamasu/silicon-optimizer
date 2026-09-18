@@ -45,11 +45,22 @@ struct VideoDurationTests {
         #expect(!AppModel.isReadyVideoCapability(
             capability(id: "wan22-ti2v-5b"), for: VideoCatalog.ltx2
         ))
-        #expect(!AppModel.isReadyVideoCapability(
+        // silicon-node's one generic capability serves every model its
+        // /v1/text-to-video accepts, never the local Phosphene H3 adapter's model.
+        #expect(AppModel.isReadyVideoCapability(
             capability(id: "text-to-video"), for: VideoCatalog.ltx2
         ))
         #expect(AppModel.isReadyVideoCapability(
             capability(id: "text-to-video"), for: VideoCatalog.wan22
+        ))
+        #expect(AppModel.isReadyVideoCapability(
+            capability(id: "text-to-video"), for: VideoCatalog.ltx23Uncensored
+        ))
+        #expect(!AppModel.isReadyVideoCapability(
+            capability(id: "text-to-video"), for: VideoCatalog.hailuoH3
+        ))
+        #expect(!AppModel.isReadyVideoCapability(
+            capability(id: "text-to-video", ready: false), for: VideoCatalog.ltx2
         ))
         #expect(!AppModel.isReadyVideoCapability(
             capability(id: "ltx2-distilled", kind: "image"), for: VideoCatalog.ltx2
@@ -83,5 +94,27 @@ struct VideoDurationTests {
             among: [wrongModel, disabledH3, unreachableH3, h3]
         )
         #expect(selected?.name == "phosphene")
+    }
+
+    /// The CUDA silicon-node advertises exactly one video capability,
+    /// `{"id": "text-to-video", "kind": "video"}`, and routes wan22-ti2v-5b,
+    /// ltx2-distilled and ltx23-uncensored by the request's `model` field. All three
+    /// catalog entries must still land on it; only H3 needs the loopback adapter.
+    @Test @MainActor func siliconNodeGenericCapabilityServesItsThreeModels() {
+        var node = AppModel.PeerStatus(
+            name: "silicon-node", baseURL: "http://cuda-box:8790", reachable: true
+        )
+        node.capabilities = [.init(
+            id: "text-to-video", kind: "video", ready: true, peakGB: nil,
+            typicalSeconds: nil,
+            detail: "Models: wan22-ti2v-5b, ltx2-distilled, ltx23-uncensored.",
+            description: nil, enabled: nil, settings: [:]
+        )]
+        for entry in [VideoCatalog.wan22, VideoCatalog.ltx2, VideoCatalog.ltx23Uncensored] {
+            #expect(AppModel.videoCapableNode(for: entry, among: [node])?.name == "silicon-node")
+        }
+        #expect(AppModel.videoCapableNode(for: VideoCatalog.hailuoH3, among: [node]) == nil)
+        #expect(VideoCatalog.all.filter(\.acceptsGenericTextToVideo).map(\.id)
+            == ["wan22-ti2v-5b", "ltx2-distilled", "ltx23-uncensored"])
     }
 }
