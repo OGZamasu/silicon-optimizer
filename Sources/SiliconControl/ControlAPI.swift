@@ -838,6 +838,12 @@ public protocol ControlHost: AnyObject, Sendable {
     func chat(_ request: ControlAPI.ChatRequest) async throws -> ControlAPI.ChatResponse
     /// Typed probabilistic decisions: `POST /decide`, also at `/v1/systemone`.
     func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse
+    /// How the Jev integration is set up, what it would answer, and what it has cost:
+    /// `GET /jev`. Never carries the API key.
+    func jevStatus() async -> ControlAPI.JevStatus
+    /// `POST /jev`. The server lets only the control token reach this — changing what the
+    /// Mac spends is the owner's own business, not a paired phone's.
+    func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus
     func benchmark() async throws -> ControlAPI.BenchmarkResult
     func imageModels() async -> [ControlAPI.ImageModel]
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan

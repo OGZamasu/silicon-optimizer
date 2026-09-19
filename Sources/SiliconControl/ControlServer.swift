@@ -472,6 +472,12 @@ public actor ControlServer {
         "This device is paired for chat only. Pair it again with full control from "
             + "Settings → Silicon Buddy on the Mac."
 
+    /// Likewise: the one sentence `POST /jev` refuses with, so the fixture and the server
+    /// cannot say different things.
+    public static let jevWriteRefusal =
+        "Only this Mac can change the Jev settings. They govern what it spends, so they "
+            + "are set in Settings → TypeSafe (Jev) on the Mac."
+
     private func identify(_ request: HTTPRequest, from origin: Origin) async -> Caller? {
         guard let bearer = request.bearerToken else { return nil }
         if bearer == token { return .control }
@@ -888,6 +894,17 @@ public actor ControlServer {
                 // The second path is TypeSafe's own, so a client written for Jev can be
                 // pointed here with only its base URL changed.
                 return try .encode(await host.decide(try request.decode(ControlAPI.DecideRequest.self)))
+            case ("GET", "/jev"):
+                return try .encode(await host.jevStatus())
+            case ("POST", "/jev"):
+                // Reading what Jev costs is one thing; changing what this Mac will spend
+                // is another. A full-control phone may look, only the Mac may set.
+                guard caller == .control else {
+                    return .error(403, Self.jevWriteRefusal)
+                }
+                return try .encode(await host.updateJev(
+                    try request.decode(ControlAPI.JevUpdate.self)
+                ))
             default:
                 return .error(404, "Unknown endpoint \(request.method) \(request.path)")
             }

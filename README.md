@@ -302,6 +302,73 @@ round. Only this Mac's own token can list or revoke devices.
 
 ---
 
+## TypeSafe (Jev)
+
+Some of what this app does is not generation, it is judgment: which node should take this
+render, is this prompt asking for something it should not, which of these twelve models suits
+what you actually do. Code cannot answer those, and a chat model answers them in prose you
+then have to parse.
+
+[Jev](https://docs.typesafe.ai) is TypeSafe's System One model, and it answers them as types.
+You send a **state** — text, or a JSON object of just the fields the question needs — and a
+map of **questions**. Each question is one of three kinds: a **noul** (a yes/no, answered as
+a probability from 0 to 1), a **choice** (one label out of a set you define, with the whole
+distribution and a confidence), or a **score** (a position on an ordered rubric you write,
+probability-weighted). There is no prose in the answer and nothing to parse. Every question
+is evaluated against the state in parallel, so asking six costs one request.
+
+**Bring your own key.** This is off until you add one. Get a key from
+[console.typesafe.ai](https://console.typesafe.ai/settings/keys), paste it into
+**Settings → TypeSafe (Jev)**, and it goes into this Mac's Keychain in an item of its own.
+It is never written to `settings.json`, `jev.json`, the ledger, a log, a crash report or a
+contract fixture; it is never sent anywhere but `api.typesafe.ai`; and no route of the
+control API will return it. Phones and swarm nodes never receive it — a phone that wants a
+decision calls this Mac's `/decide`, and the Mac is what holds the credential. "Test
+connection" checks the key against `GET /v1/models`, which spends no tokens.
+
+**What is sent.** Only the state the feature in question needs, and its questions. Not your
+files, not your conversations, not your model library, not what else is running. Each feature
+keeps its questions and its thresholds together in one file so you can read the whole policy
+in one place, and the app refuses a state over 120 KB rather than sending it — past about
+that size the model loses accuracy to irrelevant detail anyway. If nothing is enabled or no
+key is stored, nothing leaves the Mac and the same questions are answered by the model you
+have loaded, one forward pass each.
+
+**The model is pinned.** The default is `jev-1.13.0`, a version, not the `jev-latest` alias.
+An alias moves when TypeSafe ships a release, and a threshold tuned against one version is
+not a promise about the next one — so you move deliberately. The picker offers `jev-latest`
+and `jev-preview` if you want them, and the ledger records which version actually answered.
+
+**What it is used for, and what is coming.** Every feature has its own switch and its own
+line in the ledger, and they all ship off except the first:
+
+| Feature | What it does | Built |
+|---|---|---|
+| Decide tool | Answers the MCP `decide` tool and `POST /decide` with calibrated probabilities | yes |
+| Guardrails | Checks a prompt or a generated file against the rules before it is acted on | coming |
+| Prompt routing | Picks which loaded model, runtime or swarm node takes a request | coming |
+| Media routing | Reads an image, video or mesh request and picks the model and settings | coming |
+| Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
+| Model recommendation | Ranks catalogue models against what this Mac is actually used for | coming |
+| Answer verification | Checks a finished answer against its evidence and flags the doubtful ones | coming |
+| Estimate calibration | Judges whether a speed or memory estimate matched what the machine did | coming |
+
+**The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
+is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,
+input tokens, latency and the answering model version, broken down by feature and by month.
+Settings shows the running line ("This month: 312 calls · 3,104,882 input tokens · about
+$0.13"), and a **monthly budget** stops every feature asking once the month's estimated spend
+reaches it. A new month is a new entry rather than a reset, so last month is still there. A
+cache collapses an identical question asked twice inside ten minutes into one call, and a
+429 or 529 is retried with backoff that honours TypeSafe's `retry-after`.
+
+`GET /jev` returns all of it — settings, per-feature availability, the ledger, never the key
+— and the `jev_status` MCP tool prints the same thing. `POST /jev` changes the settings and
+takes this Mac's own control token: a paired phone may read what Jev costs but not decide
+what it spends.
+
+---
+
 ## The math, for the curious
 
 Everything below is how the predictions work under the hood. You don't need any of it to use

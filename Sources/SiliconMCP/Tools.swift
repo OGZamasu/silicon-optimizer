@@ -235,9 +235,13 @@ enum Tools {
                 1",…]} rates on an ordered rubric and returns the expected level. Ask several \
                 questions in one call. By default the model loaded on this Mac answers (one \
                 forward pass per question, nothing leaves the machine, uncalibrated \
-                probabilities); with a TypeSafe key in Settings, provider "typesafe" asks Jev \
-                (calibrated, ~$0.0003 per call). Use it for routing, gating, scoring and \
-                classification inside a loop, not for anything that needs generated text.
+                probabilities); provider "typesafe" asks Jev instead (calibrated, ~$0.0003 \
+                per call). The Jev lane is governed by Settings → TypeSafe (Jev) on the Mac: \
+                the master switch, the decide-tool switch, the pinned model version, the \
+                state size limit and the monthly budget all apply, and every call is recorded \
+                in that ledger. If it refuses, call jev_status to see which of those said no. \
+                Use it for routing, gating, scoring and classification inside a loop, not for \
+                anything that needs generated text.
                 """,
             properties: [
                 "state": .object([
@@ -254,9 +258,23 @@ enum Tools {
                     ),
                 ]),
                 "provider": property("string", "auto (default), local, or typesafe."),
-                "model": property("string", "TypeSafe model alias, default jev-latest. Ignored locally."),
+                "model": property("string",
+                    "Ignored. The local lane uses the loaded model and the Jev lane uses the "
+                    + "version pinned in Settings → TypeSafe (Jev)."),
             ],
             required: ["state", "questions"]
+        ),
+        Tool(
+            name: "jev_status",
+            description: """
+                How the TypeSafe (Jev) integration on this Mac is set up and what it has cost \
+                this month: the master switch, the pinned model version, whether a key is \
+                stored, the per-feature switches with what each one would do, the monthly \
+                budget and the running spend. Read-only, costs nothing, and never returns the \
+                API key — it stays in this Mac's Keychain. Call it when decide with provider \
+                "typesafe" refuses, to see which switch said no.
+                """,
+            properties: [:], required: []
         ),
         Tool(
             name: "run_benchmark",
@@ -816,6 +834,9 @@ enum Tools {
                 response.provider ?? "unknown lane", response.model, response.usage.inputTokens, latency
             )
 
+        case "jev_status":
+            return describe(try await client.get("/jev") as ControlAPI.JevStatus)
+
         default:
             throw ToolError.unknown(name)
         }
@@ -936,6 +957,55 @@ enum Tools {
             return String(format: "%.1f %@", Double(value) / scale, suffix)
         }
         return "\(value) B"
+    }
+
+    /// The same facts as `GET /jev`, as a page an agent can read. Deliberately not the raw
+    /// JSON: the useful answer to "why did decide refuse?" is one of these lines.
+    static func describe(_ status: ControlAPI.JevStatus) -> String {
+        var lines = [
+            "TypeSafe (Jev): \(status.enabled ? "on" : "off") · model \(status.model) · "
+            + "API key \(status.keySet ? "stored on this Mac" : "not set")",
+        ]
+        let spend = String(format: "$%.4f", status.estimatedUSD)
+        var spendLine = "\(status.month): \(status.calls) calls · "
+            + "\(status.inputTokens) input tokens · about \(spend)"
+        if let budget = status.monthlyBudgetUSD {
+            spendLine += String(
+                format: " of a $%.2f cap (%@ left)", budget,
+                String(format: "$%.4f", max(0, status.budgetRemainingUSD ?? 0))
+            )
+        } else {
+            spendLine += " (no budget cap set)"
+        }
+        lines.append(spendLine)
+        if !status.models.isEmpty {
+            lines.append("Answered by: " + status.models.sorted { $0.key < $1.key }
+                .map { "\($0.key) ×\($0.value)" }.joined(separator: ", "))
+        }
+        lines.append("")
+        lines.append("Features:")
+        for feature in status.features {
+            let state = feature.available
+                ? "available"
+                : (feature.enabled ? "on, but not available" : "off")
+            lines.append(
+                "- \(feature.displayName) (\(feature.id)): \(state)"
+                + (feature.built ? "" : " — not built yet")
+            )
+            lines.append("  \(feature.summary)")
+            if feature.calls > 0 {
+                lines.append(String(
+                    format: "  %d calls · %d input tokens · about $%.4f this month",
+                    feature.calls, feature.inputTokens, feature.estimatedUSD
+                ))
+            }
+        }
+        lines.append("")
+        lines.append(
+            "Only the state a feature needs is sent. The key stays in this Mac's Keychain and "
+            + "is never returned by this API. Change any of this in Settings → TypeSafe (Jev)."
+        )
+        return lines.joined(separator: "\n")
     }
 
     static func describe(_ profile: ControlAPI.Profile) -> String {

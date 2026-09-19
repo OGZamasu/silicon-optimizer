@@ -5,6 +5,10 @@ import SiliconControl
 public enum SystemOneError: Error, LocalizedError, Equatable {
     case noAPIKey
     case http(Int, String)
+    /// 429 and 529 — "come back later", with the server's own `retry-after` in seconds
+    /// when it sent one. Its own case because it is the only failure worth retrying: every
+    /// other status means the request itself was wrong and will be wrong again.
+    case overloaded(status: Int, retryAfter: TimeInterval?, detail: String)
     case tooManyOptions(question: String, count: Int)
     case noAnswer(question: String)
     case notLogprobCapable
@@ -15,6 +19,10 @@ public enum SystemOneError: Error, LocalizedError, Equatable {
             "No TypeSafe API key is set. Add one in Settings → TypeSafe (Jev), or use the local lane."
         case .http(let status, let detail):
             "TypeSafe answered HTTP \(status)\(detail.isEmpty ? "." : ": \(detail)")"
+        case .overloaded(let status, _, let detail):
+            status == 429
+                ? "TypeSafe is rate limiting this key\(detail.isEmpty ? "." : ": \(detail)")"
+                : "TypeSafe is overloaded\(detail.isEmpty ? "." : ": \(detail)")"
         case .tooManyOptions(let question, let count):
             "Question \"\(question)\" has \(count) options; the local lane answers with one letter, so 26 is the most it can offer."
         case .noAnswer(let question):
@@ -79,15 +87,70 @@ public struct SystemOneClient: Sendable {
 
         let started = Date()
         let (data, response) = try await session.data(for: urlRequest)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
         guard (200..<300).contains(status) else {
-            throw SystemOneError.http(status, Self.detail(in: data))
+            throw Self.failure(status: status, headers: http, data: data)
         }
         var decoded = try JSONDecoder().decode(ControlAPI.DecideResponse.self, from: data)
         decoded.provider = baseURL == Self.typeSafeBaseURL ? "typesafe" : baseURL.host ?? "remote"
         decoded.latencyMS = Date().timeIntervalSince(started) * 1000
         return decoded
     }
+
+    /// The model names this key may send, from `GET /v1/models`. Costs no tokens, which is
+    /// what makes it the right way to check a key.
+    public func models() async throws -> [String] {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SystemOneError.noAPIKey
+        }
+        var urlRequest = URLRequest(url: baseURL.appendingPathComponent("v1/models"))
+        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        urlRequest.setValue("silicon-optimizer", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: urlRequest)
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw Self.failure(status: status, headers: http, data: data)
+        }
+        struct Listing: Decodable {
+            struct Model: Decodable { var name: String }
+            var models: [Model]
+        }
+        return try JSONDecoder().decode(Listing.self, from: data).models.map(\.name)
+    }
+
+    /// Splits "try again" from "you asked wrong", and carries the server's `retry-after`
+    /// across so a caller's backoff can honour it rather than guess.
+    static func failure(
+        status: Int, headers: HTTPURLResponse?, data: Data
+    ) -> SystemOneError {
+        let detail = detail(in: data)
+        guard status == 429 || status == 529 else { return .http(status, detail) }
+        return .overloaded(
+            status: status, retryAfter: retryAfter(in: headers), detail: detail
+        )
+    }
+
+    /// `Retry-After` is either a count of seconds or an HTTP date; both are read, and
+    /// anything else is nil so the caller falls back to its own backoff.
+    static func retryAfter(in response: HTTPURLResponse?) -> TimeInterval? {
+        guard let raw = (response?.value(forHTTPHeaderField: "Retry-After"))?
+            .trimmingCharacters(in: .whitespaces), !raw.isEmpty
+        else { return nil }
+        if let seconds = TimeInterval(raw) { return max(0, seconds) }
+        guard let date = httpDateFormatter.date(from: raw) else { return nil }
+        return max(0, date.timeIntervalSinceNow)
+    }
+
+    private static let httpDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter
+    }()
 
     /// TypeSafe's error bodies carry `detail` (a string, or FastAPI's list of validation
     /// errors). Whatever is there, shortened, beats "HTTP 422".

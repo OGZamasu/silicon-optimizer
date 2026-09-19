@@ -246,18 +246,35 @@ struct SystemOneClientTests {
 final class CapturingServer: @unchecked Sendable {
     struct Recorded { var path: String; var headers: [String: String]; var body: Data }
 
+    /// One canned answer. Statuses and headers are per-call, not per-server, because a
+    /// backoff test needs "429 with a retry-after, then 429, then 200" from one socket.
+    struct Answer {
+        var status = 200
+        var headers: [String: String] = [:]
+        var body: String
+
+        init(status: Int = 200, headers: [String: String] = [:], body: String) {
+            self.status = status
+            self.headers = headers
+            self.body = body
+        }
+    }
+
     private let listener: NWListener
     private let lock = NSLock()
-    private let status: Int
-    private let respond: @Sendable (Recorded) -> String
+    /// Given the request and how many have already been served, what to answer.
+    private let answer: @Sendable (Recorded, Int) -> Answer
     private(set) var port: UInt16 = 0
     private var recorded: [Recorded] = []
 
     var requests: [Recorded] { lock.lock(); defer { lock.unlock() }; return recorded }
 
-    init(status: Int = 200, respond: @escaping @Sendable (Recorded) -> String) throws {
-        self.status = status
-        self.respond = respond
+    convenience init(status: Int = 200, respond: @escaping @Sendable (Recorded) -> String) throws {
+        try self.init { request, _ in Answer(status: status, body: respond(request)) }
+    }
+
+    init(answer: @escaping @Sendable (Recorded, Int) -> Answer) throws {
+        self.answer = answer
         let parameters = NWParameters.tcp
         parameters.requiredInterfaceType = .loopback
         listener = try NWListener(using: parameters, on: .any)
@@ -291,9 +308,18 @@ final class CapturingServer: @unchecked Sendable {
                 guard buffer.count - bodyStart >= length else { readMore(); return }
                 let path = head.split(separator: "\r\n").first?.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
                 let record = Recorded(path: path, headers: headers, body: buffer[bodyStart..<(bodyStart + length)])
-                self.lock.lock(); self.recorded.append(record); self.lock.unlock()
-                let body = Data(self.respond(record).utf8)
-                var response = Data("HTTP/1.1 \(self.status) X\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+                self.lock.lock()
+                let served = self.recorded.count
+                self.recorded.append(record)
+                self.lock.unlock()
+                let canned = self.answer(record, served)
+                let body = Data(canned.body.utf8)
+                var responseHead = "HTTP/1.1 \(canned.status) X\r\nContent-Type: application/json\r\n"
+                    + "Content-Length: \(body.count)\r\nConnection: close\r\n"
+                for (name, value) in canned.headers.sorted(by: { $0.key < $1.key }) {
+                    responseHead += "\(name): \(value)\r\n"
+                }
+                var response = Data((responseHead + "\r\n").utf8)
                 response.append(body)
                 connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
             }

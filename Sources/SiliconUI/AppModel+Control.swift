@@ -293,9 +293,18 @@ extension AppModel: ControlHost {
             return try await whileGenerating { try await decider.decide(request) }
         }
         func typeSafe() async throws -> ControlAPI.DecideResponse {
-            // The Keychain is consulted here and not before: a local answer never needs it.
-            guard let key = TypeSafeCredential.read() else { throw SystemOneError.noAPIKey }
-            return try await SystemOneClient(apiKey: key).decide(request)
+            // Through the one door rather than straight at `SystemOneClient`: the decide
+            // tool is a Jev feature like any other, so it obeys the same master switch,
+            // model pin, size limit, budget, cache and ledger as the rest. The Keychain is
+            // consulted inside, at the moment a request is sent — a local answer, or a
+            // refusal by any of those checks, never touches it.
+            //
+            // `request.model` is deliberately dropped: the version is the owner's choice,
+            // pinned in Settings, and a tool call should not be able to move this Mac onto
+            // an alias whose answers the thresholds were never tuned against.
+            try await JevService.shared.ask(
+                .decideTool, state: request.state, questions: request.questions
+            )
         }
 
         switch provider {
@@ -303,10 +312,10 @@ extension AppModel: ControlHost {
         case "typesafe": return try await typeSafe()
         case "auto":
             if localEndpoint != nil { return try await local() }
-            if TypeSafeCredential.isSet { return try await typeSafe() }
+            if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
             throw ControlHostError.badRequest(
                 "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
-                + "API key in Settings → TypeSafe (Jev)."
+                + "API key and turn on the decide tool in Settings → TypeSafe (Jev)."
             )
         default:
             throw ControlHostError.badRequest(

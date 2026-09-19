@@ -318,6 +318,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 Link("Get a key at console.typesafe.ai", destination: URL(string: "https://console.typesafe.ai/settings/keys")!)
                     .font(.caption)
+                JevSection()
             }
 
             Section("Model library") {
@@ -1042,6 +1043,178 @@ private struct TypeSafeKeyRow: View {
             Text("The Keychain refused to store the key.")
                 .font(.caption)
                 .foregroundStyle(.red)
+        }
+    }
+}
+
+/// Everything Jev is allowed to do, and what it has cost.
+///
+/// The rows mirror `JevSettings`, which lives in a file an actor owns rather than in the
+/// app's settings object — so this view holds a copy, writes through `JevService` and reads
+/// the result back. Optimistic: the toggle moves at once and the reload confirms it, because
+/// a switch that waits for a file write feels broken.
+private struct JevSection: View {
+    @State private var settings = JevSettings()
+    @State private var month = JevLedger.monthKey()
+    @State private var totals = JevLedger.Month()
+    @State private var keySet = TypeSafeCredential.isSet
+    @State private var connection: String?
+    @State private var connectionFailed = false
+    @State private var testing = false
+    @State private var budgetText = ""
+    @State private var saveError: String?
+
+    var body: some View {
+        Group {
+            Toggle("Use Jev", isOn: Binding(
+                get: { settings.enabled },
+                set: { value in apply { $0.enabled = value } }
+            ))
+
+            Picker("Model", selection: Binding(
+                get: { settings.model },
+                set: { value in apply { $0.model = value } }
+            )) {
+                ForEach(JevService.allowedModels, id: \.self) { model in
+                    Text(model == JevService.pinnedModel ? "\(model) (pinned)" : model)
+                        .tag(model)
+                }
+            }
+            Text(
+                "Pinned to a version on purpose. `jev-latest` and `jev-preview` move when "
+                + "TypeSafe ships a release, and thresholds tuned against one version are not "
+                + "promises about the next one."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Button(testing ? "Testing…" : "Test connection") { testConnection() }
+                    .disabled(testing || !keySet)
+                if let connection {
+                    Text(connection)
+                        .font(.caption)
+                        .foregroundStyle(connectionFailed ? .red : .secondary)
+                        .textSelection(.enabled)
+                } else if !keySet {
+                    Text("Add a key first.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ForEach(JevFeature.allCases, id: \.self) { feature in
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(feature.displayName, isOn: Binding(
+                        get: { settings.isOn(feature) },
+                        set: { value in apply { $0.features[feature] = value } }
+                    ))
+                    .disabled(!feature.isBuilt)
+                    Text(
+                        feature.isBuilt
+                            ? feature.summary
+                            : "Coming. \(feature.summary)"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            LabeledContent {
+                TextField(
+                    "Monthly budget", text: $budgetText, prompt: Text("No cap")
+                )
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { commitBudget() }
+            } label: {
+                Text("Monthly budget (USD)")
+            }
+            Text(
+                "Press return to save. Once the month's estimated spend reaches the cap, every "
+                + "feature stops asking Jev until the next month or a higher cap."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Text(spendLine)
+                .font(.callout)
+                .monospacedDigit()
+
+            if let saveError {
+                Text(saveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            Text(
+                "Only the state each feature needs is sent, nothing else. Your key stays in the "
+                + "Keychain on this Mac; phones and the swarm never receive it."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .task { await reload() }
+    }
+
+    private var spendLine: String {
+        let cost = totals.total.estimatedUSD
+        // Two decimals would read "$0.00" for a month of real use, and "$0" for none.
+        let money = cost == 0 ? "$0" : String(format: cost < 0.01 ? "$%.4f" : "$%.2f", cost)
+        return "This month: \(totals.total.calls.formatted()) calls · "
+            + "\(totals.total.inputTokens.formatted()) input tokens · about \(money)"
+    }
+
+    private func reload() async {
+        settings = await JevService.shared.settings()
+        month = JevLedger.monthKey()
+        totals = await JevService.shared.ledger().month(month)
+        keySet = TypeSafeCredential.isSet
+        budgetText = settings.monthlyBudgetUSD.map { String(format: "%.2f", $0) } ?? ""
+    }
+
+    /// The same edit twice: once to the copy on screen, once to the file the actor owns.
+    /// The service normalises, so the reload afterwards is what makes the row honest when
+    /// it clamped something.
+    private func apply(_ change: @escaping @Sendable (inout JevSettings) -> Void) {
+        change(&settings)
+        Task {
+            do {
+                try await JevService.shared.update(change)
+                saveError = nil
+            } catch {
+                saveError = "Could not save the Jev settings: \(error.localizedDescription)"
+            }
+            await reload()
+        }
+    }
+
+    private func commitBudget() {
+        let trimmed = budgetText.trimmingCharacters(in: .whitespaces)
+        // An empty field is "no cap", which is a real answer and not an error.
+        let budget = trimmed.isEmpty ? nil : Double(trimmed.replacingOccurrences(of: "$", with: ""))
+        guard trimmed.isEmpty || budget != nil else {
+            saveError = "That budget is not a number."
+            return
+        }
+        apply { $0.monthlyBudgetUSD = budget }
+    }
+
+    private func testConnection() {
+        testing = true
+        connection = nil
+        Task {
+            do {
+                let names = try await JevService.shared.testConnection()
+                connectionFailed = false
+                connection = names.isEmpty
+                    ? "Reached TypeSafe; it listed no models."
+                    : "Reached TypeSafe: \(names.joined(separator: ", "))"
+            } catch {
+                connectionFailed = true
+                connection = error.localizedDescription
+            }
+            testing = false
         }
     }
 }
