@@ -119,6 +119,21 @@ public enum GatewayAPI {
     /// what was sent should say so somewhere a client can see without reading the app's log.
     public static let prunedHeader = "X-Silicon-Pruned"
 
+    /// Whether a request for this model may have history taken out of it at all.
+    ///
+    /// Answered here, in pure code the gateway can run on its own thread, so an ordinary
+    /// request to a provider never crosses to the main actor to be told "not that one" —
+    /// the same reason `isAutoModelID` is the gateway's own vocabulary. Only models running
+    /// on hardware the owner owns qualify: a provider's window is large, its history is
+    /// what the bill is for, and sending someone else's model less than the client wrote is
+    /// not a decision this app should be making quietly.
+    public static func isPrunableTarget(_ modelID: String) -> Bool {
+        switch parseModelID(modelID) {
+        case .local, .node: true
+        case .cloud, nil: false
+        }
+    }
+
     // MARK: - Model listing
 
     /// One entry in `GET /v1/models`. The `silicon` extension block carries what the OpenAI

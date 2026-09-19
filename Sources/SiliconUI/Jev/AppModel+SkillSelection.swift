@@ -29,10 +29,11 @@ public enum SkillSelector {
             self.shortlist = shortlist
         }
 
-        /// The one line that goes into the turn's system prompt, or nil when nothing was
-        /// judged at all — in which case the engine's prompt is left exactly as it was.
+        /// The one line that goes into the turn's system prompt, or nil when there is
+        /// nothing to say — in which case the engine's prompt is left exactly as it was,
+        /// byte for byte, and the model's KV cache over it survives the turn.
         public var promptBlock: String? {
-            calls == 0 ? nil : SkillSelectionPolicy.promptBlock(suggestion)
+            suggestion.map(SkillSelectionPolicy.promptBlock)
         }
     }
 
@@ -152,20 +153,44 @@ extension AppModel {
     /// the target has to be running on hardware the owner owns, the owner has to have asked
     /// for this, the model's window has to be known, and the prompt has to be crowding it.
     public func gatewayPrune(modelID: String, body: Data) async -> GatewayPruning? {
-        // Never a provider. Pruning is for a small window on a machine you own; a cloud
-        // model's window is large, its history is what you are paying for, and quietly
-        // sending a provider less than the client wrote is not this app's call to make.
-        switch GatewayAPI.parseModelID(modelID) {
-        case .local, .node: break
-        case .cloud, nil: return nil
-        }
-        let settings = await JevService.shared.settings()
-        guard settings.pruneToolHistory else { return nil }
-        guard let window = gatewayContextWindow(of: modelID) else { return nil }
+        await gatewayPrune(modelID: modelID, body: body, using: .shared)
+    }
+
+    /// `using` is the seam a test points at a loopback server instead of TypeSafe.
+    func gatewayPrune(
+        modelID: String, body: Data, using service: JevService
+    ) async -> GatewayPruning? {
+        let settings = await service.settings()
+        let window = gatewayContextWindow(of: modelID)
+        guard Self.shouldConsiderPruning(
+            modelID: modelID, pruneToolHistory: settings.pruneToolHistory,
+            contextWindow: window
+        ), let window else { return nil }
         return await ContextPruner.prune(
             body: body, contextWindow: window,
-            aboveFraction: settings.pruneAboveFraction
+            aboveFraction: settings.pruneAboveFraction,
+            using: service
         )
+    }
+
+    /// The three things code knows before anything is asked, as one predicate.
+    ///
+    /// Pure and separate so the gates can be checked on their own, without a model library
+    /// behind them — and so that none of them can be removed without a test noticing, which
+    /// is not true of three `guard`s that all happen to return nil.
+    ///
+    /// - The target must run on hardware the owner owns. A cloud model's window is large,
+    ///   its history is what the bill is for, and quietly sending a provider less than the
+    ///   client wrote is not this app's call to make. The gateway checks this too, before it
+    ///   ever crosses to the main actor; this is the second lock on the same door, the same
+    ///   arrangement `gatewayRoute` has for the virtual model id.
+    /// - The owner must have asked for it. Off is the default.
+    /// - The window has to be known. A node model that is not serving yet reports none, and
+    ///   an unknown window is not a window to measure a fraction of.
+    static func shouldConsiderPruning(
+        modelID: String, pruneToolHistory: Bool, contextWindow: Int?
+    ) -> Bool {
+        GatewayAPI.isPrunableTarget(modelID) && pruneToolHistory && contextWindow != nil
     }
 
     /// The target model's context window, as the gateway's own model list reports it. Nil for
@@ -231,29 +256,77 @@ extension AppModel {
         )
     }
 
+    /// The app's own half of the extension's `RELEVANCE_TIMEOUT_MS`.
+    ///
+    /// The extension gives up after twenty seconds and the turn goes ahead. Past that point
+    /// an answer from here is not late, it is *wrong*: the id it quotes belongs to a dialog
+    /// Pi has already resolved, and the transcript row it would annotate belongs to a turn
+    /// that has already been answered. So this side stops too, at the same figure, and two
+    /// Jev deadlines of `SkillSelectionQuestions.deadlineSeconds` each fit inside it with
+    /// room for the round trips.
+    static let piSuggestionTimeout: TimeInterval = 20
+
     /// Answers one held turn, and puts what was suggested into the transcript.
     ///
-    /// The annotation goes on the user's own row — the turn the suggestion is about — and a
-    /// notice row says it out loud, because a suggestion that changed what the model was told
-    /// and left no trace is the kind of help nobody can audit.
+    /// The annotation goes on the turn the suggestion was made *about*, found by the request
+    /// id stamped on it when the dialog arrived — not on whatever the newest user row happens
+    /// to be when the answer lands. Those are different rows the moment somebody types again
+    /// while Jev is thinking, and hanging one turn's suggestion on the next turn is a lie
+    /// about what the model was told.
+    ///
+    /// A notice row says it out loud as well, because a suggestion that changed the system
+    /// prompt and left no trace is the kind of help nobody can audit. Neither row is written
+    /// when there is nothing to suggest, or when this gave up.
     func suggestPiTools(
         _ request: PiSkillSuggestionRequest, using service: JevService = .shared
     ) async {
-        let outcome = await SkillSelector.suggest(
-            turn: SkillSelectionTurn(
-                turn: request.turn, lastToolResult: request.lastToolResult
-            ),
-            roster: request.roster,
-            using: service
-        )
+        // Ordinarily already done by the event handler, synchronously, the instant the
+        // dialog arrived; this covers a caller that came straight here.
+        stampPiSuggestionTurn(request.requestID)
+
+        let work = Task { [request] () -> SkillSelector.Outcome? in
+            await SkillSelector.suggest(
+                turn: SkillSelectionTurn(
+                    turn: request.turn, lastToolResult: request.lastToolResult
+                ),
+                roster: request.roster,
+                using: service
+            )
+        }
+        // The same relay the streaming verdict uses, for the same reason: `await
+        // work.value` does not come back early when the waiter is cancelled, so a deadline
+        // has to be a mailbox both sides post to rather than a race in a task group.
+        guard let outcome = await VerdictRelay.result(
+            of: work, within: .seconds(Self.piSuggestionTimeout)
+        ) else {
+            // Pi has stopped listening, or is about to. Answering `cancelled` is what tells
+            // the extension to leave the system prompt alone; nothing goes in the transcript,
+            // because nothing reached the model.
+            answerPiSuggestion(request.requestID, block: nil)
+            return
+        }
+
         answerPiSuggestion(request.requestID, block: outcome.promptBlock)
         guard let suggestion = outcome.suggestion else { return }
-        piItems.last { $0.kind == .user }?.suggestion = suggestion.name
+        piItems.first(where: { $0.suggestionRequestID == request.requestID })?
+            .suggestion = suggestion.name
         piItems.append(PiItem(
             kind: .notice,
             text: "Jev suggests the \(suggestion.kind.rawValue) \(suggestion.name) for this "
                 + "turn — \(suggestion.reason). Pi can ignore it."
         ))
+    }
+
+    /// Marks the transcript row this suggestion request is about, at the moment the request
+    /// arrives rather than when its answer lands.
+    ///
+    /// Synchronous and called from the event handler on purpose: between the dialog arriving
+    /// and the suggestion coming back, the person can type again, and then "the newest user
+    /// row" is somebody else's turn. Idempotent, so calling it twice for one request is
+    /// harmless.
+    func stampPiSuggestionTurn(_ requestID: String) {
+        guard !piItems.contains(where: { $0.suggestionRequestID == requestID }) else { return }
+        piItems.last { $0.kind == .user }?.suggestionRequestID = requestID
     }
 
     /// Sends the answer back. An empty or absent block is `cancelled`, which the extension

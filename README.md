@@ -873,12 +873,15 @@ something anyway, because a list of names invites a guess.
 
 With **Tool selection and pruning** on, two Jev requests go in front of that decision, in the
 shape of TypeSafe's own skill-suggestion recipe. The first reads the whole roster cheaply —
-one line each, the first sentence of what each entry says about itself — and asks, in the
+as many whole sentences of each entry's own description as fit on a line — and asks, in the
 same request, two things about the turn: whether it wants an action taken on your files, this
 Mac, the web or the models installed here rather than an answer in words, and whether it is a
 follow-up to the last tool result. The second re-reads only the top three, now at full
 length, with one yes/no per candidate asking whether it does the specific thing that was
 asked. Either step can come back empty-handed, and both regularly do.
+
+Neither call can hold up your turn: each has a few seconds, and past that the turn goes ahead
+with no suggestion. The answer still lands and is cached, so the next turn gets it for free.
 
 At most one name comes out, and it goes into one extra line after the engine's own system
 prompt:
@@ -890,10 +893,25 @@ actually asked for.
 </tool_relevance>
 ```
 
-The roster above it is never touched, so any prefix caching over it still holds. The line
-says it can be ignored, because pushing harder wins compliance on the wrong suggestions too —
-and a turn with nothing to suggest still sends a sentence saying so, since an agent's own
-roster usually tells it to err on the side of loading and silence would leave that unopposed.
+The roster above it is never touched. The line says it can be ignored, because pushing harder
+wins compliance on the wrong suggestions too.
+
+**On a turn with nothing to suggest, nothing is added at all** — not even a sentence saying
+so. That is a deliberate departure from the cookbook, which sends one so an agent's own "err
+on the side of loading" instruction is not left unopposed; it is measuring a cloud model
+behind an explicit cache breakpoint, where the extra sentence is free. Here the model is
+usually served on this Mac, where the prompt is one prefix and the KV cache is reused from
+the first byte that differs — so a sentence that changes every turn throws away the cache
+over the whole system prompt every turn, and you pay for it in time to first token on a
+machine that has none to spare. Staying silent keeps the prompt byte-identical on the
+majority of turns and pays that cost only when there is something to say.
+
+Names from the roster are sanitised before they reach that line: angle brackets and control
+characters are stripped and the name is capped. A skill is a file on disk whose frontmatter
+names it, and an agent can write one — a name carrying `</tool_relevance>` and a newline
+would otherwise close the block early and write the rest of itself into the system prompt
+with the app's authority behind it.
+
 The questions, the thresholds and the policy are in one file,
 `Sources/SiliconUI/Jev/SkillSelectionQuestions.swift`.
 
@@ -908,13 +926,15 @@ request carries a timeout, and a suggestion that does not arrive costs nothing b
 suggestion — the opposite of the guardrail beside it, which has no timeout because a gate
 that times out into "allowed" is not a gate.
 
-**Codex** is not wired, and the blocker is the roster rather than the seam: `turn/start`
-takes an `additionalContext` array, but Codex never tells a client which tools the model has —
-`shell` and `apply_patch` are internal and the rest come from MCP servers in Codex's own
-config. Ranking a roster we had to guess at would be worse than not ranking one. The
-**DeepSeek Harness** is not wired either, and there the blocker is plumbing: its plugin does
-see the whole `tools` array on every request, but it runs in a Node process and the control
-API has no route it could ask through — the same missing route the guardrail note in
+**Codex** is not wired, for two reasons. Half its roster is knowable — this app writes
+Codex's `config.toml`, MCP entry and all — but its built-in `shell` and `apply_patch` are
+compiled in and the protocol has no way to list a thread's tools, so a ranking would be made
+against a list missing the two tools Codex reaches for most. And the per-turn seam that
+exists, `turn/start`'s `additionalContext`, is experimental with an entry shape this app has
+not pinned; guessing it would mean a failed turn rather than a missing hint. The **DeepSeek
+Harness** is not wired either, and there the blocker is plumbing: its plugin does see the
+whole `tools` array on every request, but it runs in a Node process and the control API has
+no route it could ask through — the same missing route the guardrail note in
 `AppModel+Harness.swift` describes, and one route would serve both. Both files say what it
 would take.
 
@@ -933,12 +953,16 @@ The ones that come back a confident **no** are replaced by a one-line stub,
 pretending the tool returned nothing, because a model that reads "(no output)" runs it again.
 
 What is never dropped: your messages, the assistant's replies, the system prompt, and the two
-newest tool results, which are what the turn in flight is actually about. At most forty
-results are ever asked about in one request. A shrug drops nothing — the middle of a yes/no
-is the model saying it does not know — and neither does a missing answer, Jev being off, the
-budget being spent or TypeSafe being unreachable. Models at a provider are never pruned at
-all: their windows are large, their history is what you are paying for, and quietly sending
-someone else's model less than you wrote is not this app's call to make.
+newest tool results, which are what the turn in flight is actually about. A result that
+carries anything but text — a screenshot a tool returned — is never a candidate either, since
+a stub there would tell the model a picture it can see is missing. At most forty results are
+ever asked about in one request. A shrug drops nothing — the middle of a yes/no is the model
+saying it does not know — and neither does a missing answer, Jev being off, the budget being
+spent or TypeSafe being unreachable. The whole decision has a four-second deadline, so a slow
+or rate-limited TypeSafe never holds a chat request open: past it the request goes out whole.
+Models at a provider are never pruned at all — their windows are large, their history is what
+you are paying for, and quietly sending someone else's model less than you wrote is not this
+app's call to make.
 
 You are told when it happens. A buffered reply carries `X-Silicon-Pruned: 2`; a streamed one
 says it in a comment line (`: silicon-pruned: 2`), for the same reason routing does — its head

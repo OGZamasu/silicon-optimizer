@@ -42,6 +42,10 @@ extension AppModel {
         /// suggestion was made about. Nil on every other row, and on a turn where nothing
         /// was suggested — which is most of them.
         public var suggestion: String?
+        /// Which suggestion request this row is the turn for, stamped when the request
+        /// arrives. How `suggestPiTools` finds the row again afterwards: by then the newest
+        /// user row may be a different turn, typed while Jev was thinking.
+        var suggestionRequestID: String?
 
         init(
             kind: Kind, text: String, running: Bool = false,
@@ -245,6 +249,10 @@ extension AppModel {
             let request = Self.parsePiSuggestionRequest(
                 event["placeholder"] as? String ?? "", requestID: id
             )
+            // Stamped here, synchronously, before anything is awaited: the turn this is
+            // about is the one on screen now, not whichever one is newest when the answer
+            // comes back a second or two later.
+            stampPiSuggestionTurn(id)
             Task { await suggestPiTools(request) }
         case .cancel:
             piSend(["type": "extension_ui_response", "id": id, "cancelled": true])

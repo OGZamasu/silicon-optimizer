@@ -371,19 +371,28 @@ extension AppModel {
     // turn is running and which would replace Codex's own prompt rather than append to it —
     // the wrong instrument for one extra line.
     //
-    // The roster does not. Codex never tells a client which tools the model has: `shell` and
-    // `apply_patch` are internal, and anything else comes from MCP servers configured in
-    // Codex's own `config.toml`, which this app does not write and does not read. The
-    // protocol has no "list this thread's tools" request, and the item events only name a
-    // tool *after* the model has already chosen it — which is the decision this feature
-    // exists to get in front of. Ranking a roster we had to guess at would be worse than not
-    // ranking one, because the wrong suggestion is more persuasive than none: the cookbook
-    // this implements measures that directly, and its own numbers show a confident wrong
-    // suggestion breaking turns the agent had right on its own.
+    // The roster is only half there, and it is the wrong half that is missing. This app does
+    // write Codex's `config.toml` — `CodexRuntime.ensureConfigured` regenerates it at every
+    // start, including the `silicon-optimizer` MCP entry — so the MCP side of the roster is
+    // knowable here without asking Codex anything. What is not knowable is Codex's own
+    // built-ins: `shell` and `apply_patch` are compiled in, the protocol has no "list this
+    // thread's tools" request, and the item events only name a tool *after* the model has
+    // chosen it, which is the decision this feature exists to get in front of. A roster with
+    // the two tools Codex reaches for most missing from it would rank the MCP entries against
+    // nothing, and a suggestion made against half a list is a confident wrong answer — the
+    // cookbook this implements measures that directly, and its own numbers show a confident
+    // wrong suggestion breaking turns the agent had right on its own.
     //
-    // Revisit when the app-server exposes the thread's tool list, or when Codex grows skills
-    // the client can enumerate. The shape of the work at that point is small: build
-    // `[SkillCandidate]` from that list, call `SkillSelector.suggest`, and pass
+    // The second reason is that `additionalContext` is experimental. It appears in this
+    // build's capability list as `turn/start.additionalContext`, its entries are an
+    // `AdditionalContextEntry` whose fields this app has not pinned against a published
+    // schema, and Codex refuses a `turn/start` it cannot decode. Pinning a guess to a
+    // per-turn parameter would mean a failed turn rather than a missing hint, which is the
+    // one failure mode this feature is not allowed to have.
+    //
+    // Revisit when the app-server enumerates the thread's tools, or when the entry shape is
+    // published. The work is then small: build `[SkillCandidate]` from that list plus the
+    // MCP entries this app already writes, call `SkillSelector.suggest`, and pass
     // `SkillSelectionPolicy.promptBlock` as one `additionalContext` entry on `turn/start` —
     // appended after Codex's own prompt, never replacing it, so its prefix caching holds.
 

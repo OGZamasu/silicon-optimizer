@@ -156,6 +156,9 @@ export default async function (pi: ExtensionAPI) {
       const answer = await ctx.ui.input(RELEVANCE_MARKER, question, {
         timeout: RELEVANCE_TIMEOUT_MS,
       });
+      // Nothing to say, or nobody answered in time. Returning undefined leaves the system
+      // prompt exactly as Pi built it, byte for byte — which is the common case, and the
+      // reason a local model's KV cache over the prompt survives most turns.
       if (typeof answer !== "string" || answer.trim().length === 0) return;
 
       // Appended, never substituted: the roster above it is byte-identical on every turn,

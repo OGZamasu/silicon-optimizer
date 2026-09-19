@@ -121,13 +121,25 @@ struct PiChatView: View {
     private func itemView(_ item: AppModel.PiItem) -> some View {
         switch item.kind {
         case .user:
-            HStack {
-                Spacer(minLength: 60)
-                Text(item.text)
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .background(.blue.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+            VStack(alignment: .trailing, spacing: 3) {
+                HStack {
+                    Spacer(minLength: 60)
+                    Text(item.text)
+                        .textSelection(.enabled)
+                        .padding(10)
+                        .background(.blue.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+                }
+                // What the turn was pointed at, when it was pointed at anything. A line in
+                // the system prompt that changed what the model reached for should be
+                // visible to the person whose turn it was, not only in a log.
+                if let suggestion = item.suggestion {
+                    Label("Jev suggested \(suggestion)", systemImage: "wand.and.stars")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 4)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .bottom, spacing: 6) {

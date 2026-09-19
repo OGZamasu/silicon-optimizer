@@ -356,8 +356,10 @@ public actor GatewayServer {
                 await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(modelID)"))
             }
             // A streamed reply's head is already out, so the count goes in a comment for the
-            // same reason the routed model does.
-            let pruning = await host.gatewayPrune(modelID: modelID, body: request.body)
+            // same reason the routed model does. The target is checked here, before the hop
+            // to the app: a request bound for a provider is never prunable, and answering
+            // that in pure code keeps it off the main actor.
+            let pruning = await pruneIfPrunable(modelID, body: request.body)
             if let pruning {
                 await stream.send(
                     GatewayAPI.sseComment("silicon-pruned: \(pruning.count)")
@@ -396,7 +398,7 @@ public actor GatewayServer {
             let routing = await routeIfVirtual(requestedID, body: request.body)
             let modelID = routing?.modelID ?? requestedID
             let isNode = Self.isNodeModel(modelID)
-            let pruning = await host.gatewayPrune(modelID: modelID, body: request.body)
+            let pruning = await pruneIfPrunable(modelID, body: request.body)
             let entry = await ledger?.begin(
                 endpoint: "chat", modelID: modelID, stream: false,
                 promptChars: promptChars, promptPreview: preview
@@ -461,6 +463,15 @@ public actor GatewayServer {
     private func routeIfVirtual(_ id: String, body: Data) async -> GatewayRoutingDecision? {
         guard GatewayAPI.isAutoModelID(id) else { return nil }
         return await host.gatewayRoute(modelID: id, body: body)
+    }
+
+    /// Offers a request for pruning, but only for a target that could ever be pruned.
+    ///
+    /// The check is here rather than only in the host so that a request to a provider — or
+    /// to an id this build does not recognise — never crosses to the main actor at all.
+    private func pruneIfPrunable(_ id: String, body: Data) async -> GatewayPruning? {
+        guard GatewayAPI.isPrunableTarget(id) else { return nil }
+        return await host.gatewayPrune(modelID: id, body: body)
     }
 
     static func isNodeModel(_ id: String) -> Bool {

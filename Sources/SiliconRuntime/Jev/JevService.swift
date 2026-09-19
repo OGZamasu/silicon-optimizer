@@ -612,6 +612,10 @@ public enum JevError: Error, LocalizedError, Equatable {
     case noKey
     case budgetExhausted(spentUSD: Double, budgetUSD: Double)
     case tooLarge(bytes: Int, limit: Int)
+    /// The caller's deadline passed before an answer did. The request itself was *not*
+    /// cancelled — see `ask(_:state:questions:cacheKey:deadline:)` — so this means "not in
+    /// time", not "not sent".
+    case timedOut(JevFeature, seconds: TimeInterval)
 
     public var errorDescription: String? {
         switch self {
@@ -628,6 +632,11 @@ public enum JevError: Error, LocalizedError, Equatable {
             String(
                 format: "That state is %.1f KB; Jev is sent at most %.1f KB. Filter it down to what the question needs.",
                 Double(bytes) / 1024, Double(limit) / 1024
+            )
+        case .timedOut(let feature, let seconds):
+            String(
+                format: "Jev did not answer %@ within %.1fs, so this one went ahead without it.",
+                feature.displayName, seconds
             )
         }
     }
@@ -861,12 +870,26 @@ public actor JevService {
     ///
     /// - Parameter cacheKey: replaces the derived key when the caller knows two states are
     ///   the same decision — a file whose path matters but whose modification date does not.
+    /// - Parameter deadline: how long this caller is prepared to wait, in seconds. Nil — the
+    ///   default, and what routing and the guardrail use — means as long as the retry policy
+    ///   takes, which on two 429s with a 30-second `retry-after` each is over a minute.
+    ///
+    ///   That is fine for a screening a person is waiting on a card for, and wrong for a
+    ///   feature sitting in front of somebody's chat request: a deadline is how a caller says
+    ///   "past this point, going ahead without an answer is the better outcome".
+    ///
+    ///   A deadline does **not** cancel the request. Another feature may be joined to the
+    ///   same bytes, the month has already been reserved for them, and the answer is worth
+    ///   having even late — so the request finishes on its own, records its cost, and lands
+    ///   in the cache, where the next ask of the same question finds it immediately. Only
+    ///   *this* caller stops waiting, with `JevError.timedOut`.
     @discardableResult
     public func ask(
         _ feature: JevFeature,
         state: JSONContent,
         questions: [String: ControlAPI.SystemOneQuestion],
-        cacheKey: String? = nil
+        cacheKey: String? = nil,
+        deadline: TimeInterval? = nil
     ) async throws -> ControlAPI.DecideResponse {
         let settings = settings()
         guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
@@ -905,6 +928,12 @@ public actor JevService {
         // case, not the exotic one, and the cache cannot help until the first lands.
         if let existing = inFlight[key] {
             debug("\(feature.rawValue) joined a call already in flight")
+            // A joiner's deadline is its own: the request it joined was started by somebody
+            // with different patience, and waiting out their retries is exactly what this
+            // caller said it would not do.
+            if let deadline, await !Self.settles(existing, within: deadline) {
+                throw JevError.timedOut(feature, seconds: deadline)
+            }
             return try await existing.value
         }
 
@@ -919,6 +948,21 @@ public actor JevService {
             try await self.send(request, apiKey: apiKey, feature: feature)
         }
         inFlight[key] = work
+
+        if let deadline, await !Self.settles(work, within: deadline) {
+            // Abandoned, not cancelled. The bookkeeping the lines below would have done —
+            // clearing the in-flight slot, releasing the reservation, caching the answer,
+            // recording the cost — is handed to a task that waits for the real end.
+            let settings = settings
+            Task { [weak self] in
+                await self?.settleAbandoned(
+                    key: key, reservation: reservation, work: work, feature: feature,
+                    ledgerURL: ledgerURL, cacheMinutes: settings.cacheMinutes
+                )
+            }
+            debug("\(feature.rawValue) gave up waiting after \(deadline)s")
+            throw JevError.timedOut(feature, seconds: deadline)
+        }
 
         let response: ControlAPI.DecideResponse
         do {
@@ -939,6 +983,77 @@ public actor JevService {
         // billing it twice would be a lie the budget then acts on.
         record(feature: feature, response: response, to: ledgerURL)
         return response
+    }
+
+    /// Whether a request finished inside the caller's patience. True means settled — with an
+    /// answer or with an error, which the caller's own `do`/`catch` then sorts out.
+    ///
+    /// A mailbox both sides can post to, rather than a task group. `await work.value` does
+    /// not return early when the task awaiting *it* is cancelled — that is the documented
+    /// behaviour, and it is the whole reason this cannot be written as a group with
+    /// `cancelAll`: the group would sit on the slow child anyway and the deadline would do
+    /// nothing at all. This is the same shape `VerdictRelay` uses on the UI side, for the
+    /// same reason.
+    ///
+    /// Nothing here cancels `work`. It is unstructured and may be shared with a joined
+    /// caller, and the answer is worth having even late — see `ask`.
+    static func settles(
+        _ work: Task<ControlAPI.DecideResponse, any Error>, within seconds: TimeInterval
+    ) async -> Bool {
+        guard seconds > 0 else { return false }
+        let slot = Mailbox()
+        let forward = Task {
+            _ = try? await work.value
+            await slot.post(true)
+        }
+        let timer = Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            await slot.post(false)
+        }
+        defer { forward.cancel(); timer.cancel() }
+        return await slot.take()
+    }
+
+    /// First writer wins, and an answer that arrives before anyone is listening is kept
+    /// rather than dropped: on a cache-warm path the request can finish before the caller
+    /// reaches `take()`.
+    private actor Mailbox {
+        private var settled: Bool?
+        private var waiting: CheckedContinuation<Bool, Never>?
+
+        func post(_ value: Bool) {
+            guard settled == nil else { return }
+            settled = value
+            waiting?.resume(returning: value)
+            waiting = nil
+        }
+
+        func take() async -> Bool {
+            if let settled { return settled }
+            return await withCheckedContinuation { waiting = $0 }
+        }
+    }
+
+    /// Finishes the bookkeeping for a request whose caller stopped waiting.
+    ///
+    /// Everything the ordinary path does at the end, done late: the slot is cleared so the
+    /// next identical ask starts a fresh one, the reservation is released so the budget is
+    /// not permanently short of it, and — when the answer did land — it is cached and its
+    /// cost recorded, because it was really spent either way.
+    private func settleAbandoned(
+        key: String, reservation: Double,
+        work: Task<ControlAPI.DecideResponse, any Error>,
+        feature: JevFeature, ledgerURL: URL, cacheMinutes: Int
+    ) async {
+        let response = try? await work.value
+        inFlight.removeValue(forKey: key)
+        reservedUSD = max(0, reservedUSD - reservation)
+        guard let response else { return }
+        if cacheMinutes > 0 {
+            cache[key] = CacheEntry(response: response, storedAt: Date())
+            pruneCache(window: Double(cacheMinutes) * 60)
+        }
+        record(feature: feature, response: response, to: ledgerURL)
     }
 
     /// Bytes to tokens for the budget reservation only. One token per byte is the worst
