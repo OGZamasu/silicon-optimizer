@@ -429,22 +429,10 @@ extension AppModel: ControlHost {
             return try await whileGenerating { try await decider.decide(asked) }
         }
         func typeSafe() async throws -> ControlAPI.DecideResponse {
-            // Through the one door rather than straight at `SystemOneClient`: the decide
-            // tool is a Jev feature like any other, so it obeys the same master switch,
-            // model pin, size limit, budget, cache and ledger as the rest. The Keychain is
-            // consulted inside, at the moment a request is sent — a local answer, or a
-            // refusal by any of those checks, never touches it.
-            //
-            // `request.model` is deliberately dropped: the version is the owner's choice,
-            // pinned in Settings, and a tool call should not be able to move this Mac onto
-            // an alias whose answers the thresholds were never tuned against.
-            //
             // Waited on rather than assumed: a request arriving in the first milliseconds of
             // launch must not be told there is no key on a Mac that has one.
             await JevBootstrap.ready()
-            return try await JevService.shared.ask(
-                .decideTool, state: request.state, questions: request.questions
-            )
+            return try await Self.decideViaTypeSafe(request)
         }
 
         switch provider {
@@ -500,7 +488,31 @@ extension AppModel: ControlHost {
         return await service.settings().isOn(.calibration)
     }
 
-    /// The escalation itself, billed to the decide tool.
+    /// The `typesafe` lane: the request put to Jev, billed to the decide tool.
+    ///
+    /// Through the one door rather than straight at `SystemOneClient`: the decide tool is a
+    /// Jev feature like any other, so it obeys the same master switch, model pin, size
+    /// limit, budget, cache and ledger as the rest. The Keychain is consulted inside, at
+    /// the moment a request is sent — a refusal by any of those checks never touches it.
+    ///
+    /// `request.model` is deliberately dropped: the version is the owner's choice, pinned
+    /// in Settings, and a tool call should not be able to move this Mac onto an alias
+    /// whose answers the thresholds were never tuned against.
+    ///
+    /// A free function with the service as a parameter, like `cascadeMayEscalate`, and for
+    /// the same reason: `decide` cannot be driven by a test, and the ledger line this bills
+    /// is the whole point of the lane. Inlined in `decide`, a mutation that billed it to
+    /// `.calibration` survived the suite — the only billing test could reach `escalate`.
+    static func decideViaTypeSafe(
+        _ request: ControlAPI.DecideRequest, using service: JevService = .shared
+    ) async throws -> ControlAPI.DecideResponse {
+        try await service.ask(
+            .decideTool, state: request.state, questions: request.questions
+        )
+    }
+
+    /// The escalation itself: the `typesafe` lane over the questions the local model was
+    /// unsure of, so it is billed to the decide tool.
     ///
     /// Not to `.calibration`: that line is for calibration runs, and an owner reading the
     /// ledger to find out what `decide` costs should find it under the decide tool. Gating
@@ -509,9 +521,7 @@ extension AppModel: ControlHost {
     static func escalate(
         _ request: ControlAPI.DecideRequest, using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
-            .decideTool, state: request.state, questions: request.questions
-        )
+        try await decideViaTypeSafe(request, using: service)
     }
 
     public func benchmark() async throws -> ControlAPI.BenchmarkResult {
