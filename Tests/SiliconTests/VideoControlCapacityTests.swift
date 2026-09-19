@@ -194,7 +194,7 @@ private actor WaitingVideoHost: ControlHost {
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel] { [] }
     func installed() async -> [ControlAPI.InstalledModel] { [] }
-    func recommend(category: String?) async -> ControlAPI.CatalogModel? { nil }
+    func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? { nil }
     func plan(_ request: ControlAPI.PlanRequest) async throws -> ControlAPI.Plan { throw TestControlError.unexpectedRoute }
     func install(_ request: ControlAPI.LoadRequest) async throws -> String { throw TestControlError.unexpectedRoute }
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status { throw TestControlError.unexpectedRoute }

@@ -111,12 +111,35 @@ public enum ControlAPI {
         /// Set when the entry needs a runtime the app has to check for (a fork, say) —
         /// whether it is present, and what to do if not.
         public var runtimeNote: String?
+        /// Why this model was picked for the job the caller described — "needs vision and
+        /// tool calling; fits at Q4_K_M at ~28 tok/s". Only `POST /recommend` fills it in,
+        /// and only when Jev's model recommendation is enabled; `/catalog` and a plain
+        /// `GET /recommend` never do. Optional on the wire, so an older client decodes a
+        /// newer app's answer.
+        public var reason: String?
+        /// What the caller should know about the ranking itself rather than about this
+        /// model: that the order is hardware fit because Jev could not separate the
+        /// shortlist, that Jev preferred something the weights demoted, that nothing on
+        /// the list met a requirement, that the description was trimmed before it was sent.
+        ///
+        /// Kept apart from `reason` so a client can show one without the other: `reason` is
+        /// a caption under a model's name, `note` is a line about the whole answer.
+        public var note: String?
+        /// Whether the order is the one Jev's judgment produced. False when hardware fit
+        /// did the ordering instead; absent when nothing was asked.
+        public var followedJev: Bool?
+        /// The rest of the top three for that job, best first, each with its own `reason`
+        /// and no `alternatives` of its own. Absent rather than empty when there was no
+        /// task to rank against.
+        public var alternatives: [CatalogModel]?
 
         public init(
             id: String, name: String, author: String, license: String, summary: String,
             category: String, parameters: String, activeParameters: String?, isMoE: Bool,
             capabilities: [String], rating: Int, maxContext: Int, quantizations: [String],
-            recommendation: Recommendation?, featured: Bool? = nil, runtimeNote: String? = nil
+            recommendation: Recommendation?, featured: Bool? = nil, runtimeNote: String? = nil,
+            reason: String? = nil, note: String? = nil, followedJev: Bool? = nil,
+            alternatives: [CatalogModel]? = nil
         ) {
             self.id = id
             self.name = name
@@ -134,6 +157,32 @@ public enum ControlAPI {
             self.recommendation = recommendation
             self.featured = featured
             self.runtimeNote = runtimeNote
+            self.reason = reason
+            self.note = note
+            self.followedJev = followedJev
+            self.alternatives = alternatives
+        }
+    }
+
+    /// `POST /recommend`: which model should do *this* job.
+    ///
+    /// A POST rather than a query parameter, and this is not style. The description is
+    /// somebody's prose about their own work; a URL is the one part of a request that ends
+    /// up in a shell history, a proxy log and an `/events` line, and it is also the part a
+    /// caller is most likely to paste somewhere. A body is read once and kept nowhere. It
+    /// is also the honest shape for what this route now is: `GET /recommend` reads and
+    /// advises and spends nothing, while ranking against a task spends the owner's money,
+    /// so the two want different verbs and different scopes.
+    public struct RecommendRequest: Codable, Sendable {
+        /// The same filter `GET /recommend` takes: General, Coding, Reasoning, Vision,
+        /// Small & Fast, Embeddings. Absent means everything but embeddings.
+        public var category: String?
+        /// What the model is actually for, in the owner's own words.
+        public var task: String
+
+        public init(category: String? = nil, task: String) {
+            self.category = category
+            self.task = task
         }
     }
 
@@ -870,7 +919,10 @@ public protocol ControlHost: AnyObject, Sendable {
     func status() async -> ControlAPI.Status
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel]
     func installed() async -> [ControlAPI.InstalledModel]
-    func recommend(category: String?) async -> ControlAPI.CatalogModel?
+    /// `GET /recommend`. With `task`, the strongest model for that job — Jev judges what
+    /// the job needs and code combines it with hardware fit. Without one, the strongest
+    /// model this machine can run, which is what this route has always answered.
+    func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel?
     func plan(_ request: ControlAPI.PlanRequest) async throws -> ControlAPI.Plan
     func install(_ request: ControlAPI.LoadRequest) async throws -> String
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status

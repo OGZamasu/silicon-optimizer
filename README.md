@@ -378,7 +378,7 @@ line in the ledger, and they all ship off except the first:
 | Prompt routing | Picks which loaded model, runtime or swarm node takes a request | yes |
 | Media routing | Reads an image, video or mesh request and picks the model and settings | yes |
 | Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
-| Model recommendation | Ranks catalogue models against what this Mac is actually used for | coming |
+| Model recommendation | Ranks the models this Mac can run against the job you describe | yes |
 | Answer verification | Checks a finished answer against its evidence and flags the doubtful ones | coming |
 | Estimate calibration | Judges whether a speed or memory estimate matched what the machine did | coming |
 
@@ -592,6 +592,86 @@ they are for, their clip lengths and sizes, and whether each runs on this Mac or
 machine. Never a node's name, never whether it is ready (code owns that), never the queue,
 never your files. A long prompt is cut to 4,000 characters first: the tenth paragraph of a
 shot list does not change which lane renders the first nine, and it costs accuracy to send it.
+
+### Recommendation
+
+"What should I run?" has always been answered here by arithmetic: the app plans every
+catalogue model against this Mac's memory and bandwidth and hands back the strongest one
+that fits. That is the right answer to *what fits*. It is not the right answer to *what you
+are going to do with it* — a 70B that reasons beautifully is the wrong recommendation for
+somebody reading scanned invoices, and the arithmetic has no way to know.
+
+So say what it is for:
+
+```
+POST /recommend  {"task": "reading scanned handwritten field notes into markdown"}
+```
+
+or give `recommend_model` a `task`. A body rather than `?task=`, and that is not style: a
+job description is your own prose about your own work, and a URL is the part of a request
+that survives in shell histories and proxy logs. `GET /recommend?task=…` is refused with a
+400 pointing here rather than quietly ignored.
+
+**It costs money, so it takes full control.** Plain `GET /recommend` reads and advises and
+spends nothing, so a paired phone keeps it. `POST /recommend` asks Jev once per distinct
+description, and there is no spending cap unless you set one — so it is closed to chat-only
+devices, with the same refusal every other closed route gives.
+
+Code picks the shortlist: the top sixteen by hardware fit, **plus a reserved slot for the
+best-fitting model that can see, that can call tools, that will answer an adult request,
+that loads a long context here, and for the fastest one on the machine**. Without those
+reservations a Mac with a deep library fills all sixteen slots with general text models,
+and a job that needs to read a photograph is asked about a list with nothing on it that
+can — the model cannot choose an option it was never offered.
+
+Each candidate is described by traits read out of the catalogue and out of this Mac's own
+memory plan: what it can do, **the context this computer will actually load it at** (not
+the catalogue ceiling, which is a fact about the model and a fiction about your machine),
+the best quantization that fits here and what that is predicted to generate at, its rating,
+whether it is already downloaded. Numbers reach Jev as named buckets — "very long", "fast"
+— because `jev-1.13` reads those far more reliably than it reads `262144`.
+
+Jev is asked nine questions about the **job**, never about a model: eight nouls — does this
+need vision, code, tool calling, a language other than English, a very long context,
+answers most models refuse, quick replies, real multi-step reasoning — and a score for how
+demanding it is. Then a Choice over the shortlist, with each option written against its
+rivals so two entries of the same family do not read as the same product.
+
+Code does the rest, and the policy is a plain function you can read in one file:
+
+- **Veto.** A confident yes on vision, tool calling, uncensored answers or a long context
+  removes every model that cannot do it, whatever Jev's Choice said — a noul is its own
+  absolute judgment with its own gate. A noul that lands in the middle removes nothing:
+  half a requirement should not delete four models.
+- **Weigh.** `0.55 × Jev's probability + 0.30 × hardware fit + 0.15 × speed`, and the speed
+  term counts only when the job says a person is waiting and is not demanding work. Someone
+  who asked for a proof will wait for it. A difficulty score too spread to mean anything is
+  not read at all.
+- **Explain.** When the weights overrule Jev's own pick — which is what the fit term is for
+  — the answer says so: "Jev preferred Qwen3.8 27B; it is ranked lower because it runs less
+  well on this Mac." So does an ordering that fell back to hardware fit because the Choice
+  was too flat to separate the shortlist, a requirement nothing on the list could meet, and
+  a description that was trimmed before it was sent.
+
+You get the best three. Each carries a `reason` — "needs vision and tool calling; fits at
+Q4_K_M at ~28 tok/s" — with the runners-up in `alternatives`; the answer as a whole carries
+a `note` saying why the list is this list and `followedJev` saying whether the order is
+Jev's judgment or the arithmetic. All four fields are new and optional: `/catalog` never
+sets them, `GET /recommend` never sets them, and an older client decodes the answer
+unchanged.
+
+**What is sent** is the job description and a rough performance sketch of those sixteen
+models on this machine — their abilities, their context and speed buckets here, and whether
+each is already downloaded. No file, no conversation, no path, no machine name, nothing
+about a swarm peer. The description is trimmed to 4 KB, because past a paragraph it stops
+being a question and starts being a document, and irrelevant detail costs `jev-1.13`
+accuracy; when it is trimmed the answer tells you. Because the sketch includes what this
+Mac predicts *right now*, the same question asked while something large is running is a
+different request, misses the cache and is paid for again — the price of judging models on
+what they will do here rather than on a spec sheet.
+
+Turn **Model recommendation** off, or leave it off, and `POST /recommend` is answered the
+way `GET` always was: the hardware-fit pick, with nothing asked and nothing spent.
 
 **The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
 is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,

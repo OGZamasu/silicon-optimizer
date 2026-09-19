@@ -623,9 +623,14 @@ public actor ControlServer {
         /// nothing and costs the machine minutes — so the set is written out, and a route
         /// added later is closed to chat-only devices until someone decides otherwise.
         ///
-        /// `/recommend`, `/v1/node` and `/plan` are in it for the opposite reason: they read
-        /// and advise and spend nothing, and a phone that cannot ask "would this fit here?"
-        /// is blinkered for no gain.
+        /// `GET /recommend`, `/v1/node` and `/plan` are in it for the opposite reason: they
+        /// read and advise and spend nothing, and a phone that cannot ask "would this fit
+        /// here?" is blinkered for no gain.
+        ///
+        /// `POST /recommend` is deliberately *not* in it, and that is the whole distinction:
+        /// ranking the catalogue against a described job asks Jev, which costs the owner
+        /// money per distinct description, and a paired phone is not who decides what this
+        /// Mac spends. The free verb stays open; the paid one takes full control.
         static let chatOnlyRoutes: Set<String> = [
             "GET /health", "GET /status", "GET /profile", "GET /metrics", "GET /catalog",
             "GET /installed", "GET /swarm", "GET /video/models", "GET /image/models",
@@ -646,6 +651,12 @@ public actor ControlServer {
         guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
         return .error(403, chatOnlyRefusal)
     }
+
+    /// Why a task in the query string is refused. Exported so the contract fixture and the
+    /// server cannot drift into promising different sentences.
+    public static let taskBelongsInAPost =
+        "Send the task in the body of POST /recommend, not in the URL. "
+        + "GET /recommend takes only a category."
 
     /// Exported in the contract fixtures, so it is written once and read from there.
     public static let chatOnlyRefusal =
@@ -1035,7 +1046,26 @@ public actor ControlServer {
                     onlyRunnable: request.query["onlyRunnable"] != "false"
                 ))
             case ("GET", "/recommend"):
-                guard let pick = await host.recommend(category: request.query["category"]) else {
+                // A job description does not belong in a URL — it is the owner's prose
+                // about their own work, and a URL is the part of a request that survives
+                // in histories and logs. It is also the paid half of this route, and this
+                // verb is the free one a chat-only phone may reach. Refused with somewhere
+                // to go rather than silently ignored, which would look like the feature
+                // being off.
+                guard request.query["task"] == nil else {
+                    return .error(400, Self.taskBelongsInAPost)
+                }
+                guard let pick = await host.recommend(
+                    category: request.query["category"], task: nil
+                ) else {
+                    return .error(404, "No model in the catalog fits this machine.")
+                }
+                return try .encode(pick)
+            case ("POST", "/recommend"):
+                let body = try request.decode(ControlAPI.RecommendRequest.self)
+                guard let pick = await host.recommend(
+                    category: body.category, task: body.task
+                ) else {
                     return .error(404, "No model in the catalog fits this machine.")
                 }
                 return try .encode(pick)

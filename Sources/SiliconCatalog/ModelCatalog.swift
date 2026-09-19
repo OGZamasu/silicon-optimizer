@@ -135,7 +135,8 @@ public enum ModelCatalog {
                 lora: orcaBonsaiAdapter
             ),
         ],
-        rating: 4, maxContext: 262_144
+        rating: 4, maxContext: 262_144,
+        isUncensored: true
     )
 
     /// The adapter from github.com/Continuum-AI-Corp/OrcaBonsai-27B-Uncensored, pinned to

@@ -140,12 +140,22 @@ public struct ModelEntry: Sendable, Codable, Hashable, Identifiable {
     /// Editorial spotlight: shown first in the browser with a Featured badge, and marked in
     /// the control API. One or two entries at most, or the word stops meaning anything.
     public var isFeatured: Bool
+    /// This entry answers adult, explicit or otherwise transgressive requests that a
+    /// typical instruction-tuned model refuses.
+    ///
+    /// Declared rather than inferred. It was read out of the name and the refusal-ablation
+    /// adapter before, and both of those are true of this catalogue today and neither is a
+    /// promise: a rename drops the trait silently, and an adapter that is not an ablation
+    /// would add it silently. A model that will answer what others will not is a thing the
+    /// catalogue should say out loud, once, where the person adding an entry has to decide.
+    public var isUncensored: Bool
 
     public init(
         id: String, name: String, author: String, license: String, summary: String,
         category: ModelCategory, capabilities: ModelCapabilities, format: ModelFormat,
         shape: ModelShape, variants: [ModelVariant], rating: Int, maxContext: Int,
-        requiresRecentRuntime: Bool = false, isFeatured: Bool = false
+        requiresRecentRuntime: Bool = false, isFeatured: Bool = false,
+        isUncensored: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -161,6 +171,7 @@ public struct ModelEntry: Sendable, Codable, Hashable, Identifiable {
         self.maxContext = maxContext
         self.requiresRecentRuntime = requiresRecentRuntime
         self.isFeatured = isFeatured
+        self.isUncensored = isUncensored
     }
 
     public var isMoE: Bool { shape.isMoE }

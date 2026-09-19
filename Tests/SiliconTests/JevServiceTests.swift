@@ -116,11 +116,13 @@ struct JevSettingsTests {
         for feature in JevFeature.allCases where feature != .decideTool {
             #expect(!settings.isOn(feature), "\(feature.rawValue) should ship off")
         }
-        // The roadmap is visible; a feature is marked built as its own PR lands it.
+        // The roadmap is visible; a feature is marked built as its own PR lands it, and
+        // a branch that flips this list has to keep the others' flips when it merges.
         #expect(JevFeature.decideTool.isBuilt)
         #expect(JevFeature.routing.isBuilt)
         #expect(JevFeature.mediaRouting.isBuilt)
         #expect(JevFeature.guardrails.isBuilt)
+        #expect(JevFeature.recommendation.isBuilt)
         // Guardrails ship off like the rest, and so does letting Jev answer for you.
         #expect(!settings.isOn(.guardrails))
         #expect(settings.autoApproveSafeToolCalls == false)

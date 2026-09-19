@@ -1121,7 +1121,7 @@ actor BuddyTestHost: ControlHost {
     }
     func installed() async -> [ControlAPI.InstalledModel] { [] }
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel] { [] }
-    func recommend(category: String?) async -> ControlAPI.CatalogModel? { nil }
+    func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? { nil }
     func unload() async {}
     func videoModels() async -> [ControlAPI.VideoModel] { [] }
     func imageModels() async -> [ControlAPI.ImageModel] { [] }

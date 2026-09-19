@@ -44,7 +44,8 @@ struct ContractExportTests {
             "GET /conversations", "POST /conversations", "GET /conversations/{id}",
             "POST /conversations/{id}/messages",
             "GET /health", "GET /profile", "GET /metrics", "GET /status", "GET /installed",
-            "GET /catalog", "GET /recommend", "POST /plan", "POST /install", "POST /load",
+            "GET /catalog", "GET /recommend", "POST /recommend",
+            "POST /plan", "POST /install", "POST /load",
             "POST /unload", "POST /chat", "POST /decide", "POST /v1/systemone",
             "GET /jev", "POST /jev", "GET /jev/guardrails/recent",
             "POST /benchmark", "GET /swarm", "GET /v1/node",
@@ -82,6 +83,9 @@ struct ContractExportTests {
                 || route.errors[400] != nil, "\(route.method) \(route.path)")
         }
         #expect(errors("GET", "/recommend")[404] != nil)
+        // The free verb says where the paid one is, in the server's own words.
+        #expect(errors("GET", "/recommend")[400] == ControlServer.taskBelongsInAPost)
+        #expect(errors("POST", "/recommend")[403] == ControlServer.chatOnlyRefusal)
         #expect(errors("POST", "/video/generate")[429]?.contains("/video/queue") == true)
         #expect(errors("POST", "/chat/stream")[429]?.contains("Close one") == true)
         #expect(errors("POST", "/conversations/{id}/messages")[409] != nil)
@@ -109,6 +113,9 @@ struct ContractExportTests {
             Self.routes.filter { $0.scopes.contains("chat") }.map { "\($0.method) \($0.path)" }
         )
         #expect(chatRoutes.contains("GET /recommend"))
+        // Reading and advising is free; ranking against a job asks Jev and costs money, so
+        // a paired phone may do the first and not the second.
+        #expect(!chatRoutes.contains("POST /recommend"))
         #expect(chatRoutes.contains("GET /v1/node"))
         #expect(chatRoutes.contains("POST /plan"))
         #expect(!chatRoutes.contains("POST /load"))
@@ -311,12 +318,14 @@ struct ContractExportTests {
             "",
             "`full` and `chat` are the two device scopes. A `chat` device may use the routes",
             "that only read or advise — `/health`, `/status`, `/profile`, `/metrics`,",
-            "`/catalog`, `/installed`, `/recommend`, `/plan`, `/swarm`, `/v1/node`,",
+            "`/catalog`, `/installed`, `GET /recommend`, `/plan`, `/swarm`, `/v1/node`,",
             "`/image/models`, `/mesh/models`, `/video/models`, `/video/queue`, `/events` —",
             "plus `/chat`, `/chat/stream`, `/decide`, `/v1/systemone` and every",
             "`/conversations` route. Everything else answers 403: installing, loading,",
             "unloading, benchmarking, rendering, queue control, the device list and the",
-            "Jev settings. `POST /jev` goes further and takes the Mac's own control token:",
+            "Jev settings — and `POST /recommend`, which ranks the catalogue against a",
+            "described job by asking Jev and so spends the owner's money.",
+            "`POST /jev` goes further and takes the Mac's own control token:",
             "it governs what this Mac spends, so a paired phone may read it but not set it.",
             "",
             "| Method | Path | Auth | What it does |",
@@ -516,6 +525,19 @@ struct ContractExportTests {
             method: "GET", path: "/recommend", auth: "device",
             summary: "The strongest model this machine can actually run.",
             response: .of(exampleCatalogModel),
+            errors: [
+                400: ControlServer.taskBelongsInAPost,
+                404: "No model in the catalog fits this machine.",
+            ]
+        ),
+        Route(
+            method: "POST", path: "/recommend", auth: "device",
+            summary: "The best model for a described job, with the runners-up and why. "
+                + "Asks Jev, so it costs the owner money and takes full control.",
+            request: .of(ControlAPI.RecommendRequest(
+                category: "Vision", task: "Reading scanned handwritten field notes into markdown."
+            )),
+            response: .of(exampleRecommendedModel),
             errors: [404: "No model in the catalog fits this machine."]
         ),
         Route(
@@ -880,6 +902,23 @@ struct ContractExportTests {
             rationale: "The strongest coding model inside this Mac's budget."
         )
     )
+
+    /// What `GET /recommend?task=…` adds to the same shape: why this one, and the rest of
+    /// the top three. Both are optional and absent without a task, which is why the
+    /// `/catalog` fixture above is the plain one — a generated client has to handle both.
+    static let exampleRecommendedModel: ControlAPI.CatalogModel = {
+        var model = exampleCatalogModel
+        model.reason = "needs code and tool calling; fits at Q4_K_M at ~89 tok/s"
+        model.note = "Jev preferred Qwen3.8 27B; it is ranked lower because it runs less "
+            + "well on this Mac."
+        model.followedJev = true
+        var runnerUp = exampleCatalogModel
+        runnerUp.id = "qwen3.8-27b"
+        runnerUp.name = "Qwen3.8 27B"
+        runnerUp.reason = "needs code and tool calling; fits at Q6_K at ~24 tok/s"
+        model.alternatives = [runnerUp]
+        return model
+    }()
 
     static let exampleImageRequest = ControlAPI.ImageRequest(
         prompt: "A tram climbing Alfama at dawn", modelID: "flux2-klein",

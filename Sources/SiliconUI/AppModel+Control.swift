@@ -91,14 +91,101 @@ extension AppModel: ControlHost {
             }
     }
 
-    public func recommend(category: String?) async -> ControlAPI.CatalogModel? {
+    /// The strongest model this Mac can run — and, when the caller says what the job is,
+    /// the strongest model *for that job*.
+    ///
+    /// Hardware fit is computed first either way, because it is what decides which models
+    /// are candidates at all: a model that will not run here cannot be recommended for
+    /// anything, and the ranking it produces is the fallback whenever Jev is off, has no
+    /// key, is out of budget, or fails. A task with the feature disabled is answered exactly
+    /// as it was before this existed, and costs nothing.
+    public func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? {
         let filter = category.flatMap { ModelCategory(rawValue: $0) }
         let pool = filter.map { wanted in ModelCatalog.all.filter { $0.category == wanted } }
             ?? ModelCatalog.all.filter { $0.category != .embedding }
-        guard let pick = autoConfigurator().rank(
+        let ranked = autoConfigurator().rank(
             catalog: pool, otherAppsInUse: memoryUsedByOtherApps
-        ).first else { return nil }
-        return describe(pick.entry, recommendation: pick)
+        )
+        guard let pick = ranked.first else { return nil }
+
+        guard let job = RecommendationQuestions.trimmedTask(task) else {
+            return describe(pick.entry, recommendation: pick)
+        }
+        await JevBootstrap.ready()
+        guard await JevService.shared.isAvailable(.recommendation) else {
+            return describe(pick.entry, recommendation: pick)
+        }
+        guard let answer = await taskRanking(job, over: ranked) else {
+            return describe(pick.entry, recommendation: pick)
+        }
+        return answer
+    }
+
+    /// Asks Jev what the job needs, applies `RecommendationPolicy`, and turns the top three
+    /// into one answer with its runners-up attached.
+    ///
+    /// Returns nil — rather than throwing — on any failure. A recommendation is advice; an
+    /// expired budget, a 500 from TypeSafe or a question id that no longer matches should
+    /// leave the caller with the hardware-fit answer, not with an error where a model name
+    /// was expected.
+    private func taskRanking(
+        _ job: (text: String, truncated: Bool), over ranked: [AutoConfigurator.Recommendation]
+    ) async -> ControlAPI.CatalogModel? {
+        // Fit order first, then the reservations, so a job that needs to see is offered
+        // something that can even on a Mac whose sixteen best fits are all text models.
+        let all = ranked.map {
+            RecommendationCandidate(
+                entry: $0.entry, recommendation: $0,
+                isInstalled: isInstalled($0.entry, quantization: $0.quantization)
+            )
+        }
+        let candidates = RecommendationQuestions.shortlist(from: all)
+        guard !candidates.isEmpty else { return nil }
+
+        let byID = Dictionary(ranked.map { ($0.entry.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let fitScores = RecommendationPolicy.normalizedFit(
+            Dictionary(
+                candidates.compactMap { candidate in
+                    byID[candidate.id].map { (candidate.id, $0.score) }
+                },
+                uniquingKeysWith: max
+            )
+        )
+
+        let outcome: RecommendationPolicy.Outcome
+        do {
+            let answers = try await RecommendationQuestions.ask(
+                task: job.text, candidates: candidates
+            )
+            outcome = try RecommendationPolicy.rank(
+                answers: answers, candidates: candidates, fitScores: fitScores
+            )
+        } catch {
+            return nil
+        }
+
+        let described: [ControlAPI.CatalogModel] = outcome.ranked.compactMap { place in
+            guard let fit = byID[place.id] else { return nil }
+            var model = describe(fit.entry, recommendation: fit)
+            model.reason = place.reason
+            return model
+        }
+        guard var best = described.first else { return nil }
+
+        var notes = outcome.notes
+        if job.truncated {
+            // Said rather than swallowed: a six-page description was judged on its first
+            // four kilobytes, and somebody wondering why the answer ignored the last page
+            // should be told the last page was never sent.
+            notes.append(
+                "The description was trimmed to "
+                + "\(RecommendationQuestions.maximumTaskBytes / 1024) KB before it was sent."
+            )
+        }
+        best.note = notes.isEmpty ? nil : notes.joined(separator: " ")
+        best.followedJev = outcome.followedJev
+        best.alternatives = Array(described.dropFirst())
+        return best
     }
 
     // MARK: - Plan
