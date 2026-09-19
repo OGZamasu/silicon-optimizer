@@ -839,8 +839,13 @@ struct ContractExportTests {
                 polledSecondsAgo: 4,
                 // This Mac's own tailnet address, not a peer's: the block says where
                 // *we* can be reached, which is the half of the swarm a node cannot see.
+                //
+                // 100.64.0.9 is the placeholder the rest of this export uses, and it is a
+                // placeholder on purpose: this fixture is committed to a public repository
+                // and copied into the companion-app repositories, and any other address in
+                // the tailscale range would read as somebody's real machine.
                 exposure: .init(
-                    requested: true, listening: true, address: "100.115.9.42",
+                    requested: true, listening: true, address: "100.64.0.9",
                     port: 8788, problem: nil
                 )
             ))
