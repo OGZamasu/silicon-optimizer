@@ -518,6 +518,66 @@ one thing that could not work. Revisit if the harness exposes its session as dat
 Every one of these is in the contract fixtures `ContractExportTests` exports, so the phone
 apps are generated from them rather than from this section.
 
+### Models for your phone
+
+When the Mac is out of reach — asleep, switched off, or simply not answering — Silicon
+Buddy's Android app is meant to answer by itself, with a small model running on the phone.
+This is the Mac's half of that: the phone gets its model **through the Mac**, and that is
+deliberate. The phone stays tailnet-only and
+never talks to Hugging Face, or to anything else on the internet. The Mac downloads the
+pinned file, checks it, and hands it to the phone over your tailnet.
+
+Two models are on offer, each pinned to an exact file — repository, commit, size and SHA-256
+— so what reaches the phone is precisely what was chosen:
+
+| Model | File | Size | Licence | On a Galaxy S24 Ultra (llama.cpp b11053, CPU, hot and charging) |
+| --- | --- | --- | --- | --- |
+| **Qwen3.5 2B** — the default | `bartowski/Qwen_Qwen3.5-2B-GGUF` @ `7d26695`, `Qwen_Qwen3.5-2B-Q4_0.gguf` | 1.30 GB | Apache-2.0 | ≈ 2.4 s to the first word of a 300-token question, then 17–19 tokens/s |
+| **Gemma 4 E2B** — larger, slower | `google/gemma-4-E2B-it-qat-q4_0-gguf` @ `675cff4`, `gemma-4-E2B_q4_0-it.gguf` | 3.35 GB | Apache-2.0 | ≈ 3.3 s, then 14–15 tokens/s, settling to 7.5 tokens/s on a long answer |
+
+Each entry also tells the phone how to run it — threads for reading the prompt and for
+writing (6/4 for Qwen, 4/6 for Gemma), a 4,096-token context, the free memory it wants
+(about 2.5 GB and 4.2 GB), and that the chat template is rendered with thinking off.
+
+**Getting one onto the phone.** `GET /ondevice/models` lists both, pinned, with the state of
+the Mac's copy: `absent`, `downloading` (with a `fraction`), `ready` or `failed` (with a
+`reason` to show and a `failure` to act on — `diskFull`, `checksumMismatch`, `network`,
+`server`, `interrupted` or `other`). `POST /ondevice/models/{id}/prepare` has the Mac fetch it: **202**
+while it is on its way, **200** once it is ready, and asking again never restarts or doubles
+a download. A Mac without room says so before a byte moves — a **507** with the numbers — by
+the same rule as every other download here: 10.7 GB of the startup volume stays free. A
+download cut off partway keeps what arrived and resumes from there; one whose bytes do not
+match the pinned SHA-256 is deleted, not kept. Progress reaches the phone on `/events` as
+`download` frames whose `id` is `ondevice:` and the model's id, and the last one is either
+`fraction: 1` or the reason it stopped. Settings → Silicon Buddy → **Models for your phone**
+shows the same states, with Download and Remove, so the Mac can fetch one ahead of time.
+
+`GET /ondevice/models/{id}/file` then serves it, and only once the Mac has it **verified** —
+before that it is a 409. It is the same file machinery as `GET /media/{id}`: sent in chunks
+rather than read into memory, with the slow-reader deadline, `Accept-Ranges`, `206` for a
+`Range` and `416` with the real length for one past the end. The `ETag` is the SHA-256 and so
+is `X-Content-SHA256`. A phone that drops off halfway through 3.35 GB asks for
+`Range: bytes=N-` and gets exactly the rest; sending `If-Range` with the tag guarantees it is
+the rest of the *same* file, and the phone checks the digest again at the end.
+
+"Ready" means the digest matched, not that a file of the right size is sitting there: a
+download that passes its checksum leaves a small marker saying which bytes were verified, and
+a file that has changed since, or that nobody verified, is hashed again before it is served.
+
+**Where they live.** `~/Library/Application Support/SiliconOptimizer/PhoneModels/` — on the
+startup volume, next to the rest of the app's own files, with a `.part` file beside a model
+while it downloads. Never in the Mac's model library, never in the catalogue, and never
+loaded here: the Mac only passes them along. To take them back, press **Remove** beside the
+model in Settings → Silicon Buddy, send `DELETE /ondevice/models/{id}` (which also stops a
+download in flight and deletes the partial), or delete the folder while the app is closed.
+
+**Full control only, and never a node.** A chat-only device gets the same 403 it gets for
+`POST /load`, and the swarm token gets its own — fetching gigabytes onto this Mac for a
+phone is the owner's call. The `{id}` is a catalogue key and nothing else: a path, a file
+name or a traversal in its place is the same 404, and nothing from a request ever becomes a
+path. These are public files, so the Mac fetches them **without any Hugging Face token** —
+yours stays in the Keychain, and the download never asks for it.
+
 ---
 
 ## TypeSafe (Jev)

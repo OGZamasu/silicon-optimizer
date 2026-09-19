@@ -110,7 +110,7 @@ public actor ModelDownloader {
             }
 
             try await downloadFile(
-                file, from: resolution.repository, to: destination,
+                file, from: resolution.repository, at: resolution.revision, to: destination,
                 alreadyCompleted: completedBytes, grandTotal: totalBytes,
                 fileIndex: index, fileCount: queue.count, meter: meter, onProgress: onProgress
             )
@@ -159,6 +159,7 @@ public actor ModelDownloader {
     private func downloadFile(
         _ file: HuggingFaceClient.RepoFile,
         from repository: String,
+        at revision: String?,
         to destination: URL,
         alreadyCompleted: Bytes,
         grandTotal: Bytes,
@@ -173,9 +174,17 @@ public actor ModelDownloader {
             existingBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         }
 
-        let remote = overrideBase.map {
-            $0.appendingPathComponent(repository).appendingPathComponent(file.path)
-        } ?? HuggingFaceClient.downloadURL(repository: repository, file: file.path)
+        let remote = overrideBase.map { base in
+            // The stand-in server sees the same `resolve/<commit>/` segment the Hub would,
+            // so a test can prove the pin was asked for rather than `main`.
+            let root = base.appendingPathComponent(repository)
+            return revision.map {
+                root.appendingPathComponent("resolve").appendingPathComponent($0)
+            }.map { $0.appendingPathComponent(file.path) }
+                ?? root.appendingPathComponent(file.path)
+        } ?? HuggingFaceClient.downloadURL(
+            repository: repository, file: file.path, revision: revision ?? "main"
+        )
         var request = URLRequest(url: remote)
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if existingBytes > 0 {
