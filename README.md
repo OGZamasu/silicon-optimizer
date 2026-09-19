@@ -378,7 +378,7 @@ line in the ledger, and they all ship off except the first:
 | Guardrails | Screens an agent's tool call before it runs and turns that into run, ask, or refuse | yes |
 | Prompt routing | Picks which loaded model, runtime or swarm node takes a request | yes |
 | Media routing | Reads an image, video or mesh request and picks the model and settings | yes |
-| Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
+| Tool selection and pruning | Suggests which tool or skill fits the turn, and which history a small model still needs | yes |
 | Model recommendation | Ranks the models this Mac can run against the job you describe | yes |
 | Answer verification | Checks a finished answer against the prompt, and re-runs the flagged ones on a stronger model | yes |
 | Decision calibration | Measures the local decision lane against Jev on a labelled set, and tunes when `auto` falls back to Jev | yes |
@@ -862,6 +862,93 @@ The Mac's own Chat tab is **not** verified in this milestone. Verification lives
 control API — `POST /chat`, the MCP `chat` tool, and the two streaming routes the phones
 use — and the app's own chat window goes through a different path that this does not touch
 yet.
+
+### Tool selection and pruning
+
+An agent with a large toolbox decides what to reach for on almost no information. The roster
+reaches it as an index — one truncated line per entry — and at that width the tool that
+*renders* a clip reads like the one that *queues* twenty of them. Ask for twenty and it may
+pick the wrong one. Ask a question that wants an answer in words and it may reach for
+something anyway, because a list of names invites a guess.
+
+With **Tool selection and pruning** on, two Jev requests go in front of that decision, in the
+shape of TypeSafe's own skill-suggestion recipe. The first reads the whole roster cheaply —
+one line each, the first sentence of what each entry says about itself — and asks, in the
+same request, two things about the turn: whether it wants an action taken on your files, this
+Mac, the web or the models installed here rather than an answer in words, and whether it is a
+follow-up to the last tool result. The second re-reads only the top three, now at full
+length, with one yes/no per candidate asking whether it does the specific thing that was
+asked. Either step can come back empty-handed, and both regularly do.
+
+At most one name comes out, and it goes into one extra line after the engine's own system
+prompt:
+
+```
+<tool_relevance>
+Relevant to the current request: queue_videos. Ignore this if it does not fit what the user
+actually asked for.
+</tool_relevance>
+```
+
+The roster above it is never touched, so any prefix caching over it still holds. The line
+says it can be ignored, because pushing harder wins compliance on the wrong suggestions too —
+and a turn with nothing to suggest still sends a sentence saying so, since an agent's own
+roster usually tells it to err on the side of loading and silence would leave that unopposed.
+The questions, the thresholds and the policy are in one file,
+`Sources/SiliconUI/Jev/SkillSelectionQuestions.swift`.
+
+**Where it is wired.** **Pi**, deeply. Its extension API has the exact seam for this:
+`before_agent_start` fires after you submit and before the agent loop, and what it returns
+replaces the system prompt for that turn. The extension this app writes into Pi's workspace
+uses it, builds the roster from this app's whole MCP toolbox plus Pi's own built-in tools and
+whatever skills Pi loaded, and asks the Mac through the same stdin/stdout channel the
+guardrail uses. What was suggested is written on the turn in the Chat tab, so a suggestion
+that changed what the model was told leaves a trace you can read. It fails **open**: the
+request carries a timeout, and a suggestion that does not arrive costs nothing but the
+suggestion — the opposite of the guardrail beside it, which has no timeout because a gate
+that times out into "allowed" is not a gate.
+
+**Codex** is not wired, and the blocker is the roster rather than the seam: `turn/start`
+takes an `additionalContext` array, but Codex never tells a client which tools the model has —
+`shell` and `apply_patch` are internal and the rest come from MCP servers in Codex's own
+config. Ranking a roster we had to guess at would be worse than not ranking one. The
+**DeepSeek Harness** is not wired either, and there the blocker is plumbing: its plugin does
+see the whole `tools` array on every request, but it runs in a Node process and the control
+API has no route it could ask through — the same missing route the guardrail note in
+`AppModel+Harness.swift` describes, and one route would serve both. Both files say what it
+would take.
+
+**Pruning what a small model no longer needs.** The second half of the feature, and its own
+switch under it, off by default. An agent's twentieth turn against an 8K model is mostly old
+tool results: the model is carrying every directory listing and every stack trace it has ever
+been shown, and the thing you just asked about is competing with all of them.
+
+With **Drop tool results a small model no longer needs** on, a chat request through the
+gateway bound for a model on this Mac or on a machine on your network gets one Jev request
+when — and only when — the prompt is past a fraction of that model's context window (0.7 by
+default, in Settings) and there are at least three tool results in it. One yes/no per
+candidate, each read against a short excerpt: *the latest user turn depends on this result*.
+The ones that come back a confident **no** are replaced by a one-line stub,
+`[omitted earlier tool result from step 4]` — which says a step was omitted rather than
+pretending the tool returned nothing, because a model that reads "(no output)" runs it again.
+
+What is never dropped: your messages, the assistant's replies, the system prompt, and the two
+newest tool results, which are what the turn in flight is actually about. At most forty
+results are ever asked about in one request. A shrug drops nothing — the middle of a yes/no
+is the model saying it does not know — and neither does a missing answer, Jev being off, the
+budget being spent or TypeSafe being unreachable. Models at a provider are never pruned at
+all: their windows are large, their history is what you are paying for, and quietly sending
+someone else's model less than you wrote is not this app's call to make.
+
+You are told when it happens. A buffered reply carries `X-Silicon-Pruned: 2`; a streamed one
+says it in a comment line (`: silicon-pruned: 2`), for the same reason routing does — its head
+goes out before anything has been asked of anyone. The Fleet log keeps the step numbers
+against the request.
+
+What is sent to TypeSafe is the turn, the roster lines (or the excerpts), and nothing else.
+Never a file's contents, never the conversation, never a tool's schema. Turns and excerpts go
+through the same redaction the guardrail uses — pasted keys, bearer tokens and PEM blocks are
+scrubbed, and your home directory travels as `~`.
 
 **The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
 is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,

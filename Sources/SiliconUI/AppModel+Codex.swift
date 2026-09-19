@@ -357,6 +357,36 @@ extension AppModel {
         }
     }
 
+    // MARK: - Tool selection
+
+    // Not wired, and the blocker is the roster rather than the seam.
+    //
+    // A suggestion needs two things: a list of what the agent could reach for this turn, and
+    // somewhere to put one line naming the winner. Codex has the second and not the first.
+    //
+    // The seam exists. `turn/start` takes an `additionalContext` array — this build's
+    // app-server advertises `turn/start.additionalContext` among its experimental
+    // capabilities, and this app already handshakes with `experimentalApi: true`. There is
+    // also a `baseInstructions` override on `thread/start`, which the server ignores once a
+    // turn is running and which would replace Codex's own prompt rather than append to it —
+    // the wrong instrument for one extra line.
+    //
+    // The roster does not. Codex never tells a client which tools the model has: `shell` and
+    // `apply_patch` are internal, and anything else comes from MCP servers configured in
+    // Codex's own `config.toml`, which this app does not write and does not read. The
+    // protocol has no "list this thread's tools" request, and the item events only name a
+    // tool *after* the model has already chosen it — which is the decision this feature
+    // exists to get in front of. Ranking a roster we had to guess at would be worse than not
+    // ranking one, because the wrong suggestion is more persuasive than none: the cookbook
+    // this implements measures that directly, and its own numbers show a confident wrong
+    // suggestion breaking turns the agent had right on its own.
+    //
+    // Revisit when the app-server exposes the thread's tool list, or when Codex grows skills
+    // the client can enumerate. The shape of the work at that point is small: build
+    // `[SkillCandidate]` from that list, call `SkillSelector.suggest`, and pass
+    // `SkillSelectionPolicy.promptBlock` as one `additionalContext` entry on `turn/start` —
+    // appended after Codex's own prompt, never replacing it, so its prefix caching holds.
+
     /// The last thing the user typed.
     func lastCodexUserMessage() -> String {
         for item in codexItems.reversed() {

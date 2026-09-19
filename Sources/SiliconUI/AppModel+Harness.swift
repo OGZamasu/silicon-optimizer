@@ -194,6 +194,29 @@ extension AppModel {
     // Revisit when the seam carries arguments, or when the harness exposes the tool call
     // itself to a plugin the way Pi's `tool_call` event does.
 
+    // MARK: - Tool selection
+
+    // Not wired either, and here the blocker is plumbing rather than evidence.
+    //
+    // The roster is genuinely available: `Resources/dsh-llm-silicon` is an `LlmAdapter`, so
+    // every request passes through it with the harness's whole `tools` array — names and
+    // descriptions — on the way to the gateway. That is more than Codex offers and about
+    // what Pi's `systemPromptOptions` offers. Appending one `<tool_relevance>` line as a
+    // trailing message, after the system prompt rather than inside it, is the same move the
+    // Pi extension makes and would leave prefix caching intact.
+    //
+    // What is missing is a way for that plugin to ask. It runs in the harness's Node
+    // process, cannot reach `SkillSelector` directly, and the control API has no route that
+    // would answer it — the same gap the guardrail note above describes, and the same fix: a
+    // `POST /jev/...` route on this Mac taking the turn and the roster and returning at most
+    // one name. One route serves both features.
+    //
+    // Doing it at the *gateway* instead — where the `tools` array is also visible — is
+    // deliberately not the answer. The gateway serves every engine, including Pi, which
+    // already has its own hook; a suggestion added there would arrive twice for Pi and
+    // arrive uninvited for Codex, and nothing in a chat-completions body says which engine
+    // sent it. A suggestion belongs to the engine that will act on it.
+
     /// Reacts to the chat engine picker: a sidecar only runs while it is the chosen engine,
     /// and the chosen one starts as soon as the Chat tab is showing.
     public func chatEngineDidChange() {

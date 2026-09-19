@@ -111,6 +111,14 @@ public enum GatewayAPI {
     /// see which machine it reached has been told nothing useful about its own bill.
     public static let routedToHeader = "X-Silicon-Routed-To"
 
+    /// How many earlier tool results were dropped out of a request before it was forwarded.
+    /// Set on buffered chat replies only; a streamed one says it in a comment line instead,
+    /// because its head is written before anything has been asked of anyone.
+    ///
+    /// Present even when a caller has no use for it, because a reply computed from less than
+    /// what was sent should say so somewhere a client can see without reading the app's log.
+    public static let prunedHeader = "X-Silicon-Pruned"
+
     // MARK: - Model listing
 
     /// One entry in `GET /v1/models`. The `silicon` extension block carries what the OpenAI

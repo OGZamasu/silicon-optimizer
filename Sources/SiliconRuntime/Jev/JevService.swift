@@ -25,7 +25,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .guardrails: "Guardrails"
         case .routing: "Prompt routing"
         case .mediaRouting: "Media routing"
-        case .skillSelection: "Skill selection"
+        case .skillSelection: "Tool selection and pruning"
         case .recommendation: "Model recommendation"
         case .verification: "Answer verification"
         case .calibration: "Decision calibration"
@@ -46,7 +46,8 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .mediaRouting:
             "Reads an image, video or mesh request and picks the model and settings for it."
         case .skillSelection:
-            "Chooses which tools and skills an agent should be offered for the task in hand."
+            "Tool selection and pruning: suggests which tool or skill fits the turn, and "
+            + "which history a small model still needs."
         case .recommendation:
             "Reads your description of the job and ranks the models this Mac can run by "
             + "what that job actually needs."
@@ -68,7 +69,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// keeping both members rather than choosing between two rewritten expressions.
     private static let built: Set<JevFeature> = [
         .decideTool, .routing, .mediaRouting, .guardrails, .recommendation,
-        .verification, .calibration,
+        .verification, .calibration, .skillSelection,
     ]
 }
 
@@ -219,6 +220,24 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// acquire by upgrading.
     public var autoApproveSafeToolCalls: Bool = false
 
+    /// Whether the gateway may drop old tool results out of a chat request bound for a
+    /// model running on hardware you own, once the prompt is crowding that model's window.
+    ///
+    /// Off by default, and deliberately its own switch under the feature rather than part
+    /// of it: suggesting a tool changes what a model is *told*, while this changes what it
+    /// is *given*, and a wrong drop is a turn that has forgotten something. Someone who
+    /// wants the suggestion is not thereby asking for the pruning.
+    public var pruneToolHistory: Bool = false
+
+    /// How full the target model's context window has to be before pruning is considered,
+    /// as a fraction of it. Below this the history is not the problem and the cheapest
+    /// correct thing to do is nothing.
+    ///
+    /// 0.7 leaves the model most of its window before anything is touched, and leaves room
+    /// for the answer after it. Clamped to 0.1…0.95 in `normalized()`: 0 would prune every
+    /// request and 1 would prune none, and neither is a setting anyone means.
+    public var pruneAboveFraction: Double = 0.7
+
     /// The largest `state` this app will send, in bytes — a deliberately pessimistic proxy
     /// for tokens. `jev-1.13` allows 32k tokens for the state plus the longest question and
     /// 64k for the state plus *all* the questions, and a byte is not a token: dense prose
@@ -289,6 +308,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         case autoApproveSafeToolCalls
         case verificationEscalationModel
         case cascadeFloor, cascadeNoulLow, cascadeNoulHigh
+        case pruneToolHistory, pruneAboveFraction
     }
 
     public init(from decoder: any Decoder) throws {
@@ -317,6 +337,12 @@ public struct JevSettings: Codable, Sendable, Equatable {
         cascadeFloor = try container.decodeIfPresent(Double.self, forKey: .cascadeFloor) ?? cascadeFloor
         cascadeNoulLow = try container.decodeIfPresent(Double.self, forKey: .cascadeNoulLow) ?? cascadeNoulLow
         cascadeNoulHigh = try container.decodeIfPresent(Double.self, forKey: .cascadeNoulHigh) ?? cascadeNoulHigh
+        pruneToolHistory = try container.decodeIfPresent(
+            Bool.self, forKey: .pruneToolHistory
+        ) ?? pruneToolHistory
+        pruneAboveFraction = try container.decodeIfPresent(
+            Double.self, forKey: .pruneAboveFraction
+        ) ?? pruneAboveFraction
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -346,6 +372,8 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encode(cascadeFloor, forKey: .cascadeFloor)
         try container.encode(cascadeNoulLow, forKey: .cascadeNoulLow)
         try container.encode(cascadeNoulHigh, forKey: .cascadeNoulHigh)
+        try container.encode(pruneToolHistory, forKey: .pruneToolHistory)
+        try container.encode(pruneAboveFraction, forKey: .pruneAboveFraction)
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),
@@ -431,6 +459,11 @@ public struct JevSettings: Codable, Sendable, Equatable {
         if copy.cascadeNoulLow > copy.cascadeNoulHigh {
             swap(&copy.cascadeNoulLow, &copy.cascadeNoulHigh)
         }
+        // A hand-edited NaN would compare false against every threshold and quietly turn
+        // pruning off; the default is the honest answer to a number that is not one.
+        copy.pruneAboveFraction = copy.pruneAboveFraction.isFinite
+            ? max(0.1, min(copy.pruneAboveFraction, 0.95))
+            : JevSettings().pruneAboveFraction
         if let budget = copy.monthlyBudgetUSD, !budget.isFinite || budget < 0 {
             copy.monthlyBudgetUSD = nil
         }
