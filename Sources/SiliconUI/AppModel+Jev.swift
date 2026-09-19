@@ -82,6 +82,16 @@ extension AppModel {
             }
             if let minutes = update.cacheMinutes { settings.cacheMinutes = minutes }
             if let bytes = update.maxStateBytes { settings.maxStateBytes = bytes }
+            if update.clearRoutingFallback == true {
+                settings.routingFallbackModel = nil
+            } else if let model = update.routingFallbackModel {
+                settings.routingFallbackModel = model
+            }
+            if update.clearVerificationEscalation == true {
+                settings.verificationEscalationModel = nil
+            } else if let model = update.verificationEscalationModel {
+                settings.verificationEscalationModel = model
+            }
             if update.clearAutomaticUncensoredLane == true {
                 settings.automaticUncensoredLane = nil
             } else if let automatic = update.automaticUncensoredLane {
@@ -148,7 +158,9 @@ extension AppModel {
             automaticUncensoredLaneInEffect: settings.automaticUncensoredLane(
                 uncensoredLaneInstalled: uncensoredLaneInstalled
             ),
-            composerAutoRoute: settings.composerAutoRoute
+            composerAutoRoute: settings.composerAutoRoute,
+            routingFallbackModel: settings.routingFallbackModel,
+            verificationEscalationModel: settings.verificationEscalationModel
         )
     }
 }

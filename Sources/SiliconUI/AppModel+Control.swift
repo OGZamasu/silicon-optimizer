@@ -353,12 +353,50 @@ extension AppModel: ControlHost {
         }
         lastGeneration = metrics
 
+        // Verification, and — when the policy says so — a stronger model's answer instead.
+        //
+        // This path can escalate where the streaming ones cannot: it has shown the caller
+        // nothing yet, so replacing the reply costs nobody a message they were reading.
+        // Truncation is read from the runtime's own finish reason against the budget this
+        // request actually sent, never asked of a model.
+        //
+        // Inside `whileGenerating` like the generation above it, and for the same reason:
+        // an escalation to a cold cloud model is seconds of no local activity at all, and
+        // the idle timer would happily unload the model — or let the Mac sleep — in the
+        // middle of a request that is still being answered.
+        let outcome = await whileGenerating {
+            await self.verify(
+                prompt: VerificationPrompt(messages: request.messages),
+                reply: content,
+                truncated: metrics.wasTruncated(budget: chatRequest.maxTokens)
+            )
+        }
+        var answer = content
+        var thinking = reasoning
+        var reported = metrics
+        if case .escalated(_, let better, _, _) = outcome {
+            answer = better
+            // The local model's chain of thought is not the escalated answer's, and its
+            // throughput describes text this response no longer contains. Returning either
+            // beside a reply another model wrote would be a plain untruth about where the
+            // answer came from — so both are dropped, and `verification.escalatedTo` says
+            // who did write it.
+            thinking = ""
+            reported = GenerationMetrics()
+        }
+
         return ControlAPI.ChatResponse(
-            content: content,
-            reasoning: reasoning.isEmpty ? nil : reasoning,
-            promptTokens: metrics.promptTokens,
-            generatedTokens: metrics.generatedTokens,
-            tokensPerSecond: metrics.generationTokensPerSecond
+            content: answer,
+            reasoning: thinking.isEmpty ? nil : thinking,
+            promptTokens: reported.promptTokens,
+            generatedTokens: reported.generatedTokens,
+            tokensPerSecond: reported.generationTokensPerSecond,
+            verification: outcome.verdictName.map {
+                ControlAPI.ChatVerdict(
+                    verdict: $0, reasons: outcome.reasons,
+                    escalatedTo: outcome.escalatedTo, suggestion: outcome.suggestion
+                )
+            }
         )
     }
 

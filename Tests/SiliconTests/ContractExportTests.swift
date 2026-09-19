@@ -129,6 +129,70 @@ struct ContractExportTests {
         })
     }
 
+    /// The `verdict` frame, in the contract the phone apps are generated from.
+    ///
+    /// Both streaming chat routes carry it, both say `escalatedTo: null`, and the field
+    /// names are pinned here rather than in prose: a phone reads this fixture, not the
+    /// README, and a rename on this side has to change the generated client with it.
+    /// The `verification` field on `POST /chat`, and what it says about the counters.
+    @Test func theChatResponseCarriesItsVerdictAndZeroesTheDiscardedRun() throws {
+        let route = try #require(Self.routes.first { $0.method == "POST" && $0.path == "/chat" })
+        let json = try JSONSerialization.jsonObject(
+            with: try #require(route.response).encode()
+        ) as! [String: Any]
+        let verification = try #require(json["verification"] as? [String: Any])
+        #expect(verification["verdict"] as? String == "escalate")
+        #expect((verification["reasons"] as? [String])?.isEmpty == false)
+        // Unlike the stream, this route really did re-run it, and names who answered.
+        #expect(verification["escalatedTo"] as? String == "node/studio/qwen3.8-27b")
+        // …so the local run's numbers describe text that is no longer in `content`.
+        #expect(json["promptTokens"] as? Int == 0)
+        #expect(json["generatedTokens"] as? Int == 0)
+        #expect(json["tokensPerSecond"] as? Double == 0)
+
+        // A verdict that missed its stream reaches a phone on /events instead, and the
+        // transcript keeps it either way.
+        let events = try #require(Self.routes.first { $0.path == "/events" })
+        let late = try JSONSerialization.jsonObject(
+            with: try #require(events.events.first { $0.0 == "verdict" }).1.encode()
+        ) as! [String: Any]
+        #expect(late["conversationID"] as? String != nil)
+        #expect(late["messageID"] as? String != nil)
+
+        let detail = try JSONSerialization.jsonObject(
+            with: try #require(
+                Self.routes.first { $0.path == "/conversations/{id}" }?.response
+            ).encode()
+        ) as! [String: Any]
+        let assistant = (detail["messages"] as! [[String: Any]]).last!
+        #expect(assistant["id"] as? String == late["messageID"] as? String)
+        #expect(assistant["verification"] != nil)
+    }
+
+    @Test func bothChatStreamsCarryTheVerificationVerdict() throws {
+        for path in ["/chat/stream", "/conversations/{id}/messages"] {
+            let route = try #require(Self.routes.first { $0.method == "POST" && $0.path == path })
+            let verdict = try #require(route.events.first { $0.0 == "verdict" })
+            let json = try JSONSerialization.jsonObject(
+                with: try verdict.1.encode()
+            ) as! [String: Any]
+            #expect(json["verdict"] as? String == "escalate")
+            #expect((json["reasons"] as? [String])?.isEmpty == false)
+            // Never on a stream. The whole answer has already been sent.
+            #expect(json["escalatedTo"] == nil || json["escalatedTo"] is NSNull)
+            #expect((json["suggestion"] as? String)?.isEmpty == false)
+            // And it is the last frame before `error`, so a client reading in order has the
+            // metrics before it has the verdict about them.
+            let names = route.events.map(\.0)
+            #expect(names.firstIndex(of: "finished")! < names.firstIndex(of: "verdict")!)
+        }
+        // `accept` is silence, not a frame: the three verdicts the wire uses are these.
+        #expect(
+            Set(["accept", "annotate", "escalate"])
+                .contains(Self.exampleVerdict.verdict)
+        )
+    }
+
     @Test func exportsWhenAskedTo() throws {
         guard let directory = ProcessInfo.processInfo.environment["SILICON_EXPORT_CONTRACT"],
               !directory.trimmingCharacters(in: .whitespaces).isEmpty
@@ -401,6 +465,7 @@ struct ContractExportTests {
                 ("token", .of(ControlAPI.StreamToken(text: "Because "))),
                 ("reasoning", .of(ControlAPI.StreamToken(text: "The user asked about "))),
                 ("finished", .of(exampleMetrics)),
+                ("verdict", .of(exampleVerdict)),
                 ("error", .of(ControlAPI.ErrorResponse(error: "The device stopped reading."))),
             ],
             errors: [
@@ -413,6 +478,14 @@ struct ContractExportTests {
             summary: "What the Mac is doing: loaded model, downloads, render jobs.",
             events: [
                 ("status", .of(exampleStatus)),
+                // A verdict that missed its stream arrives here instead, keyed by the two
+                // ids, so a phone can attach it to the bubble it is about.
+                ("verdict", .of(ControlAPI.ChatVerdict(
+                    verdict: "annotate",
+                    reasons: ["The reply declines or deflects the request."],
+                    conversationID: "3F5C1A88-9C1D-4E2B-8A70-1D2E3F405162",
+                    messageID: "6B2A9D14-40F7-4E85-9C33-2E5A7B1C0D9E"
+                ))),
                 ("download", .of(ControlAPI.DownloadEvent(
                     id: "qwen3-coder-30b", name: "Qwen3-Coder 30B A3B", fraction: 0.42,
                     bytesReceived: 8_589_934_592, bytesExpected: 20_401_094_656,
@@ -449,7 +522,9 @@ struct ContractExportTests {
                     .init(role: "user", content: "Three days in Lisbon — what would you do?",
                           createdAt: "2026-09-18T09:40:58Z"),
                     .init(role: "assistant", content: "Start in Alfama, early.",
-                          createdAt: "2026-09-18T09:41:12Z"),
+                          createdAt: "2026-09-18T09:41:12Z",
+                          id: "6B2A9D14-40F7-4E85-9C33-2E5A7B1C0D9E",
+                          verification: exampleVerdict),
                 ]
             )),
             errors: [404: "No conversation with id 3F5C1A88-9C1D-4E2B-8A70-1D2E3F405162."]
@@ -464,6 +539,7 @@ struct ContractExportTests {
                 ("token", .of(ControlAPI.StreamToken(text: "Start "))),
                 ("reasoning", .of(ControlAPI.StreamToken(text: "Three days is "))),
                 ("finished", .of(exampleMetrics)),
+                ("verdict", .of(exampleVerdict)),
                 ("error", .of(ControlAPI.ErrorResponse(error: "The device stopped reading."))),
             ],
             errors: [
@@ -571,9 +647,14 @@ struct ContractExportTests {
             method: "POST", path: "/chat", auth: "device",
             summary: "Ask the loaded model and wait for the whole answer.",
             request: .of(exampleChatRequest),
+            // With a verdict attached, because this is the one route that escalates and a
+            // generated client has to know the field exists before it meets one. Note the
+            // zeroed counters: `content` is the escalation model's answer, so the local
+            // run's throughput would describe text this response no longer contains.
             response: .of(ControlAPI.ChatResponse(
-                content: "Start in Alfama, early.", reasoning: nil, promptTokens: 412,
-                generatedTokens: 96, tokensPerSecond: 89.4
+                content: "Start in Alfama, early.", reasoning: nil, promptTokens: 0,
+                generatedTokens: 0, tokensPerSecond: 0,
+                verification: exampleEscalatedVerdict
             ))
         ),
         Route(
@@ -865,6 +946,28 @@ struct ContractExportTests {
 
     static let exampleMetrics = ControlAPI.ChatMetrics(
         promptTokens: 412, generatedTokens: 96, tokensPerSecond: 89.4, timeToFirstToken: 0.31
+    )
+
+    /// The frame a stream ends with when answer verification is on.
+    ///
+    /// `escalatedTo` is null here on purpose, and always is on a stream: by the time the
+    /// verdict is known the tokens are on the reader's screen, so the stream says what it
+    /// found and suggests the re-run instead of swapping the message out from under them.
+    /// `POST /chat`, which has shown the caller nothing, does the re-run itself and reports
+    /// the model in its `verification.escalatedTo`.
+    /// The same shape on `POST /chat`, where a re-run really happened.
+    static let exampleEscalatedVerdict = ControlAPI.ChatVerdict(
+        verdict: "escalate",
+        reasons: ["The reply does not answer what was asked."],
+        escalatedTo: "node/studio/qwen3.8-27b"
+    )
+
+    static let exampleVerdict = ControlAPI.ChatVerdict(
+        verdict: "escalate",
+        reasons: ["The reply stops mid-thought and the token budget ran out."],
+        escalatedTo: nil,
+        suggestion: "Send this again on cloud/openai/gpt-5.5 for a stronger answer — or use "
+            + "POST /chat, which re-runs flagged answers itself."
     )
 
     static let exampleChatRequest = ControlAPI.ChatRequest(

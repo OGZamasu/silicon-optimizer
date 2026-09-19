@@ -140,17 +140,38 @@ public struct GenerationMetrics: Sendable, Equatable {
     public var prefillTokensPerSecond: Double
     public var generationTokensPerSecond: Double
     public var timeToFirstToken: TimeInterval
+    /// The OpenAI `finish_reason` the runtime reported on the last chunk: `stop` when the
+    /// model chose to end, `length` when the token budget ran out, nil when the runtime
+    /// said nothing. Carried rather than dropped because "did this answer get cut off?" is
+    /// a fact the server already knows, and asking a model to guess at it instead would be
+    /// inventing an answer to a question code can read.
+    public var finishReason: String?
 
     public init(
         promptTokens: Int = 0, generatedTokens: Int = 0,
         prefillTokensPerSecond: Double = 0, generationTokensPerSecond: Double = 0,
-        timeToFirstToken: TimeInterval = 0
+        timeToFirstToken: TimeInterval = 0, finishReason: String? = nil
     ) {
         self.promptTokens = promptTokens
         self.generatedTokens = generatedTokens
         self.prefillTokensPerSecond = prefillTokensPerSecond
         self.generationTokensPerSecond = generationTokensPerSecond
         self.timeToFirstToken = timeToFirstToken
+        self.finishReason = finishReason
+    }
+
+    /// Whether the token budget, not the model, ended the answer.
+    ///
+    /// Either signal is enough, and that is deliberate. `llama-server` says `length` and
+    /// means it; some `mlx_lm.server` builds stop exactly at `max_tokens` and still report
+    /// `stop`, so believing the finish reason alone would read a truncated answer as a
+    /// finished one. An answer that used every token it was given is truncated whatever the
+    /// server called it — the cost of being wrong here is one unnecessary escalation, and
+    /// the cost of the other error is shipping half a sentence as if it were the answer.
+    public func wasTruncated(budget: Int?) -> Bool {
+        if finishReason == "length" { return true }
+        guard let budget, budget > 0 else { return false }
+        return generatedTokens >= budget
     }
 }
 

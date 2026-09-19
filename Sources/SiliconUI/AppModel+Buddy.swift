@@ -39,23 +39,86 @@ extension AppModel {
             maxTokens: request.maxTokens ?? (settings.maxTokens > 0 ? settings.maxTokens : nil),
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
+        let budget = chatRequest.maxTokens
         return streamed { [weak self] emit in
             guard let self else { return }
+            var answer = ""
+            var finished = GenerationMetrics()
             // Like `chat`, this path has no `generationTask`, so without `whileGenerating`
             // a long answer reads as idleness — and the idle timer unloads the model, or
             // the Mac sleeps, halfway through writing it.
             try await self.whileGenerating {
                 for try await event in try await runtime.chat(chatRequest) {
                     switch event {
-                    case .token(let token): emit(.token(token))
+                    case .token(let token):
+                        answer += token
+                        emit(.token(token))
                     case .reasoningToken(let token): emit(.reasoning(token))
                     case .finished(let metrics):
                         self.lastGeneration = metrics
+                        finished = metrics
                         emit(.finished(Self.metrics(metrics)))
                     }
                 }
             }
+            // `POST /chat/stream` has no transcript, so a verdict that misses the stream
+            // has nowhere to go: no message to hang it on, no id to key an `/events` frame
+            // to. It is bounded like the conversation path and simply dropped if it is
+            // late — which is why the stateful route is the one to use if you want the
+            // verdict guaranteed.
+            let work = Task { @MainActor [weak self] in
+                guard let self else { return nil as ControlAPI.ChatVerdict? }
+                return await self.whileGenerating {
+                    await self.streamVerdict(
+                        prompt: VerificationPrompt(messages: request.messages),
+                        reply: answer, metrics: finished, budget: budget
+                    )
+                }
+            }
+            if let verdict = await VerdictRelay.result(of: work, within: Self.verdictGrace) {
+                emit(.verdict(verdict))
+            }
         }
+    }
+
+    /// How long a stream will hold itself open waiting for Jev before closing without the
+    /// verdict.
+    ///
+    /// Jev answers in about 100 ms, so this is not a budget, it is a backstop: a TypeSafe
+    /// hiccup must not turn into a chat that appears to hang after its last token. The
+    /// conversation path loses nothing when it trips — the verdict still lands on the
+    /// message and on `/events` a moment later.
+    static let verdictGrace: Duration = .seconds(3)
+
+    /// The `verdict` frame, or nil when verification is off or found nothing worth saying.
+    ///
+    /// Deliberately after the whole answer and deliberately without escalating. Jev reads a
+    /// finished reply, and the reply is not finished until the last token — and by then the
+    /// reader has it. See `JevVerifier.streamSuggestion` for why a stream suggests rather
+    /// than substitutes; `POST /chat`, which has shown nothing, does escalate.
+    func streamVerdict(
+        prompt: VerificationPrompt, reply: String, metrics: GenerationMetrics, budget: Int?,
+        conversationID: String? = nil, messageID: String? = nil,
+        using override: JevVerifier? = nil
+    ) async -> ControlAPI.ChatVerdict? {
+        guard !reply.isEmpty else { return nil }
+        guard let (verdict, target) = await verifyWithoutEscalating(
+            prompt: prompt, reply: reply,
+            truncated: metrics.wasTruncated(budget: budget), using: override
+        ) else { return nil }
+        // Nothing fired. A frame saying so is noise on a phone; silence is the accept.
+        guard verdict != .accept else { return nil }
+        return ControlAPI.ChatVerdict(
+            verdict: verdict.name,
+            reasons: verdict.reasons,
+            escalatedTo: nil,
+            suggestion: {
+                if case .escalate = verdict { return JevVerifier.streamSuggestion(target: target) }
+                return nil
+            }(),
+            conversationID: conversationID,
+            messageID: messageID
+        )
     }
 
     // MARK: - Conversations
@@ -87,7 +150,8 @@ extension AppModel {
             messages: conversation.messages.map {
                 .init(
                     role: $0.role.rawValue, content: $0.content,
-                    createdAt: ControlAPI.timestamp($0.createdAt)
+                    createdAt: ControlAPI.timestamp($0.createdAt),
+                    id: $0.id.uuidString, verification: $0.verification
                 )
             }
         )
@@ -139,14 +203,19 @@ extension AppModel {
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
 
+        let budget = chatRequest.maxTokens
+        let asked = chatRequest.messages
         return streamed { [weak self] emit in
             guard let self else { return }
             defer { BuddyGenerations.shared.end(conversationID) }
+            var answer = ""
+            var finished = GenerationMetrics()
             do {
                 try await self.whileGenerating {
                     for try await event in try await runtime.chat(chatRequest) {
                         switch event {
                         case .token(let token):
+                            answer += token
                             self.append(token, to: replyID, in: conversationID, reasoning: false)
                             emit(.token(token))
                         case .reasoningToken(let token):
@@ -154,6 +223,7 @@ extension AppModel {
                             emit(.reasoning(token))
                         case .finished(let metrics):
                             self.lastGeneration = metrics
+                            finished = metrics
                             emit(.finished(Self.metrics(metrics)))
                         }
                     }
@@ -168,7 +238,51 @@ extension AppModel {
                 )
                 throw error
             }
+            // The verdict outlives this stream. It is written onto the message and posted
+            // to `/events`, keyed by the two ids, so a phone that has already closed the
+            // stream — or was not listening at all — still gets it, from the transcript if
+            // not from the wire.
+            let work = Task { @MainActor [weak self] in
+                guard let self else { return nil as ControlAPI.ChatVerdict? }
+                let verdict = await self.whileGenerating {
+                    await self.streamVerdict(
+                        prompt: VerificationPrompt(
+                            messages: asked.map {
+                                .init(
+                                    role: $0.role.rawValue, content: $0.content,
+                                    images: $0.images
+                                )
+                            }
+                        ),
+                        reply: answer, metrics: finished, budget: budget,
+                        conversationID: conversationID.uuidString,
+                        messageID: replyID.uuidString
+                    )
+                }
+                guard let verdict else { return nil }
+                self.attach(verdict, to: replyID, in: conversationID)
+                await BuddyEventHub.shared.post(.verdict(verdict))
+                return verdict
+            }
+            // …and the stream still closes at `finished` if Jev is slow, rather than
+            // leaving a phone watching a socket that has nothing left to say.
+            if let verdict = await VerdictRelay.result(of: work, within: Self.verdictGrace) {
+                emit(.verdict(verdict))
+            }
         }
+    }
+
+    /// Writes a verdict onto the message it is about, so `GET /conversations/{id}` carries
+    /// it for as long as the thread exists.
+    private func attach(
+        _ verdict: ControlAPI.ChatVerdict, to messageID: UUID, in conversationID: Conversation.ID
+    ) {
+        guard let conversation = conversations.firstIndex(where: { $0.id == conversationID }),
+              let message = conversations[conversation].messages.firstIndex(
+                  where: { $0.id == messageID }
+              )
+        else { return }
+        conversations[conversation].messages[message].verification = verdict
     }
 
     /// Appends into a named conversation rather than the selected one: a phone can be
@@ -292,6 +406,61 @@ extension AppModel {
                 }
             }
             continuation.onTermination = { _ in work.cancel() }
+        }
+    }
+}
+
+// MARK: - Waiting a little, but not indefinitely
+
+/// Takes a task's result if it arrives inside a deadline, and otherwise gives up on
+/// *waiting* — never on the task, which keeps running and finishes what it started.
+///
+/// That asymmetry is the whole point here. The verdict has two jobs: catching the stream
+/// that is still open, and landing on the message for everyone who reads it later. Only the
+/// first has a deadline. Cancelling the work when the deadline passed would throw away the
+/// second, which is the one that always matters.
+enum VerdictRelay {
+
+    static func result<Value: Sendable>(
+        of work: Task<Value?, Never>, within duration: Duration
+    ) async -> Value? {
+        let slot = Slot<Value>()
+        // `await work.value` is not cancellable for a non-throwing task, so the wait cannot
+        // be raced inside a task group — the group would sit on it anyway. A mailbox the
+        // timer can also post to is what makes the deadline real.
+        let forward = Task { await slot.deliver(work.value) }
+        let timer = Task {
+            try? await Task.sleep(for: duration)
+            await slot.giveUp()
+        }
+        defer { forward.cancel(); timer.cancel() }
+        return await slot.take()
+    }
+
+    private actor Slot<Value: Sendable> {
+        private var waiting: CheckedContinuation<Value?, Never>?
+        private var settled = false
+        private var value: Value?
+
+        func deliver(_ value: Value?) { finish(value) }
+        func giveUp() { finish(nil) }
+
+        /// First writer wins, so a verdict that beat the timer is not overwritten by it.
+        private func finish(_ value: Value?) {
+            guard !settled else { return }
+            settled = true
+            self.value = value
+            waiting?.resume(returning: value)
+            waiting = nil
+        }
+
+        /// Kept rather than dropped when it arrives before anyone asks: on a warm cache
+        /// the verdict can be ready before the caller reaches this line.
+        func take() async -> Value? {
+            if settled { return value }
+            return await withCheckedContinuation { continuation in
+                waiting = continuation
+            }
         }
     }
 }

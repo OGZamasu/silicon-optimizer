@@ -812,10 +812,36 @@ enum Tools {
                 maxTokens: arguments["max_tokens"]?.intValue
             ))
             let reasoning = response.reasoning ?? ""
-            let footer = String(
-                format: "\n\n---\n%d tokens at %.1f tok/s (local)",
-                response.generatedTokens, response.tokensPerSecond
-            )
+            // Jev's verdict, when answer verification is on, under the rule rather than in
+            // the reply: it is a note *about* the answer, not part of it.
+            //
+            // The first line has to be right about who wrote the text above it. Normally
+            // that is the model on this Mac and the line is its token count. When an
+            // escalation replaced the answer, saying "(local)" would be false and the local
+            // run's throughput would describe text that is no longer here — so both are
+            // dropped and the line names the model that did answer.
+            var footer: String
+            if let escalated = response.verification?.escalatedTo {
+                footer = "\n\n---\nAnswered by \(escalated). Jev flagged the local model's "
+                    + "reply and it was re-run there."
+            } else {
+                footer = String(
+                    format: "\n\n---\n%d tokens at %.1f tok/s (local)",
+                    response.generatedTokens, response.tokensPerSecond
+                )
+            }
+            if let verification = response.verification {
+                let reasons = verification.reasons.joined(separator: " ")
+                switch verification.verdict {
+                case "escalate" where verification.escalatedTo != nil:
+                    if !reasons.isEmpty { footer += "\n" + reasons }
+                case "escalate", "annotate":
+                    footer += "\nJev flagged this answer: " + reasons
+                default:
+                    break
+                }
+                if let suggestion = verification.suggestion { footer += "\n" + suggestion }
+            }
 
             // A reasoning model can spend its entire token budget thinking and never reach an
             // answer. Returning an empty string looks like a broken tool, so say what happened

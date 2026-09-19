@@ -7,6 +7,13 @@ public enum BuddyEvent: Sendable {
     case download(ControlAPI.DownloadEvent)
     case job(ControlAPI.JobEvent)
     case heartbeat(ControlAPI.HeartbeatEvent)
+    /// What Jev made of a finished answer, once it knows.
+    ///
+    /// Here as well as on the chat stream because the stream closes at `finished` and the
+    /// verdict often lands after it. This frame carries the conversation and message ids,
+    /// so a phone can attach it to the bubble it is about — or ignore it and read the same
+    /// verdict from `GET /conversations/{id}` later.
+    case verdict(ControlAPI.ChatVerdict)
 
     public var name: String {
         switch self {
@@ -14,6 +21,7 @@ public enum BuddyEvent: Sendable {
         case .download: "download"
         case .job: "job"
         case .heartbeat: "heartbeat"
+        case .verdict: "verdict"
         }
     }
 
@@ -27,6 +35,7 @@ public enum BuddyEvent: Sendable {
         case .download(let value): return try encoder.encode(value)
         case .job(let value): return try encoder.encode(value)
         case .heartbeat(let value): return try encoder.encode(value)
+        case .verdict(let value): return try encoder.encode(value)
         }
     }
 }

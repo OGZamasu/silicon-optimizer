@@ -97,10 +97,59 @@ extension ControlAPI {
     // MARK: - Streaming chat
 
     /// One frame of `POST /chat/stream`, named after the SSE event that carries it.
+    ///
+    /// **`finished` ends the reply.** A client may stop rendering there. `verdict` is an
+    /// optional extra frame that follows it when answer verification is on *and* Jev
+    /// answered quickly enough to catch the stream; otherwise the verdict arrives later on
+    /// `/events`, or on the message itself in `GET /conversations/{id}`. Any event name a
+    /// client does not recognise must be ignored rather than treated as an error — that is
+    /// what lets this contract grow without breaking the apps generated from it.
     public enum ChatStreamEvent: Sendable, Equatable {
         case token(String)
         case reasoning(String)
         case finished(ChatMetrics)
+        case verdict(ChatVerdict)
+    }
+
+    /// What Jev made of a finished answer.
+    ///
+    /// One shape for both places it appears — the `verification` field of a `/chat`
+    /// response and the `verdict` SSE frame — so a client parses it once.
+    public struct ChatVerdict: Codable, Sendable, Equatable, Hashable {
+        /// `accept`, `annotate` or `escalate`.
+        public var verdict: String
+        /// Plain sentences, already written for a reader. Empty on `accept`.
+        public var reasons: [String]
+        /// The gateway model that answered instead, when one did. Always nil on a stream:
+        /// the tokens are already on screen there, so a stream reports and suggests rather
+        /// than silently replacing what the reader has been watching arrive.
+        public var escalatedTo: String?
+        /// What to do about it, when nothing was done automatically — including the case
+        /// where there was nowhere to escalate to. A reason says what is wrong with the
+        /// answer; a suggestion says what the reader can do, and the two are kept apart so
+        /// a client can show one without the other.
+        public var suggestion: String?
+        /// Which conversation and which message this is about, when it is about one.
+        ///
+        /// Both nil for `POST /chat` and `POST /chat/stream`, which have no transcript to
+        /// point at. Set on `/conversations/{id}/messages`, and it is what makes the
+        /// `verdict` frame on `/events` usable: a verdict that arrives after the stream has
+        /// closed has to say which bubble it belongs to.
+        public var conversationID: String?
+        public var messageID: String?
+
+        public init(
+            verdict: String, reasons: [String] = [], escalatedTo: String? = nil,
+            suggestion: String? = nil, conversationID: String? = nil,
+            messageID: String? = nil
+        ) {
+            self.verdict = verdict
+            self.reasons = reasons
+            self.escalatedTo = escalatedTo
+            self.suggestion = suggestion
+            self.conversationID = conversationID
+            self.messageID = messageID
+        }
     }
 
     /// The payload of a `token` or `reasoning` event. An object rather than a bare string so
@@ -203,11 +252,24 @@ extension ControlAPI {
             public var role: String
             public var content: String
             public var createdAt: String
+            /// Stable within this Mac's transcript, and what a `verdict` event on `/events`
+            /// points at. Absent on a transcript written by a build before verification.
+            public var id: String?
+            /// What Jev made of this message, when it was verified. It is kept on the
+            /// message rather than only sent down the stream because the stream closes at
+            /// `finished` and a verdict may land after it — a phone that reconnects, or
+            /// opens the thread tomorrow, reads it here.
+            public var verification: ChatVerdict?
 
-            public init(role: String, content: String, createdAt: String) {
+            public init(
+                role: String, content: String, createdAt: String, id: String? = nil,
+                verification: ChatVerdict? = nil
+            ) {
                 self.role = role
                 self.content = content
                 self.createdAt = createdAt
+                self.id = id
+                self.verification = verification
             }
         }
 

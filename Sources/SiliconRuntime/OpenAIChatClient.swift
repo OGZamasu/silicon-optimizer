@@ -76,6 +76,12 @@ struct OpenAIChatClient: Sendable {
                             }
                         }
 
+                        // The last chunk carries it, and only the last one; an earlier
+                        // chunk's nil must not erase what a later one said.
+                        if let reason = chunk.choices?.first?.finish_reason {
+                            metrics.finishReason = reason
+                        }
+
                         if let usage = chunk.usage {
                             metrics.promptTokens = usage.prompt_tokens ?? metrics.promptTokens
                             metrics.generatedTokens = usage.completion_tokens ?? metrics.generatedTokens
