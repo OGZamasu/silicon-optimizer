@@ -811,14 +811,46 @@ extension ControlAPI {
             }
         }
 
+        /// Whether this Mac's peers can reach *it*, which is the other half of the
+        /// swarm and used to be invisible from here: a node that cannot call back
+        /// looks like a node that is down, and the reason is usually tailscale.
+        public struct Exposure: Codable, Sendable, Equatable {
+            /// The owner asked for the swarm to reach this Mac, and there is a swarm
+            /// token for it to authenticate with.
+            public var requested: Bool
+            /// The tailnet listener is actually up.
+            public var listening: Bool
+            /// This Mac's tailscale address and the port peers dial there.
+            public var address: String?
+            public var port: Int?
+            /// Why it is not up, when it was asked for and could not be — almost always
+            /// "join the tailnet first".
+            public var problem: String?
+
+            public init(
+                requested: Bool, listening: Bool, address: String? = nil,
+                port: Int? = nil, problem: String? = nil
+            ) {
+                self.requested = requested
+                self.listening = listening
+                self.address = address
+                self.port = port
+                self.problem = problem
+            }
+        }
+
         public var peers: [Peer]
         /// When the app last polled, in seconds ago — a stale view is the failure
         /// this endpoint exists to expose.
         public var polledSecondsAgo: Double?
+        /// How this Mac is reachable by its peers. Nil only from a host that has no
+        /// control server to ask.
+        public var exposure: Exposure?
 
-        public init(peers: [Peer], polledSecondsAgo: Double?) {
+        public init(peers: [Peer], polledSecondsAgo: Double?, exposure: Exposure? = nil) {
             self.peers = peers
             self.polledSecondsAgo = polledSecondsAgo
+            self.exposure = exposure
         }
     }
 }

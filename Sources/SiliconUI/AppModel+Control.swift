@@ -999,7 +999,11 @@ extension AppModel {
                     }
                 )
             },
-            polledSecondsAgo: lastSwarmPoll.map { Date().timeIntervalSince($0) }
+            polledSecondsAgo: lastSwarmPoll.map { Date().timeIntervalSince($0) },
+            // The other half of the swarm: whether this Mac's peers can reach *it*. A node
+            // that cannot call back looks exactly like a node that is down, and the reason
+            // is nearly always that tailscale is not running here.
+            exposure: await controlServer?.exposure
         )
     }
 

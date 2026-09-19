@@ -4,10 +4,11 @@ import SwiftUI
 
 /// Settings → Silicon Buddy.
 ///
-/// The toggle here is the whole security story: off, the control API is what it has always
-/// been — loopback and one token. On, a second listener goes up on this Mac's tailscale
-/// address and nowhere else, and only devices the owner has paired can use it. Nothing about
-/// this makes anything public; a phone that is not on the tailnet cannot see the Mac at all.
+/// The toggle here is the whole security story: off, device tokens mean nothing and the
+/// control API is what it has always been — loopback and one token. On, the listener on
+/// this Mac's tailscale address (shared with the swarm, which binds the same one) honours
+/// the devices the owner has paired, and nothing else. Nothing about this makes anything
+/// public; a phone that is not on the tailnet cannot see the Mac at all.
 struct BuddySettingsSection: View {
     @Environment(AppModel.self) private var model
     /// A singleton, so this is a reference rather than something the view owns. Observation
@@ -69,13 +70,12 @@ struct BuddySettingsSection: View {
     }
 
     private var statusText: String {
-        // The server's own reason comes first: "no tailscale address" and "swarm LAN access
-        // is on" are different problems with different fixes, and guessing between them
-        // sends people to the wrong screen.
+        // The server's own reason comes first — it is nearly always "join the tailnet
+        // first", and guessing at it sends people to the wrong screen.
         if let problem = buddy.problem { return problem }
         guard buddy.allowsTailnetDevices else {
-            return "Off. The control API stays on 127.0.0.1, as it always has, and paired "
-                + "devices are suspended until you turn this back on."
+            return "Off. Device tokens are refused everywhere, and paired devices are "
+                + "suspended until you turn this back on."
         }
         guard let address = buddy.reachAddress else {
             return "On, but the listener is not up yet. Nothing is reachable until it is."

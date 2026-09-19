@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 /// A small HTTP/JSON server bound to loopback, so external tools can drive the app.
 ///
@@ -23,21 +24,25 @@ public actor ControlServer {
     private var port: Int = 0
     /// The shared swarm secret, accepted alongside the per-launch token when set.
     private var swarmToken: String?
-    /// Whether the listener is actually reachable beyond loopback.
-    public private(set) var isExposedOnLAN = false
+    /// Whether the owner has asked for the swarm to reach this Mac, and a swarm token
+    /// exists for it to authenticate with. Exposure without one is refused outright.
+    public private(set) var swarmExposureRequested = false
 
     /// The owner's paired phones and tablets, and the one open pairing code.
     private let buddy: BuddyRegistry
     /// Where `/events` subscribers read from.
     private let events: BuddyEventHub
-    /// The second listener, on this Mac's tailscale address. Nil unless the owner has
-    /// turned Silicon Buddy on and this Mac is actually on a tailnet.
-    private var buddyListener: NWListener?
-    private var buddyAddress: String?
-    private var buddyPortOverride: Int?
+    /// The one listener that is not loopback, on this Mac's tailscale address. Nil unless
+    /// somebody has asked for it and this Mac is actually on a tailnet.
+    private var tailnetListener: NWListener?
+    private var tailnetAddress: String?
+    private var tailnetPortOverride: Int?
+    /// Who currently needs it. Both features want the same address and the same port, so
+    /// this is ownership of one socket rather than a second listener each.
+    private var tailnetOwners: TailnetOwners = []
     /// What the live tailnet listener is actually bound to, so a changed address or port
     /// rebinds instead of being quietly ignored.
-    private var boundEndpoint: (address: String, port: Int)?
+    private var boundEndpoint: TailnetEndpoint?
     /// Why the tailnet listener is not up, when it was asked for and could not be.
     public private(set) var tailnetError: String?
     private var activeEventStreams = 0
@@ -68,9 +73,14 @@ public actor ControlServer {
     /// the stream opens, so a client knows immediately that it is connected.
     static let heartbeatInterval: Duration = .seconds(15)
 
-    /// The port peers dial when the server is on the LAN. Fixed rather than ephemeral,
-    /// because the registry lists explicit base URLs.
-    public static let lanPort = 8788
+    /// The port peers and phones dial on this Mac's tailnet address. Fixed rather than
+    /// ephemeral, because the registry lists explicit base URLs and a paired phone has to
+    /// find the Mac again after a relaunch.
+    public static let tailnetPort = 8788
+
+    private static let log = Logger(
+        subsystem: "dev.siliconoptimizer", category: "control-server"
+    )
 
     /// The address to paste into an OBS Browser Source. Carries the token in the URL
     /// because a browser source cannot send headers; nil until the server is listening.
@@ -97,27 +107,36 @@ public actor ControlServer {
         self.token = UUID().uuidString
     }
 
-    /// Starts listening. The hard rule from the swarm design holds here: without a swarm
-    /// token there is no non-loopback bind, whatever the caller asked for — an
-    /// unauthenticated jobs API is an unauthenticated remote-execution service.
+    /// Starts listening. The primary listener is loopback and nothing else, always: what
+    /// peers and phones reach is the tailnet listener, and only ever that one.
+    ///
+    /// The hard rule from the swarm design holds here: without a swarm token there is no
+    /// non-loopback bind, whatever the caller asked for — an unauthenticated jobs API is an
+    /// unauthenticated remote-execution service. `tailnetPort` exists for the tests, which
+    /// reach the shared listener over loopback rather than over a tailnet.
     public func start(
-        preferredPort: Int = 0, exposeOnLAN: Bool = false, swarmToken: String? = nil
+        preferredPort: Int = 0, exposeToTailnet: Bool = false, swarmToken: String? = nil,
+        tailnetPort: Int? = nil
     ) async throws {
-        let lan = exposeOnLAN && !(swarmToken ?? "").isEmpty
-        self.swarmToken = swarmToken
-        self.isExposedOnLAN = lan
+        // A token that is only whitespace is not a token — the same rule `SwarmConfig`
+        // applies to the file. It must not satisfy the bind rule, and a caller must not be
+        // able to present one and be believed.
+        let secret = (swarmToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let exposed = exposeToTailnet && !secret.isEmpty
+        self.swarmToken = secret.isEmpty ? nil : secret
+        self.swarmExposureRequested = exposed
+        if let tailnetPort { self.tailnetPortOverride = tailnetPort }
 
         let parameters = NWParameters.tcp
-        if !lan {
-            // Loopback only. This must never be reachable from the network.
-            parameters.requiredInterfaceType = .loopback
-        }
+        // Loopback only. This must never be reachable from the network — an exposed swarm
+        // binds the tailnet listener below, which is a different socket with a different
+        // address and its own rules about which bearers mean anything on it.
+        parameters.requiredInterfaceType = .loopback
         parameters.allowLocalEndpointReuse = true
 
-        let chosenPort = lan ? Self.lanPort : preferredPort
         let listener = try NWListener(
             using: parameters,
-            on: chosenPort > 0 ? NWEndpoint.Port(rawValue: UInt16(chosenPort))! : .any
+            on: preferredPort > 0 ? NWEndpoint.Port(rawValue: UInt16(preferredPort))! : .any
         )
         self.listener = listener
 
@@ -130,6 +149,16 @@ public actor ControlServer {
         }
         listener.start(queue: .global(qos: .userInitiated))
 
+        if exposeToTailnet {
+            // One line, at startup, for an owner whose swarm.json predates this: the
+            // setting still says the same thing, it just cannot mean 0.0.0.0 any more.
+            Self.log.notice("""
+                Swarm exposure is tailnet-only: the control API binds this Mac's tailscale \
+                address on port \(self.tailnetPortOverride ?? Self.tailnetPort, privacy: .public), \
+                never 0.0.0.0. Existing swarm settings need no change.
+                """)
+        }
+
         // The control server is restarted whenever swarm settings change, so this is also
         // what brings the tailnet listener back afterwards. Awaited rather than detached:
         // a caller that turns Silicon Buddy on straight after starting the server must not
@@ -140,6 +169,8 @@ public actor ControlServer {
     public func stop() {
         listener?.cancel()
         listener = nil
+        tailnetOwners = []
+        tailnetAddress = nil
         closeTailnetListener()
         try? FileManager.default.removeItem(at: handshakeURL)
     }
@@ -168,70 +199,156 @@ public actor ControlServer {
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: url.path
         )
-        // The tailnet listener needs this port, so a request that arrived before the bind
-        // was possible is applied here instead of being dropped.
-        syncTailnetListener()
     }
 
     // MARK: - The tailnet listener
 
-    /// The address the companion apps reach this Mac on, or nil when they cannot.
-    public var tailnetListenerAddress: String? {
-        buddyListener == nil ? nil : buddyAddress
+    /// Who is asking for the one non-loopback listener.
+    ///
+    /// The swarm exposes the control API to this Mac's peers; Silicon Buddy serves the
+    /// owner's phones. They want the same address on the same port, so they get one socket
+    /// and this says who is still holding it — the last one to let go closes it.
+    public struct TailnetOwners: OptionSet, Sendable, Equatable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+
+        public static let swarm = TailnetOwners(rawValue: 1 << 0)
+        public static let buddy = TailnetOwners(rawValue: 1 << 1)
     }
 
-    /// The port both listeners answer on. Zero until the primary listener is ready — which
-    /// is also why a pairing QR cannot be drawn before then.
+    /// Where the shared listener is bound right now.
+    public struct TailnetEndpoint: Sendable, Equatable {
+        public var address: String
+        public var port: Int
+
+        public init(address: String, port: Int) {
+            self.address = address
+            self.port = port
+        }
+    }
+
+    /// The live endpoint, or nil when the listener is not up.
+    public var tailnetEndpoint: TailnetEndpoint? {
+        tailnetListener == nil ? nil : boundEndpoint
+    }
+
+    /// The address peers and companion apps reach this Mac on, or nil when they cannot.
+    public var tailnetListenerAddress: String? { tailnetEndpoint?.address }
+
+    /// The port they dial there. Separate from `listeningPort`, which is loopback's and
+    /// changes every launch — a pairing QR has to carry this one.
+    public var tailnetListenerPort: Int? { tailnetEndpoint?.port }
+
+    /// Which features are holding the shared listener open. Read by the tests that prove
+    /// there is exactly one of it.
+    public var tailnetOwnership: TailnetOwners { tailnetOwners }
+
+    /// The loopback port. Zero until the primary listener is ready.
     public var listeningPort: Int { port }
 
-    /// Brings the second listener into line with `buddy.json`: up on this Mac's tailscale
-    /// address when the owner has allowed their own devices, down otherwise.
+    /// What Settings and `GET /swarm` say about reaching this Mac from elsewhere.
+    public var exposure: ControlAPI.SwarmView.Exposure {
+        ControlAPI.SwarmView.Exposure(
+            requested: swarmExposureRequested,
+            listening: tailnetListener != nil,
+            address: tailnetEndpoint?.address,
+            port: tailnetEndpoint?.port,
+            problem: tailnetError
+        )
+    }
+
+    /// Said once, here, because Settings, the Buddy sheet and `GET /swarm` all report it.
+    public static let noTailnetAddress =
+        "This Mac has no tailscale address. Join the tailnet first — "
+            + "the swarm and Silicon Buddy both ride on it."
+
+    /// Brings the shared listener into line with what the two features are asking for: up
+    /// on this Mac's tailscale address when the swarm is exposed or the owner has allowed
+    /// their own devices, down when neither is.
+    ///
+    /// This is also the retry path. A bind that failed because tailscale was down clears
+    /// the address but keeps the ownership, so the next refresh — a swarm poll, the Buddy
+    /// toggle, a restart — discovers again and tries again.
     ///
     /// Discovery shells out to the tailscale CLI, so it runs off the actor — a `Process`
     /// round trip on the executor would stall every request in flight.
     public nonisolated func refreshTailnetAccess() async {
-        let discover = await discovery()
         let allowed = await buddy.allowsTailnetDevices
-        guard allowed else {
-            try? await setTailnetAccess(address: nil)
-            return
-        }
+        guard await claimTailnetListener(forBuddy: allowed) else { return }
+        let discover = await discovery()
         let address = await Task.detached(priority: .userInitiated) { discover() }.value
         guard let address else {
-            await noteTailnetError(
-                "This Mac has no tailscale address. Join the tailnet first — "
-                    + "Silicon Buddy rides on it."
-            )
+            await noteTailnetError(Self.noTailnetAddress)
             return
         }
-        try? await setTailnetAccess(address: address)
+        // Re-read the ownership rather than trusting what it was before the CLI ran: a
+        // toggle flipped during that round trip must not be overruled by a stale answer.
+        let owners = await currentOwners()
+        guard !owners.isEmpty else { return }
+        try? await setTailnetAccess(address: address, for: owners)
+    }
+
+    /// The retry the swarm's own poll carries. Rediscovery costs a `Process` round trip, so
+    /// a poll that runs every twenty seconds only pays for it while the listener is down —
+    /// which is the only state a retry could improve on.
+    public nonisolated func refreshTailnetAccessIfDown() async {
+        guard await tailnetEndpoint == nil else { return }
+        await refreshTailnetAccess()
+    }
+
+    private func currentOwners() -> TailnetOwners { tailnetOwners }
+
+    /// Records what each feature wants, and reports whether anyone still wants the
+    /// listener. Closing it here — rather than wherever an address happens to arrive — is
+    /// what lets the two share it: turning Silicon Buddy off while the swarm is exposed
+    /// leaves the socket up and only stops device bearers meaning anything on it.
+    private func claimTailnetListener(forBuddy wantedByBuddy: Bool) -> Bool {
+        var owners: TailnetOwners = []
+        if swarmExposureRequested { owners.insert(.swarm) }
+        if wantedByBuddy { owners.insert(.buddy) }
+        tailnetOwners = owners
+        guard owners.isEmpty else { return true }
+        withdrawTailnetListener()
+        return false
+    }
+
+    private func withdrawTailnetListener() {
+        tailnetAddress = nil
+        tailnetError = nil
+        closeTailnetListener()
     }
 
     private func discovery() -> @Sendable () -> String? { discoverTailnetAddress }
 
-    /// Asks for (or withdraws) the tailnet listener. The port parameter exists for tests,
-    /// which reach the second listener over loopback rather than over a tailnet.
-    public func setTailnetAccess(address: String?, port overridePort: Int? = nil) throws {
+    /// Asks for (or withdraws) the shared listener on one feature's behalf. The port
+    /// parameter exists for tests, which reach it over loopback rather than a tailnet.
+    ///
+    /// Withdrawing is per-owner: the listener only actually closes when the last holder
+    /// lets go, which is what keeps the swarm up while Silicon Buddy goes off and back on.
+    public func setTailnetAccess(
+        address: String?, port overridePort: Int? = nil, for owner: TailnetOwners = .buddy
+    ) throws {
         guard let address else {
-            buddyAddress = nil
-            buddyPortOverride = nil
-            tailnetError = nil
-            closeTailnetListener()
+            tailnetOwners.subtract(owner)
+            guard tailnetOwners.isEmpty else { return }
+            withdrawTailnetListener()
             return
         }
         guard Self.isBindableTailnetAddress(address) else {
             throw TailnetBindError.unacceptableAddress(address)
         }
-        buddyAddress = address
-        buddyPortOverride = overridePort
+        tailnetOwners.formUnion(owner)
+        tailnetAddress = address
+        if let overridePort { tailnetPortOverride = overridePort }
         tailnetError = nil
         syncTailnetListener()
     }
 
-    /// The only addresses this second listener may take: a tailnet IPv4 (100.64/10), or
+    /// The only addresses the shared listener may take: a tailnet IPv4 (100.64/10), or
     /// loopback, which is where the tests reach it. Anything else — a LAN address, a
     /// wildcard, an IPv6 any — is refused here, because binding one of those is exactly how
-    /// a private API becomes a public one.
+    /// a private API becomes a public one. The swarm goes through this gate too: "expose to
+    /// the swarm" means the tailnet and nothing else, so there is no 0.0.0.0 path left.
     public static func isBindableTailnetAddress(_ address: String) -> Bool {
         // Parsed as an address, never scanned for numbers. `NWEndpoint.Host` will happily
         // take a name, so "100.64.0.1.evil.example.com" getting this far would turn a bind
@@ -247,33 +364,29 @@ public actor ControlServer {
         public var errorDescription: String? {
             switch self {
             case .unacceptableAddress(let address):
-                "\(address) is not a tailnet address. Silicon Buddy binds the tailnet "
+                "\(address) is not a tailnet address. This Mac binds the tailnet "
                     + "interface only, never the whole network."
             }
         }
     }
 
     private func syncTailnetListener() {
-        guard let address = buddyAddress else { return closeTailnetListener() }
-        // Swarm exposure binds every interface on the fixed LAN port, so a second listener
-        // there would be shadowed by the first — and a device token is only a credential on
-        // the tailnet listener, so without one paired devices are not served at all. That is
-        // the safe way round, and the window says so rather than leaving it to be discovered.
-        guard !isExposedOnLAN else {
-            tailnetError = "Swarm LAN access is on, which binds the control API to every "
-                + "network this Mac is on. Silicon Buddy needs a tailnet-only listener, so "
-                + "it stays off until you turn swarm LAN access off in Settings → Swarm."
-            closeTailnetListener()
-            return
+        guard !tailnetOwners.isEmpty, let address = tailnetAddress else {
+            return closeTailnetListener()
         }
-        let wanted = buddyPortOverride ?? port
+        let wanted = tailnetPortOverride ?? Self.tailnetPort
         guard (1...65_535).contains(wanted),
               let boundPort = NWEndpoint.Port(rawValue: UInt16(wanted))
         else { return }
+        let endpoint = TailnetEndpoint(address: address, port: wanted)
+        // One listener, whoever asked. A second bind of the same address:port is either
+        // refused or — with the endpoint reuse this sets — quietly splits the connections
+        // between two sockets, which is how half a phone's requests would start vanishing.
+        //
         // A tailscale address can change under the app — a re-auth, a different tailnet. A
         // listener still bound to yesterday's endpoint is a feature that silently stopped.
         if let bound = boundEndpoint {
-            guard bound != (address, wanted) else { return }
+            guard bound != endpoint else { return }
             closeTailnetListener()
         }
 
@@ -292,25 +405,27 @@ public actor ControlServer {
                 Task { await self?.noteTailnetError(error.localizedDescription) }
             }
             listener.start(queue: .global(qos: .userInitiated))
-            buddyListener = listener
-            boundEndpoint = (address, wanted)
+            tailnetListener = listener
+            boundEndpoint = endpoint
         } catch {
             tailnetError = error.localizedDescription
         }
     }
 
-    /// Records why the listener is down and leaves it down. Clearing the address matters:
-    /// without it the next handshake would retry a bind that has already failed once, in a
-    /// loop, for as long as the app runs.
+    /// Records why the listener is down and leaves it down until something asks again.
+    /// Clearing the address matters: without it a retry would repeat a bind that has
+    /// already failed, in a loop, for as long as the app runs. The ownership stays, so the
+    /// next refresh rediscovers the address and tries once more — which is what brings the
+    /// listener up by itself after tailscale comes back.
     private func noteTailnetError(_ message: String) {
         tailnetError = message
-        buddyAddress = nil
+        tailnetAddress = nil
         closeTailnetListener()
     }
 
     public func closeTailnetListener() {
-        buddyListener?.cancel()
-        buddyListener = nil
+        tailnetListener?.cancel()
+        tailnetListener = nil
         boundEndpoint = nil
     }
 
@@ -318,10 +433,12 @@ public actor ControlServer {
 
     /// Which listener a connection came in on.
     ///
-    /// This is a security boundary, not bookkeeping. The primary listener is loopback — or,
-    /// with swarm exposure on, every interface on the LAN port. A device token must never be
-    /// honoured there: a phone that leaves the house, or is lost with its token on it, would
-    /// otherwise authenticate from any café Wi-Fi the Mac happens to share.
+    /// This is a security boundary, not bookkeeping. The primary listener is loopback,
+    /// always; the tailnet one is this Mac's tailscale address and nothing else. A device
+    /// token must never be honoured on loopback — a phone that leaves the house, or is lost
+    /// with its token on it, would otherwise authenticate through any local process — and
+    /// the shared swarm secret is only a credential out there while the owner has actually
+    /// asked for the swarm to reach this Mac.
     enum Origin: Sendable, Equatable {
         case primary
         case tailnet
@@ -478,10 +595,23 @@ public actor ControlServer {
         "Only this Mac can change the Jev settings. They govern what it spends, so they "
             + "are set in Settings → TypeSafe (Jev) on the Mac."
 
+    /// Whether the shared swarm secret is a credential on this listener.
+    ///
+    /// On loopback it always is — the MCP bridge and this Mac's own tools use it. Out on
+    /// the tailnet it is one only while the swarm is the reason (or part of the reason) the
+    /// listener is up: otherwise "let other Silicon nodes reach this Mac", turned off, would
+    /// still let them, the moment Silicon Buddy raised the same socket for its own devices.
+    private func honoursSwarmToken(from origin: Origin) -> Bool {
+        origin == .primary || tailnetOwners.contains(.swarm)
+    }
+
     private func identify(_ request: HTTPRequest, from origin: Origin) async -> Caller? {
         guard let bearer = request.bearerToken else { return nil }
         if bearer == token { return .control }
-        if let swarmToken, !swarmToken.isEmpty, bearer == swarmToken { return .swarm }
+        if let swarmToken, !swarmToken.isEmpty, bearer == swarmToken,
+           honoursSwarmToken(from: origin) {
+            return .swarm
+        }
         // The one door a device token opens. On the primary listener it is not a credential
         // at all, whatever it says.
         guard origin == .tailnet else { return nil }
@@ -505,7 +635,8 @@ public actor ControlServer {
             return BuddyLimits.unauthenticatedBodyBytes
         }
         if bearer == token { return HTTPRequest.maximumBody }
-        if swarmToken.map({ !$0.isEmpty && bearer == $0 }) ?? false {
+        if swarmToken.map({ !$0.isEmpty && bearer == $0 }) ?? false,
+           honoursSwarmToken(from: origin) {
             return HTTPRequest.maximumBody
         }
         return BuddyLimits.requestBodyBytes
@@ -763,8 +894,9 @@ public actor ControlServer {
             }
             let macName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
             // The port a device should keep dialling is the one it just reached us on —
-            // the tailnet listener's. In the app that is the control port; the tests split
-            // them so they can tell the two listeners apart.
+            // the tailnet listener's, which is fixed across launches precisely so a paired
+            // phone can find this Mac again. The tests bind it somewhere else so they can
+            // tell the two listeners apart.
             let reachablePort = boundEndpoint?.port ?? port
             switch await buddy.pair(
                 pairing, from: source, macName: macName, port: reachablePort

@@ -257,9 +257,9 @@ struct DashboardView: View {
                             .foregroundStyle(.tertiary)
                     }
                     HStack {
-                        Text(model.controlIsOnLAN
-                            ? "This Mac is reachable by its peers."
-                            : "This Mac is local-only — enable swarm access in Settings.")
+                        Text(SwarmExposure.shared.isListening
+                            ? "This Mac is reachable by its peers on your tailnet."
+                            : SwarmExposure.shared.summary)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                         Spacer()

@@ -254,19 +254,24 @@ nothing else. Nothing is published to the internet, no port is forwarded, and no
 in the middle. If a device is not on your tailnet it cannot see this Mac at all.
 
 **Settings → Silicon Buddy → "Allow Silicon Buddy devices on the tailnet"** is the whole
-switch, and it is off until you turn it on. With it off, the control API is what it has
-always been: bound to `127.0.0.1`, one token, local processes only. With it on, a *second*
-listener goes up on this Mac's tailscale address — the same port, the same routes — and the
-loopback one is untouched. It is never bound to `0.0.0.0`; the app parses the address and
-refuses anything that is not a tailnet or loopback literal, so a café Wi-Fi never sees it.
+switch, and it is off until you turn it on. With it off, device tokens are refused
+everywhere and the control API is what it has always been: bound to `127.0.0.1`, one token,
+local processes only. With it on, a *second* listener goes up on this Mac's tailscale
+address at port 8788 — the same routes — and the loopback one is untouched. It is never
+bound to `0.0.0.0`; the app parses the address and refuses anything that is not a tailnet or
+loopback literal, so a café Wi-Fi never sees it. If this Mac has no tailscale address, the
+listener does not go up at all and Settings says to join the tailnet first.
 
-A device token is a credential **only on that second listener**. Presented to the loopback
-listener it is not a credential at all — which is what keeps a phone that has left the house,
-or been lost with its token on it, from authenticating over some other network the Mac
-happens to be on. For the same reason, Silicon Buddy stays off while the swarm's "Let other
-Silicon nodes reach this Mac" is on: that binds every interface, and the app will not serve
-devices through a socket it cannot vouch for. The Settings line tells you which of the two is
-in your way.
+That second listener is the *same one* the swarm uses — "Let other Silicon nodes reach this
+Mac over your tailnet" binds exactly this address and port, and whichever feature asks for it
+first, there is only ever one socket. The two toggles then decide which bearers mean anything
+on it: device tokens while Silicon Buddy is on, the shared swarm token while swarm access is
+on. Turn one off and the listener stays up for the other, with that one's credentials refused
+from the next request onward.
+
+A device token is a credential **only on that listener**. Presented to the loopback listener
+it is not a credential at all — which is what keeps a phone that has left the house, or been
+lost with its token on it, from authenticating through any local process on the Mac.
 
 **Pairing** is a QR code. "Pair a device" asks how much of the Mac this one gets — **Full
 control** or **Chat only** — then shows a six-digit code and a QR encoding
@@ -531,12 +536,15 @@ model fails the build rather than silently shipping bad advice.
 
 The app's local control API binds to `127.0.0.1` only and requires a token that's
 regenerated on every launch — otherwise any process on your machine could quietly drive your
-model. It reaches beyond loopback in exactly two cases, both opt-in and both bound to a
-specific interface rather than to everything: the swarm, which needs a shared token before it
-will bind at all, and [Silicon Buddy](#silicon-buddy), which binds only your tailscale address
-and honours a device token only on that listener. The app is not sandboxed, because it launches engine
-binaries you may keep anywhere and reads model files from arbitrary paths; neither works under
-App Sandbox.
+model. It reaches beyond loopback in exactly one way: a second listener on your tailscale
+address, port 8788, which both the swarm and [Silicon Buddy](#silicon-buddy) share and which
+either of them can ask for. Everything that is not loopback is tailnet-only. The address is
+parsed and checked against 100.64/10 before anything is bound, so `0.0.0.0`, a LAN address,
+or a hostname that merely looks like a tailnet one is refused rather than bound; the swarm
+also needs a shared token in `swarm.json` before it will ask at all, and a device token is
+honoured only out on that listener and only while Silicon Buddy is on. The app is not
+sandboxed, because it launches engine binaries you may keep anywhere and reads model files
+from arbitrary paths; neither works under App Sandbox.
 
 ## Licence
 

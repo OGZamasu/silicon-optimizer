@@ -498,7 +498,7 @@ struct SettingsView: View {
 
             Section("Swarm") {
                 Toggle(
-                    "Let other Silicon nodes reach this Mac",
+                    "Let other Silicon nodes reach this Mac over your tailnet",
                     isOn: Binding(
                         get: { model.settings.exposeControlOnLAN },
                         set: { newValue in
@@ -508,6 +508,14 @@ struct SettingsView: View {
                         }
                     )
                 )
+                Text(
+                    "This Mac binds its tailscale address and port "
+                        + "\(ControlServer.tailnetPort), never 0.0.0.0 — a café Wi-Fi "
+                        + "cannot see the control API, only your tailnet can. Silicon "
+                        + "Buddy shares the same listener."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 HStack {
                     Text(swarmStatusText)
                     Spacer()
@@ -968,12 +976,10 @@ struct SettingsView: View {
         let config = model.swarmConfig
         let peerCount = config?.peers.count ?? 0
         var parts: [String] = []
-        parts.append(model.controlIsOnLAN
-            ? "Reachable on the LAN at port \(ControlServer.lanPort)."
-            : "Local only.")
+        parts.append(SwarmExposure.shared.summary)
         if config?.effectiveToken == nil {
-            parts.append("No swarm token yet — the LAN stays off until swarm.json has one "
-                + "(shared with your other nodes).")
+            parts.append("No swarm token yet — nothing leaves loopback until swarm.json has "
+                + "one (shared with your other nodes).")
         }
         parts.append(peerCount == 1 ? "1 peer configured." : "\(peerCount) peers configured.")
         return parts.joined(separator: " ")

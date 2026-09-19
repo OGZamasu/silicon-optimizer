@@ -981,8 +981,9 @@ public final class AppModel {
 
     // MARK: - Swarm
 
-    /// Whether the control server is currently reachable beyond loopback.
-    public internal(set) var controlIsOnLAN = false
+    // Whether this Mac is reachable by its peers, and where, lives in `SwarmExposure`
+    // rather than here: it is more than a flag now — an address, a port, and the reason
+    // there is neither.
 
     /// One peer's last-polled state, for the dashboard's read-only swarm view.
     public struct PeerCapability: Identifiable, Sendable {
@@ -1123,6 +1124,9 @@ public final class AppModel {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
         lastSwarmPoll = Date()
+        // Exposure rides the same tailnet these peers do: if tailscale was down when the
+        // app launched, this poll is also the retry that brings our own listener up.
+        await SwarmExposure.shared.retry(server: controlServer)
         reconcileInitialVideoSelection()
         syncSwarmChatProviders()
         // Give this Mac its own per-client identity wherever a node can mint one, so
@@ -2618,14 +2622,15 @@ public final class AppModel {
         controlServer = server
         Task {
             do {
-                // The hard swarm rule lives in the server: LAN exposure without a token
-                // silently stays loopback, so a half-configured setup fails safe.
+                // The hard swarm rule lives in the server: exposure without a token
+                // silently stays loopback, so a half-configured setup fails safe. So does
+                // exposure without a tailnet — there is no interface but the tailscale one.
                 let swarm = SwarmConfig.load()
                 try await server.start(
-                    exposeOnLAN: settings.exposeControlOnLAN,
+                    exposeToTailnet: settings.exposeControlOnLAN,
                     swarmToken: swarm?.effectiveToken
                 )
-                self.controlIsOnLAN = await server.isExposedOnLAN
+                await SwarmExposure.shared.refresh(server: server)
             } catch {
                 // Not fatal: the app is fully usable without external control.
                 self.libraryError = "Control API unavailable: \(error.localizedDescription)"

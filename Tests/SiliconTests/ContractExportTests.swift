@@ -624,7 +624,11 @@ struct ContractExportTests {
                     reachable: true, error: nil,
                     capabilities: [.init(id: "image-to-mesh", kind: "mesh", ready: true)]
                 )],
-                polledSecondsAgo: 4
+                polledSecondsAgo: 4,
+                exposure: .init(
+                    requested: true, listening: true, address: "100.118.191.121",
+                    port: 8788, problem: nil
+                )
             ))
         ),
         Route(
