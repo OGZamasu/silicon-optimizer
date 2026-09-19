@@ -1098,11 +1098,12 @@ public final class AppModel {
     /// Applies swarm settings live: tears the control server down and brings it back with
     /// the new bind — the handshake file is rewritten, so local MCP clients reconnect on
     /// their next call.
+    ///
+    /// Restarts queue behind one another rather than racing. Fired off independently, a
+    /// toggle flipped twice in a row could run the first call's start after the second
+    /// call's stop, leaving a listener — loopback, and the tailnet one — that nothing held.
     public func applySwarmSettings() {
-        Task {
-            await controlServer?.stop()
-            startControlServer()
-        }
+        restartControlServer()
     }
 
     /// Polls every registry peer's `/v1/node` — the read-only swarm. Parsed leniently:
@@ -2498,6 +2499,15 @@ public final class AppModel {
     private var sampler = MetricsSampler()
     private var samplingTask: Task<Void, Never>?
     var controlServer: ControlServer?
+    /// The restart in flight, if any. Each restart waits for the one before it, so a burst
+    /// of them runs stop-then-start strictly in order and exactly one server is live after
+    /// the last.
+    private var swarmRestart: Task<Void, Never>?
+    /// Builds the control server. Tests swap this for one that publishes to a scratch
+    /// handshake file and a private device registry, so restarting never touches the user's.
+    @ObservationIgnored var makeControlServer: @MainActor (AppModel) -> ControlServer = {
+        ControlServer(host: $0)
+    }
 
     // MARK: - Init
 
@@ -2536,9 +2546,10 @@ public final class AppModel {
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
         registerServerTermination()
+        registerHandshakeCleanup()
         prepareIdleUnloadNotices()
         beginSampling()
-        startControlServer()
+        restartControlServer()
         startGatewayServer()
         startVideoQueueWorker()
         measureStorageIfNeeded()
@@ -2610,28 +2621,51 @@ public final class AppModel {
         }
     }
 
+    /// Stops the control server, if one is up, and starts a fresh one — after any restart
+    /// already queued has finished. Launch and `applySwarmSettings()` both come through
+    /// here, so a toggle flipped straight after launch waits for the first start too.
+    private func restartControlServer() {
+        let previous = swarmRestart
+        swarmRestart = Task {
+            await previous?.value
+            await controlServer?.stop()
+            await startControlServer()
+        }
+    }
+
+    /// Returns once every restart queued so far has run. For tests.
+    func waitForControlServerRestarts() async {
+        await swarmRestart?.value
+    }
+
     /// Publishes the local control API that the MCP bridge talks to, so Claude and ChatGPT can
     /// drive the model this app has loaded rather than starting a second copy of it.
-    private func startControlServer() {
-        let server = ControlServer(host: self)
+    ///
+    /// Returns once the server is listening, or has failed to, and not before: a restart
+    /// queued behind this one must stop a server that has actually started, or its listener
+    /// outlives the app's reference to it.
+    private func startControlServer() async {
+        let server = makeControlServer(self)
         controlServer = server
-        Task {
-            do {
-                // The hard swarm rule lives in the server: LAN exposure without a token
-                // silently stays loopback, so a half-configured setup fails safe.
-                let swarm = SwarmConfig.load()
-                try await server.start(
-                    exposeOnLAN: settings.exposeControlOnLAN,
-                    swarmToken: swarm?.effectiveToken
-                )
-                self.controlIsOnLAN = await server.isExposedOnLAN
-            } catch {
-                // Not fatal: the app is fully usable without external control.
-                self.libraryError = "Control API unavailable: \(error.localizedDescription)"
-            }
+        do {
+            // The hard swarm rule lives in the server: LAN exposure without a token
+            // silently stays loopback, so a half-configured setup fails safe.
+            let swarm = SwarmConfig.load()
+            try await server.start(
+                exposeOnLAN: settings.exposeControlOnLAN,
+                swarmToken: swarm?.effectiveToken
+            )
+            controlIsOnLAN = await server.isExposedOnLAN
+        } catch {
+            // Not fatal: the app is fully usable without external control.
+            libraryError = "Control API unavailable: \(error.localizedDescription)"
         }
-        // The handshake file advertises a live app; make sure a quit does not leave it behind
-        // pointing at a dead port.
+    }
+
+    /// The handshake file advertises a live app; make sure a quit does not leave it behind
+    /// pointing at a dead port. Registered once at launch: it used to be registered with
+    /// every start, so each swarm toggle added another observer.
+    private func registerHandshakeCleanup() {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in
