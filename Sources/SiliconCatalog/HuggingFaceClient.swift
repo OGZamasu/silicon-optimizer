@@ -111,9 +111,38 @@ public struct HuggingFaceClient: Sendable {
 
     // MARK: - URLs
 
-    public static func downloadURL(repository: String, file: String, revision: String = "main") -> URL {
+    /// Where files come from, unless a test hands the downloader a stand-in.
+    public static let hub = URL(string: "https://huggingface.co")!
+
+    /// The one place a file's download URL is built — for huggingface.co and for the loopback
+    /// server a test puts in its place, so what the tests see is what the Hub is asked.
+    ///
+    /// `revision` is a branch or a commit. The catalogue's own models are fetched at `main`,
+    /// because their file names are hints resolved against the Hub; a file pinned by digest is
+    /// fetched at the commit that digest belongs to.
+    public static func downloadURL(
+        repository: String, file: String, revision: String = "main", base: URL = hub
+    ) -> URL {
         let encoded = file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file
-        return URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(encoded)?download=true")!
+        var root = base.absoluteString
+        while root.hasSuffix("/") { root.removeLast() }
+        return URL(string: "\(root)/\(repository)/resolve/\(revision)/\(encoded)?download=true")!
+    }
+
+    /// Whether a redirect from the Hub may be followed: HTTPS, on the default port, to
+    /// huggingface.co or hf.co or one of their subdomains — where the Hub sends a file's
+    /// bytes — and nowhere else. No user or password in it, and the host compared as the
+    /// name it is, so `huggingface.co.example.net` is not `huggingface.co`.
+    public static func isHubRedirect(_ url: URL) -> Bool {
+        guard url.user == nil, url.password == nil,
+              url.scheme?.lowercased() == "https",
+              url.port == nil || url.port == 443,
+              var host = url.host?.lowercased(), !host.isEmpty
+        else { return false }
+        while host.hasSuffix(".") { host.removeLast() }
+        return ["huggingface.co", "hf.co"].contains { domain in
+            host == domain || host.hasSuffix("." + domain)
+        }
     }
 
     public static func pageURL(repository: String) -> URL {

@@ -48,7 +48,9 @@ public struct PhoneModelEntry: Sendable, Hashable, Identifiable {
         public var threadsPrompt: Int
         public var threadsGenerate: Int
         public var contextLength: Int
-        /// How much memory the phone should see free before it loads this.
+        /// How much memory the phone should see free before it loads this: the peak it
+        /// measured, grown to `contextLength`, with a quarter again on top. See
+        /// `PhoneModelCatalog.minimumFreeMemory`.
         public var minFreeMemoryBytes: Int64
         /// Whether the chat template is rendered with thinking on. Off for both: a phone
         /// answering because the Mac is away should answer, not deliberate for a minute.
@@ -66,7 +68,7 @@ public struct PhoneModelEntry: Sendable, Hashable, Identifiable {
         }
     }
 
-    /// What one run on a real phone measured.
+    /// What one benchmark run on a real phone measured, and the one figure derived from it.
     public struct Measured: Sendable, Hashable {
         public var device: String
         /// Which build of which runtime, on which part of the chip.
@@ -74,28 +76,56 @@ public struct PhoneModelEntry: Sendable, Hashable, Identifiable {
         /// What the phone was doing at the time. A hot, charging phone is the honest worst
         /// case, which is why it is the one written down.
         public var conditions: String
-        /// Seconds from sending a 300-token question to the first word of the answer.
-        public var secondsToFirstWord300: Double
-        /// Writing speed. A range was measured, so this is its low end and
-        /// `tokensPerSecondMax` its high end.
+        /// Writing speed, in tokens a second, at `recommended.threadsGenerate` (llama-bench
+        /// tg128, three runs).
         public var tokensPerSecond: Double
-        public var tokensPerSecondMax: Double?
-        /// What it settles to over a long answer, once the phone has heated up. Nil when it
-        /// did not measurably settle lower.
+        /// Every thread count tried, with the writing speed it gave — the sweep
+        /// `tokensPerSecond` was picked from.
+        public var threadSweep: [ThreadSample]
+        /// Prompt speed, in tokens a second, at `recommended.threadsPrompt` (llama-bench
+        /// pp512, three runs). The time to the first word is worked out from it.
+        public var promptTokensPerSecond: Double
+        /// What a long answer settles to once the phone is hot (llama-bench tg256, ten runs),
+        /// or nil when that has not been measured. Nil never means "does not slow down".
         public var sustainedTokensPerSecond: Double?
+        /// The largest resident memory seen during the runs — at a context of at most
+        /// `peakMemoryContextTokens`, well short of the 4,096 the phone is told to use.
+        public var peakMemoryBytes: Int64
+        public var peakMemoryContextTokens: Int
+
+        public struct ThreadSample: Sendable, Hashable {
+            public var threads: Int
+            public var tokensPerSecond: Double
+
+            public init(threads: Int, tokensPerSecond: Double) {
+                self.threads = threads
+                self.tokensPerSecond = tokensPerSecond
+            }
+        }
+
+        /// Estimated, not measured: how long a 300-token question takes to read at
+        /// `promptTokensPerSecond`, rounded *up* to a tenth of a second — the same way for
+        /// every model, so a faster number is never a rounding accident. The answer's first
+        /// word follows the last prompt token.
+        public var secondsToFirstWord300: Double {
+            (300 / promptTokensPerSecond * 10).rounded(.up) / 10
+        }
 
         public init(
-            device: String, runtime: String, conditions: String,
-            secondsToFirstWord300: Double, tokensPerSecond: Double,
-            tokensPerSecondMax: Double? = nil, sustainedTokensPerSecond: Double? = nil
+            device: String, runtime: String, conditions: String, tokensPerSecond: Double,
+            threadSweep: [ThreadSample], promptTokensPerSecond: Double,
+            sustainedTokensPerSecond: Double?, peakMemoryBytes: Int64,
+            peakMemoryContextTokens: Int
         ) {
             self.device = device
             self.runtime = runtime
             self.conditions = conditions
-            self.secondsToFirstWord300 = secondsToFirstWord300
             self.tokensPerSecond = tokensPerSecond
-            self.tokensPerSecondMax = tokensPerSecondMax
+            self.threadSweep = threadSweep
+            self.promptTokensPerSecond = promptTokensPerSecond
             self.sustainedTokensPerSecond = sustainedTokensPerSecond
+            self.peakMemoryBytes = peakMemoryBytes
+            self.peakMemoryContextTokens = peakMemoryContextTokens
         }
     }
 
@@ -142,10 +172,31 @@ public enum PhoneModelCatalog {
     }
 
     /// Where the owner's own phone measured these: a Galaxy S24 Ultra running llama.cpp
-    /// b11053 on the CPU, hot and on the charger.
+    /// b11053 on the CPU, hot and on the charger, with llama-bench at 4 and 6 threads.
     static let measuredOn = "Galaxy S24 Ultra"
     static let measuredWith = "llama.cpp b11053, CPU"
     static let measuredWhile = "phone hot and charging"
+    /// The largest context the benchmark ran at: a 512-token prompt and 128 tokens written.
+    static let benchmarkContextTokens = 640
+
+    /// The free memory to ask for before loading: the measured peak, plus what the KV cache
+    /// and the attention scratch grow by between the benchmark's context and `context`, with
+    /// a quarter again on top — rounded up to a tenth of a gigabyte.
+    ///
+    /// The growth is worked out from the model's own header rather than guessed: only the
+    /// layers that attend over the whole context grow with it (Qwen3.5 attends fully in one
+    /// layer in four and runs the rest as a fixed-size recurrent state; Gemma 4 E2B shares
+    /// its last twenty layers' cache and keeps most of its own to a 512-token window), at
+    /// f16 for the cache and f32 for a 512-token batch's attention scores.
+    static func minimumFreeMemory(
+        peak: Int64, cacheBytesPerToken: Int64, attentionHeads: Int64, context: Int64
+    ) -> Int64 {
+        let grownTokens = context - Int64(benchmarkContextTokens)
+        let cache = cacheBytesPerToken * grownTokens
+        let scores = attentionHeads * 512 * grownTokens * 4
+        let needed = Double(peak + cache + scores) * 1.25
+        return Int64((needed / 100_000_000).rounded(.up)) * 100_000_000
+    }
 
     /// The default: 1.3 GB, quick to first word, and quick enough after it.
     public static let qwen35_2B = PhoneModelEntry(
@@ -160,14 +211,28 @@ public enum PhoneModelCatalog {
         licence: "Apache-2.0",
         recommended: .init(
             threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
-            minFreeMemoryBytes: 2_500_000_000, thinking: false
+            // 2,467 MiB measured; six full-attention layers of 2 KV heads × 256, 8 heads.
+            minFreeMemoryBytes: minimumFreeMemory(
+                peak: qwenPeak, cacheBytesPerToken: 6 * 2 * (256 + 256) * 2,
+                attentionHeads: 8, context: 4096
+            ),
+            thinking: false
         ),
         measured: .init(
             device: measuredOn, runtime: measuredWith, conditions: measuredWhile,
-            secondsToFirstWord300: 2.4, tokensPerSecond: 17, tokensPerSecondMax: 19
+            tokensPerSecond: 19.2,
+            threadSweep: [.init(threads: 4, tokensPerSecond: 19.2),
+                          .init(threads: 6, tokensPerSecond: 17.2)],
+            promptTokensPerSecond: 122.9,
+            // Never measured on a long answer, so not claimed either way.
+            sustainedTokensPerSecond: nil,
+            peakMemoryBytes: qwenPeak, peakMemoryContextTokens: benchmarkContextTokens
         ),
         slowerOnPhone: false
     )
+
+    /// VmHWM of llama-bench on the phone: 2,467 MiB.
+    static let qwenPeak: Int64 = 2_467 * 1_048_576
 
     /// Larger and slower on the phone: Google's quantization-aware Q4_0 of Gemma 4 E2B.
     /// Offered, never the default.
@@ -183,13 +248,25 @@ public enum PhoneModelCatalog {
         licence: "Apache-2.0",
         recommended: .init(
             threadsPrompt: 4, threadsGenerate: 6, contextLength: 4096,
-            minFreeMemoryBytes: 4_200_000_000, thinking: false
+            // 4,136 MiB measured; three global layers of 1 KV head × 512 own a growing cache.
+            minFreeMemoryBytes: minimumFreeMemory(
+                peak: gemmaPeak, cacheBytesPerToken: 3 * 1 * (512 + 512) * 2,
+                attentionHeads: 8, context: 4096
+            ),
+            thinking: false
         ),
         measured: .init(
             device: measuredOn, runtime: measuredWith, conditions: measuredWhile,
-            secondsToFirstWord300: 3.3, tokensPerSecond: 14, tokensPerSecondMax: 15,
-            sustainedTokensPerSecond: 7.5
+            tokensPerSecond: 15.1,
+            threadSweep: [.init(threads: 4, tokensPerSecond: 14.1),
+                          .init(threads: 6, tokensPerSecond: 15.1)],
+            promptTokensPerSecond: 92.6,
+            sustainedTokensPerSecond: 7.5,
+            peakMemoryBytes: gemmaPeak, peakMemoryContextTokens: benchmarkContextTokens
         ),
         slowerOnPhone: true
     )
+
+    /// VmHWM of llama-bench on the phone, the higher of its two runs: 4,136 MiB.
+    static let gemmaPeak: Int64 = 4_136 * 1_048_576
 }

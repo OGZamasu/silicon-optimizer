@@ -231,10 +231,16 @@ extension ControlAPI {
         public var bytesExpected: Int64
         public var bytesPerSecond: Double
         public var error: String?
+        /// What an unfinished transfer is doing, for the ones that have more than one thing
+        /// to do: a model the Mac keeps for the phone is fetched, then checked, and follows
+        /// the library when it moves (`ControlAPI.phoneModelStages`). Absent on the frame
+        /// that says it is done — and on the Mac's own model downloads, which have no stages.
+        public var stage: String?
 
         public init(
             id: String, name: String, fraction: Double, bytesReceived: Int64,
-            bytesExpected: Int64, bytesPerSecond: Double, error: String? = nil
+            bytesExpected: Int64, bytesPerSecond: Double, error: String? = nil,
+            stage: String? = nil
         ) {
             self.id = id
             self.name = name
@@ -243,6 +249,7 @@ extension ControlAPI {
             self.bytesExpected = bytesExpected
             self.bytesPerSecond = bytesPerSecond
             self.error = error
+            self.stage = stage
         }
     }
 

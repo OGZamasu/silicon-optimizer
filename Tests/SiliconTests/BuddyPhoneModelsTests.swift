@@ -1,7 +1,7 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Network
-import Security
 import Testing
 @testable import SiliconCatalog
 @testable import SiliconControl
@@ -10,12 +10,12 @@ import Testing
 @testable import SiliconUI
 
 /// The Mac's half of the phone's fallback model: the pinned catalogue, the fetch into
-/// `PhoneModels/`, and the four `/ondevice/models` routes a phone uses to get a model
-/// without ever leaving the tailnet.
+/// `Phone Models/` beside the model library, and the four `/ondevice/models` routes a phone
+/// uses to get a model without ever leaving the tailnet.
 ///
 /// Nothing here touches the network or the login Keychain. "Hugging Face" is a loopback
 /// socket serving a few hundred kilobytes of random bytes under the real pinned paths, the
-/// files live in a temporary directory, and the one 3.35 GB file is sparse — it occupies a
+/// model library is a temporary folder, and the one 3.35 GB file is sparse — it occupies a
 /// single block on disk.
 @Suite("Silicon Buddy phone models")
 struct BuddyPhoneModelsTests {
@@ -38,19 +38,11 @@ struct BuddyPhoneModelsTests {
         #expect(qwen.sizeBytes == 1_296_764_000)
         #expect(qwen.sha256 == "91c102fc9a86de80e427057ee938e1e34fcaf3bba956b7296e252406e05f36f6")
         #expect(qwen.licence == "Apache-2.0")
-        #expect(qwen.recommended == .init(
-            threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
-            minFreeMemoryBytes: 2_500_000_000, thinking: false
-        ))
+        #expect(qwen.recommended.threadsPrompt == 6)
+        #expect(qwen.recommended.threadsGenerate == 4)
+        #expect(qwen.recommended.contextLength == 4096)
+        #expect(!qwen.recommended.thinking)
         #expect(!qwen.slowerOnPhone)
-        let qwenMeasured = try #require(qwen.measured)
-        #expect(qwenMeasured.device == "Galaxy S24 Ultra")
-        #expect(qwenMeasured.runtime == "llama.cpp b11053, CPU")
-        #expect(qwenMeasured.conditions == "phone hot and charging")
-        #expect(qwenMeasured.secondsToFirstWord300 == 2.4)
-        #expect(qwenMeasured.tokensPerSecond == 17)
-        #expect(qwenMeasured.tokensPerSecondMax == 19)
-        #expect(qwenMeasured.sustainedTokensPerSecond == nil)
 
         let gemma = try #require(PhoneModelCatalog.entry(id: "gemma-4-e2b-q4_0"))
         #expect(gemma.label == "Gemma 4 E2B")
@@ -61,17 +53,11 @@ struct BuddyPhoneModelsTests {
         #expect(gemma.sizeBytes == 3_349_516_256)
         #expect(gemma.sha256 == "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634")
         #expect(gemma.licence == "Apache-2.0")
-        #expect(gemma.recommended == .init(
-            threadsPrompt: 4, threadsGenerate: 6, contextLength: 4096,
-            minFreeMemoryBytes: 4_200_000_000, thinking: false
-        ))
+        #expect(gemma.recommended.threadsPrompt == 4)
+        #expect(gemma.recommended.threadsGenerate == 6)
+        #expect(gemma.recommended.contextLength == 4096)
+        #expect(!gemma.recommended.thinking)
         #expect(gemma.slowerOnPhone)
-        let gemmaMeasured = try #require(gemma.measured)
-        #expect(gemmaMeasured.device == "Galaxy S24 Ultra")
-        #expect(gemmaMeasured.secondsToFirstWord300 == 3.3)
-        #expect(gemmaMeasured.tokensPerSecond == 14)
-        #expect(gemmaMeasured.tokensPerSecondMax == 15)
-        #expect(gemmaMeasured.sustainedTokensPerSecond == 7.5)
 
         // Exactly one default, and it is the small one.
         #expect(PhoneModelCatalog.all.filter(\.isDefault).map(\.id) == [qwen.id])
@@ -89,6 +75,53 @@ struct BuddyPhoneModelsTests {
         #expect(Set(PhoneModelCatalog.all.map(\.file)).count == PhoneModelCatalog.all.count)
     }
 
+    /// The numbers the owner's S24 Ultra measured, reported the way they were measured:
+    /// writing speed at the thread count the phone is told to use, the sweep it came from,
+    /// the first word as an estimate from prompt speed rounded the same way for both, and
+    /// "not measured" said rather than implied.
+    @Test func theMeasuredNumbersAreTheBenchmarksOwn() throws {
+        let qwen = try #require(PhoneModelCatalog.qwen35_2B.measured)
+        #expect(qwen.device == "Galaxy S24 Ultra")
+        #expect(qwen.runtime == "llama.cpp b11053, CPU")
+        #expect(qwen.conditions == "phone hot and charging")
+        #expect(qwen.tokensPerSecond == 19.2)
+        #expect(qwen.threadSweep == [.init(threads: 4, tokensPerSecond: 19.2),
+                                     .init(threads: 6, tokensPerSecond: 17.2)])
+        #expect(qwen.promptTokensPerSecond == 122.9)
+        #expect(qwen.secondsToFirstWord300 == 2.5)
+        #expect(qwen.sustainedTokensPerSecond == nil)
+        #expect(qwen.peakMemoryBytes == 2_467 * 1_048_576)
+
+        let gemma = try #require(PhoneModelCatalog.gemma4E2B.measured)
+        #expect(gemma.tokensPerSecond == 15.1)
+        #expect(gemma.threadSweep == [.init(threads: 4, tokensPerSecond: 14.1),
+                                      .init(threads: 6, tokensPerSecond: 15.1)])
+        #expect(gemma.promptTokensPerSecond == 92.6)
+        #expect(gemma.secondsToFirstWord300 == 3.3)
+        #expect(gemma.sustainedTokensPerSecond == 7.5)
+        #expect(gemma.peakMemoryBytes == 4_136 * 1_048_576)
+
+        for entry in PhoneModelCatalog.all {
+            let measured = try #require(entry.measured)
+            // The headline speed is the one at the threads the phone is told to write with.
+            let atRecommended = measured.threadSweep.first {
+                $0.threads == entry.recommended.threadsGenerate
+            }
+            #expect(atRecommended?.tokensPerSecond == measured.tokensPerSecond, "\(entry.id)")
+            // Rounded up, never to nearest: 300 ÷ prompt speed, in tenths.
+            let exact = 300 / measured.promptTokensPerSecond
+            #expect(measured.secondsToFirstWord300 >= exact, "\(entry.id)")
+            #expect(measured.secondsToFirstWord300 - exact < 0.1, "\(entry.id)")
+            // The peak was taken at a context far short of the one recommended.
+            #expect(measured.peakMemoryContextTokens < entry.recommended.contextLength)
+            // Free memory asked for: more than the peak, by at least a quarter.
+            #expect(Double(entry.recommended.minFreeMemoryBytes)
+                >= Double(measured.peakMemoryBytes) * 1.25, "\(entry.id)")
+        }
+        #expect(PhoneModelCatalog.qwen35_2B.recommended.minFreeMemoryBytes == 3_400_000_000)
+        #expect(PhoneModelCatalog.gemma4E2B.recommended.minFreeMemoryBytes == 5_600_000_000)
+    }
+
     /// These are fetched for the phone and passed along. They must never become something
     /// the Mac lists, recommends, loads or keeps in its own library.
     @Test func phoneModelsAreNeverMacModels() throws {
@@ -100,15 +133,8 @@ struct BuddyPhoneModelsTests {
             #expect(ModelCatalog.entry(id: entry.id) == nil, "\(entry.id)")
         }
 
-        let root = PhoneModelStore.defaultRoot.standardizedFileURL.path
-        let library = ModelLibrary.defaultRoot.standardizedFileURL.path
-        #expect(root.hasSuffix("/Application Support/SiliconOptimizer/PhoneModels"))
-        #expect(root != library)
-        #expect(!root.hasPrefix(library + "/"))
-        #expect(!library.hasPrefix(root + "/"))
-
         // A file name that could climb out of the folder is not an entry at all — so an id
-        // can never lead anywhere but a catalogue file inside `PhoneModels/`.
+        // can never lead anywhere but a catalogue file inside `Phone Models/`.
         var escaping = PhoneModelCatalog.qwen35_2B
         escaping.id = "escaping"
         escaping.file = "../Models/escaping.gguf"
@@ -116,9 +142,9 @@ struct BuddyPhoneModelsTests {
         hidden.id = "hidden"
         hidden.file = ".verified"
         let store = PhoneModelStore(
-            root: FileManager.default.temporaryDirectory.appendingPathComponent("unused-\(UUID())"),
             catalog: [escaping, hidden, PhoneModelCatalog.qwen35_2B],
-            source: URL(string: "http://127.0.0.1:9")!, spaceCheck: { _, _ in }
+            stateFile: { URL(fileURLWithPath: "/nonexistent/phone-models.json") },
+            source: { URL(string: "http://127.0.0.1:9")! }, spaceCheck: { _, _ in }
         )
         #expect(store.entry(id: "escaping") == nil)
         #expect(store.entry(id: "hidden") == nil)
@@ -126,7 +152,47 @@ struct BuddyPhoneModelsTests {
         #expect(store.entry(id: "../qwen3.5-2b-q4_0") == nil)
     }
 
-    /// What a phone reads, built from the catalogue: every pin, and the four states.
+    /// `<library>/Phone Models`, whatever the library is; the app's support folder only
+    /// when there is no library; and a drive that is not connected is a missing drive, never
+    /// a reason to use the startup disk.
+    @Test func phoneModelsLiveBesideTheModelLibrary() throws {
+        let fallback = URL(fileURLWithPath: "/tmp/fallback/Phone Models")
+        let library = FileManager.default.temporaryDirectory
+            .appendingPathComponent("library-\(UUID())")
+        func folder(_ place: PhoneModelPlace) -> String? {
+            guard case .folder(let url) = place else { return nil }
+            return url.path
+        }
+        #expect(folder(PhoneModelStore.place(forLibrary: library, fallback: fallback))
+            == library.standardizedFileURL.appendingPathComponent("Phone Models").path)
+        #expect(folder(PhoneModelStore.place(forLibrary: nil, fallback: fallback))
+            == fallback.path)
+        #expect(PhoneModelStore.fallbackRoot.path
+            .hasSuffix("/Application Support/SiliconOptimizer/Phone Models"))
+
+        // An external library whose drive is not there. Nothing about this path exists.
+        let drive = "SiliconTestNoSuchDrive-\(UUID().uuidString.prefix(8))"
+        let unplugged = URL(fileURLWithPath: "/Volumes/\(drive)/Local Models")
+        #expect(PhoneModelStore.place(forLibrary: unplugged, fallback: fallback)
+            == .driveMissing(drive: drive))
+        #expect(PhoneModelStore.missingDrive(for: unplugged) == drive)
+        // A folder on the startup disk is never "missing", and neither is a path that goes
+        // through a link back to it.
+        #expect(PhoneModelStore.missingDrive(for: library) == nil)
+        #expect(PhoneModelStore.missingDrive(for: URL(fileURLWithPath: NSHomeDirectory())) == nil)
+        #expect(PhoneModelStore.missingDrive(for: URL(fileURLWithPath: "/Volumes")) == nil)
+        let startupAlias = URL(fileURLWithPath: "/Volumes/Macintosh HD")
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: startupAlias.path)) != nil {
+            #expect(PhoneModelStore.missingDrive(
+                for: startupAlias.appendingPathComponent("Users")
+            ) == nil)
+        }
+        // And the sentence names the drive.
+        #expect(PhoneModelStore.driveMissingSentence(drive).contains("“\(drive)”"))
+        #expect(PhoneModelStore.driveMissingSentence(drive).contains("startup disk"))
+    }
+
+    /// What a phone reads, built from the catalogue: every pin, and each state.
     @Test func theWireCarriesEveryPinAndEachState() throws {
         let qwen = PhoneModelCatalog.qwen35_2B
         let absent = PhoneModelService.wire(qwen, state: .absent)
@@ -139,18 +205,27 @@ struct BuddyPhoneModelsTests {
         #expect(absent.source == .init(repo: qwen.repository, commit: qwen.commit, file: qwen.file))
         #expect(absent.recommended == .init(
             threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
-            minFreeMemoryBytes: 2_500_000_000, thinking: false
+            minFreeMemoryBytes: 3_400_000_000, thinking: false
         ))
-        #expect(absent.measured?.secondsToFirstWord300 == 2.4)
-        #expect(absent.measured?.tokensPerSecond == 17)
-        #expect(absent.measured?.tokensPerSecondMax == 19)
+        let measured = try #require(absent.measured)
+        #expect(measured.tokensPerSecond == 19.2)
+        #expect(measured.secondsToFirstWord300 == 2.5)
+        #expect(measured.firstWordEstimated)
+        #expect(measured.sustainedTokensPerSecond == nil)
+        #expect(!measured.sustainedMeasured)
         #expect(absent.onMac == .init(state: "absent"))
         #expect(absent.downloadEventID == "ondevice:qwen3.5-2b-q4_0")
 
         let half = PhoneModelService.wire(
-            qwen, state: .downloading(bytesReceived: qwen.sizeBytes / 2, bytesPerSecond: 1)
+            qwen, state: .downloading(
+                bytesReceived: qwen.sizeBytes / 2, bytesPerSecond: 1, stage: .fetching
+            )
         )
-        #expect(half.onMac == .init(state: "downloading", fraction: 0.5))
+        #expect(half.onMac == .init(state: "downloading", stage: "fetching", fraction: 0.5))
+        let checking = PhoneModelService.wire(
+            qwen, state: .downloading(bytesReceived: 0, bytesPerSecond: 0, stage: .checking)
+        )
+        #expect(checking.onMac.stage == "checking")
         #expect(PhoneModelService.wire(qwen, state: .ready).onMac == .init(state: "ready"))
 
         let cut = PhoneModelStore.Failure(
@@ -166,6 +241,8 @@ struct BuddyPhoneModelsTests {
         // The vocabularies the contract publishes are the ones the store can produce.
         #expect(Set(PhoneModelStore.Failure.Kind.allCases.map(\.rawValue))
             == Set(ControlAPI.phoneModelFailures))
+        #expect(Set(PhoneModelStore.Stage.allCases.map(\.rawValue))
+            == Set(ControlAPI.phoneModelStages))
         #expect(ControlAPI.phoneModelStates == ["absent", "downloading", "ready", "failed"])
 
         // The keys, exactly: a generated client learns these.
@@ -176,13 +253,20 @@ struct BuddyPhoneModelsTests {
             "id", "label", "isDefault", "sizeBytes", "sha256", "licence", "source", "onMac",
             "recommended", "measured", "slowerOnPhone",
         ])
+        let measuredKeys = try #require(object["measured"] as? [String: Any])
+        #expect(Set(measuredKeys.keys) == [
+            "device", "runtime", "conditions", "tokensPerSecond", "threadSweep",
+            "promptTokensPerSecond", "secondsToFirstWord300", "firstWordEstimated",
+            "sustainedMeasured", "peakMemoryBytes", "peakMemoryContextTokens",
+        ])
         let gemma = PhoneModelService.wire(PhoneModelCatalog.gemma4E2B, state: .absent)
         #expect(gemma.slowerOnPhone)
         #expect(gemma.measured?.sustainedTokensPerSecond == 7.5)
+        #expect(gemma.measured?.sustainedMeasured == true)
     }
 
-    /// Every failure a phone can be told about has a kind it can act on and a sentence
-    /// with no path and no credential in it.
+    /// Every failure a phone can be told about has a kind it can act on and a fixed
+    /// sentence — never a system error's own text, which can name folders and drives.
     @Test func failuresSayWhatHappenedAndWhatToDo() {
         let entry = PhoneModelCatalog.gemma4E2B
         func kind(_ error: any Error, partial: Int64 = 0) -> PhoneModelStore.Failure {
@@ -192,7 +276,9 @@ struct BuddyPhoneModelsTests {
             needed: Bytes(entry.sizeBytes), available: .gib(4)
         ))
         #expect(disk.kind == .diskFull)
-        #expect(disk.reason.contains("not enough space on the Mac"))
+        #expect(disk.reason.contains("not enough space"))
+        #expect(disk.reason.contains("drive the phone models are kept on"))
+        #expect(!disk.reason.contains("startup"))
         #expect(kind(CocoaError(.fileWriteOutOfSpace)).kind == .diskFull)
         #expect(kind(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))).kind == .diskFull)
 
@@ -215,39 +301,115 @@ struct BuddyPhoneModelsTests {
 
         #expect(kind(HuggingFaceClient.ClientError.badResponse(503)).reason.contains("503"))
         #expect(kind(HuggingFaceClient.ClientError.rateLimited).kind == .server)
+        #expect(kind(RedirectRefused(host: "attacker.example")).kind == .server)
+        #expect(!kind(RedirectRefused(host: "attacker.example")).reason.contains("attacker"))
 
-        for failure in [disk, mismatch, lost] {
+        // An error whose own words carry a folder and a drive name: none of it gets out.
+        let leaky = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: [
+            NSLocalizedDescriptionKey: "You don’t have permission to save “x” in “/Volumes/Secret Drive/Private”.",
+        ])
+        let other = kind(leaky)
+        #expect(other.kind == .other)
+        #expect(!other.reason.contains("Secret"))
+        #expect(!other.reason.contains("/Volumes"))
+
+        for failure in [disk, mismatch, lost, other] {
             #expect(!failure.reason.contains("/Users/"))
             #expect(!failure.reason.contains("Application Support"))
+        }
+    }
+
+    /// One builder for the Hub's download URL and for the stand-in the tests use, and the
+    /// Hub's is exactly this for both pins.
+    @Test func theHubURLIsTheCommitPinnedOne() throws {
+        #expect(HuggingFaceClient.downloadURL(
+            repository: PhoneModelCatalog.qwen35_2B.repository,
+            file: PhoneModelCatalog.qwen35_2B.file,
+            revision: PhoneModelCatalog.qwen35_2B.commit
+        ).absoluteString == "https://huggingface.co/bartowski/Qwen_Qwen3.5-2B-GGUF/resolve/"
+            + "7d26695454df6de5fbcce2e58681e62dae06ce43/Qwen_Qwen3.5-2B-Q4_0.gguf?download=true")
+        #expect(HuggingFaceClient.downloadURL(
+            repository: PhoneModelCatalog.gemma4E2B.repository,
+            file: PhoneModelCatalog.gemma4E2B.file,
+            revision: PhoneModelCatalog.gemma4E2B.commit
+        ).absoluteString == "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/"
+            + "675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B_q4_0-it.gguf?download=true")
+        // The stand-in gets the same path, so what the fetch tests see is what the Hub is
+        // asked for.
+        let local = HuggingFaceClient.downloadURL(
+            repository: "a/b", file: "c.gguf", revision: "0123",
+            base: URL(string: "http://127.0.0.1:9/")!
+        )
+        #expect(local.absoluteString == "http://127.0.0.1:9/a/b/resolve/0123/c.gguf?download=true")
+    }
+
+    /// The session a phone model is fetched on keeps nothing, and does not sit waiting for
+    /// a network that is not there.
+    @Test func thePublicFileSessionKeepsNothingAndDoesNotWait() {
+        let downloader = ModelDownloader(publicFilesFrom: nil, redirects: { _ in false })
+        #expect(downloader.waitsForConnectivity == false)
+        let configuration = ModelDownloader.publicFileConfiguration()
+        #expect(configuration.waitsForConnectivity == false)
+        #expect(configuration.httpCookieStorage == nil)
+        #expect(configuration.httpShouldSetCookies == false)
+        #expect(configuration.httpCookieAcceptPolicy == .never)
+        #expect(configuration.urlCredentialStorage == nil)
+        #expect(configuration.urlCache == nil)
+        #expect(configuration.timeoutIntervalForResource <= 60 * 60 * 12)
+        // The catalogue's own downloads keep their old behaviour.
+        #expect(ModelDownloader().waitsForConnectivity)
+    }
+
+    /// Redirects are followed only to Hugging Face, over HTTPS.
+    @Test func redirectsGoOnlyToTheHubOverHTTPS() {
+        for allowed in [
+            "https://huggingface.co/x", "https://cdn-lfs.huggingface.co/repos/a/b",
+            "https://cas-bridge.xethub.hf.co/xet-bridge-us/abc?X-Amz-Signature=1",
+            "https://hf.co/x", "https://HuggingFace.co./x", "https://cdn-lfs-us-1.hf.co:443/x",
+        ] {
+            #expect(HuggingFaceClient.isHubRedirect(URL(string: allowed)!), "\(allowed)")
+        }
+        for refused in [
+            "http://huggingface.co/x", "http://cdn-lfs.huggingface.co/x",
+            "https://huggingface.co.attacker.example/x", "https://evilhuggingface.co/x",
+            "https://hf.co.example/x", "https://127.0.0.1/x", "https://localhost/x",
+            "https://user:pass@huggingface.co/x", "https://huggingface.co:8443/x",
+            "ftp://huggingface.co/x", "file:///etc/passwd",
+        ] {
+            #expect(!HuggingFaceClient.isHubRedirect(URL(string: refused)!), "\(refused)")
         }
     }
 
     // MARK: - Fetching
 
     /// The ordinary case, all of it: the pinned commit is what is asked for, no credential
-    /// goes out, the bytes are verified, and nothing partial is left behind.
+    /// or cookie goes out, the bytes are verified, and they land beside the model library.
     @Test func aPreparedModelArrivesFromItsPinnedCommitVerifiedAndWithoutAToken() async throws {
         try await PhoneModelFixture.with { f in
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
-            #expect(try await f.store.prepare(id: f.qwen.id) == .started)
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .ready)
+            #expect(await f.state(f.qwen) == .absent)
+            #expect(try await f.prepare(f.qwen) == .started)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
 
-            let verified = try #require(await f.store.verifiedFile(id: f.qwen.id))
+            let verified = try #require(await f.verified(f.qwen))
             #expect(verified.sha256 == f.qwen.sha256)
             #expect(verified.sizeBytes == Int64(f.qwenBytes.count))
             #expect(PhoneModelFixture.sha256(try Data(contentsOf: verified.url)) == f.qwen.sha256)
+            // `<library>/Phone Models`, and the room check was asked about that folder.
             #expect(verified.url.deletingLastPathComponent().standardizedFileURL.path
                 == f.root.standardizedFileURL.path)
+            #expect(f.root.path.hasSuffix("/Local Models/Phone Models"))
+            #expect(f.roomAsked.value.map(\.standardizedFileURL.path)
+                == [f.root.standardizedFileURL.path])
 
             let requests = f.huggingFace.requests
-            #expect(requests.map(\.path) == [PhoneModelFixture.pinnedPath(f.qwen)])
+            #expect(requests.map(\.target) == [PhoneModelFixture.pinnedTarget(f.qwen)])
             #expect(requests.allSatisfy { !$0.path.contains("/resolve/main/") })
             // Public files: no bearer of any kind, and certainly not the owner's.
-            #expect(requests.allSatisfy { $0.authorization == nil })
+            #expect(requests.allSatisfy { $0.authorization == nil && $0.cookie == nil })
             #expect(!FileManager.default.fileExists(atPath: f.partialURL(f.qwen).path))
             // The other model was not touched.
-            #expect(await f.store.state(of: f.gemma.id) == .absent)
+            #expect(await f.state(f.gemma) == .absent)
         }
     }
 
@@ -257,7 +419,7 @@ struct BuddyPhoneModelsTests {
         try await PhoneModelFixture.with { f in
             try await f.interrupt(f.qwen, after: 120_000)
 
-            guard case .failed(let failure) = await f.store.state(of: f.qwen.id) else {
+            guard case .failed(let failure) = await f.state(f.qwen) else {
                 Issue.record("A cut transfer should read as failed.")
                 return
             }
@@ -266,17 +428,17 @@ struct BuddyPhoneModelsTests {
             #expect(f.size(of: f.partialURL(f.qwen)) == 120_000)
             #expect(failure.reason.contains("40%"))
             #expect(failure.reason.contains("resume"))
-            #expect(await f.store.verifiedFile(id: f.qwen.id) == nil)
-            let listed = await f.service.phoneModels().models.first { $0.id == f.qwen.id }
+            #expect(await f.verified(f.qwen) == nil)
+            let listed = await f.provider.phoneModels().models.first { $0.id == f.qwen.id }
             #expect(listed?.onMac.fraction == 0.4)
             #expect(listed?.onMac.failure == "network")
 
-            #expect(try await f.store.prepare(id: f.qwen.id) == .started)
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .ready)
+            #expect(try await f.prepare(f.qwen) == .started)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
             #expect(f.huggingFace.requests.count == 2)
             #expect(f.huggingFace.requests.last?.range == "bytes=120000-")
-            #expect(f.huggingFace.requests.last?.path == PhoneModelFixture.pinnedPath(f.qwen))
+            #expect(f.huggingFace.requests.last?.target == PhoneModelFixture.pinnedTarget(f.qwen))
             // Two ranges, one file: it hashes to the pin.
             #expect(PhoneModelFixture.sha256(try Data(contentsOf: f.fileURL(f.qwen)))
                 == f.qwen.sha256)
@@ -284,16 +446,15 @@ struct BuddyPhoneModelsTests {
     }
 
     /// Bytes that are not the pinned ones are thrown away, not kept to be resumed, and the
-    /// phone is told why.
+    /// phone is told why. The downloader is not asked to check them: the store does, once.
     @Test func aChecksumMismatchDeletesTheBytesAndSaysSo() async throws {
         try await PhoneModelFixture.with { f in
             var corrupted = f.qwenBytes
             corrupted[1_000] ^= 0xFF
             f.huggingFace.serve(corrupted, at: PhoneModelFixture.pinnedPath(f.qwen))
-            _ = try await f.store.prepare(id: f.qwen.id)
-            await f.store.waitUntilSettled(id: f.qwen.id)
+            try await f.fetch(f.qwen)
 
-            guard case .failed(let failure) = await f.store.state(of: f.qwen.id) else {
+            guard case .failed(let failure) = await f.state(f.qwen) else {
                 Issue.record("A mismatched digest should read as failed.")
                 return
             }
@@ -302,18 +463,18 @@ struct BuddyPhoneModelsTests {
             #expect(failure.reason.contains("checksum"))
             #expect(!FileManager.default.fileExists(atPath: f.fileURL(f.qwen).path))
             #expect(!FileManager.default.fileExists(atPath: f.partialURL(f.qwen).path))
-            #expect(await f.store.verifiedFile(id: f.qwen.id) == nil)
+            #expect(f.leftovers().isEmpty)
+            #expect(await f.verified(f.qwen) == nil)
 
-            let listed = await f.service.phoneModels().models.first { $0.id == f.qwen.id }
+            let listed = await f.provider.phoneModels().models.first { $0.id == f.qwen.id }
             #expect(listed?.onMac.state == "failed")
             #expect(listed?.onMac.failure == "checksumMismatch")
             #expect(listed?.onMac.fraction == nil)
 
             // Put right, it starts again from nothing — there is nothing to resume.
             f.huggingFace.serve(f.qwenBytes, at: PhoneModelFixture.pinnedPath(f.qwen))
-            _ = try await f.store.prepare(id: f.qwen.id)
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .ready)
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
             #expect(f.huggingFace.requests.last?.range == nil)
         }
     }
@@ -322,9 +483,8 @@ struct BuddyPhoneModelsTests {
     @Test func aRefusalFromHuggingFaceIsAFailureWithItsStatus() async throws {
         try await PhoneModelFixture.with { f in
             f.huggingFace.unserve(PhoneModelFixture.pinnedPath(f.gemma))
-            _ = try await f.store.prepare(id: f.gemma.id)
-            await f.store.waitUntilSettled(id: f.gemma.id)
-            guard case .failed(let failure) = await f.store.state(of: f.gemma.id) else {
+            try await f.fetch(f.gemma)
+            guard case .failed(let failure) = await f.state(f.gemma) else {
                 Issue.record("A 404 should read as failed.")
                 return
             }
@@ -333,26 +493,78 @@ struct BuddyPhoneModelsTests {
         }
     }
 
+    /// Hugging Face sends a file's bytes from a CDN. A redirect anywhere that is not the
+    /// Hub over HTTPS ends the fetch before the other host is asked for anything.
+    @Test func aRedirectAwayFromTheHubIsNotFollowed() async throws {
+        try await PhoneModelFixture.with { f in
+            let elsewhere = try FakeHuggingFace()
+            defer { elsewhere.stop() }
+            elsewhere.serve(f.qwenBytes, at: "/blob")
+            f.huggingFace.redirect(
+                PhoneModelFixture.pinnedPath(f.qwen), to: "http://127.0.0.1:\(elsewhere.port)/blob"
+            )
+            try await f.fetch(f.qwen)
+            guard case .failed(let failure) = await f.state(f.qwen) else {
+                Issue.record("A refused redirect should read as failed.")
+                return
+            }
+            #expect(failure.kind == .server)
+            #expect(failure.reason.contains("does not fetch from"))
+            #expect(elsewhere.requests.isEmpty)
+            #expect(await f.verified(f.qwen) == nil)
+        }
+    }
+
+    /// A Mac with no network fails at once, and says so, rather than sitting at "0%".
+    @Test func anUnreachableHubFailsAtOnceAsAResumableNetworkFailure() async throws {
+        let closed = try await BuddyControlTests.freeLoopbackPort()
+        try await PhoneModelFixture.with { f in
+            let directory = f.directory
+            let store = PhoneModelStore(
+                catalog: [f.qwen],
+                stateFile: { directory.appendingPathComponent("offline.json") },
+                source: { URL(string: "http://127.0.0.1:\(closed)")! },
+                spaceCheck: { _, _ in }
+            )
+            let library = f.library
+            _ = try await store.prepare(id: f.qwen.id, library: library)
+            // Bounded, so a session that waits for connectivity is a failure here rather
+            // than a test that hangs: waiting is exactly what it must not do.
+            try await until(.seconds(30)) {
+                if case .failed = await store.state(of: f.qwen.id, library: library) { return true }
+                return false
+            }
+            guard case .failed(let failure) = await store.state(of: f.qwen.id, library: f.library)
+            else {
+                Issue.record("An unreachable Hub should read as failed.")
+                return
+            }
+            #expect(failure.kind == .network)
+            #expect(failure.reason.contains("refused"))
+        }
+    }
+
     /// Asking twice is asking once: a model on its way is not restarted or doubled, and a
     /// ready one is not fetched again.
     @Test func prepareIsIdempotentWhileDownloadingAndOnceReady() async throws {
         try await PhoneModelFixture.with { f in
             f.huggingFace.hold()
-            #expect(try await f.store.prepare(id: f.qwen.id) == .started)
+            #expect(try await f.prepare(f.qwen) == .started)
             try await until { f.huggingFace.requests.count == 1 }
-            #expect(try await f.store.prepare(id: f.qwen.id) == .alreadyDownloading)
-            #expect(try await f.store.prepare(id: f.qwen.id) == .alreadyDownloading)
-            guard case .downloading = await f.store.state(of: f.qwen.id) else {
+            #expect(try await f.prepare(f.qwen) == .alreadyDownloading)
+            #expect(try await f.prepare(f.qwen) == .alreadyDownloading)
+            guard case .downloading(_, _, let stage) = await f.state(f.qwen) else {
                 Issue.record("A held transfer should read as downloading.")
                 return
             }
-            #expect(await f.store.verifiedFile(id: f.qwen.id) == nil)
+            #expect(stage == .fetching)
+            #expect(await f.verified(f.qwen) == nil)
             #expect(f.huggingFace.requests.count == 1)
 
             f.huggingFace.release()
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .ready)
-            #expect(try await f.store.prepare(id: f.qwen.id) == .alreadyReady)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(try await f.prepare(f.qwen) == .alreadyReady)
             #expect(f.huggingFace.requests.count == 1)
         }
     }
@@ -366,12 +578,12 @@ struct BuddyPhoneModelsTests {
         }
         try await PhoneModelFixture.with(spaceCheck: full) { f in
             do {
-                _ = try await f.store.prepare(id: f.gemma.id)
+                _ = try await f.prepare(f.gemma)
                 Issue.record("A full disk should refuse the prepare.")
             } catch PhoneModelStore.StoreError.noSpace(let failure) {
                 #expect(failure.kind == .diskFull)
             }
-            guard case .failed(let failure) = await f.store.state(of: f.gemma.id) else {
+            guard case .failed(let failure) = await f.state(f.gemma) else {
                 Issue.record("A refused prepare should read as failed.")
                 return
             }
@@ -379,15 +591,35 @@ struct BuddyPhoneModelsTests {
             #expect(failure.reason.contains("space"))
             #expect(f.huggingFace.requests.isEmpty)
 
-            await #expect(throws: PhoneModelError.self) {
-                _ = try await f.service.preparePhoneModel(id: f.gemma.id)
-            }
             do {
-                _ = try await f.service.preparePhoneModel(id: f.gemma.id)
+                _ = try await f.provider.preparePhoneModel(id: f.gemma.id, verify: false)
+                Issue.record("A full disk should refuse the prepare.")
             } catch let error as PhoneModelError {
                 #expect(error.status == 507)
             }
         }
+    }
+
+    /// The room check is the library drive's, with the same reserve as the Mac's own
+    /// downloads — measured where the folder is, not wherever a walk up the path ends.
+    @Test func theRoomCheckMeasuresTheLibrarysDrive() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("room-\(UUID())/Local Models/Phone Models")
+        // A few bytes always fit.
+        try PhoneModelStore.checkRoom(needed: Bytes(1), at: folder)
+        // A petabyte never does, and the refusal reports the drive this folder is on.
+        do {
+            try PhoneModelStore.checkRoom(needed: Bytes(Int64(1) << 50), at: folder)
+            Issue.record("A petabyte should not fit.")
+        } catch ModelDownloader.DownloadError.insufficientDiskSpace(let needed, let available) {
+            #expect(needed == Bytes(Int64(1) << 50))
+            let values = try FileManager.default.temporaryDirectory.resourceValues(forKeys: [
+                .volumeAvailableCapacityKey, .volumeTotalCapacityKey,
+            ])
+            let total = Int64(try #require(values.volumeTotalCapacity))
+            #expect(available.rawValue > 0 && available.rawValue <= total)
+        }
+        #expect(ModelDownloader.diskReserve == .gib(10))
     }
 
     /// Removing takes the Mac's copy, anything partial, and a fetch still in flight — and
@@ -395,41 +627,103 @@ struct BuddyPhoneModelsTests {
     @Test func removingTakesTheCopyThePartialAndAFetchInFlight() async throws {
         try await PhoneModelFixture.with { f in
             // Ready.
-            _ = try await f.store.prepare(id: f.qwen.id)
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            try await f.store.remove(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
+            try await f.fetch(f.qwen)
+            try await f.remove(f.qwen)
+            #expect(await f.state(f.qwen) == .absent)
             #expect(f.leftovers().isEmpty)
             // Again: nothing to remove is not an error.
-            try await f.store.remove(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
+            try await f.remove(f.qwen)
+            #expect(await f.state(f.qwen) == .absent)
 
             // Partial.
             try await f.interrupt(f.qwen, after: 50_000)
             #expect(f.size(of: f.partialURL(f.qwen)) == 50_000)
-            try await f.store.remove(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
+            try await f.remove(f.qwen)
+            #expect(await f.state(f.qwen) == .absent)
             #expect(f.leftovers().isEmpty)
 
             // In flight.
             f.huggingFace.hold()
             let before = f.huggingFace.requests.count
-            _ = try await f.store.prepare(id: f.qwen.id)
+            try await f.prepare(f.qwen)
             try await until { f.huggingFace.requests.count == before + 1 }
-            try await f.store.remove(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
+            try await f.remove(f.qwen)
+            #expect(await f.state(f.qwen) == .absent)
             f.huggingFace.release()
             try await Task.sleep(for: .milliseconds(200))
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
+            #expect(await f.state(f.qwen) == .absent)
             #expect(f.leftovers().isEmpty)
 
             await #expect(throws: PhoneModelStore.StoreError.unknownModel("nope")) {
-                try await f.store.remove(id: "nope")
+                try await f.store.remove(id: "nope", library: f.library)
             }
         }
     }
 
-    /// Ready means the digest matched, not that a file of the right size is sitting there.
+    /// Remove waits for the fetch it stops — even one caught between its bytes arriving and
+    /// their check — and a prepare that arrives meanwhile waits for the remove, then starts
+    /// clean. Nothing the stopped fetch was doing lands after the remove has answered.
+    @Test func removeWaitsForTheFetchItStopsAndPrepareWaitsForTheRemove() async throws {
+        let gate = PauseGate()
+        try await PhoneModelFixture.with { f in
+            f.checkGate.value = gate
+            try await f.prepare(f.qwen)
+            // Every byte is here, renamed into place, and the check has not started.
+            try await until { await gate.arrivals == 1 }
+            #expect(FileManager.default.fileExists(atPath: f.fileURL(f.qwen).path))
+
+            let removed = SharedBox(false)
+            let removing = Task {
+                try await f.remove(f.qwen)
+                removed.value = true
+            }
+            let prepared = SharedBox<PhoneModelStore.PrepareOutcome?>(nil)
+            let preparing = Task {
+                try await Task.sleep(for: .milliseconds(50))
+                prepared.value = try await f.prepare(f.qwen)
+            }
+            // Held at the gate, the fetch has not ended, so neither may the remove — nor the
+            // prepare queued behind it.
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(!removed.value)
+            #expect(prepared.value == nil)
+            #expect(f.huggingFace.requests.count == 1)
+
+            await gate.release()
+            try await removing.value
+            try await preparing.value
+            #expect(removed.value)
+            #expect(prepared.value == .started)
+            // The stopped fetch wrote nothing after it was stopped: the second one fetched
+            // from zero, and it is the one that finished.
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(f.huggingFace.requests.count == 2)
+            #expect(f.huggingFace.requests.last?.range == nil)
+        }
+    }
+
+    /// Stop keeps what arrived, so Download resumes it.
+    @Test func stoppingKeepsWhatArrived() async throws {
+        try await PhoneModelFixture.with { f in
+            f.huggingFace.hold(after: 60_000)
+            try await f.prepare(f.qwen)
+            try await until { f.size(of: f.partialURL(f.qwen)) == 60_000 }
+            let stopped = try #require(await f.provider.cancel(id: f.qwen.id))
+            #expect(stopped.onMac.state == "failed")
+            #expect(stopped.onMac.failure == "interrupted")
+            #expect(stopped.onMac.fraction == 0.2)
+            #expect(stopped.onMac.reason?.contains("resume") == true)
+            #expect(f.size(of: f.partialURL(f.qwen)) == 60_000)
+
+            f.huggingFace.release()
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(f.huggingFace.requests.last?.range == "bytes=60000-")
+        }
+    }
+
+    /// Ready means verified, not that a file of the right size is sitting there.
     @Test func readyMeansVerifiedNotMerelyTheRightSize() async throws {
         try await PhoneModelFixture.with { f in
             try FileManager.default.createDirectory(at: f.root, withIntermediateDirectories: true)
@@ -438,46 +732,131 @@ struct BuddyPhoneModelsTests {
             var impostor = f.qwenBytes
             impostor[0] ^= 0xFF
             try impostor.write(to: f.fileURL(f.qwen))
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
-            #expect(await f.store.verifiedFile(id: f.qwen.id) == nil)
-            _ = try await f.store.prepare(id: f.qwen.id)
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .ready)
+            #expect(await f.verified(f.qwen) == nil)
+            guard case .failed(let unchecked) = await f.state(f.qwen) else {
+                Issue.record("An unchecked file should say it is unchecked.")
+                return
+            }
+            #expect(unchecked.kind == .interrupted)
+            #expect(unchecked.reason.contains("has not checked"))
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
             #expect(PhoneModelFixture.sha256(try Data(contentsOf: f.fileURL(f.qwen)))
                 == f.qwen.sha256)
             #expect(f.huggingFace.requests.count == 1)
 
             // The right bytes, put there by hand: hashed and adopted, no network.
-            try await f.store.remove(id: f.qwen.id)
+            try await f.remove(f.qwen)
             try f.qwenBytes.write(to: f.fileURL(f.qwen))
-            #expect(await f.store.state(of: f.qwen.id) == .absent)
-            #expect(try await f.store.prepare(id: f.qwen.id) == .started)
-            await f.store.waitUntilSettled(id: f.qwen.id)
-            #expect(await f.store.state(of: f.qwen.id) == .ready)
+            #expect(try await f.prepare(f.qwen) == .started)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
             #expect(f.huggingFace.requests.count == 1)
 
-            // A verified file changed afterwards is no longer the verified file.
-            let handle = try FileHandle(forWritingTo: f.fileURL(f.qwen))
-            try handle.seek(toOffset: 10)
-            try handle.write(contentsOf: Data([0x00]))
-            try handle.close()
-            try FileManager.default.setAttributes(
-                [.modificationDate: Date(timeIntervalSince1970: 1_000_000)],
-                ofItemAtPath: f.fileURL(f.qwen).path
-            )
-            #expect(await f.store.state(of: f.qwen.id) != .ready)
-            #expect(await f.store.verifiedFile(id: f.qwen.id) == nil)
-
             // And a link planted where the file was is not the file, whatever it points at.
-            try await f.store.remove(id: f.qwen.id)
-            _ = try await f.store.prepare(id: f.qwen.id)
-            await f.store.waitUntilSettled(id: f.qwen.id)
             let elsewhere = f.directory.appendingPathComponent("elsewhere.gguf")
             try FileManager.default.moveItem(at: f.fileURL(f.qwen), to: elsewhere)
             try FileManager.default.createSymbolicLink(
                 at: f.fileURL(f.qwen), withDestinationURL: elsewhere
             )
-            #expect(await f.store.verifiedFile(id: f.qwen.id) == nil)
+            #expect(await f.verified(f.qwen) == nil)
+        }
+    }
+
+    /// A byte changed in place with the modification time put back exactly: the change
+    /// time still moved, so the file is no longer "verified" and is not served as the pin.
+    @Test func anInPlaceEditIsCaughtEvenWithItsTimeRestored() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            #expect(await f.verified(f.qwen) != nil)
+            let url = f.fileURL(f.qwen)
+            var before = stat()
+            try #require(stat(url.path, &before) == 0)
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seek(toOffset: 10)
+            try handle.write(contentsOf: Data([f.qwenBytes[10] ^ 0xFF]))
+            try handle.close()
+            var times = [before.st_atimespec, before.st_mtimespec]
+            try #require(utimensat(AT_FDCWD, url.path, &times, 0) == 0)
+            var after = stat()
+            try #require(stat(url.path, &after) == 0)
+            try #require(after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec
+                && after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec)
+            try #require(after.st_size == before.st_size && after.st_ino == before.st_ino)
+
+            #expect(await f.verified(f.qwen) == nil)
+            #expect(await f.state(f.qwen) != .ready)
+            // A prepare checks it, finds it wrong, and fetches the pin again.
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(PhoneModelFixture.sha256(try Data(contentsOf: url)) == f.qwen.sha256)
+            #expect(f.huggingFace.requests.count == 2)
+        }
+    }
+
+    /// `verify` hashes a ready copy again — what a phone asks for once when its download
+    /// did not hash to the pin — and says it is checking while it does.
+    @Test func verifyChecksAReadyCopyAgain() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            #expect(try await f.prepare(f.qwen) == .alreadyReady)
+
+            let gate = PauseGate()
+            f.checkGate.value = gate
+            #expect(try await f.prepare(f.qwen, verify: true) == .started)
+            try await until { await gate.arrivals == 1 }
+            // Being hashed: said so, and not served meanwhile.
+            guard case .downloading(_, _, let stage) = await f.state(f.qwen) else {
+                Issue.record("A copy being checked should say so.")
+                return
+            }
+            #expect(stage == .checking)
+            #expect(await f.verified(f.qwen) == nil)
+            #expect(try await f.prepare(f.qwen, verify: true) == .alreadyDownloading)
+
+            await gate.release()
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            // Checked, not fetched.
+            #expect(f.huggingFace.requests.count == 1)
+        }
+    }
+
+    /// A finished download nobody checked is checked now and kept if it is right; one that
+    /// is wrong, or longer than the file could be, is thrown away and fetched from zero.
+    @Test func aCompletePartialIsCheckedAndALongOneIsThrownAway() async throws {
+        try await PhoneModelFixture.with { f in
+            try FileManager.default.createDirectory(at: f.root, withIntermediateDirectories: true)
+
+            // All of it, never renamed: kept, with no network.
+            try f.qwenBytes.write(to: f.partialURL(f.qwen))
+            guard case .failed(let before) = await f.state(f.qwen) else {
+                Issue.record("A complete, unchecked partial should say so.")
+                return
+            }
+            #expect(before.kind == .interrupted)
+            #expect(before.reason.contains("nothing needs downloading"))
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(f.huggingFace.requests.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: f.partialURL(f.qwen).path))
+
+            // All of it, but the wrong bytes: fetched afresh.
+            var wrong = f.gemmaBytes
+            wrong[99] ^= 0x01
+            try wrong.write(to: f.partialURL(f.gemma))
+            try await f.fetch(f.gemma)
+            #expect(await f.state(f.gemma) == .ready)
+            #expect(f.huggingFace.requests.map(\.range) == [nil])
+
+            // Longer than the file: a prefix of nothing, so gone before anything is asked.
+            try await f.remove(f.gemma)
+            try (f.gemmaBytes + Data(count: 10)).write(to: f.partialURL(f.gemma))
+            try await f.fetch(f.gemma)
+            #expect(await f.state(f.gemma) == .ready)
+            #expect(f.huggingFace.requests.map(\.range) == [nil, nil])
+            #expect(PhoneModelFixture.sha256(try Data(contentsOf: f.fileURL(f.gemma)))
+                == f.gemma.sha256)
         }
     }
 
@@ -485,18 +864,21 @@ struct BuddyPhoneModelsTests {
     /// one says it was interrupted and resumes from what is there.
     @Test func aRelaunchKeepsWhatWasVerifiedAndResumesWhatWasNot() async throws {
         try await PhoneModelFixture.with { f in
-            _ = try await f.store.prepare(id: f.qwen.id)
-            await f.store.waitUntilSettled(id: f.qwen.id)
+            try await f.fetch(f.qwen)
             try await f.interrupt(f.gemma, after: 40_000)
             let partial: Int64 = 40_000
             #expect(f.size(of: f.partialURL(f.gemma)) == partial)
 
+            let stateFile = f.stateFile
+            let base = f.huggingFace.baseURL
             let relaunched = PhoneModelStore(
-                root: f.root, catalog: [f.qwen, f.gemma], source: f.huggingFace.baseURL,
+                catalog: [f.qwen, f.gemma], stateFile: { stateFile }, source: { base },
                 spaceCheck: { _, _ in }
             )
-            #expect(await relaunched.state(of: f.qwen.id) == .ready)
-            guard case .failed(let failure) = await relaunched.state(of: f.gemma.id) else {
+            #expect(await relaunched.state(of: f.qwen.id, library: f.library) == .ready)
+            guard case .failed(let failure) = await relaunched.state(
+                of: f.gemma.id, library: f.library
+            ) else {
                 Issue.record("A partial with nothing fetching it should read as failed.")
                 return
             }
@@ -504,13 +886,175 @@ struct BuddyPhoneModelsTests {
             #expect(failure.bytesOnDisk == partial)
             #expect(failure.reason.contains("%"))
 
-            _ = try await relaunched.prepare(id: f.gemma.id)
+            _ = try await relaunched.prepare(id: f.gemma.id, library: f.library)
             await relaunched.waitUntilSettled(id: f.gemma.id)
-            #expect(await relaunched.state(of: f.gemma.id) == .ready)
+            #expect(await relaunched.state(of: f.gemma.id, library: f.library) == .ready)
             #expect(f.huggingFace.requests.last?.range == "bytes=\(partial)-")
             #expect(PhoneModelFixture.sha256(try Data(contentsOf: f.fileURL(f.gemma)))
                 == f.gemma.sha256)
         }
+    }
+
+    // MARK: - The library moves, or its drive goes
+
+    /// The library moves in Settings: the next thing that asks finds the models in the new
+    /// place — moved, checked again, and served from there — and the old folder is gone.
+    @Test func aLibraryMoveTakesThePhoneModelsAlong() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            let oldRoot = f.root
+            #expect(await f.state(f.qwen) == .ready)
+
+            let moved = f.directory.appendingPathComponent("New Library")
+            try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+            f.library = moved
+            // Asking starts the move; it is visible as a stage, then done.
+            _ = await f.state(f.qwen)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            let verified = try #require(await f.verified(f.qwen))
+            #expect(verified.url.deletingLastPathComponent().standardizedFileURL.path
+                == moved.appendingPathComponent("Phone Models").standardizedFileURL.path)
+            #expect(PhoneModelFixture.sha256(try Data(contentsOf: verified.url)) == f.qwen.sha256)
+            #expect(!FileManager.default.fileExists(atPath: oldRoot.path))
+            #expect(f.huggingFace.requests.count == 1)
+            #expect(await f.store.notices(library: f.library).isEmpty)
+        }
+    }
+
+    /// A download in flight when the library moves stops, follows the library with what it
+    /// has, and finishes there from where it left off.
+    @Test func aFetchInFlightFollowsTheLibrary() async throws {
+        try await PhoneModelFixture.with { f in
+            f.huggingFace.hold(after: 120_000)
+            try await f.prepare(f.qwen)
+            try await until { f.size(of: f.partialURL(f.qwen)) == 120_000 }
+            let oldRoot = f.root
+
+            let moved = f.directory.appendingPathComponent("New Library")
+            f.library = moved
+            _ = await f.state(f.qwen)
+            // The move restarts the fetch in the new folder, from the moved partial.
+            try await until { f.huggingFace.requests.count == 2 }
+            #expect(f.huggingFace.requests.last?.range == "bytes=120000-")
+            f.huggingFace.release()
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(PhoneModelFixture.sha256(try Data(contentsOf: f.fileURL(f.qwen)))
+                == f.qwen.sha256)
+            #expect(f.root.path.hasPrefix(moved.path))
+            #expect(!FileManager.default.fileExists(atPath: oldRoot.path))
+        }
+    }
+
+    /// A former folder on a drive that is not connected is not forgotten: the owner is
+    /// told where the files are, and they move the next time the drive is there.
+    @Test func aFormerFolderOnAnUnpluggedDriveIsReportedAndMovedLater() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.gemma)
+            let oldRoot = f.root
+            f.unplugged.value = [oldRoot.path]
+            f.library = f.directory.appendingPathComponent("New Library")
+
+            #expect(await f.state(f.gemma) == .absent)
+            let notices = await f.store.notices(library: f.library)
+            #expect(notices.map(\.folder.standardizedFileURL.path)
+                == [oldRoot.standardizedFileURL.path])
+            #expect(notices.first?.reason.contains("“Old Drive”") == true)
+            #expect(notices.first?.reason.contains("not connected") == true)
+            #expect(FileManager.default.fileExists(atPath: oldRoot.path))
+
+            // The drive is back.
+            f.unplugged.value = []
+            _ = await f.state(f.gemma)
+            await f.settle(f.gemma)
+            #expect(await f.state(f.gemma) == .ready)
+            #expect(!FileManager.default.fileExists(atPath: oldRoot.path))
+            #expect(await f.store.notices(library: f.library).isEmpty)
+            #expect(f.huggingFace.requests.count == 1)
+        }
+    }
+
+    /// A copy already in the new folder — the owner moved the library by hand — is checked
+    /// and kept, and the old one goes.
+    @Test func aCopyAlreadyInTheNewFolderIsCheckedAndKept() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            let oldRoot = f.root
+            let moved = f.directory.appendingPathComponent("Copied Library")
+            let newRoot = moved.appendingPathComponent("Phone Models")
+            try FileManager.default.createDirectory(at: newRoot, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(
+                at: f.fileURL(f.qwen), to: newRoot.appendingPathComponent(f.qwen.file)
+            )
+            f.library = moved
+            _ = await f.state(f.qwen)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(!FileManager.default.fileExists(atPath: oldRoot.path))
+            #expect(f.huggingFace.requests.count == 1)
+        }
+    }
+
+    /// A library on a drive that is not connected: every model says so, naming the drive,
+    /// and nothing is fetched or created anywhere — least of all on the startup disk.
+    @Test func aMissingDriveIsNeverTheStartupDisk() async throws {
+        try await PhoneModelFixture.with { f in
+            let drive = "SiliconTestNoSuchDrive-\(UUID().uuidString.prefix(8))"
+            f.library = URL(fileURLWithPath: "/Volumes/\(drive)/Local Models")
+
+            for entry in [f.qwen, f.gemma] {
+                guard case .failed(let failure) = await f.state(entry) else {
+                    Issue.record("A missing drive should read as failed.")
+                    return
+                }
+                #expect(failure.kind == .driveMissing)
+                #expect(failure.reason.contains("“\(drive)”"))
+            }
+            await #expect(throws: PhoneModelStore.StoreError.self) { try await f.prepare(f.qwen) }
+            await #expect(throws: PhoneModelStore.StoreError.self) { try await f.remove(f.qwen) }
+            #expect(await f.verified(f.qwen) == nil)
+            #expect(f.huggingFace.requests.isEmpty)
+            #expect(f.roomAsked.value.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: "/Volumes/\(drive)"))
+            #expect(!FileManager.default.fileExists(
+                atPath: f.directory.appendingPathComponent("Fallback").path
+            ))
+        }
+    }
+
+    // MARK: - The Mac's own library
+
+    /// A folder scan of the model library — or importing one file by hand — must never
+    /// register a phone model as a Mac model.
+    @Test func theMacsLibraryRefusesPhoneModels() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("phone-library-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let phoneFolder = directory.appendingPathComponent("Local Models/Phone Models")
+        let otherFolder = directory.appendingPathComponent("Local Models/Elsewhere")
+        for folder in [phoneFolder, otherFolder] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        let header = GGUFBuilder(architecture: "qwen35")
+        let phoneFile = phoneFolder.appendingPathComponent(PhoneModelCatalog.qwen35_2B.file)
+        let sameBytesElsewhere = otherFolder.appendingPathComponent(PhoneModelCatalog.qwen35_2B.file)
+        try header.write(to: phoneFile)
+        try header.write(to: sameBytesElsewhere)
+
+        let library = ModelLibrary(root: directory.appendingPathComponent("index"))
+        await #expect(throws: PhoneModelFileRefused.self) {
+            _ = try await library.importExternal(file: phoneFile)
+        }
+        // Any spelling of the folder.
+        let lower = directory.appendingPathComponent("Local Models/phone models")
+        try? FileManager.default.createDirectory(at: lower, withIntermediateDirectories: true)
+        #expect(PhoneModelStore.isInPhoneModelsFolder(lower.appendingPathComponent("x.gguf")))
+        // The same header anywhere else is a model like any other — so it was the folder
+        // that refused it, not the reader.
+        let imported = try await library.importExternal(file: sameBytesElsewhere)
+        #expect(imported.primaryFile == sameBytesElsewhere)
+        #expect(await library.installed.map(\.primaryFile) == [sameBytesElsewhere])
     }
 
     // MARK: - The routes
@@ -524,13 +1068,14 @@ struct BuddyPhoneModelsTests {
         ]
     }
 
-    /// Full control only: a chat-only phone gets the chat refusal, the swarm gets its own,
-    /// and nobody without a token — or with this Mac's own token out on the tailnet — gets
-    /// anything at all.
+    /// Full control only: a chat-only phone gets the chat refusal, the swarm gets its own —
+    /// on loopback and out on the tailnet — and nobody without a token, or with this Mac's
+    /// own token out on the tailnet, gets anything at all.
     @Test func theRoutesAreFullScopeAndNeverThePeers() async throws {
         try await PhoneModelFixture.with { models in
             try await PhoneRouteFixture.with(
-                provider: models.service, hub: models.hub, swarmToken: Self.swarmSecret
+                provider: models.provider, hub: models.hub, swarmToken: Self.swarmSecret,
+                swarmOnTailnet: true
             ) { f in
                 let full = try await f.pair(name: "Studio phone")
                 let chat = try await f.pair(name: "Lent out", scope: .chat)
@@ -540,11 +1085,19 @@ struct BuddyPhoneModelsTests {
                     #expect(refusedForChat.0 == 403, "\(method) \(path)")
                     #expect(Self.error(in: refusedForChat.1) == ControlServer.chatOnlyRefusal)
 
-                    let refusedForPeers = try await f.local.call(
+                    // The swarm secret, where a node would use it: on the tailnet listener…
+                    let refusedForPeers = try await f.phone.call(
                         method, path, token: Self.swarmSecret
                     )
                     #expect(refusedForPeers.0 == 403, "\(method) \(path)")
                     #expect(Self.error(in: refusedForPeers.1)
+                        == ControlServer.phoneModelsAreNotForPeers)
+                    // …and on loopback.
+                    let refusedLocally = try await f.local.call(
+                        method, path, token: Self.swarmSecret
+                    )
+                    #expect(refusedLocally.0 == 403, "\(method) \(path)")
+                    #expect(Self.error(in: refusedLocally.1)
                         == ControlServer.phoneModelsAreNotForPeers)
 
                     #expect(try await f.phone.status(method, path, token: nil) == 401)
@@ -587,7 +1140,7 @@ struct BuddyPhoneModelsTests {
     /// 127.0.0.1 is refused even though the token it cannot read would also stop it.
     @Test func loopbackCallersMustNameALoopbackHost() async throws {
         try await PhoneModelFixture.with { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let prepare = "/ondevice/models/\(models.qwen.id)/prepare"
                 for (host, origin) in [
                     ("attacker.example:\(f.local.port)", nil),
@@ -612,7 +1165,7 @@ struct BuddyPhoneModelsTests {
     /// the middle, and conditionally — and end up with bytes that hash to the pin.
     @Test func aPhoneFetchesTheVerifiedFileWholeRangedAndResumed() async throws {
         try await PhoneModelFixture.with { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let phone = try await f.pair()
                 let q = models.qwen
                 let bytes = models.qwenBytes
@@ -626,7 +1179,7 @@ struct BuddyPhoneModelsTests {
                 #expect(accepted.id == q.id)
                 #expect(accepted.sha256 == q.sha256)
                 #expect(["downloading", "ready"].contains(accepted.onMac.state))
-                await models.store.waitUntilSettled(id: q.id)
+                await models.settle(q)
 
                 let list = try JSONDecoder().decode(
                     ControlAPI.PhoneModelList.self,
@@ -677,13 +1230,15 @@ struct BuddyPhoneModelsTests {
                 #expect(guarded.status == 206)
                 #expect(PhoneModelFixture.sha256(guarded.body)
                     == PhoneModelFixture.sha256(rest.body))
-                // …and when it is not, the whole file rather than a splice of two.
-                let stale = try await f.phone.fetchFile(path, token: phone.token, headers: [
-                    "Range": "bytes=\(middle)-",
-                    "If-Range": "\"\(String(repeating: "0", count: 64))\"",
-                ])
-                #expect(stale.status == 200)
-                #expect(PhoneModelFixture.sha256(stale.body) == q.sha256)
+                // …and when it is not, or the tag is weak, the whole file rather than a
+                // splice of two. A 200 to a ranged request means: throw the partial away.
+                for condition in ["\"\(String(repeating: "0", count: 64))\"", "W/\"\(q.sha256)\""] {
+                    let stale = try await f.phone.fetchFile(path, token: phone.token, headers: [
+                        "Range": "bytes=\(middle)-", "If-Range": condition,
+                    ])
+                    #expect(stale.status == 200, "\(condition)")
+                    #expect(PhoneModelFixture.sha256(stale.body) == q.sha256)
+                }
 
                 let tail = try await f.phone.fetchFile(
                     path, token: phone.token, headers: ["Range": "bytes=-100"]
@@ -701,9 +1256,18 @@ struct BuddyPhoneModelsTests {
                     #expect(refused["Content-Range"] == "bytes */\(count)")
                     #expect(Self.error(in: refused.body) == ControlServer.rangeOutsideFile)
                 }
+                // A unit this server does not know is ignored, not refused.
+                let items = try await f.phone.fetchFile(
+                    path, token: phone.token, headers: ["Range": "items=0-5"]
+                )
+                #expect(items.status == 200)
+                #expect(items.body.count == count)
 
-                // The digest is the tag, quoted or bare.
-                for tag in ["\"\(q.sha256)\"", q.sha256, "\"other\", \"\(q.sha256)\""] {
+                // The digest is the tag, quoted or bare, weak or in a list.
+                for tag in [
+                    "\"\(q.sha256)\"", q.sha256, "\"other\", \"\(q.sha256)\"",
+                    "W/\"\(q.sha256)\"", "*",
+                ] {
                     let unchanged = try await f.phone.fetchFile(
                         path, token: phone.token, headers: ["If-None-Match": tag]
                     )
@@ -729,10 +1293,10 @@ struct BuddyPhoneModelsTests {
 
     /// The file is not there until it is verified: absent, on its way, and failed are all
     /// the same 409 — and prepare says 202 while fetching, unchanged by asking again, and
-    /// 200 once the model is ready.
+    /// 200 once the model is ready. `?verify=1` checks a ready copy again.
     @Test func theFileWaitsForVerificationAndPrepareSaysWhere() async throws {
         try await PhoneModelFixture.with { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let phone = try await f.pair()
                 let q = models.qwen
                 let file = "/ondevice/models/\(q.id)/file"
@@ -748,18 +1312,33 @@ struct BuddyPhoneModelsTests {
                 #expect(try await f.phone.status("GET", file, token: phone.token) == 409)
                 let again = try await f.phone.call("POST", prepare, token: phone.token)
                 #expect(again.0 == 202)
-                #expect(try JSONDecoder().decode(ControlAPI.PhoneModel.self, from: again.1)
-                    .onMac.state == "downloading")
+                let downloading = try JSONDecoder().decode(ControlAPI.PhoneModel.self, from: again.1)
+                #expect(downloading.onMac.state == "downloading")
+                #expect(downloading.onMac.stage == "fetching")
                 #expect(models.huggingFace.requests.count == 1)
 
                 models.huggingFace.release()
-                await models.store.waitUntilSettled(id: q.id)
+                await models.settle(q)
                 #expect(try await f.phone.status("GET", file, token: phone.token) == 200)
                 let ready = try await f.phone.call("POST", prepare, token: phone.token)
                 #expect(ready.0 == 200)
                 #expect(try JSONDecoder().decode(ControlAPI.PhoneModel.self, from: ready.1)
                     .onMac.state == "ready")
                 #expect(models.huggingFace.requests.count == 1)
+
+                // A phone whose download did not hash asks the Mac to check its copy.
+                let verify = try await f.phone.call(
+                    "POST", prepare + "?verify=1", token: phone.token
+                )
+                #expect(verify.0 == 202)
+                await models.settle(q)
+                #expect(try await f.phone.status("GET", file, token: phone.token) == 200)
+                #expect(models.huggingFace.requests.count == 1)
+                let unclear = try await f.phone.call(
+                    "POST", prepare + "?verify=maybe", token: phone.token
+                )
+                #expect(unclear.0 == 400)
+                #expect(Self.error(in: unclear.1) == ControlServer.phoneModelVerifyValues)
 
                 // A failed fetch is not servable either, and the list says why.
                 var corrupted = models.gemmaBytes
@@ -770,7 +1349,7 @@ struct BuddyPhoneModelsTests {
                 #expect(try await f.phone.status(
                     "POST", "/ondevice/models/\(models.gemma.id)/prepare", token: phone.token
                 ) == 202)
-                await models.store.waitUntilSettled(id: models.gemma.id)
+                await models.settle(models.gemma)
                 #expect(try await f.phone.status(
                     "GET", "/ondevice/models/\(models.gemma.id)/file", token: phone.token
                 ) == 409)
@@ -789,13 +1368,13 @@ struct BuddyPhoneModelsTests {
     /// `DELETE` takes the Mac's copy back, and says what is left: nothing.
     @Test func deleteTakesTheMacsCopyBack() async throws {
         try await PhoneModelFixture.with { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let phone = try await f.pair()
                 let q = models.qwen
                 _ = try await f.phone.call(
                     "POST", "/ondevice/models/\(q.id)/prepare", token: phone.token
                 )
-                await models.store.waitUntilSettled(id: q.id)
+                await models.settle(q)
                 #expect(FileManager.default.fileExists(atPath: models.fileURL(q).path))
 
                 for _ in 0..<2 {
@@ -822,14 +1401,14 @@ struct BuddyPhoneModelsTests {
             )
         }
         try await PhoneModelFixture.with(spaceCheck: full) { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let phone = try await f.pair()
                 let (status, body) = try await f.phone.call(
                     "POST", "/ondevice/models/\(models.gemma.id)/prepare", token: phone.token
                 )
                 #expect(status == 507)
                 let reason = try #require(Self.error(in: body))
-                #expect(reason.contains("not enough space on the Mac"))
+                #expect(reason.contains("not enough space"))
 
                 let listed = try JSONDecoder().decode(
                     ControlAPI.PhoneModelList.self,
@@ -844,15 +1423,44 @@ struct BuddyPhoneModelsTests {
         }
     }
 
+    /// The library's drive is not connected: prepare, file and delete are a 503 naming it,
+    /// and the list says the same for every model.
+    @Test func aMissingDriveAnswers503NamingIt() async throws {
+        try await PhoneModelFixture.with { models in
+            let drive = "SiliconTestNoSuchDrive-\(UUID().uuidString.prefix(8))"
+            models.library = URL(fileURLWithPath: "/Volumes/\(drive)/Local Models")
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
+                let phone = try await f.pair()
+                let q = models.qwen
+                for (method, path) in [
+                    ("POST", "/ondevice/models/\(q.id)/prepare"),
+                    ("GET", "/ondevice/models/\(q.id)/file"),
+                    ("DELETE", "/ondevice/models/\(q.id)"),
+                ] {
+                    let (status, body) = try await f.phone.call(method, path, token: phone.token)
+                    #expect(status == 503, "\(method) \(path)")
+                    #expect(Self.error(in: body) == PhoneModelStore.driveMissingSentence(drive))
+                }
+                let listed = try JSONDecoder().decode(
+                    ControlAPI.PhoneModelList.self,
+                    from: try await f.phone.call("GET", "/ondevice/models", token: phone.token).1
+                )
+                #expect(listed.models.allSatisfy {
+                    $0.onMac.state == "failed" && $0.onMac.failure == "driveMissing"
+                })
+                #expect(models.huggingFace.requests.isEmpty)
+            }
+        }
+    }
+
     /// An id is a catalogue key and nothing else. Whatever else arrives in its place — a
     /// traversal, a file name, a near miss — is the same 404, and nothing is fetched,
     /// served or deleted on its account.
     @Test func idsAreCatalogKeysAndNothingElse() async throws {
         try await PhoneModelFixture.with { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let phone = try await f.pair()
-                _ = try await models.store.prepare(id: models.qwen.id)
-                await models.store.waitUntilSettled(id: models.qwen.id)
+                try await models.fetch(models.qwen)
                 let secret = models.directory.appendingPathComponent("secret.gguf")
                 try Data("not a model".utf8).write(to: secret)
 
@@ -875,18 +1483,18 @@ struct BuddyPhoneModelsTests {
                 }
                 #expect(models.huggingFace.requests.count == 1)
                 #expect(FileManager.default.fileExists(atPath: secret.path))
-                #expect(await models.store.state(of: models.qwen.id) == .ready)
-                #expect(await models.store.state(of: models.gemma.id) == .absent)
+                #expect(await models.state(models.qwen) == .ready)
+                #expect(await models.state(models.gemma) == .absent)
             }
         }
     }
 
     /// Progress reaches a phone on `/events` as `download` frames it can tie to the model:
-    /// the id is `ondevice:` and the model's, and the stream says when it is done — or why
-    /// it is not.
-    @Test func downloadFramesOnEventsCarryTheModelsID() async throws {
+    /// the id is `ondevice:` and the model's, the stage says what is happening, and the
+    /// stream says when it is done — or why it is not, or that it was removed.
+    @Test func downloadFramesOnEventsCarryTheModelsIDAndStage() async throws {
         try await PhoneModelFixture.with(qwenSize: 1_000_000) { models in
-            try await PhoneRouteFixture.with(provider: models.service, hub: models.hub) { f in
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
                 let phone = try await f.pair()
                 let follower = try await EventFollower.open(f.phone, token: phone.token)
                 defer { follower.stop() }
@@ -898,13 +1506,13 @@ struct BuddyPhoneModelsTests {
                 ) == 202)
                 try await until {
                     await follower.downloads(qwenFrames).contains {
-                        $0.fraction < 1 && $0.error == nil
+                        $0.fraction < 1 && $0.error == nil && $0.stage == "fetching"
                     }
                 }
                 models.huggingFace.release()
                 try await until {
                     await follower.downloads(qwenFrames).contains {
-                        $0.fraction == 1 && $0.error == nil
+                        $0.fraction == 1 && $0.error == nil && $0.stage == nil
                     }
                 }
                 let frames = await follower.downloads(qwenFrames)
@@ -912,7 +1520,9 @@ struct BuddyPhoneModelsTests {
                     $0.bytesExpected == Int64(models.qwenBytes.count)
                         && $0.name.contains(models.qwen.label)
                 })
-                #expect(frames.last?.bytesReceived == frames.last?.bytesExpected)
+                // Done is the last frame, and only the last frame has no stage.
+                #expect(frames.last?.stage == nil)
+                #expect(frames.dropLast().allSatisfy { $0.stage != nil })
 
                 var corrupted = models.gemmaBytes
                 corrupted[3] ^= 0x10
@@ -927,8 +1537,63 @@ struct BuddyPhoneModelsTests {
                         $0.error?.contains("checksum") == true
                     }
                 }
+
+                // Removed while it was still arriving.
+                try await models.remove(models.gemma)
+                models.huggingFace.serve(
+                    models.gemmaBytes, at: PhoneModelFixture.pinnedPath(models.gemma)
+                )
+                models.huggingFace.hold()
+                #expect(try await f.phone.status(
+                    "POST", "/ondevice/models/\(models.gemma.id)/prepare", token: phone.token
+                ) == 202)
+                try await until { models.huggingFace.requests.count == 3 }
+                #expect(try await f.phone.status(
+                    "DELETE", "/ondevice/models/\(models.gemma.id)", token: phone.token
+                ) == 200)
+                try await until {
+                    await follower.downloads("ondevice:\(models.gemma.id)").contains {
+                        $0.error == PhoneModelService.removedWhileDownloading
+                    }
+                }
             }
         }
+    }
+
+    /// What the Mac fetches for the owner's phone is the owner's business: frames about it
+    /// go to this Mac's own token and full-control devices, never to a chat-only phone or
+    /// the swarm. The Mac's own downloads still go to everyone.
+    @Test func phoneModelFramesGoOnlyToFullControl() async throws {
+        let hub = BuddyEventHub()
+        let full = await hub.subscribe(as: .device(id: "full", scope: .full))
+        let chat = await hub.subscribe(as: .device(id: "chat", scope: .chat))
+        let peer = await hub.subscribe(as: .peer)
+        let mac = await hub.subscribe(as: .thisMac)
+        let phoneFrame = PhoneModelService.downloadEvent(
+            PhoneModelCatalog.qwen35_2B,
+            state: .downloading(bytesReceived: 1, bytesPerSecond: 1, stage: .fetching)
+        )
+        let macFrame = ControlAPI.DownloadEvent(
+            id: "qwen3-coder-30b", name: "Qwen3-Coder", fraction: 0.5, bytesReceived: 1,
+            bytesExpected: 2, bytesPerSecond: 1
+        )
+        await hub.post(.download(phoneFrame))
+        await hub.post(.download(macFrame))
+        for subscriber in [full, chat, peer, mac] { await hub.cancel(subscriber.id) }
+
+        func ids(_ stream: AsyncStream<BuddyEvent.Frame>) async -> [String] {
+            var seen: [String] = []
+            for await frame in stream {
+                if let event = try? JSONDecoder().decode(
+                    ControlAPI.DownloadEvent.self, from: frame.data
+                ) { seen.append(event.id) }
+            }
+            return seen
+        }
+        #expect(await ids(full.stream) == [phoneFrame.id, macFrame.id])
+        #expect(await ids(mac.stream) == [phoneFrame.id, macFrame.id])
+        #expect(await ids(chat.stream) == [macFrame.id])
+        #expect(await ids(peer.stream) == [macFrame.id])
     }
 
     /// 3.35 GB is served from wherever the phone asks without the file ever being read
@@ -1031,6 +1696,59 @@ struct BuddyPhoneModelsTests {
         }
     }
 
+    // MARK: - GET /media, which answers files the same way
+
+    /// The conditionals `GET /media/{id}` shares with the phone-model file: `If-None-Match`
+    /// weak, in a list and `*`; `If-Range` strong only; and a range unit it does not know
+    /// ignored rather than refused.
+    @Test func mediaHonoursEveryConditionalTheFileRouteDoes() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let image = try fixture.writeOutput(
+                named: "still.png", bytes: BuddyMediaRoutesTests.pngBytes(count: 1_000)
+            )
+            let id = try #require(
+                await fixture.registry.register(path: image.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+            let path = "/media/\(id)"
+            let first = try await fixture.phone.fetchFile(path, token: paired.token)
+            let tag = try #require(first["ETag"])
+
+            for asked in ["W/\(tag)", "\"nope\", \(tag)", "*", tag] {
+                let answer = try await fixture.phone.fetchFile(
+                    path, token: paired.token, headers: ["If-None-Match": asked]
+                )
+                #expect(answer.status == 304, "\(asked)")
+            }
+            #expect(try await fixture.phone.fetchFile(
+                path, token: paired.token, headers: ["If-None-Match": "\"nope\""]
+            ).status == 200)
+
+            let ranged = try await fixture.phone.fetchFile(
+                path, token: paired.token, headers: ["Range": "bytes=10-", "If-Range": tag]
+            )
+            #expect(ranged.status == 206)
+            #expect(ranged.body.count == 990)
+            for condition in ["W/\(tag)", "\"nope\"", "Sat, 19 Sep 2026 10:00:00 GMT"] {
+                let whole = try await fixture.phone.fetchFile(
+                    path, token: paired.token, headers: ["Range": "bytes=10-", "If-Range": condition]
+                )
+                #expect(whole.status == 200, "\(condition)")
+                #expect(whole.body.count == 1_000)
+            }
+            let unknownUnit = try await fixture.phone.fetchFile(
+                path, token: paired.token, headers: ["Range": "items=0-5"]
+            )
+            #expect(unknownUnit.status == 200)
+            #expect(unknownUnit.body.count == 1_000)
+            let mixedCase = try await fixture.phone.fetchFile(
+                path, token: paired.token, headers: ["Range": "Bytes=0-9"]
+            )
+            #expect(mixedCase.status == 206)
+            #expect(mixedCase.body.count == 10)
+        }
+    }
+
     // MARK: - The app
 
     /// What the Settings row says under each name. Pinned because it is the only place the
@@ -1044,34 +1762,77 @@ struct BuddyPhoneModelsTests {
         #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(qwen, state: .absent))
             == "1.3 GB · Apache-2.0 · not on this Mac")
         #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(
-            gemma, state: .downloading(bytesReceived: gemma.sizeBytes / 4, bytesPerSecond: 1)
+            gemma, state: .downloading(
+                bytesReceived: gemma.sizeBytes / 4, bytesPerSecond: 1, stage: .fetching
+            )
         )) == "3.3 GB · Apache-2.0 · downloading 25% · slower on the phone")
+        // Hashing is not downloading, and never reads as "downloading 100%".
+        #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(
+            qwen, state: .downloading(
+                bytesReceived: qwen.sizeBytes / 2, bytesPerSecond: 0, stage: .checking
+            )
+        )) == "1.3 GB · Apache-2.0 · Checking… 50%")
+        #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(
+            qwen, state: .downloading(bytesReceived: 0, bytesPerSecond: 0, stage: .moving)
+        )) == "1.3 GB · Apache-2.0 · Moving with the model library…")
         let failure = PhoneModelStore.Failure(kind: .diskFull, reason: "No room.", bytesOnDisk: 0)
         #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(qwen, state: .failed(failure)))
             == "1.3 GB · Apache-2.0 · No room.")
+        #expect(BuddyPhoneModelsRow.explain(.folder(URL(fileURLWithPath: "/Volumes/T9/Local Models/Phone Models")))
+            .contains("Kept in /Volumes/T9/Local Models/Phone Models."))
+        #expect(BuddyPhoneModelsRow.explain(.driveMissing(drive: "External SSD"))
+            .contains("“External SSD”, which is not connected"))
     }
 
-    /// The app's own host answers these routes, and never with the owner's Hugging Face
-    /// token — even when one is set. Settings are injected, so nothing here reads or
-    /// writes the login Keychain.
+    /// The app's own service, as the app builds it — the real catalogue, store and
+    /// downloader — with only the network endpoint, the state file and the room check
+    /// swapped. It puts the models where the app's settings say the library is, and it
+    /// never sends the Hugging Face token, even with one set. Settings are injected, so
+    /// nothing here reads or writes the login Keychain.
     @MainActor
     @Test func theAppFetchesPhoneModelsWithoutTheHuggingFaceToken() async throws {
-        try await PhoneModelFixture.with { models in
-            var settings = Settings()
-            settings.huggingFaceToken = "placeholder-not-a-real-token"
-            let app = AppModel(settings: settings)
-            try await PhoneModelSeams.$service.withValue(models.service) {
-                let provider = try #require(await app.phoneModelProvider())
-                let prepared = try await provider.preparePhoneModel(id: models.qwen.id)
-                #expect(!prepared.wasReady)
-                await models.store.waitUntilSettled(id: models.qwen.id)
-                let file = try await provider.phoneModelFile(id: models.qwen.id)
-                #expect(file.sha256 == models.qwen.sha256)
-                #expect(file.fileName == models.qwen.file)
-            }
-            #expect(!models.huggingFace.requests.isEmpty)
-            #expect(models.huggingFace.requests.allSatisfy { $0.authorization == nil })
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-phone-app-\(UUID())")
+        let library = directory.appendingPathComponent("Local Models")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let huggingFace = try FakeHuggingFace()
+        defer { huggingFace.stop() }
+
+        // The real pin. Its 1.3 GB cannot be served from a test, so the fetch ends short —
+        // which is still a fetch: the request is what is being checked.
+        let qwen = PhoneModelCatalog.qwen35_2B
+        huggingFace.serve(PhoneModelFixture.randomBytes(64 * 1024), at: PhoneModelFixture.pinnedPath(qwen))
+
+        var settings = Settings()
+        settings.huggingFaceToken = "placeholder-not-a-real-token"
+        settings.modelLibraryDirectory = library.path
+        let app = AppModel(settings: settings)
+        let environment = PhoneModelSeams.Environment(
+            huggingFace: huggingFace.baseURL,
+            stateFile: directory.appendingPathComponent("phone-models.json"),
+            spaceCheck: { _, _ in }
+        )
+        try await PhoneModelSeams.$environment.withValue(environment) {
+            let provider = try #require(await app.phoneModelProvider())
+            let prepared = try await provider.preparePhoneModel(id: qwen.id, verify: false)
+            #expect(!prepared.wasReady)
+            await AppPhoneModels.service.store.waitUntilSettled(id: qwen.id)
+
+            let listed = await provider.phoneModels().models.first { $0.id == qwen.id }
+            #expect(listed?.onMac.state == "failed")
+            #expect(listed?.onMac.failure == "network")
+            // Beside the library the settings name, and nowhere else.
+            let partial = library.appendingPathComponent("Phone Models")
+                .appendingPathComponent(qwen.file + ".part")
+            #expect(PhoneModelFixture.size(of: partial) == 65_536)
+            _ = try await provider.removePhoneModel(id: qwen.id)
+            #expect(!FileManager.default.fileExists(atPath: partial.path))
+            // Nothing keeps polling this test's library once it is gone.
+            await AppPhoneModels.service.waitForWatchers()
         }
+        #expect(huggingFace.requests.map(\.target) == [PhoneModelFixture.pinnedTarget(qwen)])
+        #expect(huggingFace.requests.allSatisfy { $0.authorization == nil && $0.cookie == nil })
     }
 
     // MARK: - Helpers
@@ -1090,497 +1851,5 @@ struct BuddyPhoneModelsTests {
             if answer.contains("\r\n\r\n"), answer.hasSuffix("}") { break }
         }
         return answer
-    }
-}
-
-// MARK: - Waiting without sleeping blind
-
-func until(
-    _ timeout: Duration = .seconds(10), _ condition: @Sendable () async -> Bool
-) async throws {
-    let deadline = ContinuousClock.now + timeout
-    while !(await condition()) {
-        guard ContinuousClock.now < deadline else { throw BuddyTestError.timeout }
-        try await Task.sleep(for: .milliseconds(10))
-    }
-}
-
-// MARK: - The fixtures
-
-/// A phone-model store and service over a temporary folder, fed by a loopback stand-in for
-/// Hugging Face that serves random bytes under the real pinned paths. The catalogue is the
-/// real one with each file shrunk to a few hundred kilobytes — same ids, repositories,
-/// commits and file names, so every request the store makes is the one it would make for
-/// real.
-struct PhoneModelFixture {
-    var directory = URL(fileURLWithPath: "/nonexistent")
-    var root = URL(fileURLWithPath: "/nonexistent")
-    var huggingFace: FakeHuggingFace!
-    var qwenBytes = Data()
-    var gemmaBytes = Data()
-    var qwen = PhoneModelCatalog.qwen35_2B
-    var gemma = PhoneModelCatalog.gemma4E2B
-    var store: PhoneModelStore!
-    var service: PhoneModelService!
-    var hub = BuddyEventHub()
-
-    static func pinnedPath(_ entry: PhoneModelEntry) -> String {
-        "/\(entry.repository)/resolve/\(entry.commit)/\(entry.file)"
-    }
-
-    func fileURL(_ entry: PhoneModelEntry) -> URL { root.appendingPathComponent(entry.file) }
-    func partialURL(_ entry: PhoneModelEntry) -> URL {
-        fileURL(entry).appendingPathExtension("part")
-    }
-
-    func size(of url: URL) -> Int64? { Self.size(of: url) }
-
-    static func size(of url: URL) -> Int64? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path))
-            .flatMap { ($0[.size] as? NSNumber)?.int64Value }
-    }
-
-    /// Cuts the next transfer of `entry` off after exactly `bytes` — and only once the
-    /// store has those bytes on disk, so what a resume starts from is known rather than
-    /// raced against how quickly the socket was read before it closed.
-    func interrupt(_ entry: PhoneModelEntry, after bytes: Int) async throws {
-        huggingFace.hold(after: bytes)
-        _ = try await store.prepare(id: entry.id)
-        let partial = partialURL(entry)
-        try await until { Self.size(of: partial) == Int64(bytes) }
-        huggingFace.drop()
-        await store.waitUntilSettled(id: entry.id)
-    }
-
-    /// Whatever is left in the store's folder, hidden files included.
-    func leftovers() -> [String] {
-        (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-    }
-
-    static func with(
-        spaceCheck: @escaping PhoneModelStore.SpaceCheck = { _, _ in },
-        qwenSize: Int = 300_000, gemmaSize: Int = 200_000,
-        isolation: isolated (any Actor)? = #isolation,
-        _ body: (PhoneModelFixture) async throws -> Void
-    ) async throws {
-        var fixture = PhoneModelFixture()
-        fixture.directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("buddy-phone-models-\(UUID())")
-        try FileManager.default.createDirectory(
-            at: fixture.directory, withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: fixture.directory) }
-        let huggingFace = try FakeHuggingFace()
-        defer { huggingFace.stop() }
-
-        fixture.huggingFace = huggingFace
-        fixture.qwenBytes = randomBytes(qwenSize)
-        fixture.gemmaBytes = randomBytes(gemmaSize)
-        fixture.qwen = shrunk(PhoneModelCatalog.qwen35_2B, to: fixture.qwenBytes)
-        fixture.gemma = shrunk(PhoneModelCatalog.gemma4E2B, to: fixture.gemmaBytes)
-        huggingFace.serve(fixture.qwenBytes, at: pinnedPath(fixture.qwen))
-        huggingFace.serve(fixture.gemmaBytes, at: pinnedPath(fixture.gemma))
-        fixture.root = fixture.directory.appendingPathComponent("PhoneModels")
-        fixture.store = PhoneModelStore(
-            root: fixture.root, catalog: [fixture.qwen, fixture.gemma],
-            source: huggingFace.baseURL, spaceCheck: spaceCheck
-        )
-        fixture.service = PhoneModelService(
-            store: fixture.store, hub: fixture.hub, watchInterval: .milliseconds(20)
-        )
-
-        // Whatever happened, nothing may still be writing into the folder the defer above
-        // is about to delete.
-        let store: PhoneModelStore = fixture.store
-        let ids = [fixture.qwen.id, fixture.gemma.id]
-        do {
-            try await body(fixture)
-        } catch {
-            huggingFace.release()
-            for id in ids { try? await store.remove(id: id) }
-            throw error
-        }
-        huggingFace.release()
-        for id in ids { try? await store.remove(id: id) }
-    }
-
-    /// The real entry, with its size and digest swapped for a small file's.
-    static func shrunk(_ real: PhoneModelEntry, to bytes: Data) -> PhoneModelEntry {
-        var entry = real
-        entry.sizeBytes = Int64(bytes.count)
-        entry.sha256 = sha256(bytes)
-        return entry
-    }
-
-    static func randomBytes(_ count: Int) -> Data {
-        var data = Data(count: count)
-        let status = data.withUnsafeMutableBytes {
-            SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!)
-        }
-        precondition(status == errSecSuccess)
-        return data
-    }
-
-    static func sha256(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-}
-
-/// A control server whose `/ondevice/models` answers from the provider handed in, with a
-/// loopback listener for this Mac's own token and a second one standing in for the
-/// tailnet, where paired devices and nothing else are honoured.
-struct PhoneRouteFixture {
-    let server: ControlServer
-    let local: TestClient
-    let phone: TestClient
-    let devices: BuddyRegistry
-
-    func pair(
-        name: String = "Galaxy S24 Ultra", scope: BuddyScope = .full
-    ) async throws -> ControlAPI.BuddyPairResponse {
-        let invitation = await devices.invite(host: "127.0.0.1", port: phone.port, scope: scope)
-        let (status, body) = try await phone.call(
-            "POST", "/buddy/pair", token: nil,
-            body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"android"}"#
-        )
-        #expect(status == 200)
-        return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
-    }
-
-    static func with(
-        provider: (any PhoneModelProvider)?, hub: BuddyEventHub = BuddyEventHub(),
-        swarmToken: String? = nil,
-        writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
-        isolation: isolated (any Actor)? = #isolation,
-        _ body: (PhoneRouteFixture) async throws -> Void
-    ) async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("buddy-phone-routes-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let handshakeURL = directory.appendingPathComponent("control.json")
-        let devices = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
-        let server = ControlServer(
-            host: BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false),
-            handshakeURL: handshakeURL, buddy: devices, events: hub,
-            media: MediaRegistry(url: nil),
-            uploadsRoot: directory.appendingPathComponent("uploads"),
-            postersRoot: directory.appendingPathComponent("posters"),
-            eventWriteDeadline: writeDeadline,
-            // Never the real CLI: a test must not bind whatever tailnet this machine is on.
-            discoverTailnetAddress: { nil },
-            phoneModels: provider
-        )
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpMaximumConnectionsPerHost = 64
-        configuration.timeoutIntervalForRequest = 30
-        configuration.urlCache = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-
-        try await server.start(swarmToken: swarmToken)
-        defer { Task { await server.stop() } }
-        let deadline = ContinuousClock.now + .seconds(5)
-        while !FileManager.default.fileExists(atPath: handshakeURL.path) {
-            guard ContinuousClock.now < deadline else { throw BuddyTestError.timeout }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let handshake = try JSONDecoder().decode(
-            ControlAPI.Handshake.self, from: try Data(contentsOf: handshakeURL)
-        )
-        await devices.setAllowsTailnetDevices(true)
-        let tailnetPort = try await BuddyControlTests.bindTailnetListener(
-            on: server, avoiding: handshake.port
-        )
-
-        try await body(PhoneRouteFixture(
-            server: server,
-            local: TestClient(port: handshake.port, token: handshake.token, session: session),
-            phone: TestClient(port: tailnetPort, token: handshake.token, session: session),
-            devices: devices
-        ))
-        await server.stop()
-    }
-}
-
-/// One file, ready, under one id — for the tests about how bytes go out rather than how
-/// they arrived.
-struct OneFile: PhoneModelProvider {
-    let id: String
-    let file: ControlAPI.PhoneModelFile
-
-    func phoneModels() async -> ControlAPI.PhoneModelList { .init(models: []) }
-
-    func preparePhoneModel(id: String) async throws -> ControlAPI.PhoneModelPreparation {
-        throw PhoneModelError.unknownModel(id)
-    }
-
-    func phoneModelFile(id: String) async throws -> ControlAPI.PhoneModelFile {
-        guard id == self.id else { throw PhoneModelError.unknownModel(id) }
-        return file
-    }
-
-    func removePhoneModel(id: String) async throws -> ControlAPI.PhoneModel {
-        throw PhoneModelError.unknownModel(id)
-    }
-}
-
-extension TestClient {
-
-    /// A GET whose headers matter as much as its body, with whatever conditional and range
-    /// headers the test sends. Always to the wire: `URLSession` would otherwise answer a
-    /// 304 from its own cache and call it a 200.
-    func fetchFile(
-        _ path: String, token: String?, headers: [String: String] = [:]
-    ) async throws -> MediaAnswer {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
-        let (body, response) = try await session.data(for: request)
-        let http = try #require(response as? HTTPURLResponse)
-        var lowered: [String: String] = [:]
-        for (key, value) in http.allHeaderFields {
-            guard let key = key as? String, let value = value as? String else { continue }
-            lowered[key.lowercased()] = value
-        }
-        return MediaAnswer(status: http.statusCode, headers: lowered, body: body)
-    }
-}
-
-/// Holds an `/events` stream open and keeps every frame it is sent.
-final class EventFollower: @unchecked Sendable {
-    private let task: Task<Void, any Error>
-    private let log: Log
-
-    private actor Log {
-        var frames: [TestClient.Frame] = []
-        func append(_ frame: TestClient.Frame) { frames.append(frame) }
-    }
-
-    private init(task: Task<Void, any Error>, log: Log) {
-        self.task = task
-        self.log = log
-    }
-
-    static func open(_ client: TestClient, token: String) async throws -> EventFollower {
-        let log = Log()
-        let ready = Ready()
-        let task = Task {
-            let (bytes, response) = try await client.session.bytes(
-                for: client.request("GET", "/events", token: token, body: nil)
-            )
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                throw BuddyTestError.unexpectedRoute
-            }
-            var name = ""
-            for try await line in bytes.lines {
-                if line.hasPrefix("event: ") {
-                    name = String(line.dropFirst("event: ".count))
-                } else if line.hasPrefix("data: ") {
-                    await log.append(.init(name: name, data: String(line.dropFirst("data: ".count))))
-                    await ready.signal()
-                }
-            }
-        }
-        do {
-            try await ready.wait()
-        } catch {
-            task.cancel()
-            throw error
-        }
-        return EventFollower(task: task, log: log)
-    }
-
-    /// The `download` frames for one id, in the order they arrived.
-    func downloads(_ id: String) async -> [ControlAPI.DownloadEvent] {
-        await log.frames.filter { $0.name == "download" }.compactMap {
-            try? JSONDecoder().decode(ControlAPI.DownloadEvent.self, from: Data($0.data.utf8))
-        }.filter { $0.id == id }
-    }
-
-    func stop() { task.cancel() }
-}
-
-// MARK: - Hugging Face, over loopback
-
-/// Stands in for huggingface.co: serves a few files at exact paths, honours
-/// `Range: bytes=N-`, records what it was asked and with which credential, and can be told
-/// to misbehave the ways the real one does — hold a transfer open partway, then either let
-/// it finish or drop the connection.
-final class FakeHuggingFace: @unchecked Sendable {
-
-    struct Request: Sendable, Equatable {
-        var path: String
-        var range: String?
-        var authorization: String?
-    }
-
-    /// What a held transfer sends before it waits, unless told otherwise.
-    static let heldPrefix = 16_384
-
-    private let listener: NWListener
-    private let queue = DispatchQueue(label: "fake-hugging-face")
-    private let lock = NSLock()
-    private var files: [String: Data] = [:]
-    private var log: [Request] = []
-    /// How much of a body goes out before a transfer waits, while transfers are held.
-    private var holdingAfter: Int?
-    private var held: [(connection: NWConnection, rest: Data)] = []
-    private var connections: [NWConnection] = []
-    private(set) var port: UInt16 = 0
-
-    init() throws {
-        let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = .loopback
-        listener = try NWListener(using: parameters, on: .any)
-        let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { state in
-            if case .ready = state { ready.signal() }
-        }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
-        }
-        listener.start(queue: queue)
-        guard ready.wait(timeout: .now() + 5) == .success else {
-            listener.cancel()
-            throw BuddyTestError.timeout
-        }
-        port = listener.port?.rawValue ?? 0
-    }
-
-    var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
-
-    var requests: [Request] { lock.withLock { log } }
-
-    func serve(_ data: Data, at path: String) { lock.withLock { files[path] = data } }
-    func unserve(_ path: String) { _ = lock.withLock { files.removeValue(forKey: path) } }
-
-    /// Transfers from now on declare their full length, send `bytes` of it, and wait for
-    /// `release` or `drop`.
-    func hold(after bytes: Int = FakeHuggingFace.heldPrefix) {
-        lock.withLock { holdingAfter = bytes }
-    }
-
-    /// Lets every held transfer finish.
-    func release() {
-        for transfer in takeHeld() { send(transfer.connection, "", transfer.rest) }
-    }
-
-    /// Hangs up on every held transfer without sending the rest — which is what a dropped
-    /// connection looks like from the client's side.
-    func drop() {
-        for transfer in takeHeld() { transfer.connection.cancel() }
-    }
-
-    private func takeHeld() -> [(connection: NWConnection, rest: Data)] {
-        lock.withLock {
-            holdingAfter = nil
-            defer { held = [] }
-            return held
-        }
-    }
-
-    func stop() {
-        listener.cancel()
-        let open = lock.withLock { () -> [NWConnection] in
-            held = []
-            defer { connections = [] }
-            return connections
-        }
-        for connection in open { connection.cancel() }
-    }
-
-    private func accept(_ connection: NWConnection) {
-        lock.withLock { connections.append(connection) }
-        connection.start(queue: queue)
-        receive(connection, buffer: Data())
-    }
-
-    private func receive(_ connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
-            [weak self] data, _, complete, error in
-            guard let self else { return }
-            var buffer = buffer
-            if let data { buffer.append(data) }
-            if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                self.respond(connection, head: String(
-                    decoding: buffer[buffer.startIndex..<end.lowerBound], as: UTF8.self
-                ))
-            } else if error == nil, !complete {
-                self.receive(connection, buffer: buffer)
-            } else {
-                connection.cancel()
-            }
-        }
-    }
-
-    private func respond(_ connection: NWConnection, head: String) {
-        let lines = head.components(separatedBy: "\r\n")
-        let path = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
-        var headers: [String: String] = [:]
-        for line in lines.dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            headers[line[..<colon].lowercased()] =
-                line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-        }
-        let request = Request(
-            path: path, range: headers["range"], authorization: headers["authorization"]
-        )
-        let (stored, holdAfter) = lock.withLock { (files[path], holdingAfter) }
-        guard let stored else {
-            send(connection, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            record(request)
-            return
-        }
-
-        var status = "200 OK"
-        var body = stored
-        var extra = ""
-        if let range = headers["range"], range.hasPrefix("bytes="),
-           let from = Int(range.dropFirst("bytes=".count).split(separator: "-").first ?? "") {
-            guard from < stored.count else {
-                send(connection, "HTTP/1.1 416 Range Not Satisfiable\r\n"
-                    + "Content-Range: bytes */\(stored.count)\r\nContent-Length: 0\r\n"
-                    + "Connection: close\r\n\r\n")
-                record(request)
-                return
-            }
-            status = "206 Partial Content"
-            body = stored.subdata(in: from..<stored.count)
-            extra = "Content-Range: bytes \(from)-\(stored.count - 1)/\(stored.count)\r\n"
-        }
-        let header = "HTTP/1.1 \(status)\r\nContent-Length: \(body.count)\r\n"
-            + "Content-Type: application/octet-stream\r\n\(extra)Connection: close\r\n\r\n"
-
-        if let holdAfter {
-            send(connection, header, Data(body.prefix(holdAfter)), close: false)
-            // Held, then logged, in one step and only after the prefix is queued: a test that
-            // can see this request can release or drop it, and the rest of the body can only
-            // ever follow the part already sent.
-            let rest = Data(body.dropFirst(holdAfter))
-            lock.withLock {
-                held.append((connection, rest))
-                log.append(request)
-            }
-        } else {
-            send(connection, header, body)
-            record(request)
-        }
-    }
-
-    private func record(_ request: Request) { lock.withLock { log.append(request) } }
-
-    private func send(
-        _ connection: NWConnection, _ header: String, _ body: Data = Data(), close: Bool = true
-    ) {
-        var payload = Data(header.utf8)
-        payload.append(body)
-        connection.send(content: payload, completion: .contentProcessed { _ in
-            if close { connection.cancel() }
-        })
     }
 }

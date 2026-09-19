@@ -1639,7 +1639,15 @@ public actor ControlServer {
             if request.method == "POST",
                let id = Self.parameter(segments, matching: ["ondevice", "models", "*", "prepare"]) {
                 guard let provider else { throw PhoneModelError.unknownModel(id) }
-                let prepared = try await provider.preparePhoneModel(id: id)
+                // `?verify=1` hashes a ready copy again before it is served — what a phone
+                // asks for once when the file it fetched did not hash to the pin.
+                let verify: Bool
+                switch request.query["verify"]?.lowercased() {
+                case nil, "0", "false": verify = false
+                case "1", "true": verify = true
+                default: return .error(400, Self.phoneModelVerifyValues)
+                }
+                let prepared = try await provider.preparePhoneModel(id: id, verify: verify)
                 // 202 for a fetch that is on its way, started now or already; 200 for a
                 // model that was ready before anyone asked. Either way the body is the entry,
                 // so a phone learns the state from the same answer.
@@ -1806,8 +1814,9 @@ public actor ControlServer {
         if let condition = request["if-range"], !strongMatch(condition, tag) {
             ranged = nil
         }
-        if let asked = ranged, !asked.contains(",") {
-            guard let range = GatewayAPI.byteRange(header: asked, fileSize: total) else {
+        if let asked = ranged, !asked.contains(","), let spec = byteRangeSpec(asked) {
+            guard let range = GatewayAPI.byteRange(header: "bytes=" + spec, fileSize: total)
+            else {
                 // With where the end actually is, so a player that guessed can correct
                 // itself instead of retrying the same range.
                 var refusal = HTTPResponse.error(416, Self.rangeOutsideFile)
@@ -1832,6 +1841,16 @@ public actor ControlServer {
         whole.cacheControl = cacheControl
         whole.writeDeadline = writeDeadline
         return whole
+    }
+
+    /// The part after `bytes=` of a `Range` header, or nil for a range in any other unit —
+    /// which RFC 9110 says a server ignores rather than refuses, so the whole file goes out.
+    /// The unit is compared without regard to case, as the RFC has it.
+    static func byteRangeSpec(_ header: String) -> String? {
+        guard let equals = header.firstIndex(of: "=") else { return nil }
+        let unit = header[..<equals].trimmingCharacters(in: .whitespaces)
+        guard unit.caseInsensitiveCompare("bytes") == .orderedSame else { return nil }
+        return String(header[header.index(after: equals)...])
     }
 
     /// An entity tag without its weakness marker and its quotes. A client that sends the
