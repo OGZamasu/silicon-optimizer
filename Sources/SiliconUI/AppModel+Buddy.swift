@@ -640,7 +640,7 @@ public final class BuddyCenter {
     public func refresh(server: ControlServer?) async {
         allowsTailnetDevices = await registry.allowsTailnetDevices
         devices = await registry.devices()
-        invitation = await registry.openInvitation()
+        adopt(await registry.openInvitation())
         reachAddress = await server?.tailnetListenerAddress
         problem = await server?.tailnetError
     }
@@ -674,9 +674,7 @@ public final class BuddyCenter {
         problem = nil
         let granting = scope ?? nextScope
         nextScope = granting
-        let fresh = await registry.invite(host: host, port: port, scope: granting)
-        invitation = fresh
-        scheduleExpiry(of: fresh)
+        adopt(await registry.invite(host: host, port: port, scope: granting))
     }
 
     /// Called while the sheet is open. A code that has just been spent should turn into the
@@ -684,17 +682,16 @@ public final class BuddyCenter {
     public func followPairing(server: ControlServer?) async -> Bool {
         let stillOpen = await registry.openInvitation()
         guard stillOpen == nil, invitation != nil else {
-            invitation = stillOpen
+            adopt(stillOpen)
             return false
         }
-        invitation = nil
+        adopt(nil)
         await refresh(server: server)
         return true
     }
 
     public func cancelInvitation() async {
-        expiryTask?.cancel()
-        expiryTask = nil
+        cancelExpiry()
         await registry.cancelInvitation()
         invitation = nil
     }
@@ -704,16 +701,44 @@ public final class BuddyCenter {
         devices = await registry.devices()
     }
 
+    /// Takes up whatever invitation is open now, re-arming the expiry whenever the code
+    /// on screen is a different one.
+    ///
+    /// The code is the identity, and this has to notice a swap rather than merely an
+    /// arrival. `POST /buddy/invitations` can mint underneath an open pairing sheet, and
+    /// the sheet's poll adopts what it finds — which leaves the expiry armed for the code
+    /// that was replaced still counting down towards a credential that is live. Firing it
+    /// would blank a code the owner is halfway through typing into a phone.
+    private func adopt(_ fresh: BuddyInvitation?) {
+        let superseded = fresh?.code != invitation?.code
+            || fresh?.expiresAt != invitation?.expiresAt
+        invitation = fresh
+        guard superseded else { return }
+        if let fresh {
+            scheduleExpiry(of: fresh)
+        } else {
+            cancelExpiry()
+        }
+    }
+
     /// Clears the code from the screen when it stops working, so the window never shows a
     /// QR that the server would now refuse.
     private func scheduleExpiry(of invitation: BuddyInvitation) {
-        expiryTask?.cancel()
+        cancelExpiry()
         let wait = invitation.expiresAt.timeIntervalSinceNow
         expiryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(max(wait, 0)))
             guard !Task.isCancelled else { return }
+            // Belt and braces with `adopt`: a timer that has outlived the code it was
+            // armed for must never take the live one down with it.
+            guard self?.invitation?.code == invitation.code else { return }
             self?.invitation = nil
         }
+    }
+
+    private func cancelExpiry() {
+        expiryTask?.cancel()
+        expiryTask = nil
     }
 
     /// The QR the phone camera reads. Scaled up from the generator's tiny native output,
