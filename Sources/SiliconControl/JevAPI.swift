@@ -56,6 +56,14 @@ extension ControlAPI {
         public var budgetRemainingUSD: Double?
         public var cacheMinutes: Int
         public var maxStateBytes: Int
+        /// Whether an adult media prompt is sent to the uncensored lane without asking.
+        /// Nil means "follow whether an uncensored lane is installed on this Mac".
+        public var automaticUncensoredLane: Bool?
+        /// What that nil currently resolves to, so a client can draw the row without
+        /// knowing which video models this Mac has.
+        public var automaticUncensoredLaneInEffect: Bool
+        /// Whether the Video tab's composer asks the media router to pick.
+        public var composerAutoRoute: Bool
         /// In `JevFeature`'s own order, so a client can draw the list without sorting it.
         public var features: [Feature]
         /// Which month the totals below are for, as `2026-09`.
@@ -79,8 +87,14 @@ extension ControlAPI {
             monthlyBudgetUSD: Double?, budgetRemainingUSD: Double?, cacheMinutes: Int,
             maxStateBytes: Int, features: [Feature], month: String, calls: Int,
             inputTokens: Int, estimatedUSD: Double, models: [String: Int],
-            monthlyUSD: [String: Double] = [:], ledgerWriteFailed: Bool = false
+            monthlyUSD: [String: Double] = [:], ledgerWriteFailed: Bool = false,
+            automaticUncensoredLane: Bool? = nil,
+            automaticUncensoredLaneInEffect: Bool = false,
+            composerAutoRoute: Bool = false
         ) {
+            self.automaticUncensoredLane = automaticUncensoredLane
+            self.automaticUncensoredLaneInEffect = automaticUncensoredLaneInEffect
+            self.composerAutoRoute = composerAutoRoute
             self.enabled = enabled
             self.model = model
             self.availableModels = availableModels
@@ -114,12 +128,23 @@ extension ControlAPI {
         public var clearMonthlyBudget: Bool?
         public var cacheMinutes: Int?
         public var maxStateBytes: Int?
+        /// Whether adult media prompts are routed to the uncensored lane automatically.
+        public var automaticUncensoredLane: Bool?
+        /// Puts `automaticUncensoredLane` back to "follow whether a lane is installed".
+        /// Needed for the same reason as `clearMonthlyBudget`: absent means "leave alone".
+        public var clearAutomaticUncensoredLane: Bool?
+        public var composerAutoRoute: Bool?
 
         public init(
             enabled: Bool? = nil, model: String? = nil, features: [String: Bool]? = nil,
             monthlyBudgetUSD: Double? = nil, clearMonthlyBudget: Bool? = nil,
-            cacheMinutes: Int? = nil, maxStateBytes: Int? = nil
+            cacheMinutes: Int? = nil, maxStateBytes: Int? = nil,
+            automaticUncensoredLane: Bool? = nil,
+            clearAutomaticUncensoredLane: Bool? = nil, composerAutoRoute: Bool? = nil
         ) {
+            self.automaticUncensoredLane = automaticUncensoredLane
+            self.clearAutomaticUncensoredLane = clearAutomaticUncensoredLane
+            self.composerAutoRoute = composerAutoRoute
             self.enabled = enabled
             self.model = model
             self.features = features

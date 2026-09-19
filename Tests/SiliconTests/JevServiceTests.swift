@@ -119,6 +119,7 @@ struct JevSettingsTests {
         // The roadmap is visible; a feature is marked built as its own PR lands it.
         #expect(JevFeature.decideTool.isBuilt)
         #expect(JevFeature.routing.isBuilt)
+        #expect(JevFeature.mediaRouting.isBuilt)
         #expect(JevFeature.allCases.allSatisfy { !$0.summary.isEmpty && !$0.displayName.isEmpty })
     }
 

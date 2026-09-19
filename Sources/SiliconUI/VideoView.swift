@@ -9,9 +9,16 @@ import UniformTypeIdentifiers
 /// Phosphene. The selected catalog entry decides which exact capability must be ready.
 struct VideoView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.controlActiveState) private var controlActiveState
     @State private var recentClips: [URL] = []
     @State private var showsRecents = false
     @State private var selectedClip: URL?
+    /// Whether Jev can route media right now, and whether the composer is asking it to.
+    /// Both live in a file an actor owns, so they are read asynchronously — and re-read
+    /// whenever this window comes forward, because the place they are changed is the
+    /// Settings window and coming back here is exactly when a stale answer would show.
+    @State private var canRouteMedia = false
+    @State private var autoRoute = false
 
     private struct RecentsInput: Equatable {
         var directory: URL
@@ -54,7 +61,12 @@ struct VideoView: View {
         .background(.background)
         .navigationTitle("Video")
         .task {
+            await reloadRouting()
             await model.refreshSwarm()
+        }
+        .onChange(of: controlActiveState) {
+            guard controlActiveState != .inactive else { return }
+            Task { await reloadRouting() }
         }
         .task(id: recentsInput) {
             let input = recentsInput
@@ -79,6 +91,11 @@ struct VideoView: View {
             if model.videoSampling != .full { model.videoH3Steps = 0 }
         }
         .onChange(of: selectedClip) { model.revealVideoPanel(.result) }
+    }
+
+    private func reloadRouting() async {
+        canRouteMedia = await model.mediaRoutingIsAvailable
+        autoRoute = await model.mediaRoutingSettings.composerAutoRoute
     }
 
     private var selectedEntry: VideoEntry? {
@@ -114,7 +131,27 @@ struct VideoView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Picker("Model", selection: $model.selectedVideoModel) {
+                // Only offered when Jev can actually answer. A switch that silently does
+                // nothing is worse than no switch, and this one costs money when it works.
+                if canRouteMedia {
+                    Toggle("Let Jev pick the model and length", isOn: Binding(
+                        get: { autoRoute },
+                        set: { value in
+                            autoRoute = value
+                            Task { try? await JevService.shared.update { $0.composerAutoRoute = value } }
+                        }
+                    ))
+                    Text(autoRoute
+                         ? "Jev reads the prompt once and picks the lane, the clip length and "
+                            + "the sampling. The model below is what it falls back to when it "
+                            + "is not sure. Each queued clip records what it decided."
+                         : "The model, length and sampling below are used as they are.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Picker(autoRoute && canRouteMedia ? "Fall back to" : "Model",
+                       selection: $model.selectedVideoModel) {
                     ForEach(VideoCatalog.all) { entry in
                         Text(entry.name).tag(entry.id)
                     }
@@ -227,7 +264,7 @@ struct VideoView: View {
                                       || model.videoBatchQueue.storageError != nil || model.isEnqueuingVideoBatch)
                         } else {
                             Button {
-                                model.generateVideo()
+                                model.enqueueVideoClip()
                             } label: {
                                 Label("Add to queue", systemImage: "text.badge.plus")
                             }

@@ -48,7 +48,11 @@ extension AppModel {
 
     public func jevStatus() async -> ControlAPI.JevStatus {
         await JevBootstrap.ready()
-        return await Self.jevStatus(from: JevService.shared)
+        // What "follow whether a lane is installed" currently resolves to is this Mac's
+        // to answer, not the service's — the service knows nothing about video models.
+        return await Self.jevStatus(
+            from: JevService.shared, uncensoredLaneInstalled: hasUncensoredVideoLane
+        )
     }
 
     public func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus {
@@ -78,13 +82,21 @@ extension AppModel {
             }
             if let minutes = update.cacheMinutes { settings.cacheMinutes = minutes }
             if let bytes = update.maxStateBytes { settings.maxStateBytes = bytes }
+            if update.clearAutomaticUncensoredLane == true {
+                settings.automaticUncensoredLane = nil
+            } else if let automatic = update.automaticUncensoredLane {
+                settings.automaticUncensoredLane = automatic
+            }
+            if let auto = update.composerAutoRoute { settings.composerAutoRoute = auto }
         }
         return await jevStatus()
     }
 
     /// Built here rather than inside `JevService` because the key question — is one stored?
     /// — is the app's to answer, and the service is deliberately given no way to say.
-    static func jevStatus(from service: JevService) async -> ControlAPI.JevStatus {
+    static func jevStatus(
+        from service: JevService, uncensoredLaneInstalled: Bool = false
+    ) async -> ControlAPI.JevStatus {
         let settings = await service.settings()
         let ledger = await service.ledger()
         let month = JevLedger.monthKey()
@@ -124,7 +136,12 @@ extension AppModel {
             estimatedUSD: totals.total.estimatedUSD,
             models: totals.models,
             monthlyUSD: ledger.months.mapValues(\.total.estimatedUSD),
-            ledgerWriteFailed: await service.ledgerWriteFailed
+            ledgerWriteFailed: await service.ledgerWriteFailed,
+            automaticUncensoredLane: settings.automaticUncensoredLane,
+            automaticUncensoredLaneInEffect: settings.automaticUncensoredLane(
+                uncensoredLaneInstalled: uncensoredLaneInstalled
+            ),
+            composerAutoRoute: settings.composerAutoRoute
         )
     }
 }
