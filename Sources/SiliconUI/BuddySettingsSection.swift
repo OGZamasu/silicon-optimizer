@@ -169,11 +169,27 @@ struct BuddyPairingSheet: View {
         }
     }
 
+    /// What the sheet shows: the scope of the code that is actually on screen, and only
+    /// when there is no code, what the next one would grant.
+    ///
+    /// The picker cannot keep an answer of its own. `POST /buddy/invitations` mints
+    /// underneath an open sheet, and the poll below adopts what it finds — so the live
+    /// invitation is the credential the owner is about to hand over, and the last thing
+    /// this window happened to pick is not. A picker reading "full control" over a code
+    /// that pairs chat-only is the owner approving something they were never shown.
+    var displayedScope: BuddyScope { buddy.invitation?.scope ?? buddy.nextScope }
+
+    /// The line under the code that says what typing it in will grant. Said on the same
+    /// screen as the digits, because that is where the decision is actually made.
+    static func grantLine(_ scope: BuddyScope) -> String {
+        "This code grants \(scope.label.lowercased())."
+    }
+
     @ViewBuilder
     private var scopePicker: some View {
         VStack(alignment: .leading, spacing: 4) {
             Picker("This device gets", selection: Binding(
-                get: { buddy.nextScope },
+                get: { displayedScope },
                 set: { scope in
                     // Changing the answer has to change the code: one already on screen was
                     // issued for the old one.
@@ -186,7 +202,7 @@ struct BuddyPairingSheet: View {
             }
             .pickerStyle(.segmented)
             .disabled(paired)
-            Text(buddy.nextScope.detail)
+            Text(displayedScope.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -205,6 +221,11 @@ struct BuddyPairingSheet: View {
         Text(invitation.displayCode)
             .font(.system(.title, design: .monospaced))
             .textSelection(.enabled)
+        // The code's own scope, not the picker's: these two can disagree, and when they do
+        // the code is the one the server will honour.
+        Text(Self.grantLine(invitation.scope))
+            .font(.caption)
+            .foregroundStyle(.secondary)
         // Typed in by hand when a camera will not cooperate, which on a tablet propped up
         // behind a monitor is most of the time.
         Text("Scan this in Silicon Buddy, or type the code and \(invitation.host).")

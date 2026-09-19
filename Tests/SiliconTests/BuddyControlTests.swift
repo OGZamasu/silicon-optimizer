@@ -365,6 +365,197 @@ struct BuddyControlTests {
         }
     }
 
+    // MARK: - Minting a pairing code
+
+    /// The route exists so a test or a script can pair without a human at the Settings
+    /// window, which means the only thing worth proving about the code it hands back is
+    /// that the server will actually honour it.
+    @Test func mintingWithNoBodyGivesAFullControlCodeThatPairs() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint()
+            #expect(minted.scope == "full")
+            // Six digits, read as digits: a code with a space or a letter in it is one a
+            // phone would offer back verbatim and be refused for.
+            #expect(minted.code.count == 6)
+            #expect(Int(minted.code) != nil)
+            // Where the device is told to dial: the second listener, never loopback — whose
+            // port is a different number in this fixture precisely so the two can be told
+            // apart, and which takes a fresh one every launch in the real app.
+            #expect(minted.host == "127.0.0.1")
+            #expect(minted.port == fixture.phone.port)
+            #expect(minted.port != fixture.local.port)
+            let expiry = try #require(ControlAPI.date(fromTimestamp: minted.expiresAt))
+            let life = expiry.timeIntervalSinceNow
+            #expect(life > BuddyPairing.codeLifetime - 60)
+            #expect(life <= BuddyPairing.codeLifetime)
+
+            let device = try await fixture.spend(minted)
+            #expect(device.scope == "full")
+            #expect(try await fixture.phone.status("GET", "/status", token: device.token) == 200)
+            // One use, like any code the Settings window mints: the second device offering
+            // it is told what every wrong guess is told.
+            #expect(try await fixture.phone.status(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(minted.code)","deviceName":"Second","platform":"ios"}"#
+            ) == 403)
+        }
+    }
+
+    @Test func anExplicitChatScopeIsTheScopeTheDeviceGets() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint(scope: "chat")
+            #expect(minted.scope == "chat")
+
+            let device = try await fixture.spend(minted, name: "Lent out")
+            #expect(device.scope == "chat")
+            #expect(try await fixture.phone.status("GET", "/status", token: device.token) == 200)
+            #expect(try await fixture.phone.status(
+                "POST", "/load", token: device.token, body: "{}"
+            ) == 403)
+
+            // Said the other way round too, so "chat" cannot quietly become the default:
+            // an empty body is full control, which is what the owner is offered by hand.
+            #expect(try await fixture.mint().scope == "full")
+            #expect(try await fixture.mint(scope: "full").scope == "full")
+            // An empty string is nothing said, not a scope this server does not have.
+            #expect(try await fixture.mint(scope: "").scope == "full")
+        }
+    }
+
+    /// A scope this server does not have is a refusal, never a quiet fall back to the more
+    /// powerful of the two — and it must not spend the code the owner is already holding.
+    @Test func aScopeThisMacDoesNotHaveIsRefusedAndBurnsNothing() async throws {
+        try await withServer { fixture in
+            let standing = try await fixture.mint(scope: "chat")
+
+            for bogus in ["admin", "owner", "FULL", "Chat", "full ", "full,chat"] {
+                let (status, body) = try await fixture.local.call(
+                    "POST", "/buddy/invitations", token: fixture.local.token,
+                    body: #"{"scope":"\#(bogus)"}"#
+                )
+                #expect(status == 400, "\(bogus) should not be a scope")
+                let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+                #expect(envelope.error == ControlServer.unknownScopeRefusal)
+            }
+            // A body that is not JSON at all is the other 400, and mints nothing either.
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token, body: "not json"
+            ) == 400)
+
+            // Every one of those left the code that was already open exactly as it was.
+            #expect(await fixture.registry.openInvitation()?.code == standing.code)
+            #expect(await fixture.registry.openInvitation()?.scope == .chat)
+        }
+    }
+
+    @Test func cancellingTakesTheCodeOutOfCirculationAndIsIdempotent() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint()
+
+            let (first, body) = try await fixture.local.call(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            )
+            #expect(first == 200)
+            #expect(String(decoding: body, as: UTF8.self).contains("cancelled"))
+            #expect(await fixture.registry.openInvitation() == nil)
+
+            // What was a live credential a moment ago is now six wrong digits.
+            #expect(try await fixture.phone.status(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(minted.code)","deviceName":"Late","platform":"ios"}"#
+            ) == 403)
+
+            // Cancelling a code already gone — spent, expired, or never opened at all — is
+            // what the caller asked for, not a race it has to check.
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+        }
+    }
+
+    /// A code carries an address and a deadline as much as it carries six digits. With
+    /// nothing listening on the far side, minting one would cost somebody a minute of
+    /// typing into a phone that cannot reach this Mac.
+    @Test func aCodeWithNowhereToDialIsRefusedRatherThanMinted() async throws {
+        try await withServer { fixture in
+            try await fixture.server.setTailnetAccess(address: nil)
+
+            let (status, body) = try await fixture.local.call(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            )
+            #expect(status == 409)
+            let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+            #expect(envelope.error == ControlServer.buddyListenerDown)
+            #expect(await fixture.registry.openInvitation() == nil)
+
+            // Cancelling needs nowhere to dial, so it carries on working regardless.
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+
+            // The listener back up, but Silicon Buddy switched off: a device token minted
+            // now would be refused on sight, so the code that mints it is refused instead.
+            _ = try await Self.bindTailnetListener(on: fixture.server)
+            await fixture.registry.setAllowsTailnetDevices(false)
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            ) == 409)
+
+            // And on again, which is the whole of what was standing in the way.
+            await fixture.registry.setAllowsTailnetDevices(true)
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+        }
+    }
+
+    /// The gate this route exists behind. Minting admits the *next* device to this Mac: a
+    /// phone that could mint could pair the phone after it without the owner ever seeing a
+    /// code. So it is answered for this Mac's own token on this Mac's own listener, and for
+    /// nothing else — the same rule `/buddy/devices` has always had.
+    @Test func noTailnetCallerMayMintOrCancelAPairingCode() async throws {
+        try await withServer { fixture in
+            let full = try await fixture.pair(name: "Studio phone")
+            let chat = try await fixture.pair(name: "Lent out", scope: .chat)
+
+            for route in [("POST", "/buddy/invitations"), ("DELETE", "/buddy/invitations")] {
+                let (method, path) = route
+                // Out here the control token is not a credential at all, so it reads as no
+                // token — which is the point: a phone cannot hold what these routes want.
+                #expect(try await fixture.phone.status(method, path, token: fixture.local.token)
+                    == 401, "\(method) \(path) with the control token")
+                #expect(try await fixture.phone.status(method, path, token: nil) == 401)
+                #expect(try await fixture.phone.status(method, path, token: "guessed") == 401)
+
+                // A paired device's token is a credential out there, and buys nothing here.
+                let (fullStatus, fullBody) = try await fixture.phone.call(
+                    method, path, token: full.token
+                )
+                #expect(fullStatus == 403, "\(method) \(path) with a full-control device")
+                let refusal = try JSONDecoder().decode(
+                    ControlAPI.ErrorResponse.self, from: fullBody
+                )
+                #expect(refusal.error.contains("Only this Mac"))
+
+                let (chatStatus, chatBody) = try await fixture.phone.call(
+                    method, path, token: chat.token
+                )
+                #expect(chatStatus == 403, "\(method) \(path) with a chat-only device")
+                #expect(try JSONDecoder().decode(
+                    ControlAPI.ErrorResponse.self, from: chatBody
+                ).error == ControlServer.chatOnlyRefusal)
+            }
+
+            // None of that minted a code, and none of it cancelled one either.
+            #expect(await fixture.registry.openInvitation() == nil)
+            // Which the Mac's own listener settles by minting the first one that works.
+            #expect(try await fixture.mint().scope == "full")
+        }
+    }
+
     // MARK: - The second listener
 
     @Test func onlyTailnetAndLoopbackAddressesMayBeBound() {
@@ -800,6 +991,31 @@ struct BuddyControlTests {
             let (status, body) = try await phone.call(
                 "POST", "/buddy/pair", token: nil,
                 body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"\#(platform)"}"#
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
+        }
+
+        /// Mints a code the way a script would: this Mac's own token, on this Mac's own
+        /// listener, and no Settings window anywhere.
+        func mint(scope: String? = nil) async throws -> ControlAPI.BuddyInvitationResponse {
+            let (status, body) = try await local.call(
+                "POST", "/buddy/invitations", token: local.token,
+                body: scope.map { #"{"scope":"\#($0)"}"# }
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(
+                ControlAPI.BuddyInvitationResponse.self, from: body
+            )
+        }
+
+        /// Spends a minted code from the far listener, as the device holding it would.
+        func spend(
+            _ invitation: ControlAPI.BuddyInvitationResponse, name: String = "CI runner"
+        ) async throws -> ControlAPI.BuddyPairResponse {
+            let (status, body) = try await phone.call(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"ios"}"#
             )
             #expect(status == 200)
             return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)

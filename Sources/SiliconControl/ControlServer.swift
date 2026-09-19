@@ -663,6 +663,24 @@ public actor ControlServer {
         "This device is paired for chat only. Pair it again with full control from "
             + "Settings → Silicon Buddy on the Mac."
 
+    /// What `POST /buddy/invitations` says when a code would have nowhere to point.
+    ///
+    /// A pairing code is an address and a deadline as much as it is six digits. With the
+    /// tailnet listener down there is nothing for a device to dial, and with Silicon Buddy
+    /// switched off the token the code mints would be refused the moment it was used — so
+    /// both answer with this one sentence, because the owner's next move is the same
+    /// either way and a code nobody can spend is worse than a plain no.
+    public static let buddyListenerDown =
+        "Silicon Buddy's tailnet listener is not up, so a pairing code would have nowhere "
+            + "to dial. Turn Silicon Buddy on in Settings → Silicon Buddy on the Mac and "
+            + "wait for it to report an address."
+
+    /// The one sentence for a scope this server does not have. It names the two it does,
+    /// so a caller that guessed wrong does not have to go and find them.
+    public static let unknownScopeRefusal =
+        "A pairing code grants either \"full\" or \"chat\". Leave the scope out for full "
+            + "control, which is what the Mac's own Settings window offers by default."
+
     /// Likewise: the one sentence `POST /jev` refuses with, so the fixture and the server
     /// cannot say different things.
     public static let jevWriteRefusal =
@@ -924,6 +942,19 @@ public actor ControlServer {
         .error(401, "Invalid or missing control token.")
     }
 
+    /// What scope a mint asked for: nothing at all means full control, which is the
+    /// default the Settings window offers and the one the product is about. An empty string
+    /// is nothing said too — a client that writes `""` for a field it has no answer for
+    /// means the same as one that leaves the key out. Nil — and only nil — means the caller
+    /// named a scope this server does not have, which is a 400 rather than a quiet fall
+    /// back to the more powerful of the two.
+    static func invitationScope(_ asked: String?) -> BuddyScope? {
+        guard let asked, !asked.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return .full
+        }
+        return BuddyScope(rawValue: asked)
+    }
+
     /// Matches a path shape with one wildcard — `["conversations", "*"]` — and hands back
     /// what the wildcard caught. Swift cannot pattern-match array literals with bindings,
     /// and a routing framework for four routes would be worse than this.
@@ -1029,6 +1060,65 @@ public actor ControlServer {
                 return .error(404, "No paired device with id \(id).")
             }
             return .json(["status": "revoked"])
+        }
+        // Minting a pairing code is admitting the next device to this Mac, so it is gated
+        // exactly as the device list is: `caller == .control`, which `identify` grants only
+        // to this Mac's own token arriving on this Mac's own loopback listener. A phone
+        // that could mint could pair the phone after it without the owner ever seeing a
+        // code, and a peer that could mint could pair itself — neither is a tailnet's
+        // business, so neither is reachable from out there at any scope.
+        //
+        // It exists so tests and scripts can pair without a human at the Settings window;
+        // everything it hands back is what BuddyCenter's "Pair a device" would have shown.
+        if request.method == "POST", segments == ["buddy", "invitations"] {
+            guard caller == .control else {
+                return .error(403, "Only this Mac can mint a pairing code.")
+            }
+            // No body at all is the ordinary shape of this request from a shell, and it
+            // means what `{}` means: full control.
+            let asked: ControlAPI.BuddyInvitationRequest
+            if request.body.isEmpty {
+                asked = ControlAPI.BuddyInvitationRequest()
+            } else if let decoded = try? request.decode(ControlAPI.BuddyInvitationRequest.self) {
+                asked = decoded
+            } else {
+                return .error(400, "Could not read the invitation request.")
+            }
+            // Read before anything is minted, so a typo in the scope cannot burn the code
+            // the owner is already looking at.
+            guard let scope = Self.invitationScope(asked.scope) else {
+                return .error(400, Self.unknownScopeRefusal)
+            }
+            // Asked of the live listener rather than of the settings file: the code carries
+            // the address a device will keep dialling, and the only honest answer to
+            // "where?" is where something is actually listening as this is answered.
+            guard let endpoint = tailnetEndpoint, await buddy.allowsTailnetDevices else {
+                return .error(409, Self.buddyListenerDown)
+            }
+            // The registry's own mint, so a code from here is the same credential as one
+            // from the Settings window in every way that matters — five minutes, one use,
+            // ten wrong guesses and it burns — and it replaces whatever was on screen,
+            // because two live codes would mean the owner cannot tell which admitted what.
+            let invitation = await buddy.invite(
+                host: endpoint.address, port: endpoint.port, scope: scope
+            )
+            // The response is the only place this code exists. Nothing here logs it, and
+            // nothing can read it back: the next request for it mints a different one.
+            return (try? .encode(ControlAPI.BuddyInvitationResponse(
+                code: invitation.code, host: invitation.host, port: invitation.port,
+                expiresAt: ControlAPI.timestamp(invitation.expiresAt),
+                scope: invitation.scope.rawValue
+            ))) ?? .error(500, "Could not encode the invitation.")
+        }
+        if request.method == "DELETE", segments == ["buddy", "invitations"] {
+            guard caller == .control else {
+                return .error(403, "Only this Mac can cancel a pairing code.")
+            }
+            // Idempotent on purpose. A caller that cancels a code already spent, expired or
+            // never opened wants what it asked for — no live code — and has it. Answering
+            // 404 would hand a script a race it cannot win against a five-minute clock.
+            await buddy.cancelInvitation()
+            return .json(["status": "cancelled"])
         }
         if request.method == "GET",
            let id = Self.parameter(segments, matching: ["conversations", "*"]) {

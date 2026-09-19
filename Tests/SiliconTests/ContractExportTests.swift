@@ -40,6 +40,7 @@ struct ContractExportTests {
         #expect(Set(names).count == names.count)
         #expect(Set(names) == [
             "POST /buddy/pair", "GET /buddy/devices", "DELETE /buddy/devices/{id}",
+            "POST /buddy/invitations", "DELETE /buddy/invitations",
             "POST /chat/stream", "GET /events",
             "GET /conversations", "POST /conversations", "GET /conversations/{id}",
             "POST /conversations/{id}/messages",
@@ -95,6 +96,21 @@ struct ContractExportTests {
         // The control-only routes refuse with their own sentence, not each other's.
         #expect(errors("GET", "/buddy/devices")[403]?.contains("list") == true)
         #expect(errors("DELETE", "/buddy/devices/{id}")[403]?.contains("revoke") == true)
+        #expect(errors("POST", "/buddy/invitations")[403]?.contains("mint") == true)
+        #expect(errors("DELETE", "/buddy/invitations")[403]?.contains("cancel") == true)
+        // The two the phone side has to be able to act on: a code that could not be minted
+        // because nothing is listening, and a scope this server does not have.
+        #expect(errors("POST", "/buddy/invitations")[409] == ControlServer.buddyListenerDown)
+        #expect(errors("POST", "/buddy/invitations")[400] == ControlServer.unknownScopeRefusal)
+        // Minting admits the next device, so it is the Mac's own business — never a
+        // paired phone's, at either scope.
+        for invitation in Self.routes.filter({ $0.path == "/buddy/invitations" }) {
+            #expect(invitation.auth == "control")
+            #expect(invitation.scopes == ["full"])
+        }
+        // And the code in the fixture is a placeholder, so nothing that reads these files
+        // is ever reading a credential.
+        #expect(Self.exampleInvitation.code == "000000")
         #expect(errors("POST", "/jev")[403] == ControlServer.jevWriteRefusal)
         #expect(errors("POST", "/jev/calibrate")[403] == ControlServer.jevCalibrateRefusal)
         // Two different refusals for two different things, so a client can tell "you may not
@@ -424,6 +440,15 @@ struct ContractExportTests {
             "the matching `GET /jev` and `GET /jev/calibration`, without being able to",
             "change either.",
             "",
+            "`POST /buddy/invitations` and `DELETE /buddy/invitations` take that same control",
+            "token, and for a stronger reason: minting a pairing code admits the *next*",
+            "device to this Mac. A phone that could mint one could pair the phone after it",
+            "without the owner ever seeing a code, so these two are answered on the Mac's own",
+            "loopback listener only and are not reachable from the tailnet at all — at any",
+            "device scope, and with any token. A minted code carries the tailnet listener's",
+            "address and port, lives five minutes and is spent once; with that listener down",
+            "the mint is a 409 rather than a code pointing nowhere.",
+            "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
         ]
@@ -488,6 +513,25 @@ struct ContractExportTests {
                 403: "Only this Mac can revoke a paired device.",
                 404: "No paired device with id 7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C.",
             ]
+        ),
+        Route(
+            method: "POST", path: "/buddy/invitations", auth: "control",
+            summary: "Mint the pairing code the Mac's own Settings window would show.",
+            request: .of(ControlAPI.BuddyInvitationRequest(scope: "chat")),
+            response: .of(exampleInvitation),
+            errors: [
+                // Written out rather than inherited: the shared 400 is "that body does not
+                // parse", and a scope this server does not have parses perfectly well.
+                400: ControlServer.unknownScopeRefusal,
+                403: "Only this Mac can mint a pairing code.",
+                409: ControlServer.buddyListenerDown,
+            ]
+        ),
+        Route(
+            method: "DELETE", path: "/buddy/invitations", auth: "control",
+            summary: "Cancel the code on screen. Succeeds whether or not one was open.",
+            response: .of(["status": "cancelled"]),
+            errors: [403: "Only this Mac can cancel a pairing code."]
         ),
         Route(
             method: "POST", path: "/chat/stream", auth: "device",
@@ -795,8 +839,13 @@ struct ContractExportTests {
                 polledSecondsAgo: 4,
                 // This Mac's own tailnet address, not a peer's: the block says where
                 // *we* can be reached, which is the half of the swarm a node cannot see.
+                //
+                // 100.64.0.9 is the placeholder the rest of this export uses, and it is a
+                // placeholder on purpose: this fixture is committed to a public repository
+                // and copied into the companion-app repositories, and any other address in
+                // the tailscale range would read as somebody's real machine.
                 exposure: .init(
-                    requested: true, listening: true, address: "100.115.9.42",
+                    requested: true, listening: true, address: "100.64.0.9",
                     port: 8788, problem: nil
                 )
             ))
@@ -925,6 +974,15 @@ struct ContractExportTests {
     ]
 
     // MARK: - Shared examples
+
+    /// A placeholder code, never a real one: these files are committed, copied between
+    /// repositories and read by generators, and a live six-digit code has five minutes in
+    /// which it admits whoever types it. Six zeroes is the one value that is obviously not
+    /// an answer.
+    static let exampleInvitation = ControlAPI.BuddyInvitationResponse(
+        code: "000000", host: "100.64.0.9", port: 8788,
+        expiresAt: "2026-09-18T09:17:44Z", scope: "chat"
+    )
 
     static let exampleDevice = ControlAPI.BuddyDeviceSummary(
         id: "7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C", name: "Galaxy S24 Ultra",
