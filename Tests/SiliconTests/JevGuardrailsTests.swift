@@ -30,7 +30,16 @@ func guardrailAnswer(
         """
 }
 
-/// The same thing as answers, for the policy tests, which need no server at all.
+/// The same thing as a response, for the policy tests, which need no server at all.
+func guardrailResponse(
+    _ overrides: [GuardrailQuestions.ID: Double] = [:], harm: Double = 0
+) -> ControlAPI.DecideResponse {
+    .init(
+        model: "jev-1.13.0", usage: .init(inputTokens: 900, outputTokens: 9),
+        answers: guardrailAnswers(overrides, harm: harm)
+    )
+}
+
 func guardrailAnswers(
     _ overrides: [GuardrailQuestions.ID: Double] = [:], harm: Double = 0
 ) -> [String: ControlAPI.SystemOneAnswer] {
@@ -276,14 +285,14 @@ struct GuardrailStateTests {
 struct GuardrailPolicyTests {
 
     @Test func aQuietBatteryActs() {
-        #expect(GuardrailPolicy.verdict(for: guardrailAnswers()) == .act)
+        #expect(GuardrailPolicy.verdict(for: guardrailResponse()) == .act)
     }
 
     @Test func theHazardConfirmLineIsAtAHalf() {
         #expect(GuardrailQuestions.hazard.confirm == 0.5)
-        #expect(GuardrailPolicy.verdict(for: guardrailAnswers([.irreversible: 0.49])) == .act)
+        #expect(GuardrailPolicy.verdict(for: guardrailResponse([.irreversible: 0.49])) == .act)
         #expect(
-            GuardrailPolicy.verdict(for: guardrailAnswers([.irreversible: 0.5]))
+            GuardrailPolicy.verdict(for: guardrailResponse([.irreversible: 0.5]))
                 == .confirm(reasons: ["irreversible"])
         )
     }
@@ -291,11 +300,11 @@ struct GuardrailPolicyTests {
     @Test func theHazardBlockLineIsAt085() {
         #expect(GuardrailQuestions.hazard.act == 0.85)
         #expect(
-            GuardrailPolicy.verdict(for: guardrailAnswers([.destructive: 0.84]))
+            GuardrailPolicy.verdict(for: guardrailResponse([.destructive: 0.84]))
                 == .confirm(reasons: ["destructive"])
         )
         #expect(
-            GuardrailPolicy.verdict(for: guardrailAnswers([.destructive: 0.85]))
+            GuardrailPolicy.verdict(for: guardrailResponse([.destructive: 0.85]))
                 == .block(reasons: ["destructive"])
         )
     }
@@ -306,7 +315,7 @@ struct GuardrailPolicyTests {
         ])
         for hazard in GuardrailQuestions.blocking {
             #expect(
-                GuardrailPolicy.verdict(for: guardrailAnswers([hazard: 0.99]))
+                GuardrailPolicy.verdict(for: guardrailResponse([hazard: 0.99]))
                     == .block(reasons: [hazard.rawValue]),
                 "\(hazard.rawValue) should block on its own"
             )
@@ -316,7 +325,7 @@ struct GuardrailPolicyTests {
         for hazard in GuardrailQuestions.ID.hazards
         where !GuardrailQuestions.blocking.contains(hazard) {
             #expect(
-                GuardrailPolicy.verdict(for: guardrailAnswers([hazard: 0.99]))
+                GuardrailPolicy.verdict(for: guardrailResponse([hazard: 0.99]))
                     == .confirm(reasons: [hazard.rawValue]),
                 "\(hazard.rawValue) should only ask"
             )
@@ -325,9 +334,9 @@ struct GuardrailPolicyTests {
 
     @Test func theHarmConfirmLineIsAt15() {
         #expect(GuardrailQuestions.harm.confirm == 1.5)
-        #expect(GuardrailPolicy.verdict(for: guardrailAnswers(harm: 1.49)) == .act)
+        #expect(GuardrailPolicy.verdict(for: guardrailResponse(harm: 1.49)) == .act)
         #expect(
-            GuardrailPolicy.verdict(for: guardrailAnswers(harm: 1.5))
+            GuardrailPolicy.verdict(for: guardrailResponse(harm: 1.5))
                 == .confirm(reasons: ["harm"])
         )
     }
@@ -335,11 +344,11 @@ struct GuardrailPolicyTests {
     @Test func theHarmBlockLineIsAt25() {
         #expect(GuardrailQuestions.harm.act == 2.5)
         #expect(
-            GuardrailPolicy.verdict(for: guardrailAnswers(harm: 2.49))
+            GuardrailPolicy.verdict(for: guardrailResponse(harm: 2.49))
                 == .confirm(reasons: ["harm"])
         )
         #expect(
-            GuardrailPolicy.verdict(for: guardrailAnswers(harm: 2.5))
+            GuardrailPolicy.verdict(for: guardrailResponse(harm: 2.5))
                 == .block(reasons: ["harm"])
         )
     }
@@ -349,13 +358,13 @@ struct GuardrailPolicyTests {
     /// the command itself looks harmless.
     @Test func promptInjectionAlwaysReachesAPerson() {
         let verdict = GuardrailPolicy.verdict(
-            for: guardrailAnswers([.drivenByToolOutput: 0.5], harm: 0)
+            for: guardrailResponse([.drivenByToolOutput: 0.5], harm: 0)
         )
         #expect(verdict == .confirm(reasons: ["driven_by_tool_output"]))
     }
 
     @Test func reasonsNameEveryQuestionThatFiredInOrder() {
-        let verdict = GuardrailPolicy.verdict(for: guardrailAnswers(
+        let verdict = GuardrailPolicy.verdict(for: guardrailResponse(
             [.exfiltrates: 0.9, .outsideWorkingTree: 0.7, .destructive: 0.95], harm: 2.6
         ))
         #expect(verdict == .block(reasons: ["destructive", "exfiltrates", "harm"]))
@@ -377,23 +386,35 @@ struct GuardrailPolicyTests {
         var answers = guardrailAnswers()
         answers.removeValue(forKey: "exfiltrates")
         answers.removeValue(forKey: "harm")
+        let response = ControlAPI.DecideResponse(
+            model: "jev-1.13.0", usage: .init(inputTokens: 1, outputTokens: 1),
+            answers: answers
+        )
         #expect(
-            GuardrailPolicy.verdict(for: answers) == .confirm(reasons: ["exfiltrates", "harm"])
+            GuardrailPolicy.verdict(for: response) == .confirm(reasons: ["exfiltrates", "harm"])
         )
     }
 
-    @Test func ananswerOfTheWrongKindIsNotASafeAnswerEither() {
+    @Test func anAnswerOfTheWrongKindIsNotASafeAnswerEither() {
         var answers = guardrailAnswers()
-        // The harm score answered as a noul: well-formed JSON, useless here.
+        // The harm score answered as a noul: well-formed JSON, useless here. The typed
+        // accessor is what notices; reading the dictionary by hand would take 0.1 as a
+        // score of 0.1 and call the whole thing safe.
         answers["harm"] = .noul(0.1)
-        #expect(GuardrailPolicy.verdict(for: answers) == .confirm(reasons: ["harm"]))
-        #expect(GuardrailPolicy.signals(for: answers)["harm"] == nil)
+        let response = ControlAPI.DecideResponse(
+            model: "jev-1.13.0", usage: .init(inputTokens: 1, outputTokens: 1),
+            answers: answers
+        )
+        #expect(GuardrailPolicy.verdict(for: response) == .confirm(reasons: ["harm"]))
+        #expect(GuardrailPolicy.signals(for: response)["harm"] == nil)
+        #expect(throws: ControlAPI.SystemOneAnswerError.self) { try response.score("harm") }
     }
 
     /// A noul is not a confidence, and this is the test that says so: 0.4 on a hazard is a
-    /// no, not an "unsure". If the signals ever go back to the confidence band, this fails.
+    /// no, not an "unsure". The confidence band would call it `.escalate`; `noulBand` calls
+    /// it what it is, a decisive no, and the guardrail reads that as clear.
     @Test func signalsReadAProbabilityAsAProbability() {
-        let signals = GuardrailPolicy.signals(for: guardrailAnswers(
+        let signals = GuardrailPolicy.signals(for: guardrailResponse(
             [.destructive: 0.9, .irreversible: 0.6, .exfiltrates: 0.4], harm: 1.6
         ))
         #expect(signals["destructive"] == .fired)
@@ -476,7 +497,7 @@ struct JevGuardrailEngineTests {
                 JevGuardrails.record(
                     .screened(
                         verdict: .confirm(reasons: ["harm"]), latencyMS: Double(index),
-                        answers: guardrailAnswers(harm: 1.6)
+                        response: guardrailResponse(harm: 1.6)
                     ),
                     engine: .codex
                 )

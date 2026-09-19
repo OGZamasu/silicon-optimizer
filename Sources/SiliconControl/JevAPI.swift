@@ -149,9 +149,13 @@ extension ControlAPI {
         /// Which engine asked: `codex`, `pi`, `harness`, `buddy`.
         public var engine: String
         public var screening: GuardrailScreening
-        /// Question id → `act`, `confirm` or `escalate`: where each answer landed against
-        /// the feature's thresholds. For a hazard, `act` means it held firmly enough to act
-        /// on, `confirm` means it was plausible, and `escalate` means it did not fire.
+        /// Question id → `fired`, `plausible` or `clear`: where each answer landed against
+        /// the feature's thresholds.
+        ///
+        /// Its own three words rather than the `act`/`confirm`/`escalate` band used for a
+        /// model's *confidence*, because eight of these nine questions are nouls, where the
+        /// number is the answer rather than a certainty about it: 0.05 on a hazard is a firm
+        /// no, and calling that "escalate" would invert it.
         public var bands: [String: String]
 
         public init(

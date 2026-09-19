@@ -323,10 +323,25 @@ public enum GuardrailQuestions: JevQuestionSet {
     }
 
     /// A hazard probability, read against `hazard`.
+    ///
+    /// The decisive/undecided split is `JevThresholds.noulBand`, which is the right gate for
+    /// a noul: the certain answers are at *both* ends and the useless ones are in the
+    /// middle, so a hazard sitting at 0.6 is not a weak yes, it is the model failing to
+    /// settle — and that is precisely when a person should look. Only once the answer is
+    /// decisive does this ask which end it landed on.
+    ///
+    /// `no: hazard.confirm.nextDown` because `noulBand`'s lower end is inclusive while this
+    /// feature's line is "0.5 or more asks". One representable step below `confirm` keeps
+    /// the two conventions from disagreeing about the boundary itself.
     public static func signal(forHazard probability: Double) -> Signal {
-        if probability >= hazard.act { return .fired }
-        if probability >= hazard.confirm { return .plausible }
-        return .clear
+        switch JevThresholds.noulBand(
+            probability, yes: hazard.act, no: hazard.confirm.nextDown
+        ) {
+        case .act:
+            return probability >= hazard.act ? .fired : .clear
+        case .escalate, .confirm:
+            return .plausible
+        }
     }
 
     /// The harm score, read against `harm`.
@@ -575,17 +590,13 @@ public enum GuardrailPolicy {
 
     /// The decision, from one Jev response.
     public static func verdict(for response: ControlAPI.DecideResponse) -> GuardrailVerdict {
-        verdict(for: response.answers)
-    }
-
-    public static func verdict(
-        for answers: [String: ControlAPI.SystemOneAnswer]
-    ) -> GuardrailVerdict {
         // An answer that is missing — or came back as the wrong kind — is not a safe
         // answer. It means the response was short of what was asked for, and the only
         // honest thing to do with a call we did not manage to judge is ask the person.
+        // The typed accessors are what make that detectable at all: reading the dictionary
+        // by hand would turn a renamed question into a silent "nothing fired".
         let unanswered = GuardrailQuestions.ID.allCases
-            .filter { signal(for: $0, in: answers) == nil }
+            .filter { signal(for: $0, in: response) == nil }
             .map(\.rawValue)
         guard unanswered.isEmpty else { return .confirm(reasons: unanswered.sorted()) }
 
@@ -593,7 +604,7 @@ public enum GuardrailPolicy {
         var asking: [String] = []
 
         for question in GuardrailQuestions.ID.allCases {
-            guard let signal = signal(for: question, in: answers) else { continue }
+            guard let signal = signal(for: question, in: response) else { continue }
             switch signal {
             case .fired:
                 // Four hazards refuse on their own, and so does serious harm. The rest of
@@ -619,28 +630,24 @@ public enum GuardrailPolicy {
     /// Where one question's answer landed, or nil when it is missing or of the wrong kind.
     /// The one place an answer is read, so "a noul is not a confidence" is decided once.
     static func signal(
-        for question: GuardrailQuestions.ID, in answers: [String: ControlAPI.SystemOneAnswer]
+        for question: GuardrailQuestions.ID, in response: ControlAPI.DecideResponse
     ) -> GuardrailQuestions.Signal? {
-        switch (question, answers[question.rawValue]) {
-        case (.harm, .score(let score, _, _, _)):
-            GuardrailQuestions.signal(forHarm: score)
-        case (.harm, _):
-            nil
-        case (_, .noul(let probability)):
-            GuardrailQuestions.signal(forHazard: probability)
-        default:
-            nil
+        if question == .harm {
+            guard let harm = try? response.score(question.rawValue) else { return nil }
+            return GuardrailQuestions.signal(forHarm: harm.score)
         }
+        guard let probability = try? response.noul(question.rawValue) else { return nil }
+        return GuardrailQuestions.signal(forHazard: probability)
     }
 
     /// Where every answer landed, for the ring buffer and the UI. Ids and signals only:
     /// this is everything the app is allowed to remember about a screening.
     public static func signals(
-        for answers: [String: ControlAPI.SystemOneAnswer]
+        for response: ControlAPI.DecideResponse
     ) -> [String: GuardrailQuestions.Signal] {
         var signals: [String: GuardrailQuestions.Signal] = [:]
         for question in GuardrailQuestions.ID.allCases {
-            guard let signal = signal(for: question, in: answers) else { continue }
+            guard let signal = signal(for: question, in: response) else { continue }
             signals[question.rawValue] = signal
         }
         return signals

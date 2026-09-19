@@ -9,12 +9,13 @@ import SiliconRuntime
 /// to ask the person. Every hook in this app does that, and a new one must too.
 public enum GuardrailScreening: Sendable, Equatable {
 
-    /// Jev answered. The verdict is the policy's; the answers are kept so a caller can look
-    /// at a probability the policy only compared.
+    /// Jev answered. The verdict is the policy's; the whole response is kept so a caller
+    /// can look at a probability the policy only compared — through the typed accessors,
+    /// which say so by name when a question is missing or answered as the wrong kind.
     case screened(
         verdict: GuardrailVerdict,
         latencyMS: Double,
-        answers: [String: ControlAPI.SystemOneAnswer]
+        response: ControlAPI.DecideResponse
     )
 
     /// Nothing was judged, and why. Fall back to the human.
@@ -30,16 +31,20 @@ public enum GuardrailScreening: Sendable, Equatable {
         return nil
     }
 
-    public var answers: [String: ControlAPI.SystemOneAnswer] {
-        if case .screened(_, _, let answers) = self { return answers }
-        return [:]
+    /// The response Jev sent, for a caller that wants a probability rather than a verdict.
+    public var response: ControlAPI.DecideResponse? {
+        if case .screened(_, _, let response) = self { return response }
+        return nil
     }
+
+    public var answers: [String: ControlAPI.SystemOneAnswer] { response?.answers ?? [:] }
 
     public var reasons: [String] { verdict?.reasons ?? [] }
 
     /// Where each question landed. Empty when nothing was screened.
     public var signals: [String: GuardrailQuestions.Signal] {
-        GuardrailPolicy.signals(for: answers)
+        guard let response else { return [:] }
+        return GuardrailPolicy.signals(for: response)
     }
 
     /// The line an approval card shows.
@@ -117,21 +122,16 @@ public enum JevGuardrails {
 
         let started = Date()
         do {
-            // The same door `JevQuestionSet.ask` opens — the feature switch, the budget,
-            // the cache and the ledger all apply — named explicitly because this call has a
-            // service to hand rather than always the shared one.
-            let response = try await service.ask(
-                GuardrailQuestions.feature, state: state,
-                questions: GuardrailQuestions.questions
-            )
+            // One request, nine questions, through the one governed door.
+            let response = try await GuardrailQuestions.ask(state: state, using: service)
             // Wall clock rather than the response's own figure: what matters to a person
             // watching an approval card is how long the app made them wait, which includes
             // the queueing and the retries.
             let latency = Date().timeIntervalSince(started) * 1_000
             let screening = GuardrailScreening.screened(
-                verdict: GuardrailPolicy.verdict(for: response.answers),
+                verdict: GuardrailPolicy.verdict(for: response),
                 latencyMS: latency,
-                answers: response.answers
+                response: response
             )
             record(screening, engine: engine)
             return screening
