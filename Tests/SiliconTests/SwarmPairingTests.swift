@@ -106,8 +106,10 @@ struct SwarmPairingPieceTests {
 @Suite("Swarm pairing end to end", .serialized)
 struct SwarmPairingFlowTests {
 
-    private func freePort() -> Int {
-        Int.random(in: 22_000...58_000)
+    /// A port nobody is on, asked of the kernel rather than guessed: a number drawn from a
+    /// range can land on one another suite in this process is using, and did.
+    private func freePort() async throws -> Int {
+        try await BuddyControlTests.freeLoopbackPort()
     }
 
     @Test("hello, knock, code, approve, deliver once")
@@ -118,7 +120,7 @@ struct SwarmPairingFlowTests {
                               token: "client-tok-abc")]
         )
         let server = PairingServer(hostName: "Owner Mac")
-        let port = freePort()
+        let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
         try await Task.sleep(for: .milliseconds(300))
@@ -171,7 +173,7 @@ struct SwarmPairingFlowTests {
     @Test("a denied knock stays denied and frees the door")
     func deniedFlow() async throws {
         let server = PairingServer(hostName: "Owner")
-        let port = freePort()
+        let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
         try await Task.sleep(for: .milliseconds(300))
@@ -194,7 +196,7 @@ struct SwarmPairingFlowTests {
     @Test("stale requests expire on their own")
     func expiry() async throws {
         let server = PairingServer(hostName: "Owner", requestLifetime: 0.2)
-        let port = freePort()
+        let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
         try await Task.sleep(for: .milliseconds(300))
