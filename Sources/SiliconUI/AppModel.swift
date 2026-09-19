@@ -2536,6 +2536,7 @@ public final class AppModel {
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
         registerServerTermination()
+        configureJev()
         prepareIdleUnloadNotices()
         beginSampling()
         startControlServer()

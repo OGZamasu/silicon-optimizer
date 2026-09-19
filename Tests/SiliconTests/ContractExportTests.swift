@@ -46,6 +46,7 @@ struct ContractExportTests {
             "GET /health", "GET /profile", "GET /metrics", "GET /status", "GET /installed",
             "GET /catalog", "GET /recommend", "POST /plan", "POST /install", "POST /load",
             "POST /unload", "POST /chat", "POST /decide", "POST /v1/systemone",
+            "GET /jev", "POST /jev",
             "POST /benchmark", "GET /swarm", "GET /v1/node",
             "GET /image/models", "POST /image/plan", "POST /image/generate",
             "GET /mesh/models", "POST /mesh/plan", "POST /mesh/generate",
@@ -85,9 +86,21 @@ struct ContractExportTests {
         #expect(errors("POST", "/chat/stream")[429]?.contains("Close one") == true)
         #expect(errors("POST", "/conversations/{id}/messages")[409] != nil)
         #expect(errors("POST", "/conversations/{id}/messages")[429] != nil)
-        // The two control-only routes refuse with their own sentence, not each other's.
+        // The control-only routes refuse with their own sentence, not each other's.
         #expect(errors("GET", "/buddy/devices")[403]?.contains("list") == true)
         #expect(errors("DELETE", "/buddy/devices/{id}")[403]?.contains("revoke") == true)
+        #expect(errors("POST", "/jev")[403] == ControlServer.jevWriteRefusal)
+        // A full-control phone may read what Jev costs; only the Mac may change it.
+        #expect(Self.routes.first { $0.method == "GET" && $0.path == "/jev" }?.auth == "device")
+        #expect(Self.routes.first { $0.method == "POST" && $0.path == "/jev" }?.auth == "control")
+        // And the key is not in the shape at all — the one thing this contract must never
+        // teach a generated client to expect.
+        let jevFixture = String(
+            decoding: (try? Self.encoder.encode(Self.exampleJevStatus)) ?? Data(), as: UTF8.self
+        )
+        #expect(jevFixture.contains("keySet"))
+        #expect(!jevFixture.lowercased().contains("apikey"))
+        #expect(!jevFixture.lowercased().contains("\"key\""))
         // And the chat-only refusal is the server's own string, not a copy of it.
         #expect(errors("POST", "/load")[403] == ControlServer.chatOnlyRefusal)
         // A route a chat-only device may call must not advertise the refusal it would get
@@ -302,7 +315,9 @@ struct ContractExportTests {
             "`/image/models`, `/mesh/models`, `/video/models`, `/video/queue`, `/events` —",
             "plus `/chat`, `/chat/stream`, `/decide`, `/v1/systemone` and every",
             "`/conversations` route. Everything else answers 403: installing, loading,",
-            "unloading, benchmarking, rendering, queue control and the device list.",
+            "unloading, benchmarking, rendering, queue control, the device list and the",
+            "Jev settings. `POST /jev` goes further and takes the Mac's own control token:",
+            "it governs what this Mac spends, so a paired phone may read it but not set it.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -572,6 +587,20 @@ struct ContractExportTests {
             ))
         ),
         Route(
+            method: "GET", path: "/jev", auth: "device",
+            summary: "How the TypeSafe (Jev) lane is set up, and what it has cost this month.",
+            response: .of(exampleJevStatus)
+        ),
+        Route(
+            method: "POST", path: "/jev", auth: "control",
+            summary: "Change what Jev is allowed to do. Only sent fields change.",
+            request: .of(ControlAPI.JevUpdate(
+                enabled: true, features: ["decideTool": true], monthlyBudgetUSD: 5
+            )),
+            response: .of(exampleJevStatus),
+            errors: [403: ControlServer.jevWriteRefusal]
+        ),
+        Route(
             method: "POST", path: "/benchmark", auth: "device",
             summary: "Measure the loaded model here, and recalibrate its estimates.",
             response: .of(ControlAPI.BenchmarkResult(
@@ -728,6 +757,31 @@ struct ContractExportTests {
         platform: "android", scope: "full", pairedAt: "2026-09-18T09:12:44Z",
         lastSeen: "2026-09-18T09:40:02Z"
     )
+
+    /// Built from the real feature list rather than typed out, so a feature added to the
+    /// enum reaches the generated clients instead of being forgotten here. Note what is not
+    /// in the shape at all: there is no field for the API key, and there never will be.
+    static let exampleJevStatus: ControlAPI.JevStatus = {
+        var status = ControlAPI.JevStatus.fixture(enabled: true)
+        status.keySet = true
+        status.monthlyBudgetUSD = 5
+        status.budgetRemainingUSD = 4.87
+        status.calls = 312
+        status.inputTokens = 3_104_882
+        status.estimatedUSD = 0.13
+        status.models = ["jev-1.13.0": 312]
+        status.monthlyUSD = ["2026-08": 0.09, "2026-09": 0.13]
+        status.features = status.features.map { feature in
+            var copy = feature
+            guard copy.id == "decideTool" else { return copy }
+            copy.available = true
+            copy.calls = 312
+            copy.inputTokens = 3_104_882
+            copy.estimatedUSD = 0.13
+            return copy
+        }
+        return status
+    }()
 
     static let exampleStatus = ControlAPI.Status(
         state: "running", loadedModelID: "qwen3-coder-30b",

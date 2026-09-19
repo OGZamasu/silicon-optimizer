@@ -152,7 +152,7 @@ struct BuddyControlTests {
                 ("POST", "/benchmark"), ("POST", "/video/generate"),
                 ("POST", "/image/generate"), ("POST", "/mesh/generate"),
                 ("POST", "/video/queue"), ("POST", "/video/queue/control"),
-                ("GET", "/buddy/devices"),
+                ("GET", "/buddy/devices"), ("GET", "/jev"),
             ] {
                 let (code, body) = try await fixture.phone.call(
                     refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
@@ -176,6 +176,52 @@ struct BuddyControlTests {
             #expect(try await fixture.phone.status(
                 "POST", "/video/queue/control", token: full.token, body: #"{"action":"pause"}"#
             ) == 200)
+        }
+    }
+
+    /// Reading what Jev costs is a full-control device's business; changing what this Mac
+    /// will spend is the Mac's alone. A stolen phone token must not be able to lift the
+    /// budget cap or switch a feature on.
+    @Test func onlyTheMacMayChangeTheJevSettings() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            #expect(paired.scope == "full")
+
+            // A full-control phone may look.
+            let (readStatus, readBody) = try await fixture.phone.call(
+                "GET", "/jev", token: paired.token
+            )
+            #expect(readStatus == 200)
+            let status = try JSONDecoder().decode(ControlAPI.JevStatus.self, from: readBody)
+            #expect(status.model == "jev-1.13.0")
+            #expect(status.features.count == 8)
+            // Whatever else this route says, it never says the key.
+            let text = String(decoding: readBody, as: UTF8.self)
+            #expect(text.contains("\"keySet\""))
+            #expect(!text.lowercased().contains("apikey"))
+            #expect(!text.contains("sk-"))
+
+            // But not set.
+            let (writeStatus, writeBody) = try await fixture.phone.call(
+                "POST", "/jev", token: paired.token, body: #"{"enabled":true}"#
+            )
+            #expect(writeStatus == 403)
+            let refusal = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: writeBody)
+            #expect(refusal.error == ControlServer.jevWriteRefusal)
+            // And nothing changed on the way to being refused.
+            #expect(try await JSONDecoder().decode(
+                ControlAPI.JevStatus.self,
+                from: fixture.phone.call("GET", "/jev", token: paired.token).1
+            ).enabled == false)
+
+            // The Mac's own token may.
+            let (accepted, updated) = try await fixture.local.call(
+                "POST", "/jev", token: fixture.local.token,
+                body: #"{"enabled":true,"model":"jev-latest"}"#
+            )
+            #expect(accepted == 200)
+            let after = try JSONDecoder().decode(ControlAPI.JevStatus.self, from: updated)
+            #expect(after.enabled && after.model == "jev-latest")
         }
     }
 
@@ -1095,6 +1141,17 @@ actor BuddyTestHost: ControlHost {
     func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         throw BuddyTestError.unexpectedRoute
     }
+
+    /// Answered rather than trapped: the scope test really calls both, and `POST /jev` has
+    /// to get past the route before the control-token gate can refuse it.
+    private var jev = ControlAPI.JevStatus.fixture()
+    func jevStatus() async -> ControlAPI.JevStatus { jev }
+    func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus {
+        if let enabled = update.enabled { jev.enabled = enabled }
+        if let model = update.model { jev.model = model }
+        return jev
+    }
+
     func benchmark() async throws -> ControlAPI.BenchmarkResult {
         throw BuddyTestError.unexpectedRoute
     }
