@@ -671,6 +671,9 @@ struct BuddyPhoneModelsTests {
             #expect(failure.reason.contains("1.0 GB is free"))
         }
         #expect(Set(readings.value) == [library.standardizedFileURL.path])
+        // Whatever it started, it has finished before the folder above is deleted.
+        await store.cancel(id: PhoneModelCatalog.qwen35_2B.id)
+        await store.waitUntilSettled(id: PhoneModelCatalog.qwen35_2B.id)
     }
 
     /// Removing takes the Mac's copy, anything partial, and a fetch still in flight — and
