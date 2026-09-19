@@ -1200,6 +1200,12 @@ private struct JevSection: View {
                             }
                         )
                     }
+
+                    // Under its own toggle, like the two above: the run is what this switch
+                    // pays for, and the floors are the only thing it changes.
+                    if feature == .calibration, settings.isOn(.calibration) {
+                        JevCalibrationRow()
+                    }
                 }
             }
 
@@ -1549,6 +1555,94 @@ private struct MediaRoutingOptions: View {
                 saveError = "Could not save that: \(error.localizedDescription)"
             }
             await reload()
+        }
+    }
+}
+
+/// The calibration run and what the last one found.
+///
+/// Sits under the feature switches because it belongs to one of them: Decision calibration
+/// is what pays for the run, and the two floors below are the only thing the run changes.
+/// The summary is deliberately specific — which model, when, how much agreement, which
+/// floors — because a calibration measured against a model you are no longer running is a
+/// number that has quietly stopped applying, and the row should say so rather than imply
+/// otherwise by showing it.
+private struct JevCalibrationRow: View {
+    @Environment(AppModel.self) private var model
+    @State private var last: ControlAPI.JevCalibration?
+    @State private var running = false
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Button(running ? "Calibrating…" : "Calibrate local decisions") { run() }
+                    .disabled(running)
+                if running {
+                    ProgressView().controlSize(.small)
+                }
+            }
+
+            if let last {
+                Text(last.summary)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .textSelection(.enabled)
+                if last.modelID != model.loadedModel?.id {
+                    Text(
+                        "Measured against a different model from the one loaded now, so "
+                        + "`auto` is using the default floors until this is run again."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+            } else {
+                Text(Self.neverRun)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(Self.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let problem {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+        }
+        .task { last = await model.jevCalibration() }
+    }
+
+    /// Built once as a plain string rather than inline in the view: the type checker times
+    /// out on a `Text` assembled from this many `String(format:)` pieces.
+    static let neverRun = String(
+        format: "Never run. Until it is, `auto` escalates on the default floors: a choice or "
+        + "score under %.2f confidence, or a noul between %.2f and %.2f.",
+        JevSettings.defaultCascadeFloor, JevSettings.defaultCascadeNoulLow,
+        JevSettings.defaultCascadeNoulHigh
+    )
+
+    static let explanation =
+        "Runs \(CalibrationQuestions.builtIn.count) short cases through the loaded model and "
+        + "through Jev, and sets where `decide` stops trusting this Mac on its own. About "
+        + "\(ControlAPI.JevCalibration.estimatedCents()) cent of Jev tokens and a minute or "
+        + "two of the model. Jev is the reference, not ground truth — agreement means the two "
+        + "landed in the same place, which they can do while both being wrong. Add cases of "
+        + "your own to `jev-calibration.json` beside `jev.json`."
+
+    private func run() {
+        running = true
+        problem = nil
+        Task {
+            do {
+                last = try await model.calibrateJev()
+            } catch {
+                problem = error.localizedDescription
+            }
+            running = false
         }
     }
 }

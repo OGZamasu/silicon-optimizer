@@ -45,6 +45,18 @@ public indirect enum JSONContent: Codable, Equatable, Hashable, Sendable {
         return nil
     }
 
+    public var boolValue: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
+    }
+
+    /// Strictly a JSON number. A numeric string is not one: something that reads `"2"` where
+    /// a level was meant is a mistake worth seeing rather than quietly coercing.
+    public var numberValue: Double? {
+        if case .number(let value) = self { return value }
+        return nil
+    }
+
     public var objectValue: [String: JSONContent]? {
         if case .object(let value) = self { return value }
         return nil
@@ -264,21 +276,39 @@ extension ControlAPI {
         public var answers: [String: SystemOneAnswer]
         public var provider: String?
         public var latencyMS: Double?
+        /// Which lane answered each question, by question id — `local` or `typesafe`.
+        ///
+        /// Absent unless more than one lane was involved, which is the ordinary case: a
+        /// single-lane answer is already described by `provider`, and repeating it per
+        /// question would be noise. The cascade sets it, because there the whole point is
+        /// that "which lane answered" is no longer one fact about the response.
+        public var sources: [String: String]?
 
         public init(
             model: String, usage: SystemOneUsage, answers: [String: SystemOneAnswer],
-            provider: String? = nil, latencyMS: Double? = nil
+            provider: String? = nil, latencyMS: Double? = nil,
+            sources: [String: String]? = nil
         ) {
             self.model = model
             self.usage = usage
             self.answers = answers
             self.provider = provider
             self.latencyMS = latencyMS
+            self.sources = sources
         }
 
         private enum CodingKeys: String, CodingKey {
-            case model, usage, answers, provider
+            case model, usage, answers, provider, sources
             case latencyMS = "latency_ms"
+        }
+
+        /// The two lane names `sources` uses. Written down once, because the cascade, the
+        /// tests and the MCP tool all have to agree on the spelling.
+        public enum Lane {
+            public static let local = "local"
+            public static let typeSafe = "typesafe"
+            /// What `provider` reads when both answered.
+            public static let cascade = "local+typesafe"
         }
 
         // MARK: Reading answers

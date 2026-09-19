@@ -669,6 +669,18 @@ public actor ControlServer {
         "Only this Mac can change the Jev settings. They govern what it spends, so they "
             + "are set in Settings → TypeSafe (Jev) on the Mac."
 
+    /// And the one `POST /jev/calibrate` refuses with. Its own sentence rather than the
+    /// one above, because the thing being refused is different: not a setting, a run.
+    public static let jevCalibrateRefusal =
+        "Only this Mac can start a calibration run. It spends Jev tokens and holds the "
+            + "loaded model, so it is started from Settings → TypeSafe (Jev) on the Mac."
+
+    /// What `GET /jev/calibration` says before there has ever been a run. A 404 with a
+    /// sentence, rather than an empty body a client has to guess at.
+    public static let noCalibrationYet =
+        "This Mac has not calibrated its local decision lane yet. Run one from "
+            + "Settings → TypeSafe (Jev), or POST /jev/calibrate."
+
     /// Whether the shared swarm secret is a credential on this listener.
     ///
     /// On loopback it always is — the MCP bridge and this Mac's own tools use it. Out on
@@ -685,7 +697,8 @@ public actor ControlServer {
         // handshake file, and meaningful only to processes that can read it. It is not a
         // remote credential, so it is not one out on the tailnet — the designed ones there
         // are the swarm token and a paired device's. That is what makes "only this Mac"
-        // — on `/buddy/devices`, on `POST /jev` — literally true rather than nearly true:
+        // — on `/buddy/devices`, on `POST /jev`, on `POST /jev/calibrate` — literally true
+        // rather than nearly true:
         // a phone or a peer cannot hold the token those routes ask for.
         if bearer == token { return origin == .primary ? .control : nil }
         if let swarmToken, !swarmToken.isEmpty, bearer == swarmToken,
@@ -1153,6 +1166,19 @@ public actor ControlServer {
                 return try .encode(await host.updateJev(
                     try request.decode(ControlAPI.JevUpdate.self)
                 ))
+            case ("GET", "/jev/calibration"):
+                guard let result = await host.jevCalibration() else {
+                    return .error(404, Self.noCalibrationYet)
+                }
+                return try .encode(result)
+            case ("POST", "/jev/calibrate"):
+                // Spends Jev tokens and holds the loaded model for a minute. Same rule as
+                // POST /jev, for the same reason: a phone may read what this Mac spends but
+                // not start it spending.
+                guard caller == .control else {
+                    return .error(403, Self.jevCalibrateRefusal)
+                }
+                return try .encode(await host.calibrateJev())
             default:
                 return .error(404, "Unknown endpoint \(request.method) \(request.path)")
             }

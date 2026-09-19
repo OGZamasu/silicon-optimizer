@@ -954,6 +954,12 @@ public protocol ControlHost: AnyObject, Sendable {
     /// The last screenings the tool-call guardrail made: `GET /jev/guardrails/recent`.
     /// Question ids, bands and verdicts — never what was screened.
     func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings
+    /// `GET /jev/calibration` — the last calibration run, or nil if there has never been
+    /// one. Reading costs nothing, so a full-control phone may.
+    func jevCalibration() async -> ControlAPI.JevCalibration?
+    /// `POST /jev/calibrate` — run the calibration set through both lanes and keep the
+    /// result. Spends Jev tokens and minutes of the machine, so only the control token.
+    func calibrateJev() async throws -> ControlAPI.JevCalibration
     func benchmark() async throws -> ControlAPI.BenchmarkResult
     func imageModels() async -> [ControlAPI.ImageModel]
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan

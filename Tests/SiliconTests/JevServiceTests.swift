@@ -130,6 +130,9 @@ struct JevSettingsTests {
         // Verification too, and with nowhere to escalate to until someone picks one.
         #expect(!settings.isOn(.verification))
         #expect(settings.verificationEscalationModel == nil)
+        #expect(JevFeature.calibration.isBuilt)
+        // Built is not the same as on: calibration ships off, like everything but the first.
+        #expect(!settings.isOn(.calibration))
         #expect(JevFeature.allCases.allSatisfy { !$0.summary.isEmpty && !$0.displayName.isEmpty })
     }
 

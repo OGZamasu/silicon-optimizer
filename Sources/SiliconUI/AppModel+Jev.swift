@@ -109,6 +109,79 @@ extension AppModel {
         await JevGuardrails.recent()
     }
 
+    // MARK: - Calibration
+
+    /// The floors `provider: "auto"` escalates on: the last calibration's when it was
+    /// measured against the model loaded right now, and the settings' otherwise.
+    func cascadeFloors() async -> ControlAPI.JevCalibration.Floors {
+        await JevBootstrap.ready()
+        let settings = await JevService.shared.settings().cascadeFloors
+        let store = await JevService.shared.storeLocations()
+        let calibration = await LocalCalibrationStore.shared.result(at: store.calibration)
+        return CalibrationQuestions.floors(
+            forModel: loadedModel?.id, calibration: calibration, settings: settings
+        )
+    }
+
+    /// `GET /jev/calibration` — the last run, or nil if there has never been one.
+    public func jevCalibration() async -> ControlAPI.JevCalibration? {
+        await JevBootstrap.ready()
+        let store = await JevService.shared.storeLocations()
+        return await LocalCalibrationStore.shared.result(at: store.calibration)
+    }
+
+    /// `POST /jev/calibrate` — run every case through both lanes and write the result.
+    ///
+    /// Both halves have to be there: a calibration is a *comparison*, so without a loaded
+    /// model there is nothing to calibrate, and without Jev there is nothing to calibrate
+    /// against. Each refusal says which one is missing rather than "could not calibrate".
+    public func calibrateJev() async throws -> ControlAPI.JevCalibration {
+        await JevBootstrap.ready()
+        guard case .ready(let endpoint) = runtimeState, let loaded = loadedModel else {
+            throw ControlHostError.badRequest(
+                "Calibration compares the model loaded here with Jev, so a model has to be "
+                + "loaded. Load one and try again."
+            )
+        }
+        guard await JevService.shared.isAvailable(.calibration) else {
+            throw ControlHostError.badRequest(
+                "Calibration asks Jev for the reference answers. Add a TypeSafe API key and "
+                + "turn on Use Jev and Decision calibration in Settings → TypeSafe (Jev)."
+            )
+        }
+
+        let settings = await JevService.shared.settings()
+        let store = await JevService.shared.storeLocations()
+        let set = CalibrationQuestions.allCases(userCasesAt: store.userCases)
+        let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
+
+        noteActivity()
+        let result = await whileGenerating {
+            await CalibrationQuestions.calibrate(
+                cases: set.cases,
+                context: .init(
+                    localModelID: loaded.id,
+                    localModelName: loaded.name,
+                    jevModel: settings.model,
+                    fallbackFloors: settings.cascadeFloors,
+                    builtInCount: CalibrationQuestions.builtIn.count,
+                    notes: set.notes
+                ),
+                local: { try await decider.decide($0) },
+                jev: { asked in
+                    try await JevService.shared.ask(
+                        .calibration, state: asked.state, questions: asked.questions
+                    )
+                }
+            )
+        }
+        // Written even when both floors fell back to the defaults: the agreement rates and
+        // the reliability bins are the point of looking, and a run that found no better
+        // floor is a result a person should be able to read rather than a failure.
+        try? await LocalCalibrationStore.shared.save(result, to: store.calibration)
+        return result
+    }
+
     /// Built here rather than inside `JevService` because the key question — is one stored?
     /// — is the app's to answer, and the service is deliberately given no way to say.
     static func jevStatus(

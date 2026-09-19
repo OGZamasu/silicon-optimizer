@@ -228,7 +228,8 @@ Building from source instead? `Scripts/install-mcp.sh` compiles the bridge, inst
 | `list_image_models` | Which image models exist here, and what each would peak at |
 | `plan_image` | Phase-by-phase memory for a given size, steps and precision |
 | `generate_image` | Draw it locally, with a warning first if it looks too big |
-| `decide` | Typed, probabilistic decisions in the TypeSafe/Jev shape: a state plus noul, choice and score questions in, probabilities out. Answered by the loaded model in one forward pass per question, or by Jev with a key |
+| `decide` | Typed, probabilistic decisions in the TypeSafe/Jev shape: a state plus noul, choice and score questions in, probabilities out. Answered by the loaded model in one forward pass per question, with the answers it was unsure of escalated to Jev when a key is set |
+| `calibrate_decisions` | Measure the loaded model's decisions against Jev's on a fixed set of cases, and retune where `decide` escalates. Costs about a cent |
 | `run_benchmark` | Measure this model here, and recalibrate its estimates |
 | `get_status` | What is loaded, at what settings, how fast |
 
@@ -380,7 +381,68 @@ line in the ledger, and they all ship off except the first:
 | Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
 | Model recommendation | Ranks the models this Mac can run against the job you describe | yes |
 | Answer verification | Checks a finished answer against the prompt, and re-runs the flagged ones on a stronger model | yes |
-| Estimate calibration | Judges whether a speed or memory estimate matched what the machine did | coming |
+| Decision calibration | Measures the local decision lane against Jev on a labelled set, and tunes when `auto` falls back to Jev | yes |
+
+### Calibration and the cascade
+
+`POST /decide` with `provider: "auto"` — which is what the `decide` tool sends unless you say
+otherwise — is a **cascade**, not a fallback. The model loaded on this Mac answers first: one
+forward pass per question, nothing leaves the machine, nothing to pay. Then, per *answer*, the
+ones it was not sure of go to Jev in a single follow-up request, and only those. The reply
+comes back as `provider: "local+typesafe"` with a `sources` map saying which lane answered
+each question:
+
+```json
+{"answers": {"team": {...}, "refund": {...}},
+ "provider": "local+typesafe",
+ "sources": {"team": "typesafe", "refund": "local"}}
+```
+
+"Not sure" is two rules, because the two answer shapes are different. A **choice** or a
+**score** carries a `confidence`, high when the distribution is concentrated, so it escalates
+*below* a floor. A **noul** carries no confidence at all — the number it returns is the
+answer, so it is certain at both ends and useless in the middle — and it escalates when it
+lands strictly *inside* a band. A noul of 0.05 is a confident no, and gating it on a
+confidence floor would read it as no confidence whatsoever.
+
+Out of the box the floor is 0.6 and the band is 0.25 to 0.75. They are deliberately
+unambitious, because until something has been measured they are a guess.
+
+**Calibrate local decisions** measures better ones. It runs about forty short cases —
+routing, support triage, safety, sentiment, all in
+`Sources/SiliconUI/Jev/CalibrationQuestions.swift` where you can read and argue with them —
+through both lanes, and computes four things: the agreement rate per question kind (the same
+label for a choice, within half a level for a score, the same side of 0.5 for a noul); the
+*lowest* confidence at which the local lane still agrees with Jev at least 90% of the time,
+which becomes the floor; the narrowest middle band that catches at least 90% of the noul
+answers Jev disagreed with, which becomes the band; and a reliability table of local
+confidence against agreement, a tenth at a time, which is where you see whether the
+confidence number means anything on this model at all. A search that cannot reach 90% with
+enough answers behind it returns nothing and says so, rather than inventing a threshold from
+four cases.
+
+The result goes in `local-calibration.json` beside `jev.json`, with the model it was measured
+against, the date and the counts — and the cascade uses it **only while that same model is
+loaded**. Confidence is the model's own number, and it is the thing being calibrated; a floor
+found on a 30B mixture-of-experts is not a claim about a 4B dense one. Load something else
+and `auto` goes back to the defaults until you run it again.
+
+Add cases of your own to `jev-calibration.json` beside `jev.json` — a JSON array in the same
+shape as the built-in ones — and the next run includes them. A case that will not parse is
+reported in the run's notes rather than failing it.
+
+A run costs about a cent of Jev tokens and a minute or two of the loaded model. It is
+`POST /jev/calibrate` (this Mac's own token only), the `calibrate_decisions` MCP tool, or the
+button in Settings; `GET /jev/calibration` and `get_status` report the last one.
+
+> **Jev is the reference, not ground truth.** An agreement rate says the two lanes landed in
+> the same place. It does not say either was right, and they can be wrong together — in which
+> case this run will call the local answer a disagreement and tighten the floor against it.
+> That is why each built-in case also carries the answer a careful reader would give, and why
+> the run reports how *both* lanes did against those labels beside the agreement rate. High
+> agreement with two poor label scores is the shape to watch for. Treat the floors as a
+> measurement of one model against another on forty cases, which is what they are.
+>>>>>>> be36c32 (Calibrate the local decision lane, and make `auto` a cascade)
 
 ### Model routing
 
@@ -793,7 +855,10 @@ takes this Mac's own control token: a paired phone may read what Jev costs but n
 what it spends. That token is only a credential on loopback (see the
 [credential table](#silicon-buddy)), so "this Mac's own" is the literal truth — a caller out
 on the tailnet cannot present it at all, whatever it has learnt.
-`GET /jev/guardrails/recent` returns the screening log described above.
+`GET /jev/guardrails/recent` returns the screening log described above. `GET /jev/calibration`
+and `POST /jev/calibrate` split the same way as the settings pair, and for the same reason —
+a run spends tokens and holds the loaded model — so a phone may read the last result but not
+start another.
 
 > **If you were already using the `decide` tool with a TypeSafe key:** a stored key used to
 > be enough. It is not any more. `provider: "typesafe"`, and the `auto` fallback when no

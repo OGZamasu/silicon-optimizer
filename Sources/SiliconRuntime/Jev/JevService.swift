@@ -28,7 +28,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .skillSelection: "Skill selection"
         case .recommendation: "Model recommendation"
         case .verification: "Answer verification"
-        case .calibration: "Estimate calibration"
+        case .calibration: "Decision calibration"
         }
     }
 
@@ -53,7 +53,8 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .verification:
             "Checks a finished answer against its evidence and flags the ones worth a second look."
         case .calibration:
-            "Judges whether a speed or memory estimate matches what the machine really did."
+            "Measures the local decision lane against Jev on a labelled set and tunes when "
+            + "`auto` falls back to Jev."
         }
     }
 
@@ -67,7 +68,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// keeping both members rather than choosing between two rewritten expressions.
     private static let built: Set<JevFeature> = [
         .decideTool, .routing, .mediaRouting, .guardrails, .recommendation,
-        .verification,
+        .verification, .calibration,
     ]
 }
 
@@ -236,6 +237,27 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// reads it, but it lives here because this is the file the owner's Jev decisions are
     /// kept in and a control client may rewrite.
     public var verificationEscalationModel: String?
+    /// The cascade's floors, when no calibration has been run for the loaded model.
+    ///
+    /// `POST /jev/calibrate` measures better ones and writes them to `local-calibration.json`
+    /// beside this file; these three are what the cascade uses until then, and what it falls
+    /// back to when a different model is loaded. They are deliberately unambitious — a
+    /// choice the local model is less than 60% sure of, or a noul it has put near the middle,
+    /// is worth a second opinion on almost any model.
+    public var cascadeFloor: Double = JevSettings.defaultCascadeFloor
+    /// A noul strictly between these two is escalated; at either edge it is a confident
+    /// answer. Exclusive on purpose, so this agrees with `JevThresholds.noulBand`.
+    public var cascadeNoulLow: Double = JevSettings.defaultCascadeNoulLow
+    public var cascadeNoulHigh: Double = JevSettings.defaultCascadeNoulHigh
+
+    public static let defaultCascadeFloor = 0.6
+    public static let defaultCascadeNoulLow = 0.25
+    public static let defaultCascadeNoulHigh = 0.75
+
+    /// The floors as the cascade wants them, before a calibration file is consulted.
+    public var cascadeFloors: ControlAPI.JevCalibration.Floors {
+        .init(confidence: cascadeFloor, noulLow: cascadeNoulLow, noulHigh: cascadeNoulHigh)
+    }
 
     public init() {}
 
@@ -262,6 +284,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         case automaticUncensoredLane, composerAutoRoute
         case autoApproveSafeToolCalls
         case verificationEscalationModel
+        case cascadeFloor, cascadeNoulLow, cascadeNoulHigh
     }
 
     public init(from decoder: any Decoder) throws {
@@ -287,6 +310,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
         verificationEscalationModel = try container.decodeIfPresent(
             String.self, forKey: .verificationEscalationModel
         )
+        cascadeFloor = try container.decodeIfPresent(Double.self, forKey: .cascadeFloor) ?? cascadeFloor
+        cascadeNoulLow = try container.decodeIfPresent(Double.self, forKey: .cascadeNoulLow) ?? cascadeNoulLow
+        cascadeNoulHigh = try container.decodeIfPresent(Double.self, forKey: .cascadeNoulHigh) ?? cascadeNoulHigh
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -313,6 +339,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encodeIfPresent(
             verificationEscalationModel, forKey: .verificationEscalationModel
         )
+        try container.encode(cascadeFloor, forKey: .cascadeFloor)
+        try container.encode(cascadeNoulLow, forKey: .cascadeNoulLow)
+        try container.encode(cascadeNoulHigh, forKey: .cascadeNoulHigh)
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),
@@ -338,6 +367,29 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// The pairing rule on its own, so it can be checked without a process-wide variable.
     public static func ledgerURL(besideConfigAt config: URL) -> URL {
         config.deletingLastPathComponent().appendingPathComponent("jev-ledger.json")
+    }
+
+    /// The last calibration run, beside the settings like everything else Jev owns.
+    public static var calibrationURL: URL { calibrationURL(besideConfigAt: configURL) }
+
+    public static func calibrationURL(besideConfigAt config: URL) -> URL {
+        config.deletingLastPathComponent().appendingPathComponent("local-calibration.json")
+    }
+
+    /// Cases the owner added by hand, which the run appends to the built-in set.
+    ///
+    /// `SILICON_JEV_CALIBRATION_CASES` names the file outright — that is how the tests get
+    /// one of their own — and otherwise it sits beside the settings, so
+    /// `SILICON_JEV_CONFIG` relocates it with everything else.
+    public static var userCasesURL: URL {
+        if let override = ProcessInfo.processInfo.environment["SILICON_JEV_CALIBRATION_CASES"] {
+            return URL(fileURLWithPath: override)
+        }
+        return userCasesURL(besideConfigAt: configURL)
+    }
+
+    public static func userCasesURL(besideConfigAt config: URL) -> URL {
+        config.deletingLastPathComponent().appendingPathComponent("jev-calibration.json")
     }
 
     /// A missing or unreadable file reads as the defaults — off, nothing spent — which is
@@ -367,6 +419,14 @@ public struct JevSettings: Codable, Sendable, Equatable {
         if !JevService.allowedModels.contains(copy.model) { copy.model = JevService.pinnedModel }
         copy.cacheMinutes = max(0, min(copy.cacheMinutes, 24 * 60))
         copy.maxStateBytes = max(1_024, min(copy.maxStateBytes, JevService.hardMaxStateBytes))
+        copy.cascadeFloor = Self.clampProbability(copy.cascadeFloor, default: Self.defaultCascadeFloor)
+        copy.cascadeNoulLow = Self.clampProbability(copy.cascadeNoulLow, default: Self.defaultCascadeNoulLow)
+        copy.cascadeNoulHigh = Self.clampProbability(copy.cascadeNoulHigh, default: Self.defaultCascadeNoulHigh)
+        // An inverted band would escalate nothing at all, which is not a setting anybody
+        // means: a hand-edited file that says 0.8–0.2 gets the pair the right way round.
+        if copy.cascadeNoulLow > copy.cascadeNoulHigh {
+            swap(&copy.cascadeNoulLow, &copy.cascadeNoulHigh)
+        }
         if let budget = copy.monthlyBudgetUSD, !budget.isFinite || budget < 0 {
             copy.monthlyBudgetUSD = nil
         }
@@ -387,6 +447,14 @@ public struct JevSettings: Codable, Sendable, Equatable {
         }
         return copy
     }
+
+    /// A probability from a file somebody may have typed into. NaN and infinity are not
+    /// clampable into anything meaningful, so they go back to the default rather than to an
+    /// edge that would read as a deliberate choice.
+    static func clampProbability(_ value: Double, default fallback: Double) -> Double {
+        guard value.isFinite else { return fallback }
+        return max(0, min(1, value))
+    }
 }
 
 // MARK: - Ledger
@@ -398,11 +466,13 @@ public struct JevSettings: Codable, Sendable, Equatable {
 /// month is a new key rather than a reset, so last month is still there to look at.
 public struct JevLedger: Codable, Sendable, Equatable {
 
-    /// TypeSafe charges for input tokens only; output is free.
-    public static let usdPerMillionInputTokens = 0.042
+    /// TypeSafe charges for input tokens only; output is free. The number itself lives in
+    /// `SiliconControl`, which the MCP bridge links and this target does not reach into —
+    /// so a run's cost can be quoted there from the same figure billed here.
+    public static let usdPerMillionInputTokens = ControlAPI.JevPricing.usdPerMillionInputTokens
 
     public static func cost(inputTokens: Int) -> Double {
-        Double(inputTokens) * usdPerMillionInputTokens / 1_000_000
+        ControlAPI.JevPricing.costUSD(inputTokens: inputTokens)
     }
 
     /// One bucket of spend. Latency is summed rather than listed: an average is what a
@@ -691,6 +761,22 @@ public actor JevService {
         let loaded = JevLedger.load(from: ledgerURL)
         loadedLedger = loaded
         return loaded
+    }
+
+    /// Where this service's three sibling files live — the settings, the last calibration,
+    /// and the owner's own calibration cases.
+    ///
+    /// Asked of the actor rather than derived from `JevSettings.configURL` by the caller,
+    /// because a test points `configure(configURL:)` somewhere private and everything that
+    /// writes beside the settings has to follow it there.
+    public func storeLocations() -> (config: URL, calibration: URL, userCases: URL) {
+        (
+            configURL,
+            JevSettings.calibrationURL(besideConfigAt: configURL),
+            configURL == JevSettings.configURL
+                ? JevSettings.userCasesURL
+                : JevSettings.userCasesURL(besideConfigAt: configURL)
+        )
     }
 
     /// Whether this feature would answer right now. Four conditions, all cheap: no network,

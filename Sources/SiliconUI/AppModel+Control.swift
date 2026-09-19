@@ -400,22 +400,33 @@ extension AppModel: ControlHost {
         )
     }
 
-    /// Who answers a decision. `auto` prefers the model loaded here — nothing leaves the
-    /// Mac and there is nothing to pay — and falls back to TypeSafe when a key is set.
-    /// Naming a lane makes it a hard requirement instead.
+    /// Who answers a decision.
+    ///
+    /// `auto` is a **cascade**, not a fallback. The model loaded here answers first — nothing
+    /// leaves the Mac and there is nothing to pay — and then, per question, only the answers
+    /// it was not sure of are put to Jev. What counts as "not sure" is the calibration's
+    /// business: `POST /jev/calibrate` measures where this model's confidence stops
+    /// predicting Jev's verdict, and the cascade thresholds there. With no model loaded there
+    /// is nothing to cascade from and `auto` is the old fallback; with Jev unavailable there
+    /// is nothing to cascade to and it is the local lane, unchanged.
+    ///
+    /// Naming a lane makes it a hard requirement instead, and skips the cascade in both
+    /// directions: `local` never pays, `typesafe` never asks the model here.
     public func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         try request.validate()
         let provider = (request.provider ?? "auto").lowercased()
         var localEndpoint: URL?
         if case .ready(let endpoint) = runtimeState { localEndpoint = endpoint }
 
-        func local() async throws -> ControlAPI.DecideResponse {
+        func local(
+            _ asked: ControlAPI.DecideRequest = request
+        ) async throws -> ControlAPI.DecideResponse {
             guard let endpoint = localEndpoint, let loaded = loadedModel else {
                 throw ControlHostError.noModelLoaded
             }
             noteActivity()
             let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
-            return try await whileGenerating { try await decider.decide(request) }
+            return try await whileGenerating { try await decider.decide(asked) }
         }
         func typeSafe() async throws -> ControlAPI.DecideResponse {
             // Through the one door rather than straight at `SystemOneClient`: the decide
@@ -440,12 +451,34 @@ extension AppModel: ControlHost {
         case "local": return try await local()
         case "typesafe": return try await typeSafe()
         case "auto":
-            if localEndpoint != nil { return try await local() }
-            await JevBootstrap.ready()
-            if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
-            throw ControlHostError.badRequest(
-                "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
-                + "API key and turn on the decide tool in Settings → TypeSafe (Jev)."
+            guard localEndpoint != nil else {
+                await JevBootstrap.ready()
+                if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
+                throw ControlHostError.badRequest(
+                    "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
+                    + "API key and turn on the decide tool in Settings → TypeSafe (Jev)."
+                )
+            }
+            let floors = await cascadeFloors()
+            return try await DecisionCascade.run(
+                request,
+                floors: floors,
+                // Asked only once the local answers are in and at least one of them was
+                // uncertain, so a confident run never reads the settings file — and the
+                // Keychain is not touched until a request is actually about to be sent.
+                jevAvailable: {
+                    await JevBootstrap.ready()
+                    return await JevService.shared.isAvailable(.calibration)
+                },
+                local: { try await local($0) },
+                // The escalation is billed and gated as `.calibration`, the same feature
+                // whose switch let it happen. Gating on one feature and spending another's
+                // budget would make the ledger a poor answer to "why did this cost that?".
+                jev: { escalated in
+                    try await JevService.shared.ask(
+                        .calibration, state: escalated.state, questions: escalated.questions
+                    )
+                }
             )
         default:
             throw ControlHostError.badRequest(

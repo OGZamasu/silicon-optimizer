@@ -264,3 +264,178 @@ extension ControlAPI {
         }
     }
 }
+
+// MARK: - Calibration
+
+extension ControlAPI {
+
+    /// What TypeSafe charges, in one place.
+    ///
+    /// In `SiliconControl` rather than beside the ledger in `SiliconRuntime` because the MCP
+    /// bridge links only this target and still has to tell an agent what a calibration run
+    /// will cost before it starts one. `JevLedger` reads the same constant, so the two
+    /// cannot drift.
+    public enum JevPricing {
+        /// Input tokens only; output is free.
+        public static let usdPerMillionInputTokens = 0.042
+
+        public static func costUSD(inputTokens: Int) -> Double {
+            Double(inputTokens) * usdPerMillionInputTokens / 1_000_000
+        }
+    }
+
+    /// `POST /jev/calibrate` and `GET /jev/calibration` — how the local decision lane
+    /// compares with Jev on a fixed set of cases, and the floors the cascade takes from it.
+    ///
+    /// The honest caveat travels with the numbers rather than living only in the README:
+    /// Jev is the *reference*, not ground truth. An "agreement rate" is how often the model
+    /// loaded here landed where Jev landed, and both can be wrong together.
+    public struct JevCalibration: Codable, Sendable, Equatable {
+
+        /// How many built-in cases ship in the reviewable set, and what one costs to ask.
+        ///
+        /// Duplicated from `CalibrationQuestions` — which lives in the app target the MCP
+        /// bridge does not link — and pinned to it by a test, so the "about N cents" in the
+        /// tool description cannot quietly stop being true.
+        public static let builtInCaseCount = 40
+        /// A pessimistic per-case input-token estimate: one token per byte of state and
+        /// questions, which is where JSON and punctuation actually land.
+        public static let estimatedInputTokensPerCase = 900
+
+        /// What a run of `count` cases is expected to cost, rounded up to the cent it will
+        /// be quoted in.
+        public static func estimatedCents(cases: Int = builtInCaseCount) -> Int {
+            let usd = JevPricing.costUSD(
+                inputTokens: max(0, cases) * estimatedInputTokensPerCase
+            )
+            return max(1, Int((usd * 100).rounded(.up)))
+        }
+
+        /// Agreement on one kind of question.
+        public struct Agreement: Codable, Sendable, Equatable {
+            /// `noul`, `choice` or `score`.
+            public var kind: String
+            public var compared: Int
+            public var agreed: Int
+            /// Agreed over compared, or 0 when nothing of this kind was asked.
+            public var rate: Double
+
+            public init(kind: String, compared: Int, agreed: Int, rate: Double) {
+                self.kind = kind
+                self.compared = compared
+                self.agreed = agreed
+                self.rate = rate
+            }
+        }
+
+        /// One tenth of the local confidence range, and how often local was right about it.
+        /// A calibrated lane has `agreementRate` climbing with `meanConfidence`; a flat
+        /// column is the shape that says the confidence number means nothing here.
+        ///
+        /// Choice and score only. A noul carries no confidence — the number *is* the answer
+        /// — and folding `max(p, 1-p)` in here would be exactly the invariant `jev-1.13`'s
+        /// jaggedness note says not to assume.
+        public struct Bin: Codable, Sendable, Equatable {
+            public var lower: Double
+            public var upper: Double
+            public var count: Int
+            public var agreed: Int
+            public var meanConfidence: Double
+            public var agreementRate: Double
+
+            public init(
+                lower: Double, upper: Double, count: Int, agreed: Int,
+                meanConfidence: Double, agreementRate: Double
+            ) {
+                self.lower = lower
+                self.upper = upper
+                self.count = count
+                self.agreed = agreed
+                self.meanConfidence = meanConfidence
+                self.agreementRate = agreementRate
+            }
+        }
+
+        /// The three numbers the cascade thresholds on.
+        public struct Floors: Codable, Sendable, Equatable {
+            /// Choice and score below this confidence are escalated to Jev.
+            public var confidence: Double
+            /// A noul strictly between these two is escalated. At either edge it is a
+            /// confident answer — the same rule `JevThresholds.noulBand` already uses.
+            public var noulLow: Double
+            public var noulHigh: Double
+
+            public init(confidence: Double, noulLow: Double, noulHigh: Double) {
+                self.confidence = confidence
+                self.noulLow = noulLow
+                self.noulHigh = noulHigh
+            }
+        }
+
+        /// The installed model id the local lane used. The cascade takes these floors only
+        /// while this is what is loaded: a threshold measured on a 30B MoE is not a promise
+        /// about a 4B dense one.
+        public var modelID: String
+        public var modelName: String
+        /// The Jev version that played reference.
+        public var jevModel: String
+        /// ISO-8601, like every other timestamp on this wire.
+        public var date: String
+        public var cases: Int
+        public var builtInCases: Int
+        public var userCases: Int
+        /// Answers compared, which is cases times the questions in each.
+        public var comparisons: Int
+        public var agreement: [Agreement]
+        public var overallAgreementRate: Double
+        public var floors: Floors
+        /// False when the search could not reach 90% and the floor fell back to the
+        /// setting's default. Reported rather than hidden: a fallback floor is a guess, and
+        /// the screen says which of the two you are looking at.
+        public var confidenceFloorMeasured: Bool
+        public var noulBandMeasured: Bool
+        public var bins: [Bin]
+        /// What the run actually spent at Jev.
+        public var inputTokens: Int
+        public var estimatedUSD: Double
+        /// Anything the run wants a person to read before trusting the numbers — too few
+        /// samples, a search that found nothing, cases that would not run.
+        public var notes: [String]
+
+        public init(
+            modelID: String, modelName: String, jevModel: String, date: String,
+            cases: Int, builtInCases: Int, userCases: Int, comparisons: Int,
+            agreement: [Agreement], overallAgreementRate: Double, floors: Floors,
+            confidenceFloorMeasured: Bool, noulBandMeasured: Bool, bins: [Bin],
+            inputTokens: Int, estimatedUSD: Double, notes: [String] = []
+        ) {
+            self.modelID = modelID
+            self.modelName = modelName
+            self.jevModel = jevModel
+            self.date = date
+            self.cases = cases
+            self.builtInCases = builtInCases
+            self.userCases = userCases
+            self.comparisons = comparisons
+            self.agreement = agreement
+            self.overallAgreementRate = overallAgreementRate
+            self.floors = floors
+            self.confidenceFloorMeasured = confidenceFloorMeasured
+            self.noulBandMeasured = noulBandMeasured
+            self.bins = bins
+            self.inputTokens = inputTokens
+            self.estimatedUSD = estimatedUSD
+            self.notes = notes
+        }
+
+        /// One line for a settings row, an MCP answer or a log.
+        public var summary: String {
+            let percent = Int((overallAgreementRate * 100).rounded())
+            return String(
+                format: "%@ · %@ · %d cases · %d%% agreement · floor %.2f · noul band %.2f–%.2f",
+                modelName, date.prefix(10).description, cases, percent,
+                floors.confidence, floors.noulLow, floors.noulHigh
+            )
+        }
+    }
+}

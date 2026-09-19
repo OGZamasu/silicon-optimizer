@@ -206,6 +206,8 @@ private actor WaitingVideoHost: ControlHost {
         .init(available: false, questions: [], screenings: [])
     }
     func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus { throw TestControlError.unexpectedRoute }
+    func jevCalibration() async -> ControlAPI.JevCalibration? { nil }
+    func calibrateJev() async throws -> ControlAPI.JevCalibration { throw TestControlError.unexpectedRoute }
     func benchmark() async throws -> ControlAPI.BenchmarkResult { throw TestControlError.unexpectedRoute }
     func imageModels() async -> [ControlAPI.ImageModel] { [] }
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan { throw TestControlError.unexpectedRoute }

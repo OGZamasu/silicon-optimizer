@@ -250,9 +250,14 @@ enum Tools {
                 picks a label; {"type":"score","instructions":"…","criteria":["level 0","level \
                 1",…]} rates on an ordered rubric and returns the expected level. Ask several \
                 questions in one call. Every question needs instructions saying what is being \
-                judged. By default the model loaded on this Mac answers (one forward pass per \
-                question, nothing leaves the machine, uncalibrated probabilities); provider \
-                "typesafe" asks Jev instead (calibrated, ~$0.0003 per call). The Jev lane is \
+                judged. By default ("auto") the model loaded on this Mac answers first — one \
+                forward pass per question, nothing leaves the machine, uncalibrated \
+                probabilities — and then only the answers it was unsure of are put to Jev, \
+                which returns `provider: "local+typesafe"` and a `sources` map saying which \
+                lane answered each question. Where "unsure" sits is set by \
+                calibrate_decisions; with no model loaded, or Decision calibration off, \
+                "auto" is a single lane as before. provider "local" never pays and never \
+                escalates; "typesafe" asks Jev alone (calibrated, ~$0.0003 per call). The Jev lane is \
                 governed by Settings → TypeSafe (Jev) on the Mac: the master switch, the \
                 decide-tool switch, the pinned model version, the state size limit and the \
                 monthly budget all apply, and every call is recorded \
@@ -287,6 +292,26 @@ enum Tools {
                 budget and the running spend. Read-only, costs nothing, and never returns the \
                 API key — it stays in this Mac's Keychain. Call it when decide with provider \
                 "typesafe" refuses, to see which switch said no.
+                """,
+            properties: [:], required: []
+        ),
+        Tool(
+            name: "calibrate_decisions",
+            description: """
+                Measure how often the model loaded on this Mac decides the way Jev does, and \
+                retune when `decide` with provider "auto" escalates to Jev. Runs a fixed set \
+                of about \(ControlAPI.JevCalibration.builtInCaseCount) short cases — routing, \
+                support triage, safety, sentiment — through both lanes, then reports agreement \
+                per question kind, a reliability table of local confidence against agreement, \
+                and the two floors "auto" will use from now on: the confidence below which a \
+                choice or score is sent to Jev, and the middle band in which a noul is. \
+                COSTS MONEY: about \(ControlAPI.JevCalibration.estimatedCents()) cent(s) of \
+                Jev tokens, plus a minute or two of the loaded model, so ask the user before \
+                running it. Needs a model loaded and Decision calibration switched on in \
+                Settings → TypeSafe (Jev). The result is kept and reused only while that same \
+                model is loaded — a threshold found on one model says nothing about another. \
+                Jev is the reference here, not ground truth: agreement means the two lanes \
+                landed in the same place, which they can do while both being wrong.
                 """,
             properties: [:], required: []
         ),
@@ -516,7 +541,15 @@ enum Tools {
             return try await describe(await client.get("/metrics") as ControlAPI.Metrics)
 
         case "get_status":
-            return try await describe(await client.get("/status") as ControlAPI.Status)
+            var status = try await describe(await client.get("/status") as ControlAPI.Status)
+            // Appended rather than folded into `ControlAPI.Status`, which the phone apps are
+            // generated from and which has nothing to do with Jev. `try?` because a Mac that
+            // has never calibrated answers 404, and that is not a reason to fail `get_status`.
+            if let calibration = try? await client.get("/jev/calibration")
+                as ControlAPI.JevCalibration {
+                status += "\n" + cascadeLine(calibration)
+            }
+            return status
 
         case "recommend_model":
             let category = arguments["category"]?.stringValue
@@ -891,13 +924,24 @@ enum Tools {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let answers = String(decoding: try encoder.encode(response.answers), as: UTF8.self)
             let latency = response.latencyMS.map { String(format: "%.0f ms", $0) } ?? "-"
-            return answers + String(
+            var footer = String(
                 format: "\n\n---\n%@ · %@ · %d input tokens · %@",
                 response.provider ?? "unknown lane", response.model, response.usage.inputTokens, latency
             )
+            // Only the cascade sets this, and when it does, "which lane answered" is no
+            // longer one fact about the response — so it is spelled out per question.
+            if let sources = response.sources, !sources.isEmpty {
+                footer += "\n" + sources.sorted { $0.key < $1.key }
+                    .map { "\($0.key): \($0.value)" }.joined(separator: " · ")
+            }
+            return answers + footer
 
         case "jev_status":
             return describe(try await client.get("/jev") as ControlAPI.JevStatus)
+
+        case "calibrate_decisions":
+            let result: ControlAPI.JevCalibration = try await client.postEmpty("/jev/calibrate")
+            return describe(result)
 
         default:
             throw ToolError.unknown(name)
@@ -1019,6 +1063,78 @@ enum Tools {
             return String(format: "%.1f %@", Double(value) / scale, suffix)
         }
         return "\(value) B"
+    }
+
+    /// The one line `get_status` appends: what `decide` with provider "auto" will send to
+    /// Jev, and what measured it. Written for an agent deciding whether a local answer is
+    /// worth trusting, so it leads with the floors rather than with the run's provenance.
+    static func cascadeLine(_ calibration: ControlAPI.JevCalibration) -> String {
+        String(
+            format: "Decision cascade: choices and scores below %.2f confidence, and nouls "
+            + "between %.2f and %.2f, are escalated to Jev · calibrated %@ against %@ "
+            + "(%d cases, %d%% agreement)%@",
+            calibration.floors.confidence, calibration.floors.noulLow,
+            calibration.floors.noulHigh, calibration.date.prefix(10).description,
+            calibration.modelName, calibration.cases,
+            Int((calibration.overallAgreementRate * 100).rounded()),
+            calibration.confidenceFloorMeasured && calibration.noulBandMeasured
+                ? "" : " — some floors fell back to the defaults"
+        )
+    }
+
+    /// A calibration run as a page an agent can read: what it measured, what it changed, and
+    /// the caveat that goes with it.
+    static func describe(_ calibration: ControlAPI.JevCalibration) -> String {
+        var lines = [
+            "Calibrated \(calibration.modelName) against \(calibration.jevModel) "
+            + "on \(calibration.date).",
+            "\(calibration.cases) cases (\(calibration.builtInCases) built in, "
+            + "\(calibration.userCases) yours) · \(calibration.comparisons) answers compared "
+            + String(format: "· %d%% agreement overall", Int((calibration.overallAgreementRate * 100).rounded())),
+            String(
+                format: "Cost: %d input tokens, about $%.4f.",
+                calibration.inputTokens, calibration.estimatedUSD
+            ),
+            "",
+            "Agreement by question kind:",
+        ]
+        for row in calibration.agreement where row.compared > 0 {
+            lines.append(String(
+                format: "- %@: %d of %d (%d%%)", row.kind, row.agreed, row.compared,
+                Int((row.rate * 100).rounded())
+            ))
+        }
+        lines.append("")
+        lines.append(cascadeLine(calibration))
+        if !calibration.confidenceFloorMeasured {
+            lines.append("  The confidence floor is the default; the search found none better.")
+        }
+        if !calibration.noulBandMeasured {
+            lines.append("  The noul band is the default; there were too few disagreements to place one.")
+        }
+        if !calibration.bins.isEmpty {
+            lines.append("")
+            lines.append("Local confidence against agreement:")
+            for bin in calibration.bins {
+                lines.append(String(
+                    format: "- %.1f–%.1f: %d answers, %d%% agreed (mean confidence %.2f)",
+                    bin.lower, bin.upper, bin.count,
+                    Int((bin.agreementRate * 100).rounded()), bin.meanConfidence
+                ))
+            }
+        }
+        if !calibration.notes.isEmpty {
+            lines.append("")
+            lines.append("Notes:")
+            lines.append(contentsOf: calibration.notes.map { "- \($0)" })
+        }
+        lines.append("")
+        lines.append(
+            "Jev is the reference, not ground truth: an agreement rate says the two lanes "
+            + "landed in the same place, not that either was right. These floors apply only "
+            + "while \(calibration.modelName) is the loaded model."
+        )
+        return lines.joined(separator: "\n")
     }
 
     /// The same facts as `GET /jev`, as a page an agent can read. Deliberately not the raw

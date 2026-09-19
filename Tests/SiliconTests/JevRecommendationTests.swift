@@ -1153,6 +1153,8 @@ actor RecommendingHost: ControlHost {
               messageCount: 0)
     }
     func jevStatus() async -> ControlAPI.JevStatus { .fixture() }
+    func jevCalibration() async -> ControlAPI.JevCalibration? { nil }
+    func calibrateJev() async throws -> ControlAPI.JevCalibration { throw RecommendingHostError.unused }
     func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings {
         .init(available: false, questions: [], screenings: [])
     }
