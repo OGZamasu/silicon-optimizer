@@ -1182,6 +1182,11 @@ public actor ControlServer {
             default:
                 return .error(404, "Unknown endpoint \(request.method) \(request.path)")
             }
+        } catch let error as any ControlStatusError {
+            // A host that knows what status it means gets to say so. Everything else is a
+            // 400, which is right for "you asked wrong" and wrong for anything a client
+            // could act on — which is why this branch exists.
+            return .error(error.status, error.localizedDescription)
         } catch {
             return .error(400, error.localizedDescription)
         }

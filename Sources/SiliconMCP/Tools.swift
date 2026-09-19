@@ -543,10 +543,11 @@ enum Tools {
         case "get_status":
             var status = try await describe(await client.get("/status") as ControlAPI.Status)
             // Appended rather than folded into `ControlAPI.Status`, which the phone apps are
-            // generated from and which has nothing to do with Jev. `try?` because a Mac that
-            // has never calibrated answers 404, and that is not a reason to fail `get_status`.
-            if let calibration = try? await client.get("/jev/calibration")
-                as ControlAPI.JevCalibration {
+            // generated from and which has nothing to do with Jev — and read through a short
+            // cache, so a tool an agent calls in a loop does not pay a second round trip
+            // every time. A Mac that has never calibrated answers 404, which is remembered
+            // too rather than re-asked.
+            if let calibration = await CalibrationCache.shared.current(from: client) {
                 status += "\n" + cascadeLine(calibration)
             }
             return status
@@ -941,6 +942,8 @@ enum Tools {
 
         case "calibrate_decisions":
             let result: ControlAPI.JevCalibration = try await client.postEmpty("/jev/calibrate")
+            // What get_status is holding is now last week's answer.
+            await CalibrationCache.shared.forget()
             return describe(result)
 
         default:
@@ -1066,19 +1069,40 @@ enum Tools {
     }
 
     /// The one line `get_status` appends: what `decide` with provider "auto" will send to
-    /// Jev, and what measured it. Written for an agent deciding whether a local answer is
-    /// worth trusting, so it leads with the floors rather than with the run's provenance.
+    /// Jev, and what measured it.
+    ///
+    /// Written for an agent deciding whether a local answer is worth trusting, so it leads
+    /// with the floors *in effect*. A calibration measured against a model that is no longer
+    /// loaded is not a description of what will happen now, and saying its numbers plainly
+    /// would be a quiet lie — so that case says so first and gives the defaults that are
+    /// actually running.
     static func cascadeLine(_ calibration: ControlAPI.JevCalibration) -> String {
-        String(
-            format: "Decision cascade: choices and scores below %.2f confidence, and nouls "
-            + "between %.2f and %.2f, are escalated to Jev · calibrated %@ against %@ "
-            + "(%d cases, %d%% agreement)%@",
-            calibration.floors.confidence, calibration.floors.noulLow,
-            calibration.floors.noulHigh, calibration.date.prefix(10).description,
-            calibration.modelName, calibration.cases,
+        let applies = calibration.appliesToLoadedModel ?? true
+        let floors = calibration.floorsInEffect ?? calibration.floors
+        let head = String(
+            format: "Decision cascade: choices under %.2f confidence, scores under %.2f, "
+            + "and nouls between %.2f and %.2f are escalated to Jev.",
+            floors.choiceConfidence, floors.scoreConfidence, floors.noulLow, floors.noulHigh
+        )
+        guard applies else {
+            return head + String(
+                format: " The %@ calibration of %@ is NOT in effect — it was measured on %@, "
+                + "and %@ is loaded — so those are the defaults. Run calibrate_decisions "
+                + "against the loaded model to replace them.",
+                calibration.date.prefix(10).description, calibration.modelName,
+                calibration.modelName, calibration.loadedModelName ?? "another model"
+            )
+        }
+        return head + String(
+            format: " Calibrated %@ against %@: %d cases, %d%% agreement, %d%% of answers "
+            + "escalated.%@",
+            calibration.date.prefix(10).description, calibration.modelName,
+            calibration.cases,
             Int((calibration.overallAgreementRate * 100).rounded()),
-            calibration.confidenceFloorMeasured && calibration.noulBandMeasured
-                ? "" : " — some floors fell back to the defaults"
+            Int((calibration.escalationRate * 100).rounded()),
+            calibration.choiceFloorMeasured && calibration.scoreFloorMeasured
+                && calibration.noulBandMeasured
+                ? "" : " Some floors fell back to the defaults."
         )
     }
 
@@ -1106,8 +1130,15 @@ enum Tools {
         }
         lines.append("")
         lines.append(cascadeLine(calibration))
-        if !calibration.confidenceFloorMeasured {
-            lines.append("  The confidence floor is the default; the search found none better.")
+        lines.append(String(
+            format: "Under these floors, %d%% of this set would have gone to Jev.",
+            Int((calibration.escalationRate * 100).rounded())
+        ))
+        if !calibration.choiceFloorMeasured {
+            lines.append("  The choice floor is the default; the search found none better.")
+        }
+        if !calibration.scoreFloorMeasured {
+            lines.append("  The score floor is the default; the search found none better.")
         }
         if !calibration.noulBandMeasured {
             lines.append("  The noul band is the default; there were too few disagreements to place one.")
@@ -1423,5 +1454,34 @@ enum Tools {
                 + ", \(model.category)\n  \(fit)"
                 + (model.runtimeNote.map { "\n  \($0)" } ?? "")
         }.joined(separator: "\n")
+    }
+}
+
+/// `GET /jev/calibration`, remembered for a minute.
+///
+/// `get_status` is one of the cheapest tools here and agents call it in loops; adding an
+/// unconditional second HTTP request to it would make "what is loaded?" twice as expensive
+/// for a line most callers never read. A minute is long enough to cover a burst and short
+/// enough that a calibration run started elsewhere shows up on its own. A 404 — the Mac has
+/// never calibrated — is cached just as firmly, because that is the common case and the one
+/// that would otherwise re-ask forever.
+actor CalibrationCache {
+    static let shared = CalibrationCache()
+
+    static let lifetime: TimeInterval = 60
+
+    private var value: ControlAPI.JevCalibration?
+    private var readAt: Date?
+
+    func current(from client: ControlClient) async -> ControlAPI.JevCalibration? {
+        if let readAt, Date().timeIntervalSince(readAt) < Self.lifetime { return value }
+        value = try? await client.get("/jev/calibration") as ControlAPI.JevCalibration
+        readAt = Date()
+        return value
+    }
+
+    func forget() {
+        value = nil
+        readAt = nil
     }
 }

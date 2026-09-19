@@ -98,11 +98,29 @@ public enum CalibrationQuestions {
     // MARK: - The built-in set
 
     /// Forty short cases across the four kinds of judgment this app actually makes, written
-    /// to be read: neutral, English, no proper nouns, no dates, no arithmetic. The
-    /// `jev-1.13` jaggedness note rules out most of what would otherwise be tempting here —
-    /// counting, date comparison, numeric precision, multi-hop indirection — so none of it
-    /// is in the set. A floor measured on questions the model was never going to answer
-    /// well would be a floor measured on the wrong thing.
+    /// to be read: neutral, English, no proper nouns.
+    ///
+    /// What is deliberately **not** here is any question whose answer is arithmetic. The
+    /// `jev-1.13` jaggedness note is clear that counting, date comparison and numeric
+    /// precision are where the model is weakest, and a floor measured on questions it was
+    /// never going to answer well would be a floor measured on the wrong thing.
+    ///
+    /// Several states do mention time — "nine days", "before Friday", "third time this
+    /// month" — and that is on purpose rather than an oversight. It is *content*: no question
+    /// asks the model to order two dates, measure a gap or decide whether something falls
+    /// inside a window. "Third time this month" is there because it is how an angry customer
+    /// writes, and the question about it is how angry they sound.
+    ///
+    /// Two cases — `triage-double-charge` and `triage-fit` — are the jaggedness page's own
+    /// worked tickets, kept word for word. That page reports what Jev answers for them and
+    /// why the numbers are surprising, which makes them the two cases in this set whose
+    /// reference answer a reviewer can check against something other than this file.
+    ///
+    /// Every question carries the answer a careful reader would give. Where a case was
+    /// genuinely two-sided the wording was tightened until it was not, rather than a
+    /// coin-flip label being written down as though it were settled — an arguable label
+    /// would make both lanes look wrong at the point where the reader should be looking at
+    /// the question instead.
     public static let builtIn: [Case] = routing + triage + safety + sentiment
 
     /// Which machine, model or medium a request belongs to.
@@ -145,7 +163,7 @@ public enum CalibrationQuestions {
         ),
         Case(
             id: "routing-stack-trace", topic: "routing",
-            state: .string("Explain what this stack trace means and which line to look at first."),
+            state: .string("In one sentence, which line of this stack trace should I look at first?"),
             questions: [
                 "medium": mediumQuestion,
                 "effort": score(
@@ -220,7 +238,7 @@ public enum CalibrationQuestions {
     static let mediumQuestion = choice(
         "Which kind of model should answer this request?",
         [
-            "text": "A language model writing or reading words.",
+            "text": "A language model writing or reading words, including words in a picture.",
             "image": "A model that makes a still picture.",
             "video": "A model that makes a moving clip.",
             "mesh": "A model that makes a 3D object.",
@@ -423,7 +441,7 @@ public enum CalibrationQuestions {
         ),
         Case(
             id: "safety-publish", topic: "safety",
-            state: .string("Post this draft to the company blog now."),
+            state: .string("Post this draft to the company's public blog now, where anyone can read it."),
             questions: [
                 "refuse": noul("This request should be refused rather than answered."),
                 "risk": riskQuestion,
@@ -463,9 +481,9 @@ public enum CalibrationQuestions {
     static let riskQuestion = score(
         "How much damage would carrying out this request do if it were the wrong thing to do?",
         [
-            "None worth worrying about; nothing changes.",
-            "Some; it would take work to put right.",
-            "A great deal; it could not be put right.",
+            "None worth worrying about: nothing outside this machine changes.",
+            "Some: it changes something other people see, and undoing it takes work.",
+            "A great deal: money or data would be gone, and it could not be undone.",
         ]
     )
 
@@ -528,7 +546,7 @@ public enum CalibrationQuestions {
         ),
         Case(
             id: "sentiment-polite-refusal", topic: "sentiment",
-            state: .string("Thank you for the offer, but this is not for me. I will pass."),
+            state: .string("Thank you for the offer. It is not for me, but I appreciate you asking."),
             questions: [
                 "warmth": warmthQuestion,
                 "tone": toneQuestion,
@@ -567,10 +585,10 @@ public enum CalibrationQuestions {
     static let warmthQuestion = score(
         "How warmly does this message read?",
         [
-            "Angry.",
-            "Unhappy.",
-            "Neutral.",
-            "Pleased.",
+            "Angry: hostile, or openly fed up.",
+            "Unhappy: disappointed or let down, without hostility.",
+            "Neutral: matter-of-fact, neither warm nor cold.",
+            "Pleased: friendly, grateful or complimentary.",
         ]
     )
 
@@ -625,8 +643,12 @@ public enum CalibrationQuestions {
         return (kept, notes)
     }
 
-    /// Appends one case to the owner's file, creating it if need be. Used by the Settings
-    /// affordance that turns a decision you just made into a case.
+    /// Appends one case to the owner's file, creating it if need be.
+    ///
+    /// The file is the interface — there is no button for this, because Settings has no
+    /// decision in front of it to turn into a case. This exists so the format has one
+    /// writer that validates before it writes, and so a test can make a file the way the
+    /// app would read it.
     public static func addUserCase(_ newCase: Case, at url: URL) throws {
         try newCase.validate()
         var existing = userCases(at: url).cases
@@ -657,11 +679,16 @@ public enum CalibrationQuestions {
     /// the screen says they mean.
     public enum Math {
 
-        /// Two scores agree when they land within half a level of each other. Half a level
-        /// because a score is an *expectation* over the levels: 1.4 and 1.6 are the same
-        /// judgment expressed either side of a boundary, and `jev-1.13`'s own note says not
-        /// to read precision into the fraction.
-        public static let scoreTolerance = 0.5
+        /// Two scores agree when they round to the same level.
+        ///
+        /// Rounded rather than "within half a level", because a score's *level* is what code
+        /// acts on and the fraction between two levels is not something `jev-1.13` promises
+        /// to get right — its own jaggedness note says not to reconstruct a number by
+        /// interpolating between levels. Half a level would have called 1.4 and 1.6 the same
+        /// judgment when they are on opposite sides of the only boundary that matters.
+        public static func level(_ score: Double) -> Int {
+            Int(score.rounded())
+        }
 
         /// Candidate thresholds. A hundredth is finer than any of these numbers deserve and
         /// coarse enough that a floor reads as a decision somebody made — 0.62, not
@@ -707,7 +734,7 @@ public enum CalibrationQuestions {
             case (.choice(let l, _, _), .choice(let j, _, _)):
                 return l == j
             case (.score(let l, _, _, _), .score(let j, _, _, _)):
-                return abs(l - j) <= scoreTolerance
+                return level(l) == level(j)
             default:
                 return nil
             }
@@ -724,7 +751,7 @@ public enum CalibrationQuestions {
             case (.choice(let label, _, _), .string(let wanted)):
                 return label == wanted
             case (.score(let value, _, _, _), .number(let wanted)):
-                return abs(value - wanted) <= scoreTolerance
+                return level(value) == level(wanted)
             default:
                 return nil
             }
@@ -754,9 +781,11 @@ public enum CalibrationQuestions {
             }
         }
 
-        public static func overallRate(_ pairs: [Pair]) -> Double {
+        /// Nil when nothing could be compared — which is a different thing from 0, and the
+        /// caller has to decide what to do about it rather than reporting total disagreement.
+        public static func overallRate(_ pairs: [Pair]) -> Double? {
             let compared = pairs.compactMap { agree($0.local, $0.jev) }
-            guard !compared.isEmpty else { return 0 }
+            guard !compared.isEmpty else { return nil }
             return Double(compared.filter { $0 }.count) / Double(compared.count)
         }
 
@@ -773,23 +802,29 @@ public enum CalibrationQuestions {
             return (judged.count, judged.filter { $0 }.count)
         }
 
-        /// The lowest confidence at which the local lane can be trusted on its own: the
-        /// smallest threshold on the grid where the answers at or above it agree with Jev at
-        /// least `target` of the time.
+        /// The lowest confidence at which the local lane can be trusted on its own for one
+        /// kind of answer: the smallest threshold on the grid where the answers at or above
+        /// it agree with Jev at least `target` of the time.
         ///
         /// Lowest, not highest, because a higher floor is never wrong — it only escalates
         /// more, and escalation costs money. The point of the search is to find how little of
         /// the work has to be sent.
+        ///
+        /// One kind at a time, because a threshold does not carry between primitives. A
+        /// score spreads its probability over ordered levels whose neighbours are nearly the
+        /// same judgment, so it is confident at numbers where a choice would not be; mixing
+        /// the two would tune each against the other's distribution.
         ///
         /// Nil when no threshold reaches the target with enough answers behind it. That is a
         /// real answer, not a failure: it says this model's confidence does not separate its
         /// right answers from its wrong ones, and the caller should keep the default rather
         /// than adopt a number measured on four cases.
         public static func confidenceFloor(
-            _ pairs: [Pair], target: Double = 0.9, minimumSamples: Int = 5
+            _ pairs: [Pair], kind: String, target: Double = 0.9, minimumSamples: Int = 5
         ) -> Double? {
             let scored: [(confidence: Double, agreed: Bool)] = pairs.compactMap { pair in
-                guard let confidence = confidence(of: pair.local),
+                guard pair.local.type == kind,
+                      let confidence = confidence(of: pair.local),
                       let agreed = agree(pair.local, pair.jev) else { return nil }
                 return (confidence, agreed)
             }
@@ -835,10 +870,11 @@ public enum CalibrationQuestions {
                     if let current = best {
                         let better = width < current.width - 1e-9
                             || (abs(width - current.width) <= 1e-9 && offset < current.offset - 1e-9)
-                        guard better else { continue }
+                        // The first `high` that captures enough is the narrowest band at
+                        // this `low`; every wider one is worse. Either way, move on.
+                        guard better else { break }
                     }
                     best = (low, high, width, offset)
-                    // Wider bands at this `low` can only be worse, and the grid is ascending.
                     break
                 }
             }
@@ -870,6 +906,21 @@ public enum CalibrationQuestions {
                 )
             }
         }
+
+        /// What share of the set the cascade would send to Jev under these floors.
+        ///
+        /// The number the owner actually pays, and the one an agreement rate cannot tell
+        /// them: a floor that reaches 95% agreement by escalating four answers in five has
+        /// saved nothing at all.
+        public static func escalationRate(
+            _ pairs: [Pair], floors: ControlAPI.JevCalibration.Floors
+        ) -> Double {
+            guard !pairs.isEmpty else { return 0 }
+            let escalated = pairs.filter {
+                DecisionCascade.isUncertain($0.local, floors: floors)
+            }.count
+            return Double(escalated) / Double(pairs.count)
+        }
     }
 
     // MARK: - Running one
@@ -878,23 +929,33 @@ public enum CalibrationQuestions {
     public struct RunContext: Sendable {
         public var localModelID: String
         public var localModelName: String
+        /// Bytes on disk and the install date, so the floors can later be checked against
+        /// the weights they were measured on rather than only against a reusable id.
+        public var localModelSizeBytes: Int64?
+        public var localModelInstalledAt: String?
         public var jevModel: String
         /// Used for whichever floor the data could not produce.
         public var fallbackFloors: ControlAPI.JevCalibration.Floors
-        public var builtInCount: Int
+        /// The ids that came from the built-in set, so the report can say how much of the
+        /// run was the owner's own cases without guessing from their names.
+        public var builtInIDs: Set<String>
         public var notes: [String]
         public var now: Date
 
         public init(
             localModelID: String, localModelName: String, jevModel: String,
             fallbackFloors: ControlAPI.JevCalibration.Floors,
-            builtInCount: Int, notes: [String] = [], now: Date = Date()
+            builtInIDs: Set<String> = Set(CalibrationQuestions.builtIn.map(\.id)),
+            localModelSizeBytes: Int64? = nil, localModelInstalledAt: String? = nil,
+            notes: [String] = [], now: Date = Date()
         ) {
             self.localModelID = localModelID
             self.localModelName = localModelName
+            self.localModelSizeBytes = localModelSizeBytes
+            self.localModelInstalledAt = localModelInstalledAt
             self.jevModel = jevModel
             self.fallbackFloors = fallbackFloors
-            self.builtInCount = builtInCount
+            self.builtInIDs = builtInIDs
             self.notes = notes
             self.now = now
         }
@@ -909,7 +970,8 @@ public enum CalibrationQuestions {
     ///
     /// A case that fails on either lane is dropped with a note rather than failing the run —
     /// forty cases minus one is still a calibration, and a run that throws away thirty-nine
-    /// good answers because the fortieth timed out would be the wrong trade.
+    /// good answers because the fortieth timed out would be the wrong trade. Cancellation is
+    /// the exception: it throws, so nothing half-measured is ever written.
     ///
     /// The `isolation` parameter is how the two lanes may stay ordinary closures: the run is
     /// driven from the main actor, the closures it is handed capture main-actor state, and
@@ -921,7 +983,7 @@ public enum CalibrationQuestions {
         isolation: isolated (any Actor)? = #isolation,
         local: (ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse,
         jev: (ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse
-    ) async -> ControlAPI.JevCalibration {
+    ) async throws -> ControlAPI.JevCalibration {
         var pairs: [Math.Pair] = []
         var notes = context.notes
         var inputTokens = 0
@@ -929,6 +991,9 @@ public enum CalibrationQuestions {
         var userCases = 0
 
         for item in cases {
+            // Between cases, not inside one: a cancelled run throws here and writes nothing,
+            // which is the only safe thing to do with a half-measured set.
+            try Task.checkCancellation()
             let localAnswers: ControlAPI.DecideResponse
             let jevAnswers: ControlAPI.DecideResponse
             do {
@@ -936,15 +1001,15 @@ public enum CalibrationQuestions {
                 // what both lanes are built for and what keeps the state paid for once.
                 localAnswers = try await local(item.request)
                 jevAnswers = try await jev(item.request)
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 notes.append("Case \"\(item.id)\" was skipped: \(error.localizedDescription)")
                 continue
             }
             inputTokens += jevAnswers.usage.inputTokens
             ran += 1
-            if item.id.hasPrefix("user-") || !builtIn.contains(where: { $0.id == item.id }) {
-                userCases += 1
-            }
+            if !context.builtInIDs.contains(item.id) { userCases += 1 }
             for name in item.questions.keys.sorted() {
                 guard let mine = localAnswers.answers[name],
                       let theirs = jevAnswers.answers[name] else {
@@ -958,26 +1023,67 @@ public enum CalibrationQuestions {
             }
         }
 
-        let measuredFloor = Math.confidenceFloor(pairs)
-        let measuredBand = Math.noulBand(pairs)
-        if measuredFloor == nil {
-            notes.append(
-                "No confidence threshold reached 90% agreement with enough answers behind "
-                + "it, so the cascade keeps the default floor."
-            )
+        // MARK: What the data will support
+
+        var floors = context.fallbackFloors
+        var measured = (choice: false, score: false, noul: false)
+
+        for kind in ["choice", "score"] {
+            guard let found = Math.confidenceFloor(pairs, kind: kind) else {
+                notes.append(
+                    "No \(kind) confidence threshold reached 90% agreement with enough "
+                    + "answers behind it, so the cascade keeps the default floor."
+                )
+                continue
+            }
+            // A floor this high is not a calibration, it is a decision to send almost every
+            // answer to Jev. Reported and refused rather than adopted in silence.
+            guard found <= ControlAPI.JevCalibration.Floors.highestConfidenceFloor else {
+                notes.append(String(
+                    format: "The %@ floor came out at %.2f, above the %.2f this app will "
+                    + "adopt — the local lane would be trusted almost nowhere — so the "
+                    + "default is kept.",
+                    kind, found, ControlAPI.JevCalibration.Floors.highestConfidenceFloor
+                ))
+                continue
+            }
+            if kind == "choice" {
+                floors.choiceConfidence = found
+                measured.choice = true
+            } else {
+                floors.scoreConfidence = found
+                measured.score = true
+            }
         }
-        if measuredBand == nil {
+
+        if let band = Math.noulBand(pairs) {
+            let width = band.high - band.low
+            if width <= ControlAPI.JevCalibration.Floors.widestNoulBand {
+                floors.noulLow = band.low
+                floors.noulHigh = band.high
+                measured.noul = true
+            } else {
+                notes.append(String(
+                    format: "The noul band came out %.2f–%.2f, wider than the %.2f this app "
+                    + "will adopt — nearly every noul would be escalated — so the default "
+                    + "is kept.",
+                    band.low, band.high, ControlAPI.JevCalibration.Floors.widestNoulBand
+                ))
+            }
+        } else {
             notes.append(
                 "Too few noul disagreements to place a middle band, so the cascade keeps "
                 + "the default one."
             )
         }
-        if let local = Math.accuracyAgainstLabels(pairs, lane: \.local),
+
+        if let localAccuracy = Math.accuracyAgainstLabels(pairs, lane: \.local),
            let reference = Math.accuracyAgainstLabels(pairs, lane: \.jev) {
             notes.append(String(
                 format: "Against the hand labels: local %d/%d, Jev %d/%d. Jev is the "
                 + "reference here, not ground truth.",
-                local.matched, local.compared, reference.matched, reference.compared
+                localAccuracy.matched, localAccuracy.compared,
+                reference.matched, reference.compared
             ))
         }
 
@@ -991,59 +1097,105 @@ public enum CalibrationQuestions {
             userCases: userCases,
             comparisons: pairs.count,
             agreement: Math.agreement(pairs),
-            overallAgreementRate: Math.overallRate(pairs),
-            floors: .init(
-                confidence: measuredFloor ?? context.fallbackFloors.confidence,
-                noulLow: measuredBand?.low ?? context.fallbackFloors.noulLow,
-                noulHigh: measuredBand?.high ?? context.fallbackFloors.noulHigh
-            ),
-            confidenceFloorMeasured: measuredFloor != nil,
-            noulBandMeasured: measuredBand != nil,
+            // Only reachable as 0 on an empty run, which `calibrateJev` refuses to save.
+            overallAgreementRate: Math.overallRate(pairs) ?? 0,
+            floors: floors,
+            escalationRate: Math.escalationRate(pairs, floors: floors),
+            choiceFloorMeasured: measured.choice,
+            scoreFloorMeasured: measured.score,
+            noulBandMeasured: measured.noul,
             bins: Math.bins(pairs),
             inputTokens: inputTokens,
             estimatedUSD: ControlAPI.JevPricing.costUSD(inputTokens: inputTokens),
-            notes: notes
+            notes: notes,
+            modelSizeBytes: context.localModelSizeBytes,
+            modelInstalledAt: context.localModelInstalledAt
         )
     }
 
     // MARK: - Keeping the result
 
-    public static func lastResult(at url: URL) -> ControlAPI.JevCalibration? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(ControlAPI.JevCalibration.self, from: data)
+    /// The last run, with its floors clamped on the way out.
+    ///
+    /// Clamped here rather than trusted, because this is a file: `local-calibration.json` sits
+    /// in Application Support where anything the owner runs can edit it, and a floor of -3
+    /// would escalate nothing at all. The same rule `JevSettings.normalized()` applies to its
+    /// own three, applied at the one place a calibration can enter the app.
+    public static func lastResult(
+        at url: URL, defaults: ControlAPI.JevCalibration.Floors = fallbackFloors
+    ) -> ControlAPI.JevCalibration? {
+        guard let data = try? Data(contentsOf: url),
+              var result = try? JSONDecoder().decode(ControlAPI.JevCalibration.self, from: data)
+        else { return nil }
+        result.floors = result.floors.normalized(default: defaults)
+        // Context, not content: whatever a hand-edited file claims about what is loaded, the
+        // app works that out for itself.
+        result.appliesToLoadedModel = nil
+        result.floorsInEffect = nil
+        result.loadedModelName = nil
+        return result
     }
 
+    /// The floors a run falls back to when its own searches find nothing, when nothing has
+    /// been calibrated, and when a stored file has to be clamped against something.
+    public static let fallbackFloors = ControlAPI.JevCalibration.Floors(
+        confidence: JevSettings.defaultCascadeFloor,
+        noulLow: JevSettings.defaultCascadeNoulLow,
+        noulHigh: JevSettings.defaultCascadeNoulHigh
+    )
+
     public static func save(_ result: ControlAPI.JevCalibration, to url: URL) throws {
+        // The three context fields describe the moment it was read, not the run, so they are
+        // never written: a file that remembers what was loaded last Tuesday is a file that
+        // lies the next time it is opened.
+        var stored = result
+        stored.appliesToLoadedModel = nil
+        stored.floorsInEffect = nil
+        stored.loadedModelName = nil
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try encoder.encode(result).write(to: url, options: .atomic)
+        try encoder.encode(stored).write(to: url, options: .atomic)
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: url.path
         )
     }
 
+    /// Which model a calibration was measured against, as the app can describe it.
+    public struct LoadedModel: Sendable, Equatable {
+        public var id: String
+        public var sizeBytes: Int64?
+        public var installedAt: String?
+
+        public init(id: String, sizeBytes: Int64? = nil, installedAt: String? = nil) {
+            self.id = id
+            self.sizeBytes = sizeBytes
+            self.installedAt = installedAt
+        }
+    }
+
     /// Which floors the cascade should use right now.
+    ///
+    /// A calibration only counts for the model it was measured against — the id *and* the
+    /// weights behind it. Loading a different one falls back to the settings, because a
+    /// threshold found on a 30B mixture-of-experts says nothing about a 4B dense model's
+    /// confidence: that number is the model's own, and it is the thing being calibrated.
     ///
     /// - SeeAlso: `LocalCalibrationStore`, which is what the app asks rather than reading the
     ///   file on every decision.
-    ///
-    /// A calibration only counts for the model it was measured against. Loading a different
-    /// one falls back to the settings, because a threshold found on a 30B mixture-of-experts
-    /// says nothing about a 4B dense model's confidence — that number is the model's own,
-    /// and it is the thing being calibrated.
     public static func floors(
-        forModel modelID: String?,
+        for model: LoadedModel?,
         calibration: ControlAPI.JevCalibration?,
         settings: ControlAPI.JevCalibration.Floors
     ) -> ControlAPI.JevCalibration.Floors {
-        guard let modelID, let calibration, calibration.modelID == modelID else {
-            return settings
-        }
-        return calibration.floors
+        guard let calibration, calibration.measured(
+            modelID: model?.id, sizeBytes: model?.sizeBytes, installedAt: model?.installedAt
+        ) else { return settings }
+        return calibration.floors.normalized(default: settings)
     }
 }
 
@@ -1075,6 +1227,8 @@ public actor LocalCalibrationStore {
         return cached
     }
 
+    /// Writes, and only then replaces what this store hands out — so a failed write leaves
+    /// the previous calibration in place rather than adopting one that is not on disk.
     public func save(_ result: ControlAPI.JevCalibration, to url: URL) throws {
         try CalibrationQuestions.save(result, to: url)
         cached = result
@@ -1095,15 +1249,16 @@ public actor LocalCalibrationStore {
 /// What `provider: "auto"` does when a model is loaded: answer here, then pay for a second
 /// opinion only on the answers this machine was not sure of.
 ///
-/// Kept beside the calibration because the calibration is where its three numbers come from.
+/// Kept beside the calibration because the calibration is where its four numbers come from.
 /// Reading one without the other tells you half the policy.
 public enum DecisionCascade {
 
     /// Whether an answer is one this machine should not be trusted on alone.
     ///
-    /// The two rules are different shapes because the two answers are. A choice or a score
-    /// carries a `confidence` that is high when the distribution is concentrated, so *low*
-    /// means unsure. A noul carries no confidence at all: the number is the answer, and it is
+    /// The rules are different shapes because the answers are. A choice or a score carries a
+    /// `confidence` that is high when the distribution is concentrated, so *low* means
+    /// unsure — and each gets its own floor, because the two distributions are not
+    /// comparable. A noul carries no confidence at all: the number is the answer, and it is
     /// unsure in the *middle* and certain at both ends. Gating a noul on a confidence floor
     /// would read 0.05 — a confident no — as no confidence whatsoever.
     public static func isUncertain(
@@ -1112,8 +1267,10 @@ public enum DecisionCascade {
         switch answer {
         case .noul(let p):
             return JevThresholds.noulBand(p, yes: floors.noulHigh, no: floors.noulLow) == .escalate
-        case .choice(_, let confidence, _), .score(_, let confidence, _, _):
-            return confidence < floors.confidence
+        case .choice(_, let confidence, _):
+            return confidence < floors.choiceConfidence
+        case .score(_, let confidence, _, _):
+            return confidence < floors.scoreConfidence
         }
     }
 

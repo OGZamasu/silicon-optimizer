@@ -1561,12 +1561,12 @@ private struct MediaRoutingOptions: View {
 
 /// The calibration run and what the last one found.
 ///
-/// Sits under the feature switches because it belongs to one of them: Decision calibration
-/// is what pays for the run, and the two floors below are the only thing the run changes.
-/// The summary is deliberately specific — which model, when, how much agreement, which
-/// floors — because a calibration measured against a model you are no longer running is a
-/// number that has quietly stopped applying, and the row should say so rather than imply
-/// otherwise by showing it.
+/// Sits under the Decision calibration switch because it belongs to it: that switch is what
+/// pays for the run, and the floors it produces are the only thing the run changes. The
+/// summary is deliberately specific — which model, when, how much agreement, how much of the
+/// set would be escalated, which floors — because a calibration measured against a model you
+/// are no longer running is a number that has quietly stopped applying, and the row should
+/// say so rather than imply otherwise by showing it.
 private struct JevCalibrationRow: View {
     @Environment(AppModel.self) private var model
     @State private var last: ControlAPI.JevCalibration?
@@ -1580,6 +1580,9 @@ private struct JevCalibrationRow: View {
                     .disabled(running)
                 if running {
                     ProgressView().controlSize(.small)
+                    // Forty cases is a minute or two of the loaded model doing nothing else.
+                    // A run you cannot stop is a run you will not start.
+                    Button("Cancel") { CalibrationRun.cancel() }
                 }
             }
 
@@ -1588,10 +1591,11 @@ private struct JevCalibrationRow: View {
                     .font(.caption)
                     .monospacedDigit()
                     .textSelection(.enabled)
-                if last.modelID != model.loadedModel?.id {
+                if last.appliesToLoadedModel == false {
                     Text(
-                        "Measured against a different model from the one loaded now, so "
-                        + "`auto` is using the default floors until this is run again."
+                        "Not in effect: measured against \(last.modelName), and "
+                        + "\(model.loadedModel?.name ?? "another model") is loaded. `auto` is "
+                        + "using the default floors until this is run again."
                     )
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -1628,10 +1632,11 @@ private struct JevCalibrationRow: View {
     static let explanation =
         "Runs \(CalibrationQuestions.builtIn.count) short cases through the loaded model and "
         + "through Jev, and sets where `decide` stops trusting this Mac on its own. About "
-        + "\(ControlAPI.JevCalibration.estimatedCents()) cent of Jev tokens and a minute or "
-        + "two of the model. Jev is the reference, not ground truth — agreement means the two "
-        + "landed in the same place, which they can do while both being wrong. Add cases of "
-        + "your own to `jev-calibration.json` beside `jev.json`."
+        + "\(ControlAPI.JevCalibration.estimatedCents(cases: CalibrationQuestions.builtIn.count)) "
+        + "cent of Jev tokens and a minute or two of the model. Jev is the reference, not "
+        + "ground truth — agreement means the two landed in the same place, which they can do "
+        + "while both being wrong. Add cases of your own to `jev-calibration.json` beside "
+        + "`jev.json`."
 
     private func run() {
         running = true
@@ -1639,6 +1644,8 @@ private struct JevCalibrationRow: View {
         Task {
             do {
                 last = try await model.calibrateJev()
+            } catch is CancellationError {
+                problem = "Calibration cancelled. The previous result is unchanged."
             } catch {
                 problem = error.localizedDescription
             }

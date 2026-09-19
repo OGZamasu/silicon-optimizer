@@ -211,7 +211,7 @@ struct BuddyControlTests {
             let result = try JSONDecoder().decode(
                 ControlAPI.JevCalibration.self, from: readBody
             )
-            #expect(result.floors.confidence == 0.72)
+            #expect(result.floors.choiceConfidence == 0.72)
 
             // But it may not start one.
             let (writeStatus, writeBody) = try await fixture.phone.call(
@@ -230,8 +230,20 @@ struct BuddyControlTests {
             )
             #expect(accepted == 200)
             #expect(await fixture.host.calibrationRuns == 1)
+
+            // A run already in progress is a 409, not a 400: "come back later" is something
+            // a client can act on, and every other host error is something it cannot.
+            await fixture.host.setCalibrationBusy(true)
+            let (busy, busyBody) = try await fixture.local.call(
+                "POST", "/jev/calibrate", token: fixture.local.token
+            )
+            #expect(busy == 409)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: busyBody
+            ).error.contains("already running"))
         }
     }
+
 
     static let exampleCalibration = ControlAPI.JevCalibration(
         modelID: "test-model", modelName: "Test 1B", jevModel: "jev-1.13.0",
@@ -240,8 +252,9 @@ struct BuddyControlTests {
         agreement: [.init(kind: "choice", compared: 30, agreed: 27, rate: 0.9)],
         overallAgreementRate: 0.85,
         floors: .init(confidence: 0.72, noulLow: 0.25, noulHigh: 0.75),
-        confidenceFloorMeasured: true, noulBandMeasured: false, bins: [],
-        inputTokens: 31_204, estimatedUSD: 0.0013
+        escalationRate: 0.21,
+        choiceFloorMeasured: true, scoreFloorMeasured: true, noulBandMeasured: false,
+        bins: [], inputTokens: 31_204, estimatedUSD: 0.0013
     )
 
     @Test func onlyTheMacMayChangeTheJevSettings() async throws {
@@ -1302,8 +1315,14 @@ actor BuddyTestHost: ControlHost {
 
     func jevCalibration() async -> ControlAPI.JevCalibration? { calibration }
 
+    /// Set by the single-flight test: what the second caller is told.
+    var calibrationIsBusy = false
+
+    func setCalibrationBusy(_ value: Bool) { calibrationIsBusy = value }
+
     func calibrateJev() async throws -> ControlAPI.JevCalibration {
         calibrationRuns += 1
+        if calibrationIsBusy { throw CalibrationBusy() }
         guard let calibration else { throw BuddyTestError.unexpectedRoute }
         return calibration
     }
@@ -1341,4 +1360,14 @@ actor BuddyTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoQueueView {
         throw BuddyTestError.unexpectedRoute
     }
+}
+
+
+/// A host error that knows it is a 409, which is what a second calibration gets. At file
+/// scope because the host that throws it is, too.
+struct CalibrationBusy: Error, LocalizedError, ControlStatusError {
+    var errorDescription: String? {
+        "A calibration is already running on this Mac. Wait for it to finish."
+    }
+    var status: Int { 409 }
 }

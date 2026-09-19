@@ -101,6 +101,22 @@ struct ContractExportTests {
         // change what this Mac spends" from "you may not start it spending".
         #expect(ControlServer.jevCalibrateRefusal != ControlServer.jevWriteRefusal)
         #expect(errors("GET", "/jev/calibration")[404] == ControlServer.noCalibrationYet)
+        // A generated client is taught the cascade shape by the route that produces it: two
+        // lanes in one answer, and the map that says which answered what.
+        let decide = Self.routes.first { $0.method == "POST" && $0.path == "/decide" }
+        let decideBody = String(
+            decoding: (try? decide?.response?.encode()) ?? Data(), as: UTF8.self
+        )
+        #expect(decideBody.contains("\"provider\":\"local+typesafe\""))
+        #expect(decideBody.contains("\"sources\""))
+        #expect(decideBody.contains("\"team\":\"typesafe\""))
+        #expect(decideBody.contains("\"refund\":\"local\""))
+        // And the single-lane shape is still in the fixtures, on TypeSafe's own path.
+        let systemOne = Self.routes.first { $0.path == "/v1/systemone" }
+        let systemOneBody = String(
+            decoding: (try? systemOne?.response?.encode()) ?? Data(), as: UTF8.self
+        )
+        #expect(!systemOneBody.contains("sources"))
         // A full-control phone may read what Jev costs; only the Mac may change it.
         #expect(Self.routes.first { $0.method == "GET" && $0.path == "/jev" }?.auth == "device")
         #expect(Self.routes.first { $0.method == "POST" && $0.path == "/jev" }?.auth == "control")
@@ -680,13 +696,28 @@ struct ContractExportTests {
                 state: .string("Customer was charged twice and wants it fixed."),
                 questions: [
                     "refund": .init(type: "noul", instructions: .string("Asks for money back")),
+                    "team": .init(
+                        type: "choice", instructions: .string("Which team should take it"),
+                        criteria: .object(["billing": .null, "technical": .null])
+                    ),
                 ]
             )),
+            // The cascade, because that is what `provider: "auto"` does on a Mac with a
+            // model loaded and Jev turned on — and because `sources` is the field a
+            // generated client would otherwise never be taught to expect. The single-lane
+            // shape is next door on /v1/systemone.
             response: .of(ControlAPI.DecideResponse(
-                model: "Qwen3-Coder 30B A3B",
-                usage: .init(inputTokens: 120, outputTokens: 1),
-                answers: ["refund": .noul(0.94)],
-                provider: "local"
+                model: "Qwen3-Coder 30B A3B + jev-1.13.0",
+                usage: .init(inputTokens: 1_020, outputTokens: 2),
+                answers: [
+                    "refund": .noul(0.94),
+                    "team": .choice(
+                        choice: "billing", confidence: 0.91,
+                        probabilities: ["billing": 0.91, "technical": 0.09]
+                    ),
+                ],
+                provider: "local+typesafe",
+                sources: ["refund": "local", "team": "typesafe"]
             ))
         ),
         Route(
@@ -980,8 +1011,12 @@ struct ContractExportTests {
             .init(kind: "score", compared: 24, agreed: 19, rate: 0.792),
         ],
         overallAgreementRate: 0.85,
-        floors: .init(confidence: 0.72, noulLow: 0.25, noulHigh: 0.75),
-        confidenceFloorMeasured: true,
+        floors: .init(
+            choiceConfidence: 0.72, scoreConfidence: 0.81, noulLow: 0.25, noulHigh: 0.75
+        ),
+        escalationRate: 0.21,
+        choiceFloorMeasured: true,
+        scoreFloorMeasured: true,
         noulBandMeasured: false,
         bins: [
             .init(lower: 0.4, upper: 0.5, count: 6, agreed: 3, meanConfidence: 0.45, agreementRate: 0.5),

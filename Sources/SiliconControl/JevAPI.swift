@@ -356,20 +356,74 @@ extension ControlAPI {
             }
         }
 
-        /// The three numbers the cascade thresholds on.
+        /// The four numbers the cascade thresholds on.
+        ///
+        /// A choice and a score get **separate** confidence floors, searched separately and
+        /// applied separately. They are different primitives answering different shapes of
+        /// question, and `jev-1.13`'s jaggedness note is explicit that a threshold tuned on
+        /// one does not carry to another — a score's distribution is over ordered levels
+        /// where neighbours are nearly the same judgment, so it spreads where a choice's
+        /// would not, and the same 0.7 means different things in the two.
         public struct Floors: Codable, Sendable, Equatable {
-            /// Choice and score below this confidence are escalated to Jev.
-            public var confidence: Double
+            /// Choices below this confidence are escalated to Jev.
+            public var choiceConfidence: Double
+            /// Scores below this confidence are escalated to Jev.
+            public var scoreConfidence: Double
             /// A noul strictly between these two is escalated. At either edge it is a
             /// confident answer — the same rule `JevThresholds.noulBand` already uses.
             public var noulLow: Double
             public var noulHigh: Double
 
-            public init(confidence: Double, noulLow: Double, noulHigh: Double) {
-                self.confidence = confidence
+            public init(
+                choiceConfidence: Double, scoreConfidence: Double,
+                noulLow: Double, noulHigh: Double
+            ) {
+                self.choiceConfidence = choiceConfidence
+                self.scoreConfidence = scoreConfidence
                 self.noulLow = noulLow
                 self.noulHigh = noulHigh
             }
+
+            /// Both confidence floors at one value — what a setting means before anything
+            /// has been measured, and what a test usually wants.
+            public init(confidence: Double, noulLow: Double, noulHigh: Double) {
+                self.init(
+                    choiceConfidence: confidence, scoreConfidence: confidence,
+                    noulLow: noulLow, noulHigh: noulHigh
+                )
+            }
+
+            /// A calibration file is a file, and a file can be hand-edited into nonsense.
+            /// Clamped and swapped exactly as `JevSettings.normalized()` does its own three,
+            /// so a number that reaches the cascade means the same thing wherever it was
+            /// read from — and a value that is not a number at all goes back to `fallback`
+            /// rather than to an edge that would read as a deliberate choice.
+            public func normalized(default fallback: Floors) -> Floors {
+                func clamp(_ value: Double, _ other: Double) -> Double {
+                    guard value.isFinite else { return other }
+                    return max(0, min(1, value))
+                }
+                var copy = Floors(
+                    choiceConfidence: clamp(choiceConfidence, fallback.choiceConfidence),
+                    scoreConfidence: clamp(scoreConfidence, fallback.scoreConfidence),
+                    noulLow: clamp(noulLow, fallback.noulLow),
+                    noulHigh: clamp(noulHigh, fallback.noulHigh)
+                )
+                if copy.noulLow > copy.noulHigh {
+                    swap(&copy.noulLow, &copy.noulHigh)
+                }
+                return copy
+            }
+
+            /// A band this wide escalates almost every noul, which is not a calibration but
+            /// a decision to pay Jev for everything. A search that lands past it is reported
+            /// and refused rather than adopted.
+            public static let widestNoulBand = 0.8
+            /// Likewise at the other end: a floor this high means the local lane is trusted
+            /// almost nowhere.
+            public static let highestConfidenceFloor = 0.95
+
+            public var noulBandWidth: Double { noulHigh - noulLow }
         }
 
         /// The installed model id the local lane used. The cascade takes these floors only
@@ -377,6 +431,14 @@ extension ControlAPI {
         /// about a 4B dense one.
         public var modelID: String
         public var modelName: String
+        /// Bytes on disk and when it was installed, beside the id.
+        ///
+        /// An id can be reused — a model removed and reinstalled at a different
+        /// quantization, or a local build overwritten — and the floors would then be applied
+        /// to weights they were never measured against. These two are cheap, already known,
+        /// and together they catch that.
+        public var modelSizeBytes: Int64?
+        public var modelInstalledAt: String?
         /// The Jev version that played reference.
         public var jevModel: String
         /// ISO-8601, like every other timestamp on this wire.
@@ -389,10 +451,18 @@ extension ControlAPI {
         public var agreement: [Agreement]
         public var overallAgreementRate: Double
         public var floors: Floors
-        /// False when the search could not reach 90% and the floor fell back to the
-        /// setting's default. Reported rather than hidden: a fallback floor is a guess, and
-        /// the screen says which of the two you are looking at.
-        public var confidenceFloorMeasured: Bool
+        /// The fraction of the set that would have been sent to Jev under `floors`.
+        ///
+        /// The number the owner actually pays for. A floor that reaches 95% agreement by
+        /// escalating four answers in five has not saved anything, and no agreement rate on
+        /// its own would say so.
+        public var escalationRate: Double
+        /// False when a search could not reach 90% with enough answers behind it, or landed
+        /// somewhere too extreme to adopt, and the floor fell back to the setting's default.
+        /// Reported rather than hidden: a fallback floor is a guess, and the screen says
+        /// which of the two you are looking at.
+        public var choiceFloorMeasured: Bool
+        public var scoreFloorMeasured: Bool
         public var noulBandMeasured: Bool
         public var bins: [Bin]
         /// What the run actually spent at Jev.
@@ -402,15 +472,33 @@ extension ControlAPI {
         /// samples, a search that found nothing, cases that would not run.
         public var notes: [String]
 
+        // MARK: Context, filled in when this is read rather than when it was written
+
+        /// Whether `floors` are the ones the cascade is using right now. Nil in the stored
+        /// file, which has no idea what is loaded; set by `GET /jev/calibration`.
+        public var appliesToLoadedModel: Bool?
+        /// The floors actually in effect — `floors` when they apply, the settings' defaults
+        /// when they do not. So a client never has to guess whether what it is showing is
+        /// what is happening.
+        public var floorsInEffect: Floors?
+        /// The model loaded right now, when it is not the one these were measured against.
+        public var loadedModelName: String?
+
         public init(
             modelID: String, modelName: String, jevModel: String, date: String,
             cases: Int, builtInCases: Int, userCases: Int, comparisons: Int,
             agreement: [Agreement], overallAgreementRate: Double, floors: Floors,
-            confidenceFloorMeasured: Bool, noulBandMeasured: Bool, bins: [Bin],
-            inputTokens: Int, estimatedUSD: Double, notes: [String] = []
+            escalationRate: Double,
+            choiceFloorMeasured: Bool, scoreFloorMeasured: Bool, noulBandMeasured: Bool,
+            bins: [Bin], inputTokens: Int, estimatedUSD: Double, notes: [String] = [],
+            modelSizeBytes: Int64? = nil, modelInstalledAt: String? = nil,
+            appliesToLoadedModel: Bool? = nil, floorsInEffect: Floors? = nil,
+            loadedModelName: String? = nil
         ) {
             self.modelID = modelID
             self.modelName = modelName
+            self.modelSizeBytes = modelSizeBytes
+            self.modelInstalledAt = modelInstalledAt
             self.jevModel = jevModel
             self.date = date
             self.cases = cases
@@ -420,22 +508,55 @@ extension ControlAPI {
             self.agreement = agreement
             self.overallAgreementRate = overallAgreementRate
             self.floors = floors
-            self.confidenceFloorMeasured = confidenceFloorMeasured
+            self.escalationRate = escalationRate
+            self.choiceFloorMeasured = choiceFloorMeasured
+            self.scoreFloorMeasured = scoreFloorMeasured
             self.noulBandMeasured = noulBandMeasured
             self.bins = bins
             self.inputTokens = inputTokens
             self.estimatedUSD = estimatedUSD
             self.notes = notes
+            self.appliesToLoadedModel = appliesToLoadedModel
+            self.floorsInEffect = floorsInEffect
+            self.loadedModelName = loadedModelName
+        }
+
+        /// Whether a model is the one these numbers were measured against — the id, and the
+        /// weights behind it.
+        public func measured(
+            modelID: String?, sizeBytes: Int64?, installedAt: String?
+        ) -> Bool {
+            guard let modelID, modelID == self.modelID else { return false }
+            // Absent on either side means an older file or a host that cannot say, and a
+            // missing check is not a failed one.
+            if let mine = modelSizeBytes, let theirs = sizeBytes, mine != theirs { return false }
+            if let mine = modelInstalledAt, let theirs = installedAt, mine != theirs { return false }
+            return true
         }
 
         /// One line for a settings row, an MCP answer or a log.
         public var summary: String {
             let percent = Int((overallAgreementRate * 100).rounded())
+            let escalated = Int((escalationRate * 100).rounded())
             return String(
-                format: "%@ · %@ · %d cases · %d%% agreement · floor %.2f · noul band %.2f–%.2f",
-                modelName, date.prefix(10).description, cases, percent,
-                floors.confidence, floors.noulLow, floors.noulHigh
+                format: "%@ · %@ · %d cases · %d%% agreement · escalates %d%% · "
+                + "choice %.2f · score %.2f · noul %.2f–%.2f",
+                modelName, date.prefix(10).description, cases, percent, escalated,
+                floors.choiceConfidence, floors.scoreConfidence,
+                floors.noulLow, floors.noulHigh
             )
         }
     }
 }
+
+/// An error that already knows what HTTP status it should become.
+///
+/// The buffered routes used to turn every thrown error into a 400, which is right for "you
+/// asked wrong" and wrong for "ask again later" — a client cannot tell a malformed body from
+/// a run that is already in progress. `BuddyHostError` had the same problem and solved it for
+/// the streaming path; this is that answer, named for what it does and reachable from both.
+public protocol ControlStatusError: Error {
+    var status: Int { get }
+}
+
+extension BuddyHostError: ControlStatusError {}

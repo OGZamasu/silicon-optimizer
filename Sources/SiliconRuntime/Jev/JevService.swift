@@ -244,6 +244,10 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// back to when a different model is loaded. They are deliberately unambitious — a
     /// choice the local model is less than 60% sure of, or a noul it has put near the middle,
     /// is worth a second opinion on almost any model.
+    ///
+    /// One number here for both choices and scores, which a calibration then splits in two.
+    /// Before anything has been measured there is nothing to tell them apart with, and two
+    /// identical settings rows would be asking the owner a question they cannot answer.
     public var cascadeFloor: Double = JevSettings.defaultCascadeFloor
     /// A noul strictly between these two is escalated; at either edge it is a confident
     /// answer. Exclusive on purpose, so this agrees with `JevThresholds.noulBand`.
