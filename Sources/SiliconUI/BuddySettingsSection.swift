@@ -109,6 +109,11 @@ struct BuddySettingsSection: View {
         } else {
             parts.append("never seen")
         }
+        // Said outright rather than left to be discovered as "the phone stopped working":
+        // this device holds a port that moved, and only pairing again can tell it so.
+        if device.needsRepair {
+            parts.append("paired before the port moved — pair again")
+        }
         return parts.joined(separator: " · ")
     }
 }

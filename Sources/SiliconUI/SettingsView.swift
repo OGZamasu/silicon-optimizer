@@ -519,6 +519,16 @@ struct SettingsView: View {
                 HStack {
                     Text(swarmStatusText)
                     Spacer()
+                    // Tailscale is often just not up yet. Asking again is a second; being
+                    // told to restart the app for it is not.
+                    if !SwarmExposure.shared.isListening {
+                        Button("Retry") {
+                            Task {
+                                await SwarmExposure.shared.retryNow(server: model.controlServer)
+                            }
+                        }
+                        .buttonStyle(.link)
+                    }
                     Button("Reveal swarm config") {
                         SwarmConfig.ensureExists()
                         NSWorkspace.shared.activateFileViewerSelecting([SwarmConfig.configURL])

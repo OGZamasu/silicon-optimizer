@@ -277,11 +277,14 @@ struct BuddyControlTests {
                 try await fixture.server.setTailnetAccess(address: "0.0.0.0")
             }
 
-            // Same routes, same auth, a different way in.
+            // Same routes, a different way in — but not the same credentials. The control
+            // token is this Mac's own and is refused out here; a paired device's works.
             #expect(try await fixture.phone.status("GET", "/health", token: nil) == 200)
             #expect(try await fixture.phone.status(
                 "GET", "/status", token: fixture.local.token
-            ) == 200)
+            ) == 401)
+            let paired = try await fixture.pair(name: "Onward")
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
             #expect(try await fixture.phone.status("GET", "/status", token: nil) == 401)
 
             // A tailscale address can move under the app; the listener has to follow.

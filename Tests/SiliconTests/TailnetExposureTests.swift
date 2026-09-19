@@ -35,11 +35,9 @@ struct TailnetExposureTests {
             #expect(loopbackPort != fixture.peerPort)
             #expect(loopbackPort != ControlServer.tailnetPort)
 
-            // And it is loopback in the sense that matters: a request to this Mac's own
-            // network address does not reach it. A wildcard bind would answer this.
-            if let lan = Self.nonLoopbackIPv4() {
-                #expect(!(await Self.answers(host: lan, port: loopbackPort)))
-            }
+            // (That the loopback listener does not answer at this Mac's own network
+            // address is proved against the real interfaces in
+            // `neitherListenerAnswersAtThisMacsLANAddress`, which needs one to exist.)
 
             // The wildcard cannot be reached by asking for it, either.
             await #expect(throws: ControlServer.TailnetBindError.self) {
@@ -94,11 +92,12 @@ struct TailnetExposureTests {
 
         discovery.set("127.0.0.1")
         await bench.server.refreshTailnetAccess()
+        try await Self.waitUntil { await bench.server.tailnetEndpoint != nil }
 
         #expect(await bench.server.tailnetEndpoint
             == ControlServer.TailnetEndpoint(address: "127.0.0.1", port: port))
         #expect(await bench.server.tailnetError == nil)
-        #expect(await BuddyControlTests.reachable(port: port))
+        try await Self.waitUntil { await BuddyControlTests.reachable(port: port) }
         await bench.server.stop()
     }
 
@@ -139,6 +138,59 @@ struct TailnetExposureTests {
         await bench.server.stop()
     }
 
+    /// `.waiting` is the state that used to lie. Asked for a tailnet literal this Mac does
+    /// not hold, Network.framework keeps a listener object sitting on EADDRNOTAVAIL: the
+    /// object exists, nothing listens, and the old code called that bound — which put a
+    /// dead port in the pairing QR and disarmed the retry for the rest of the process.
+    @Test func aBindWaitingOnAnAddressThisMacDoesNotHoldIsAProblemNotAListener() async throws {
+        let bench = try await Bench(discovering: "127.0.0.1")
+        defer { bench.tearDown() }
+        let port = try await BuddyControlTests.freeLoopbackPort()
+        try await bench.server.start(swarmToken: Bench.swarmToken)
+        let local = try await bench.loopbackClient()
+
+        // A perfectly valid 100.64/10 literal, and not one this Mac holds.
+        try await bench.server.setTailnetAccess(address: "100.64.1.1", port: port, for: .swarm)
+        try await Self.waitUntil { await bench.server.tailnetError != nil }
+
+        let exposure = await bench.server.exposure
+        #expect(!exposure.listening)
+        #expect(exposure.address == nil)
+        #expect(exposure.port == nil)
+        let problem = try #require(exposure.problem)
+        #expect(problem.contains("100.64.1.1:\(port)"))
+        #expect(await bench.server.tailnetEndpoint == nil)
+        #expect(await bench.server.tailnetListenerPort == nil)
+        // Nothing is there, and nothing says there is.
+        #expect(!(await BuddyControlTests.reachable(port: port)))
+        // The retry is still armed: ownership survived, so the next refresh tries again.
+        #expect(await bench.server.tailnetOwnership == .swarm)
+        await bench.server.refreshTailnetAccessIfDown()
+        try await Self.waitUntil { await bench.server.tailnetEndpoint != nil }
+        #expect(await bench.server.tailnetListenerAddress == "127.0.0.1")
+
+        #expect(try await local.status("GET", "/status", token: local.token) == 200)
+        await bench.server.stop()
+    }
+
+    /// A port somebody else already holds is a problem to report, not a listener to
+    /// pretend to have — and on the fixed swarm port it is the likeliest conflict there is.
+    @Test func aPortAlreadyHeldIsReportedRatherThanAssumed() async throws {
+        let bench = try await Bench(discovering: "127.0.0.1")
+        defer { bench.tearDown() }
+        // Held without endpoint reuse, which is what makes the second bind a real conflict.
+        let (squatter, port) = try await Self.holdALoopbackPort()
+        defer { squatter.cancel() }
+
+        try await bench.server.start(
+            exposeToTailnet: true, swarmToken: Bench.swarmToken, tailnetPort: port
+        )
+        try await Self.waitUntil { await bench.server.tailnetError != nil }
+        #expect(await bench.server.exposure.listening == false)
+        #expect(await bench.server.exposure.problem != nil)
+        await bench.server.stop()
+    }
+
     // MARK: - One listener, two features
 
     /// The swarm and Silicon Buddy want the same address on the same port. They get one
@@ -151,7 +203,12 @@ struct TailnetExposureTests {
 
             #expect(await fixture.server.tailnetOwnership == [.swarm, .buddy])
             #expect(await fixture.server.tailnetEndpoint == before)
-            #expect(await BuddyControlTests.reachable(port: fixture.peerPort))
+            try await Self.waitUntil { await BuddyControlTests.reachable(port: fixture.peerPort) }
+            // Counted, not inferred: two listeners on one address:port would present the
+            // same endpoint and answer the same probe, and only one of them would be
+            // getting the connections at any moment.
+            #expect(fixture.bench.ledger.opened == 1)
+            #expect(fixture.bench.ledger.live == 1)
 
             // Both credentials, one door.
             let paired = try await fixture.pair()
@@ -248,6 +305,89 @@ struct TailnetExposureTests {
         }
     }
 
+    /// Twenty-four toggles is still one socket — or none, when nobody is left holding it.
+    /// Ownership that leaked would show up here as a second open.
+    @Test func rapidTogglingLeavesExactlyOneListenerOrNone() async throws {
+        try await withExposedServer { fixture in
+            for _ in 0..<12 {
+                try await fixture.allowDevices(true)
+                try await fixture.allowDevices(false)
+            }
+            #expect(await fixture.server.tailnetOwnership == .swarm)
+            #expect(fixture.bench.ledger.live == 1)
+            // The endpoint never changed, so nothing ever had to be rebound.
+            #expect(fixture.bench.ledger.opened == 1)
+            try await Self.waitUntil { await BuddyControlTests.reachable(port: fixture.peerPort) }
+
+            try await fixture.server.setTailnetAccess(address: nil, for: .swarm)
+            #expect(fixture.bench.ledger.live == 0)
+            #expect(await fixture.server.tailnetEndpoint == nil)
+        }
+    }
+
+    /// The control token is this Mac's own: minted per launch, published in a 0600 file,
+    /// meaningful only to a process that can read it. Out on the tailnet it is not a
+    /// credential at all — which is what makes "only this Mac" on `/buddy/devices` and
+    /// `POST /jev` literally true rather than nearly true.
+    @Test func theControlTokenIsRefusedOnTheTailnetListener() async throws {
+        try await withExposedServer { fixture in
+            try await fixture.allowDevices(true)
+            let control = fixture.local.token
+
+            #expect(try await fixture.peer.status("GET", "/status", token: control) == 401)
+            #expect(try await fixture.peer.status(
+                "GET", "/buddy/devices", token: control
+            ) == 401)
+            #expect(try await fixture.peer.status(
+                "POST", "/jev", token: control, body: #"{"enabled":true}"#
+            ) == 401)
+            // Including the copy of it a browser source carries in a URL, which is the one
+            // form of this token that leaks through history, logs and referrers.
+            #expect(try await fixture.peer.status(
+                "GET", "/overlay?token=\(control)", token: nil
+            ) == 404)
+
+            // A paired device still works out there, and the control token still works here.
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status("GET", "/status", token: paired.token) == 200)
+            #expect(try await fixture.local.status("GET", "/buddy/devices", token: control) == 200)
+            #expect(try await fixture.local.status(
+                "POST", "/jev", token: control, body: #"{"enabled":true}"#
+            ) == 200)
+        }
+    }
+
+    /// The security property against the real interfaces rather than a stand-in: a listener
+    /// pinned to this Mac's tailscale address answers there and nowhere else, and loopback
+    /// answers nowhere but loopback. Skipped, visibly, on a machine without both addresses
+    /// — a check that quietly passes because it found nothing to test is worse than absent.
+    @Test(
+        .enabled(
+            if: TailnetExposureTests.machineTailnetAddress != nil
+                && TailnetExposureTests.nonLoopbackIPv4() != nil,
+            "This Mac needs both a tailscale address and an ordinary LAN address"
+        )
+    )
+    func neitherListenerAnswersAtThisMacsLANAddress() async throws {
+        let tailnet = try #require(Self.machineTailnetAddress)
+        let lan = try #require(Self.nonLoopbackIPv4())
+        let bench = try await Bench(discovering: tailnet)
+        defer { bench.tearDown() }
+        let port = try await BuddyControlTests.freeLoopbackPort()
+        try await bench.server.start(
+            exposeToTailnet: true, swarmToken: Bench.swarmToken, tailnetPort: port
+        )
+        let local = try await bench.loopbackClient()
+        try await Self.waitUntil { await bench.server.tailnetEndpoint != nil }
+
+        // Reachable where it is meant to be…
+        try await Self.waitUntil { await Self.answers(host: tailnet, port: port) }
+        // …and nowhere else. A 0.0.0.0 bind would answer both of these.
+        #expect(!(await Self.answers(host: lan, port: port)))
+        #expect(!(await Self.answers(host: lan, port: local.port)))
+        await bench.server.stop()
+    }
+
     // MARK: - The bench
 
     /// A control server with a private handshake file and registry, an injected tailnet
@@ -262,11 +402,17 @@ struct TailnetExposureTests {
         let server: ControlServer
         let session: URLSession
 
+        /// Every listener this server opens and closes, so a test can count sockets
+        /// instead of inferring them from an endpoint that would look the same either way.
+        let ledger: ListenerLedger
+
         init(discovering address: String?) async throws {
             try await self.init(discovering: DiscoveryBox(address: address))
         }
 
         init(discovering discovery: DiscoveryBox) async throws {
+            let ledger = ListenerLedger()
+            self.ledger = ledger
             directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("tailnet-exposure-\(UUID())")
             try FileManager.default.createDirectory(
@@ -278,8 +424,10 @@ struct TailnetExposureTests {
             server = ControlServer(
                 host: host, handshakeURL: handshakeURL, buddy: registry,
                 events: BuddyEventHub(),
-                // Never the real CLI: a test must not bind whatever tailnet this machine is on.
-                discoverTailnetAddress: { discovery.current }
+                // Never the real CLI unless a test says so explicitly: a test must not bind
+                // whatever tailnet this machine happens to be on by accident.
+                discoverTailnetAddress: { discovery.current },
+                tailnetBindObserver: { ledger.record($0) }
             )
             let configuration = URLSessionConfiguration.ephemeral
             configuration.timeoutIntervalForRequest = 20
@@ -353,9 +501,13 @@ struct TailnetExposureTests {
                 exposeToTailnet: true, swarmToken: Bench.swarmToken, tailnetPort: port
             )
             let local = try await bench.loopbackClient()
-            guard await bench.server.tailnetEndpoint != nil,
-                  await BuddyControlTests.reachable(port: port)
-            else {
+            // A bind is not instant and `tailnetEndpoint` deliberately stays nil until the
+            // kernel says the listener is ready, so this waits rather than sampling once.
+            let up = (try? await Self.waitUntil {
+                guard await bench.server.tailnetEndpoint != nil else { return false }
+                return await BuddyControlTests.reachable(port: port)
+            }) != nil
+            guard up else {
                 await bench.server.stop()
                 bench.tearDown()
                 guard attempt < 7 else { throw TailnetTestError.timeout }
@@ -371,6 +523,46 @@ struct TailnetExposureTests {
         }
         throw TailnetTestError.timeout
     }
+
+    // MARK: - Waiting, holding, looking
+
+    static func waitUntil(
+        _ seconds: Double = 5, _ condition: @Sendable () async -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + .seconds(seconds)
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw TailnetTestError.timeout }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// Takes a loopback port and holds it *without* endpoint reuse, so a second bind of it
+    /// conflicts the way a real squatter does rather than quietly sharing the socket.
+    ///
+    /// Retried across candidates: a port that was free a moment ago can be taken by another
+    /// suite in this process before this bind lands, and a squatter that never came up
+    /// would look exactly like the conflict it is here to arrange.
+    static func holdALoopbackPort() async throws -> (NWListener, Int) {
+        for _ in 0..<8 {
+            let port = try await BuddyControlTests.freeLoopbackPort()
+            let parameters = NWParameters.tcp
+            parameters.requiredInterfaceType = .loopback
+            let listener = try NWListener(
+                using: parameters, on: NWEndpoint.Port(rawValue: UInt16(port))!
+            )
+            listener.newConnectionHandler = { $0.cancel() }
+            listener.start(queue: .global(qos: .userInitiated))
+            if (try? await waitUntil(2, { listener.state == .ready })) != nil {
+                return (listener, port)
+            }
+            listener.cancel()
+        }
+        throw TailnetTestError.timeout
+    }
+
+    /// This Mac's real tailscale address, asked once. Only the test that proves the bind
+    /// against real interfaces uses it, and only when it exists.
+    static let machineTailnetAddress = SwarmPairing.tailnetIPv4()
 
     // MARK: - Reaching this Mac by its own network address
 
@@ -409,6 +601,34 @@ struct TailnetExposureTests {
             return false
         }
         return (response as? HTTPURLResponse)?.statusCode == 200
+    }
+}
+
+/// Every tailnet listener a server opened and closed, in order. Counting sockets is the
+/// only way to tell "both features share one listener" from "both features have one each
+/// on the same address" — the endpoint, and every probe of it, look identical either way.
+final class ListenerLedger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opens = 0
+    private var closes = 0
+
+    /// Non-nil is a listener that became ready; nil is one that was closed.
+    func record(_ endpoint: ControlServer.TailnetEndpoint?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if endpoint == nil { closes += 1 } else { opens += 1 }
+    }
+
+    var opened: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return opens
+    }
+
+    var live: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return opens - closes
     }
 }
 

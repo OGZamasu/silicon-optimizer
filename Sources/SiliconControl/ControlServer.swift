@@ -40,9 +40,14 @@ public actor ControlServer {
     /// Who currently needs it. Both features want the same address and the same port, so
     /// this is ownership of one socket rather than a second listener each.
     private var tailnetOwners: TailnetOwners = []
-    /// What the live tailnet listener is actually bound to, so a changed address or port
-    /// rebinds instead of being quietly ignored.
+    /// What the live tailnet listener is actually bound to — set when the kernel says the
+    /// listener is ready, never before — so a changed address or port rebinds instead of
+    /// being quietly ignored, and nothing claims to be reachable until it is.
     private var boundEndpoint: TailnetEndpoint?
+    /// What a bind in flight asked for. A listener waiting on an address this Mac does not
+    /// hold sits here rather than in `boundEndpoint`, which is the difference between "not
+    /// up yet" and "up".
+    private var pendingEndpoint: TailnetEndpoint?
     /// Why the tailnet listener is not up, when it was asked for and could not be.
     public private(set) var tailnetError: String?
     private var activeEventStreams = 0
@@ -50,6 +55,10 @@ public actor ControlServer {
     /// found. Both are injected so the tests can drive them without a tailnet or a stall.
     private let eventWriteDeadline: Duration
     private let discoverTailnetAddress: @Sendable () -> String?
+    /// Called with the endpoint every time a tailnet listener becomes ready, and with nil
+    /// every time one is closed. Nil in the app; the tests count these to prove that two
+    /// features asking for the listener produce one socket and not two.
+    private let tailnetBindObserver: (@Sendable (TailnetEndpoint?) -> Void)?
 
     /// Streams open right now. Read by the tests that prove a dead client is reaped.
     public var openEventStreams: Int { activeEventStreams }
@@ -95,7 +104,8 @@ public actor ControlServer {
         eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
             SwarmPairing.tailnetIPv4()
-        }
+        },
+        tailnetBindObserver: (@Sendable (TailnetEndpoint?) -> Void)? = nil
     ) {
         self.host = host
         self.handshakeURL = handshakeURL
@@ -103,6 +113,7 @@ public actor ControlServer {
         self.events = events
         self.eventWriteDeadline = eventWriteDeadline
         self.discoverTailnetAddress = discoverTailnetAddress
+        self.tailnetBindObserver = tailnetBindObserver
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
         self.token = UUID().uuidString
     }
@@ -126,6 +137,9 @@ public actor ControlServer {
         self.swarmToken = secret.isEmpty ? nil : secret
         self.swarmExposureRequested = exposed
         if let tailnetPort { self.tailnetPortOverride = tailnetPort }
+        // The swarm's half of the ownership, set here and nowhere else — `refreshTailnetAccess`
+        // owns Silicon Buddy's bit and leaves this one alone.
+        setTailnetOwners(exposed ? tailnetOwners.union(.swarm) : tailnetOwners.subtracting(.swarm))
 
         let parameters = NWParameters.tcp
         // Loopback only. This must never be reachable from the network — an exposed swarm
@@ -247,10 +261,15 @@ public actor ControlServer {
     public var listeningPort: Int { port }
 
     /// What Settings and `GET /swarm` say about reaching this Mac from elsewhere.
+    ///
+    /// "Listening" means the kernel has handed us the port, not that a listener object
+    /// exists: one waiting on an address this Mac does not hold is an object with nothing
+    /// behind it, and reporting that as reachable is how a QR code ends up pointing at a
+    /// dead port.
     public var exposure: ControlAPI.SwarmView.Exposure {
         ControlAPI.SwarmView.Exposure(
             requested: swarmExposureRequested,
-            listening: tailnetListener != nil,
+            listening: tailnetEndpoint != nil,
             address: tailnetEndpoint?.address,
             port: tailnetEndpoint?.port,
             problem: tailnetError
@@ -298,24 +317,31 @@ public actor ControlServer {
 
     private func currentOwners() -> TailnetOwners { tailnetOwners }
 
-    /// Records what each feature wants, and reports whether anyone still wants the
-    /// listener. Closing it here — rather than wherever an address happens to arrive — is
-    /// what lets the two share it: turning Silicon Buddy off while the swarm is exposed
-    /// leaves the socket up and only stops device bearers meaning anything on it.
-    private func claimTailnetListener(forBuddy wantedByBuddy: Bool) -> Bool {
-        var owners: TailnetOwners = []
-        if swarmExposureRequested { owners.insert(.swarm) }
-        if wantedByBuddy { owners.insert(.buddy) }
+    /// The one place ownership changes, so "who wants the listener" and "is the listener
+    /// up" can never disagree. Everything else computes the set it wants and comes here.
+    ///
+    /// Closing here — rather than wherever an address happens to arrive — is what lets the
+    /// two features share the socket: turning Silicon Buddy off while the swarm is exposed
+    /// leaves it up and only stops device bearers meaning anything on it.
+    @discardableResult
+    private func setTailnetOwners(_ owners: TailnetOwners) -> Bool {
         tailnetOwners = owners
         guard owners.isEmpty else { return true }
-        withdrawTailnetListener()
-        return false
-    }
-
-    private func withdrawTailnetListener() {
         tailnetAddress = nil
         tailnetError = nil
         closeTailnetListener()
+        return false
+    }
+
+    /// Silicon Buddy's half of the ownership, from `buddy.json`.
+    ///
+    /// Only its own bit: the swarm's is claimed in `start` and released there or through
+    /// `setTailnetAccess`, and a refresh that recomputed it would quietly undo a claim it
+    /// knows nothing about — which is one feature deciding another feature's business.
+    private func claimTailnetListener(forBuddy wantedByBuddy: Bool) -> Bool {
+        var owners = tailnetOwners
+        if wantedByBuddy { owners.insert(.buddy) } else { owners.remove(.buddy) }
+        return setTailnetOwners(owners)
     }
 
     private func discovery() -> @Sendable () -> String? { discoverTailnetAddress }
@@ -329,15 +355,13 @@ public actor ControlServer {
         address: String?, port overridePort: Int? = nil, for owner: TailnetOwners = .buddy
     ) throws {
         guard let address else {
-            tailnetOwners.subtract(owner)
-            guard tailnetOwners.isEmpty else { return }
-            withdrawTailnetListener()
+            setTailnetOwners(tailnetOwners.subtracting(owner))
             return
         }
         guard Self.isBindableTailnetAddress(address) else {
             throw TailnetBindError.unacceptableAddress(address)
         }
-        tailnetOwners.formUnion(owner)
+        setTailnetOwners(tailnetOwners.union(owner))
         tailnetAddress = address
         if let overridePort { tailnetPortOverride = overridePort }
         tailnetError = nil
@@ -379,14 +403,16 @@ public actor ControlServer {
               let boundPort = NWEndpoint.Port(rawValue: UInt16(wanted))
         else { return }
         let endpoint = TailnetEndpoint(address: address, port: wanted)
-        // One listener, whoever asked. A second bind of the same address:port is either
-        // refused or — with the endpoint reuse this sets — quietly splits the connections
-        // between two sockets, which is how half a phone's requests would start vanishing.
+        // One listener, whoever asked: a second `NWListener` on the same address and port
+        // fails with EADDRINUSE while the first one holds it, so asking twice would turn a
+        // working feature into an error message.
         //
         // A tailscale address can change under the app — a re-auth, a different tailnet. A
         // listener still bound to yesterday's endpoint is a feature that silently stopped.
-        if let bound = boundEndpoint {
-            guard bound != endpoint else { return }
+        // `pendingEndpoint` counts here too: a bind that has not finished is still a bind
+        // in progress, and starting a second one beside it is how two listeners happen.
+        if let existing = boundEndpoint ?? pendingEndpoint {
+            guard existing != endpoint else { return }
             closeTailnetListener()
         }
 
@@ -401,15 +427,44 @@ public actor ControlServer {
                 Task { await self?.accept(connection, from: .tailnet) }
             }
             listener.stateUpdateHandler = { [weak self] state in
-                guard case .failed(let error) = state else { return }
-                Task { await self?.noteTailnetError(error.localizedDescription) }
+                switch state {
+                case .ready:
+                    Task { await self?.noteTailnetReady(endpoint) }
+                case .waiting(let error), .failed(let error):
+                    // `.waiting` is not "nearly there": asked for an address this Mac does
+                    // not hold, Network.framework waits on EADDRNOTAVAIL forever while
+                    // nothing listens. Treating it as the failure it is keeps the retry
+                    // armed instead of leaving a dead port in a QR code.
+                    Task {
+                        await self?.noteTailnetError(
+                            "Could not bind \(endpoint.address):\(endpoint.port) — "
+                                + error.localizedDescription,
+                            from: endpoint
+                        )
+                    }
+                default:
+                    break
+                }
             }
             listener.start(queue: .global(qos: .userInitiated))
             tailnetListener = listener
-            boundEndpoint = endpoint
+            // Not bound yet — only the `.ready` above may claim that, because until the
+            // kernel says so there is nothing on the other end of this port.
+            pendingEndpoint = endpoint
         } catch {
             tailnetError = error.localizedDescription
         }
+    }
+
+    /// The kernel has actually given us the port. Only now is anything reachable, and only
+    /// now may `exposure` say so.
+    private func noteTailnetReady(_ endpoint: TailnetEndpoint) {
+        // A callback from a listener we have since cancelled must not resurrect it.
+        guard tailnetListener != nil, pendingEndpoint == endpoint else { return }
+        pendingEndpoint = nil
+        boundEndpoint = endpoint
+        tailnetError = nil
+        tailnetBindObserver?(endpoint)
     }
 
     /// Records why the listener is down and leaves it down until something asks again.
@@ -417,16 +472,22 @@ public actor ControlServer {
     /// already failed, in a loop, for as long as the app runs. The ownership stays, so the
     /// next refresh rediscovers the address and tries once more — which is what brings the
     /// listener up by itself after tailscale comes back.
-    private func noteTailnetError(_ message: String) {
+    private func noteTailnetError(_ message: String, from endpoint: TailnetEndpoint? = nil) {
+        // A late failure from a listener that has already been replaced says nothing about
+        // the one that is up now.
+        if let endpoint, endpoint != (boundEndpoint ?? pendingEndpoint) { return }
         tailnetError = message
         tailnetAddress = nil
         closeTailnetListener()
     }
 
     public func closeTailnetListener() {
+        let wasThere = tailnetListener != nil
         tailnetListener?.cancel()
         tailnetListener = nil
         boundEndpoint = nil
+        pendingEndpoint = nil
+        if wasThere { tailnetBindObserver?(nil) }
     }
 
     // MARK: - Connection handling
@@ -501,14 +562,16 @@ public actor ControlServer {
                 // this client no longer wants the synchronous response. Keep a
                 // receive outstanding so Network.framework notices a FIN/RST
                 // while the route is waiting, not only at response.write().
-                let waiting = Task { await route(request, as: caller, from: source) }
+                let waiting = Task {
+                    await route(request, as: caller, from: source, on: origin)
+                }
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
                     if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
                 }
                 response = await waiting.value
                 guard !waiting.isCancelled else { return }
             } else {
-                response = await route(request, as: caller, from: source)
+                response = await route(request, as: caller, from: source, on: origin)
             }
             try await response.write(to: connection)
         } catch {
@@ -607,7 +670,13 @@ public actor ControlServer {
 
     private func identify(_ request: HTTPRequest, from origin: Origin) async -> Caller? {
         guard let bearer = request.bearerToken else { return nil }
-        if bearer == token { return .control }
+        // The control token is this Mac's own: minted per launch, published in a 0600
+        // handshake file, and meaningful only to processes that can read it. It is not a
+        // remote credential, so it is not one out on the tailnet — the designed ones there
+        // are the swarm token and a paired device's. That is what makes "only this Mac"
+        // — on `/buddy/devices`, on `POST /jev` — literally true rather than nearly true:
+        // a phone or a peer cannot hold the token those routes ask for.
+        if bearer == token { return origin == .primary ? .control : nil }
         if let swarmToken, !swarmToken.isEmpty, bearer == swarmToken,
            honoursSwarmToken(from: origin) {
             return .swarm
@@ -634,7 +703,8 @@ public actor ControlServer {
             // is over. A pairing request is a hundred bytes.
             return BuddyLimits.unauthenticatedBodyBytes
         }
-        if bearer == token { return HTTPRequest.maximumBody }
+        // Not `bearer == token`: out here the control token buys nothing at all, so it
+        // must not buy a bigger body either.
         if swarmToken.map({ !$0.isEmpty && bearer == $0 }) ?? false,
            honoursSwarmToken(from: origin) {
             return HTTPRequest.maximumBody
@@ -846,7 +916,7 @@ public actor ControlServer {
     }
 
     private func route(
-        _ request: HTTPRequest, as caller: Caller?, from source: String
+        _ request: HTTPRequest, as caller: Caller?, from source: String, on origin: Origin
     ) async -> HTTPResponse {
         // /health is unauthenticated so a client can tell "app not running" from "bad token".
         if request.path == "/health" {
@@ -856,6 +926,12 @@ public actor ControlServer {
         // cannot set headers, so these three routes accept the token either way. They
         // are read-only and serve nothing but the character currently on screen.
         if request.path.hasPrefix("/overlay") {
+            // Loopback only, like the token it asks for. OBS runs on this Mac, and a token
+            // in a URL is the one credential that leaks through a browser's history, logs
+            // and referrers — it must not be a way back in from the tailnet.
+            guard origin == .primary else {
+                return .error(404, "Unknown endpoint \(request.method) \(request.path)")
+            }
             guard request.query["token"] == token || request.bearerToken == token else {
                 return .error(401, "Invalid or missing control token.")
             }

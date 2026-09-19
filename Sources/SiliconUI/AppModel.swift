@@ -1109,6 +1109,10 @@ public final class AppModel {
     /// Polls every registry peer's `/v1/node` — the read-only swarm. Parsed leniently:
     /// a peer that renames a field degrades to "reachable, details unknown", not a crash.
     public func refreshSwarm() async {
+        // Before the peer guard, not after: exposure rides the same tailnet these peers do,
+        // and a Mac with no peers configured yet is exactly the one still being set up —
+        // the one whose listener most needs another try after tailscale comes up.
+        await SwarmExposure.shared.retry(server: controlServer)
         guard let config = SwarmConfig.load(), !config.peers.isEmpty else {
             swarmPeers = []
             return
@@ -1124,9 +1128,6 @@ public final class AppModel {
             $0.name.localizedCompare($1.name) == .orderedAscending
         }
         lastSwarmPoll = Date()
-        // Exposure rides the same tailnet these peers do: if tailscale was down when the
-        // app launched, this poll is also the retry that brings our own listener up.
-        await SwarmExposure.shared.retry(server: controlServer)
         reconcileInitialVideoSelection()
         syncSwarmChatProviders()
         // Give this Mac its own per-client identity wherever a node can mint one, so

@@ -257,7 +257,7 @@ struct DashboardView: View {
                             .foregroundStyle(.tertiary)
                     }
                     HStack {
-                        Text(SwarmExposure.shared.isListening
+                        Text(SwarmExposure.shared.isReachableByPeers
                             ? "This Mac is reachable by its peers on your tailnet."
                             : SwarmExposure.shared.summary)
                             .font(.caption2)

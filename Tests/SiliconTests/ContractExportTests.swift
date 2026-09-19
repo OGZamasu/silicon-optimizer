@@ -625,8 +625,10 @@ struct ContractExportTests {
                     capabilities: [.init(id: "image-to-mesh", kind: "mesh", ready: true)]
                 )],
                 polledSecondsAgo: 4,
+                // This Mac's own tailnet address, not a peer's: the block says where
+                // *we* can be reached, which is the half of the swarm a node cannot see.
                 exposure: .init(
-                    requested: true, listening: true, address: "100.118.191.121",
+                    requested: true, listening: true, address: "100.115.9.42",
                     port: 8788, problem: nil
                 )
             ))

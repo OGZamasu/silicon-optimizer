@@ -256,22 +256,30 @@ in the middle. If a device is not on your tailnet it cannot see this Mac at all.
 **Settings → Silicon Buddy → "Allow Silicon Buddy devices on the tailnet"** is the whole
 switch, and it is off until you turn it on. With it off, device tokens are refused
 everywhere and the control API is what it has always been: bound to `127.0.0.1`, one token,
-local processes only. With it on, a *second* listener goes up on this Mac's tailscale
+local processes only. With it on, **one shared listener** goes up on this Mac's tailscale
 address at port 8788 — the same routes — and the loopback one is untouched. It is never
 bound to `0.0.0.0`; the app parses the address and refuses anything that is not a tailnet or
 loopback literal, so a café Wi-Fi never sees it. If this Mac has no tailscale address, the
-listener does not go up at all and Settings says to join the tailnet first.
+listener does not go up at all, Settings says to join the tailnet first, and the app retries
+by itself when tailscale comes back (there is a Retry beside the line, too).
 
-That second listener is the *same one* the swarm uses — "Let other Silicon nodes reach this
-Mac over your tailnet" binds exactly this address and port, and whichever feature asks for it
-first, there is only ever one socket. The two toggles then decide which bearers mean anything
-on it: device tokens while Silicon Buddy is on, the shared swarm token while swarm access is
-on. Turn one off and the listener stays up for the other, with that one's credentials refused
-from the next request onward.
+It is *shared* with the swarm — "Let other Silicon nodes reach this Mac over your tailnet"
+binds exactly this address and port, and whichever feature asks for it first, there is only
+ever one socket. The two toggles then decide which bearers mean anything on it, and turning
+one off leaves the listener up for the other with that one's credentials refused from the
+next request onward.
 
-A device token is a credential **only on that listener**. Presented to the loopback listener
-it is not a credential at all — which is what keeps a phone that has left the house, or been
-lost with its token on it, from authenticating through any local process on the Mac.
+There are three credentials, and each one is honoured in exactly one place:
+
+| Credential | Loopback (`127.0.0.1`) | Tailnet listener (`100.x:8788`) |
+| --- | --- | --- |
+| **Control token** — new every launch, in a `0600` handshake file | Yes: this Mac's own processes, the MCP bridge, the OBS overlay | **No.** Not a remote credential, so "only this Mac" on `/buddy/devices` and `POST /jev` is literally true |
+| **Swarm token** — shared, from `swarm.json` | Yes | Only while swarm access is on |
+| **Device token** — 32 bytes, minted at pairing | **No**, whatever it says | Only while Silicon Buddy is on, and only within the device's scope |
+
+A device token being refused on loopback is what keeps a phone that has left the house, or
+been lost with its token on it, from authenticating through some local process on the Mac;
+the control token being refused on the tailnet is the same rule from the other side.
 
 **Pairing** is a QR code. "Pair a device" asks how much of the Mac this one gets — **Full
 control** or **Chat only** — then shows a six-digit code and a QR encoding
@@ -290,8 +298,14 @@ because you are standing over the device approving it by hand.
 
 The Mac keeps only a SHA-256 of each device token, in
 `~/Library/Application Support/SiliconOptimizer/buddy.json`, alongside the device's name,
-platform, scope, when it paired and when it was last seen. A copy of that file cannot be
-replayed against the server.
+platform, scope, the port it was told to dial, when it paired and when it was last seen. A
+copy of that file cannot be replayed against the server.
+
+The listener's port is fixed at 8788 rather than following loopback's, which changes every
+launch — so a paired phone can find this Mac again after a restart. Devices paired by the
+first version, which handed out that moving port, cannot: their row says *paired before the
+port moved — pair again*, `GET /buddy/devices` carries the same thing as `needsRepair`, and
+pairing them again is the whole fix.
 
 **Revoking** is immediate and reaches work already in flight: Revoke beside a row in Settings
 ends that device's open `/events` subscription and any answer it has streaming, then and
@@ -383,7 +397,9 @@ a 429 or 529 is retried with backoff that honours TypeSafe's `retry-after-ms` or
 `GET /jev` returns all of it — settings, per-feature availability, the ledger, never the key
 — and the `jev_status` MCP tool prints the same thing. `POST /jev` changes the settings and
 takes this Mac's own control token: a paired phone may read what Jev costs but not decide
-what it spends.
+what it spends. That token is only a credential on loopback (see the
+[credential table](#silicon-buddy)), so "this Mac's own" is the literal truth — a caller out
+on the tailnet cannot present it at all, whatever it has learnt.
 
 > **If you were already using the `decide` tool with a TypeSafe key:** a stored key used to
 > be enough. It is not any more. `provider: "typesafe"`, and the `auto` fallback when no
@@ -540,9 +556,10 @@ model. It reaches beyond loopback in exactly one way: a second listener on your 
 address, port 8788, which both the swarm and [Silicon Buddy](#silicon-buddy) share and which
 either of them can ask for. Everything that is not loopback is tailnet-only. The address is
 parsed and checked against 100.64/10 before anything is bound, so `0.0.0.0`, a LAN address,
-or a hostname that merely looks like a tailnet one is refused rather than bound; the swarm
-also needs a shared token in `swarm.json` before it will ask at all, and a device token is
-honoured only out on that listener and only while Silicon Buddy is on. The app is not
+or a hostname that merely looks like a tailnet one is refused rather than bound, and nothing
+is reported as reachable until the kernel has actually granted the port. The swarm also needs
+a shared token in `swarm.json` before it will ask at all; the [credential table](#silicon-buddy)
+says which bearer is honoured where, and the control token is not one of them out there. The app is not
 sandboxed, because it launches engine binaries you may keep anywhere and reads model files
 from arbitrary paths; neither works under App Sandbox.
 
