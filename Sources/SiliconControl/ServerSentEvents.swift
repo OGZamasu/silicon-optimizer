@@ -77,6 +77,11 @@ actor EventStreamWriter {
         try await send(event: event.name, data: try event.encoded())
     }
 
+    /// A frame the hub has already encoded — once, for every subscriber it went to.
+    func send(_ frame: BuddyEvent.Frame) async throws {
+        try await send(event: frame.name, data: frame.data)
+    }
+
     /// Says no. Before the first frame that is an ordinary HTTP status, which is what a
     /// phone can act on; afterwards the head is long gone and an `error` event is all that
     /// is left. Deciding late is why nothing is written until a route has actually started.

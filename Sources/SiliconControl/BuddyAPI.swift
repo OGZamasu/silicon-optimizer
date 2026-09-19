@@ -287,6 +287,21 @@ extension ControlAPI {
         public init(at: String) { self.at = at }
     }
 
+    /// The `resync` frame: this stream fell behind and frames were dropped to catch it up.
+    ///
+    /// A subscriber that reads slower than the Mac writes keeps the newest frames and loses
+    /// the oldest — a phone on a bad link wants now, not a queue of every percentage point
+    /// it missed. That trade is only honest if the phone is *told*, so this frame follows
+    /// any drop. What to do about it is the same for every kind of frame: fetch what you
+    /// show again — `GET /status`, `GET /video/queue`, and each agent session with the
+    /// `since`/`epoch` you last had, which answers exactly what the dropped frames carried.
+    public struct ResyncEvent: Codable, Sendable, Equatable {
+        /// How many frames were dropped since the last `resync`.
+        public var dropped: Int
+
+        public init(dropped: Int) { self.dropped = dropped }
+    }
+
     // MARK: - Conversations
 
     public struct ConversationSummary: Codable, Sendable, Equatable, Identifiable {

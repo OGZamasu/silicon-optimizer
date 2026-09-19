@@ -319,8 +319,12 @@ extension AppModel {
         BuddyEventPump.shared.start(watching: self, hub: hub)
         // Its own watcher rather than another field on this one: the agent sessions are
         // sampled ten times a second so streamed prose arrives promptly, and the status
-        // and download frames have no use for that rate.
-        AgentEventPump.shared.start(watching: self, hub: hub)
+        // and download frames have no use for that rate. Started only for a subscriber
+        // allowed to see them — a chat-only phone or the swarm on `/events` is sent no
+        // agent frames, so reading transcripts on its behalf would be work for nothing.
+        if await hub.agentAudienceCount > 0 {
+            AgentEventPump.shared.start(watching: self, hub: hub)
+        }
     }
 
     /// What a subscriber would want to know right now. Built whole and diffed, rather than

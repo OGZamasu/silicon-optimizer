@@ -20,8 +20,11 @@ public enum BuddyEvent: Sendable {
     ///
     /// Posted from the Mac's own state rather than from the routes, which is what makes
     /// the owner's typing and the owner's approvals show up on the phone exactly as a
-    /// phone's do.
+    /// phone's do. Delivered only to an audience that may see agent sessions — see
+    /// `BuddyEventHub.Audience`.
     case agent(ControlAPI.AgentEvent)
+    /// This subscriber fell behind and lost frames. See `ControlAPI.ResyncEvent`.
+    case resync(ControlAPI.ResyncEvent)
 
     public var name: String {
         switch self {
@@ -31,6 +34,7 @@ public enum BuddyEvent: Sendable {
         case .heartbeat: "heartbeat"
         case .verdict: "verdict"
         case .agent: "agent"
+        case .resync: "resync"
         }
     }
 
@@ -46,7 +50,29 @@ public enum BuddyEvent: Sendable {
         case .heartbeat(let value): return try encoder.encode(value)
         case .verdict(let value): return try encoder.encode(value)
         case .agent(let value): return try encoder.encode(value)
+        case .resync(let value): return try encoder.encode(value)
         }
+    }
+
+    /// A frame as it goes down the wire: its event name and its bytes, encoded once.
+    ///
+    /// The hub encodes when it posts rather than each writer when it sends, so three phones
+    /// watching a transcript cost one encoding of each row rather than three.
+    public struct Frame: Sendable, Equatable {
+        public var name: String
+        public var data: Data
+
+        public init(name: String, data: Data) {
+            self.name = name
+            self.data = data
+        }
+    }
+
+    /// Whether this is one of the frames that describe an agent session — and so one only
+    /// an audience that may drive those sessions is sent.
+    var describesAgentSession: Bool {
+        if case .agent = self { return true }
+        return false
     }
 }
 
@@ -59,51 +85,172 @@ public actor BuddyEventHub {
 
     public static let shared = BuddyEventHub()
 
-    private var listeners: [UUID: AsyncStream<BuddyEvent>.Continuation] = [:]
-    /// The scope behind each subscription, for the one thing the hub is asked about it: how
-    /// many paired devices with full control are watching right now. Nil for this Mac's own
-    /// token and for the swarm, neither of which is a Silicon Buddy.
-    private var scopes: [UUID: BuddyScope] = [:]
+    /// Who a subscription is for, which decides what it is sent.
+    ///
+    /// A security boundary rather than bookkeeping. `/events` is open to every credential
+    /// this server honours, and most of what it carries — the loaded model, a download, a
+    /// render — is fine for all of them. An agent session is not: a transcript carries the
+    /// commands an agent ran and what they printed, and an approval names what it is about
+    /// to do. A device paired for chat was deliberately given less than that, and the
+    /// swarm secret is a node's credential, not a person's; neither may call the agent
+    /// routes, and neither is sent what those routes would have answered.
+    public enum Audience: Sendable, Equatable {
+        /// This Mac's own control token, on its own loopback listener.
+        case thisMac
+        /// A paired phone or tablet, at the scope it was paired for.
+        case device(id: String, scope: BuddyScope)
+        /// The swarm secret.
+        case peer
+
+        /// Whether `agent` frames may be sent to this audience — the same rule the agent
+        /// routes enforce, so the side channel cannot tell anyone more than the front door.
+        public var seesAgentSessions: Bool {
+            switch self {
+            case .thisMac, .device(_, .full): true
+            case .device(_, .chat), .peer: false
+            }
+        }
+    }
+
+    private var listeners: [UUID: AsyncStream<BuddyEvent.Frame>.Continuation] = [:]
+    private var audiences: [UUID: Audience] = [:]
+    /// Frames dropped per subscriber since it was last told. See `ControlAPI.ResyncEvent`.
+    private var dropped: [UUID: Int] = [:]
+    /// Agent subscribers that have not been sent their opening frames yet. The agent
+    /// watcher takes them on its next reading, so what a phone is opened with and what
+    /// changes after it come from one reading, with nothing able to fall between the two.
+    private var awaitingOpening: Set<UUID> = []
+    /// When each paired device last used an agent route. See `agentWatcherCount`.
+    private var agentActivity: [String: Date] = [:]
+
+    /// How many frames a subscriber may fall behind before the oldest are dropped.
+    public static let bufferedFrames = 32
 
     public init() {}
 
     public var subscriberCount: Int { listeners.count }
 
-    /// How many paired, full-control devices are reading `/events`.
-    ///
-    /// The Chat tab's "Silicon Buddy is watching" badge, and nothing else. Full scope
-    /// because that is exactly the set of devices that can drive an agent session: a
-    /// chat-only phone watching the same stream cannot send into Codex or answer an
-    /// approval, and saying it was watching *this* would be telling the owner something
-    /// stronger than what is true.
-    public var watchingDeviceCount: Int {
-        scopes.values.count(where: { $0 == .full })
+    /// How many subscribers may be sent agent frames. The agent watcher runs only while
+    /// this is above zero: sampling transcripts for an audience that may not see them
+    /// would spend the main actor on frames that are thrown away.
+    public var agentAudienceCount: Int {
+        audiences.values.count(where: \.seesAgentSessions)
     }
 
-    /// - Parameter scope: what the subscriber was paired for, or nil when it is not a
-    ///   paired device at all.
     public func subscribe(
-        scope: BuddyScope? = nil
-    ) -> (id: UUID, stream: AsyncStream<BuddyEvent>) {
+        as audience: Audience
+    ) -> (id: UUID, stream: AsyncStream<BuddyEvent.Frame>) {
         let id = UUID()
         // Buffering the newest few: a phone on a slow link should get the current state,
-        // not a queue of every percentage point it missed.
-        let stream = AsyncStream<BuddyEvent>(bufferingPolicy: .bufferingNewest(32)) {
-            continuation in
+        // not a queue of every percentage point it missed. A drop is announced, though —
+        // see `post`.
+        let stream = AsyncStream<BuddyEvent.Frame>(
+            bufferingPolicy: .bufferingNewest(Self.bufferedFrames)
+        ) { continuation in
             listeners[id] = continuation
         }
-        if let scope { scopes[id] = scope }
+        audiences[id] = audience
+        if audience.seesAgentSessions { awaitingOpening.insert(id) }
         return (id, stream)
     }
 
     /// Ends one subscription. Also what a cancelled `/events` task calls, because finishing
     /// the continuation is the only thing that breaks the reader out of its `for await`.
     public func cancel(_ id: UUID) {
-        scopes.removeValue(forKey: id)
+        audiences.removeValue(forKey: id)
+        dropped.removeValue(forKey: id)
+        awaitingOpening.remove(id)
         listeners.removeValue(forKey: id)?.finish()
     }
 
+    /// To every subscriber allowed to see it.
     public func post(_ event: BuddyEvent) {
-        for listener in listeners.values { listener.yield(event) }
+        deliver([event], to: { _ in true })
+    }
+
+    /// In order, to every subscriber allowed to see them except `skipped`.
+    public func post(_ events: [BuddyEvent], excluding skipped: Set<UUID>) {
+        deliver(events, to: { !skipped.contains($0) })
+    }
+
+    /// In order, to exactly these subscribers, where they are allowed to see them.
+    public func post(_ events: [BuddyEvent], to recipients: Set<UUID>) {
+        deliver(events, to: { recipients.contains($0) })
+    }
+
+    /// The agent subscribers still owed their opening frames, handed over once.
+    public func takeNewAgentSubscribers() -> Set<UUID> {
+        defer { awaitingOpening.removeAll() }
+        return awaitingOpening
+    }
+
+    private func deliver(_ events: [BuddyEvent], to chosen: (UUID) -> Bool) {
+        guard !listeners.isEmpty else { return }
+        for event in events {
+            // Encoded at most once, and only if somebody is going to receive it.
+            var frame: BuddyEvent.Frame?
+            for (id, listener) in listeners where chosen(id) {
+                // The filter that keeps a transcript away from a chat-only phone and from
+                // the swarm. Everything else goes to everyone, as it always has.
+                if event.describesAgentSession, audiences[id]?.seesAgentSessions != true {
+                    continue
+                }
+                if frame == nil {
+                    guard let data = try? event.encoded() else { break }
+                    frame = BuddyEvent.Frame(name: event.name, data: data)
+                }
+                if case .dropped = listener.yield(frame!) { dropped[id, default: 0] += 1 }
+            }
+        }
+        announceDrops()
+    }
+
+    /// Tells each subscriber that just lost frames that it did. Yielded after the frames
+    /// that pushed the old ones out, so it is among the newest and survives the buffer.
+    private func announceDrops() {
+        for (id, count) in dropped where count > 0 {
+            guard let listener = listeners[id],
+                  let data = try? BuddyEvent.resync(.init(dropped: count)).encoded()
+            else { continue }
+            dropped[id] = 0
+            if case .dropped = listener.yield(.init(name: "resync", data: data)) {
+                // The announcement itself pushed one more out; it is owed in the next.
+                dropped[id] = 1
+            }
+        }
+    }
+
+    // MARK: - Who is watching the agents
+
+    /// A paired, full-control device just used an agent route.
+    public func noteAgentActivity(deviceID: String, at moment: Date = Date()) {
+        agentActivity[deviceID] = moment
+    }
+
+    /// How many paired devices with full control are following the agent sessions: every
+    /// one with `/events` open, and every one that used an agent route within `window`.
+    ///
+    /// The Chat tab's "Silicon Buddy is watching" badge, and nothing else. Both halves,
+    /// because a phone can follow a session without holding the stream — polling
+    /// `GET /agent/sessions/{engine}`, or sending and walking away — and a badge that went
+    /// dark the moment the stream dropped would say nobody was there while a phone had just
+    /// answered an approval. Full scope only, because that is exactly the set of devices
+    /// that can reach these sessions; this Mac's own token and the swarm secret are not
+    /// devices at all.
+    public func agentWatcherCount(
+        within window: Duration = .seconds(180), now: Date = Date()
+    ) -> Int {
+        let horizon = now.addingTimeInterval(-Self.seconds(window))
+        agentActivity = agentActivity.filter { $0.value >= horizon }
+        var devices = Set(agentActivity.keys)
+        for audience in audiences.values {
+            if case .device(let id, .full) = audience { devices.insert(id) }
+        }
+        return devices.count
+    }
+
+    private static func seconds(_ duration: Duration) -> TimeInterval {
+        let (seconds, attoseconds) = duration.components
+        return TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
     }
 }

@@ -1,18 +1,21 @@
 import SiliconControl
 import SwiftUI
 
-/// One line in the Codex and Pi chat headers: somebody is looking at this session on their
-/// phone.
+/// One line in the Codex and Pi chat headers: a paired phone is following this Mac's agent
+/// sessions.
 ///
-/// It exists because the session is genuinely shared. A paired device can read this
-/// transcript, send into it and answer the approvals on it, and the owner typing at the Mac
-/// should know that without having to remember they left a phone connected in the kitchen.
+/// It exists because the sessions are genuinely shared. A device paired with full control
+/// can read these transcripts, send into them and answer their approvals, and the owner
+/// typing at the Mac should know that without having to remember they left a phone
+/// connected in the kitchen.
 ///
-/// The count comes from `BuddyEventHub`, which knows what scope each open `/events` stream
-/// was paired for. **Full scope only**, deliberately: a chat-only device reading the same
-/// stream cannot reach an agent session at all — it is refused by the scope gate — so
-/// counting it here would tell the owner something stronger than what is true. This Mac's
-/// own control token and the swarm secret are not devices and are never counted.
+/// The count comes from `BuddyEventHub.agentWatcherCount`: every full-control device with
+/// `/events` open, and every one that used an agent route in the last three minutes — a
+/// phone can follow a session by polling or by sending and walking away, and a badge that
+/// went dark whenever the stream dropped would say nobody was there just after a phone had
+/// answered an approval. **Full scope only**, because that is exactly who can reach these
+/// sessions: a device paired for chat is refused the agent routes and is sent no `agent`
+/// frames, and this Mac's own token and the swarm secret are not devices at all.
 ///
 /// Polled rather than observed: the hub is an actor with no change notification, a badge is
 /// not worth inventing one for, and two seconds is well inside the time it takes to notice
@@ -25,6 +28,9 @@ struct BuddyWatchingBadge: View {
     /// reading a person is waiting on.
     static let pollInterval: Duration = .seconds(2)
 
+    /// How long a device counts as present after its last agent request.
+    static let recentWindow: Duration = .seconds(180)
+
     var body: some View {
         Group {
             if watchers > 0 {
@@ -32,11 +38,7 @@ struct BuddyWatchingBadge: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .help(
-                        "A device paired with full control has this session open. It can "
-                        + "read the transcript, send messages and answer approvals — the "
-                        + "same session, not a copy."
-                    )
+                    .help(Self.tooltip)
                     .transition(.opacity)
             }
         }
@@ -44,7 +46,7 @@ struct BuddyWatchingBadge: View {
             // Ends with the view: the loop is cancelled when the tab goes away, and the
             // hub is asked nothing while nobody is looking at a chat.
             while !Task.isCancelled {
-                let now = await BuddyEventHub.shared.watchingDeviceCount
+                let now = await BuddyEventHub.shared.agentWatcherCount(within: Self.recentWindow)
                 if now != watchers {
                     withAnimation(.easeInOut(duration: 0.2)) { watchers = now }
                 }
@@ -61,4 +63,10 @@ struct BuddyWatchingBadge: View {
             ? "Silicon Buddy is watching"
             : "\(count) Silicon Buddies are watching"
     }
+
+    /// Says what the badge counts, including the part that is not "right now".
+    static let tooltip =
+        "A phone or tablet paired with full control is following these agent sessions — "
+        + "it has the live stream open, or used them in the last three minutes. It can read "
+        + "the transcripts, send messages and answer approvals on both Codex and Pi."
 }

@@ -1144,8 +1144,10 @@ public protocol ControlHost: AnyObject, Sendable {
     /// `GET /agent/sessions` — every engine, running or not.
     func agentSessions() async -> ControlAPI.AgentSessionList
     /// `GET /agent/sessions/{engine}` — the summary, the transcript and what is waiting.
-    /// `since` is a sequence number or an item id; nil means the whole transcript.
-    func agentSession(engine: String, since: String?) async throws -> ControlAPI.AgentSessionDetail
+    /// A slice after `since` is answered only when `epoch` names the same transcript.
+    func agentSession(
+        engine: String, query: ControlAPI.AgentSessionQuery
+    ) async throws -> ControlAPI.AgentSessionDetail
     /// `POST /agent/sessions/{engine}/start` — exactly what opening the tab does, and
     /// idempotent for the same reason opening it twice is.
     func startAgentSession(engine: String) async throws -> ControlAPI.AgentSessionSummary

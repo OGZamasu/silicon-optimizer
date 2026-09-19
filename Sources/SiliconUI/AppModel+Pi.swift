@@ -403,7 +403,7 @@ extension AppModel {
     func setPiModel(_ id: String) {
         guard piRuntime != nil else { return }
         settings.piModel = id
-        settings.save()
+        persistSettings()
         piCurrentModel = id
         piSend(["type": "set_model", "provider": "silicon", "modelId": id])
     }
