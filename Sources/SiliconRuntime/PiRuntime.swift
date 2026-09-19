@@ -19,6 +19,12 @@ public actor PiRuntime {
             .appendingPathComponent("SiliconOptimizer/pi/workspace", isDirectory: true)
     }
 
+    /// Where Pi reads its settings and extensions for this workspace — including the
+    /// guardrail's own. A tool call aimed in here is one the guardrail never waves through.
+    public static var configurationDirectory: URL {
+        workspaceDirectory.appendingPathComponent(".pi", isDirectory: true)
+    }
+
     public enum State: Sendable, Equatable {
         case idle
         case starting(stage: String)
@@ -63,11 +69,38 @@ public actor PiRuntime {
         )
 
         if let extensionSource {
-            let destination = extensions.appendingPathComponent("silicon.ts")
+            let destination = extensions.appendingPathComponent(managedExtension)
             let fresh = try Data(contentsOf: extensionSource)
             if (try? Data(contentsOf: destination)) != fresh {
                 try fresh.write(to: destination, options: .atomic)
             }
+        }
+
+        removeUnmanagedExtensions(in: extensions)
+    }
+
+    /// The one extension this app owns in the managed workspace.
+    public static let managedExtension = "silicon.ts"
+
+    /// Deletes anything in the managed `.pi/extensions` directory that this app did not put
+    /// there, on every start.
+    ///
+    /// Pi loads *every* module in that directory, and an extension can register its own
+    /// `tool_call` handler — which is exactly how the guardrail is installed. A file written
+    /// there by the agent could therefore approve its own calls, or rewrite the arguments
+    /// after ours has approved them, and nothing later in the session would notice. The
+    /// workspace is this app's, not the user's: `~/.pi` is untouched, their own global
+    /// extensions still load, and the only thing swept is the directory we manage.
+    ///
+    /// Best-effort by design. A file that cannot be removed is a reason to keep going — the
+    /// screening still runs — not a reason to refuse to start Pi at all.
+    static func removeUnmanagedExtensions(in directory: URL) {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ) else { return }
+        for entry in entries where entry.lastPathComponent != managedExtension {
+            try? manager.removeItem(at: entry)
         }
     }
 

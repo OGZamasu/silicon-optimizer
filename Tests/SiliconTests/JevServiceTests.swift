@@ -120,6 +120,10 @@ struct JevSettingsTests {
         #expect(JevFeature.decideTool.isBuilt)
         #expect(JevFeature.routing.isBuilt)
         #expect(JevFeature.mediaRouting.isBuilt)
+        #expect(JevFeature.guardrails.isBuilt)
+        // Guardrails ship off like the rest, and so does letting Jev answer for you.
+        #expect(!settings.isOn(.guardrails))
+        #expect(settings.autoApproveSafeToolCalls == false)
         #expect(JevFeature.allCases.allSatisfy { !$0.summary.isEmpty && !$0.displayName.isEmpty })
     }
 

@@ -92,6 +92,13 @@ extension AppModel {
         return await jevStatus()
     }
 
+    /// `GET /jev/guardrails/recent`. Read straight off the main actor's ring buffer, which
+    /// is where every screening this app makes is recorded — and which holds ids and bands
+    /// rather than commands, so answering a phone with it discloses nothing.
+    public func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings {
+        await JevGuardrails.recent()
+    }
+
     /// Built here rather than inside `JevService` because the key question — is one stored?
     /// — is the app's to answer, and the service is deliberately given no way to say.
     static func jevStatus(

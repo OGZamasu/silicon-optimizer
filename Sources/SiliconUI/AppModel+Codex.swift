@@ -30,12 +30,31 @@ public struct CodexApproval: Identifiable, Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
         case command(String)
         case fileChange(String)
+
+        /// What the guardrail is told this call is. Codex's two approval kinds are its
+        /// shell and its patch applier; the names are the ones its own protocol uses.
+        var toolName: String {
+            switch self {
+            case .command: "shell"
+            case .fileChange: "apply_patch"
+            }
+        }
+
+        var arguments: String {
+            switch self {
+            case .command(let command): command
+            case .fileChange(let summary): summary
+            }
+        }
     }
 
     public var id = UUID()
     public var rpcID: JSONValue
     public var kind: Kind
     public var reason: String?
+    /// What Jev made of it. Nil while the screening is in flight, and for the whole life of
+    /// the card when guardrails are off — the card says so rather than implying safety.
+    public var screening: GuardrailScreening?
 }
 
 /// Lifecycle of the Codex sidecar behind the Chat tab's Codex engine.
@@ -171,17 +190,27 @@ extension AppModel {
         noteActivity()
 
         let cwd = codexWorkingDirectory.path
-        let approval = Self.codexPolicyValue(
+        let storedApproval = Self.codexPolicyValue(
             settings.codexApprovalPolicy, allowed: ["untrusted", "on-request", "never"],
             fallback: "on-request"
         )
-        let sandbox = Self.codexPolicyValue(
+        let storedSandbox = Self.codexPolicyValue(
             settings.codexSandbox,
             allowed: ["read-only", "workspace-write", "danger-full-access"],
             fallback: "read-only"
         )
 
         Task {
+            // The guardrail screens what Codex *asks* about. A thread started with "never
+            // ask" or full access never asks, so the guardrail would sit there with nothing
+            // to screen while the agent worked unattended — the setting that looks like
+            // more freedom silently turning the safety off. While guardrails are on, the
+            // policy is the one that keeps them in the loop; the picker says so and
+            // disables the other two rows.
+            let guarded = await JevGuardrails.isTurnedOn()
+            let approval = guarded ? Self.guardedApprovalPolicy : storedApproval
+            let sandbox = guarded && storedSandbox == "danger-full-access"
+                ? "workspace-write" : storedSandbox
             do {
                 let threadID: String
                 if let existing = codexThreadID {
@@ -219,6 +248,11 @@ extension AppModel {
         }
     }
 
+    /// What Codex's approval policy is pinned to while the Jev guardrail is on: the one
+    /// value under which Codex asks before it runs a command, which is the moment the
+    /// guardrail gets to look at it.
+    public static let guardedApprovalPolicy = "on-request"
+
     /// Codex's policy enums are kebab-case on the wire ("on-request", "workspace-write");
     /// anything unrecognized — including values an older build may have stored — falls
     /// back rather than failing thread creation with an opaque enum error.
@@ -242,8 +276,11 @@ extension AppModel {
     // MARK: - Approvals
 
     public func answerCodexApproval(_ approval: CodexApproval, accept: Bool) {
-        guard let runtime = codexRuntime else { return }
+        // The card goes first, and unconditionally: the decision has been made, and a card
+        // left on screen because the sidecar died in the meantime is a lie about what is
+        // still pending.
         codexApprovals.removeAll { $0.id == approval.id }
+        guard let runtime = codexRuntime else { return }
         // The result is an object, not a bare string — the protocol schema's
         // `{ decision: accept | acceptForSession | decline | cancel }`. A bare string
         // deserializes as an error on Codex's side, which the model then narrates as a
@@ -254,6 +291,130 @@ extension AppModel {
                 id: approval.rpcID, result: .object(["decision": .string(decision)])
             )
         }
+    }
+
+    // MARK: - Guardrails
+
+    /// Screens one Codex approval and, when the owner has asked for it, answers the ones
+    /// Jev is sure about.
+    ///
+    /// Codex is the engine where this fits best: it asks before it runs, over its own
+    /// protocol, and it waits for the answer. So the screening happens *before* the command
+    /// exists as anything but a proposal, and a `.block` is a real refusal rather than a
+    /// note about something that already happened.
+    ///
+    /// Three outcomes, and the order matters. `.act` and `.block` are answered here only if
+    /// "Auto-approve calls Jev rates safe" is on. `.confirm` always waits for the person.
+    /// And a screening that could not happen at all waits for the person too — an
+    /// unavailable guardrail must never read as a yes.
+    func screenCodexApproval(_ approvalID: UUID, using service: JevService = .shared) async {
+        guard let pending = codexApprovals.first(where: { $0.id == approvalID }) else { return }
+
+        // Read before screening rather than after: whether a `.act` would be answered
+        // without a person changes what the policy does with a call aimed at the agent's
+        // own configuration, so the policy has to be told.
+        let autoApprove = await service.settings().autoApproveSafeToolCalls
+
+        let screening = await JevGuardrails.screen(
+            engine: .codex,
+            request: lastCodexUserMessage(),
+            userIntent: lastSubstantiveCodexRequest(),
+            tool: pending.kind.toolName,
+            arguments: pending.kind.arguments,
+            workingDirectory: codexWorkingDirectory.path,
+            recentTranscript: recentCodexToolResults(),
+            protecting: [CodexRuntime.homeDirectory.path],
+            autoApproveArmed: autoApprove,
+            using: service
+        )
+
+        // The person may have decided while the screening was in flight. Their answer wins,
+        // and the card is gone, so there is nothing to annotate and nothing to auto-answer.
+        guard let index = codexApprovals.firstIndex(where: { $0.id == approvalID }) else { return }
+        codexApprovals[index].screening = screening
+        let approval = codexApprovals[index]
+
+        guard autoApprove, let verdict = screening.verdict else { return }
+
+        switch verdict {
+        case .act:
+            codexItems.append(CodexChatItem(
+                id: UUID().uuidString,
+                kind: .notice("Approved automatically — \(screening.summary).")
+            ))
+            answerCodexApproval(approval, accept: true)
+        case .block(let reasons):
+            codexItems.append(CodexChatItem(
+                id: UUID().uuidString,
+                kind: .notice(
+                    "Declined automatically — Jev: block: \(reasons.joined(separator: ", "))."
+                )
+            ))
+            answerCodexApproval(approval, accept: false)
+        case .confirm:
+            // The one case a person is for.
+            break
+        }
+    }
+
+    /// The last thing the user typed.
+    func lastCodexUserMessage() -> String {
+        for item in codexItems.reversed() {
+            if case .user(let text) = item.kind { return text }
+        }
+        return ""
+    }
+
+    /// The last thing the user actually *asked for*.
+    ///
+    /// Not the same message: "thanks, that worked" is the last thing typed and asks for
+    /// nothing, and `contradicts_request` compared against it would call every subsequent
+    /// call a contradiction. So acknowledgements are skipped and the request behind them
+    /// stands until a new one replaces it.
+    func lastSubstantiveCodexRequest() -> String {
+        for item in codexItems.reversed() {
+            guard case .user(let text) = item.kind else { continue }
+            if Self.isSubstantiveRequest(text) { return text }
+        }
+        return lastCodexUserMessage()
+    }
+
+    /// Whether a message asks for anything. Deliberately crude: the cost of calling a real
+    /// request an acknowledgement is one question answered against a slightly older goal,
+    /// and the list is only the words people actually send on their own.
+    nonisolated static func isSubstantiveRequest(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!…"))
+            .lowercased()
+        guard !trimmed.isEmpty else { return false }
+        let acknowledgements: Set<String> = [
+            "thanks", "thank you", "ta", "cheers", "ok", "okay", "k", "yes", "yep", "yeah",
+            "y", "no", "nope", "n", "sure", "great", "perfect", "nice", "good", "cool",
+            "continue", "go on", "go ahead", "carry on", "please continue", "next",
+            "that worked", "it worked", "done", "lgtm", "👍",
+        ]
+        return !acknowledgements.contains(trimmed)
+    }
+
+    /// The last few tool results, newest last — the material an injected instruction would
+    /// have arrived in. Only what came *back*: the model's own prose is not evidence about
+    /// whether the model was steered.
+    func recentCodexToolResults() -> [String] {
+        var results: [String] = []
+        for item in codexItems.reversed() {
+            switch item.kind {
+            case .command(let command, let output, _) where !output.isEmpty:
+                results.append("$ \(command)\n\(output)")
+            case .webSearch(let query):
+                results.append("web search: \(query)")
+            case .toolCall(let title, _):
+                results.append("tool: \(title)")
+            default:
+                continue
+            }
+            if results.count >= GuardrailState.maximumResults { break }
+        }
+        return results.reversed()
     }
 
     // MARK: - Event handling
@@ -416,14 +577,14 @@ extension AppModel {
                 ?? params["command"].arrayValue?.compactMap(\.stringValue)
                     .joined(separator: " ")
                 ?? "a command"
-            codexApprovals.append(CodexApproval(
+            appendCodexApproval(CodexApproval(
                 rpcID: id, kind: .command(command),
                 reason: params["reason"].stringValue
             ))
         case "item/fileChange/requestApproval":
             let paths = params["changes"].arrayValue?
                 .compactMap { $0["path"].stringValue }.joined(separator: ", ")
-            codexApprovals.append(CodexApproval(
+            appendCodexApproval(CodexApproval(
                 rpcID: id, kind: .fileChange(paths ?? "file changes"),
                 reason: params["reason"].stringValue
             ))
@@ -437,6 +598,14 @@ extension AppModel {
                 kind: .notice("Declined an unsupported Codex request (\(method)).")
             ))
         }
+    }
+
+    /// Shows the card, then screens it. The card comes first on purpose: the person can
+    /// answer at once rather than waiting on a network round trip, and the verdict appears
+    /// on the card a moment later if they have not.
+    private func appendCodexApproval(_ approval: CodexApproval) {
+        codexApprovals.append(approval)
+        Task { await screenCodexApproval(approval.id) }
     }
 
     /// Codex is a child process; app exit must take it along. Same synchronous-signal

@@ -884,6 +884,9 @@ public protocol ControlHost: AnyObject, Sendable {
     /// `POST /jev`. The server lets only the control token reach this — changing what the
     /// Mac spends is the owner's own business, not a paired phone's.
     func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus
+    /// The last screenings the tool-call guardrail made: `GET /jev/guardrails/recent`.
+    /// Question ids, bands and verdicts — never what was screened.
+    func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings
     func benchmark() async throws -> ControlAPI.BenchmarkResult
     func imageModels() async -> [ControlAPI.ImageModel]
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan

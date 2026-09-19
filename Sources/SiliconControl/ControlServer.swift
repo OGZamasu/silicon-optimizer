@@ -1104,6 +1104,14 @@ public actor ControlServer {
                 return try .encode(await host.decide(try request.decode(ControlAPI.DecideRequest.self)))
             case ("GET", "/jev"):
                 return try .encode(await host.jevStatus())
+            case ("GET", "/jev/guardrails/recent"):
+                // Reachable by the Mac's own token, a full-control device, and — like every
+                // route that is not listed as control-only — the swarm secret. A phone that
+                // approves tool calls needs to see what the guardrail has been deciding;
+                // the route carries verdicts and question ids and never what was screened,
+                // which is what makes that sharing safe. A chat-only device is refused
+                // before it gets here, because the path is not in `chatOnlyRoutes`.
+                return try .encode(await host.recentGuardrailScreenings())
             case ("POST", "/jev"):
                 // Reading what Jev costs is one thing; changing what this Mac will spend
                 // is another. A full-control phone may look, only the Mac may set.
