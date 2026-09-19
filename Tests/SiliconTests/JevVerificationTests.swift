@@ -97,6 +97,13 @@ func testVerifier(
     )
 }
 
+/// Whether a piece of background work actually ran, and whether it was cancelled first.
+actor Landing {
+    private(set) var landed = false
+    private(set) var wasCancelled = true
+    func note(cancelled: Bool) { landed = true; wasCancelled = cancelled }
+}
+
 actor EscalationCount {
     private(set) var calls = 0
     func note() { calls += 1 }
@@ -391,11 +398,35 @@ struct VerificationQuestionTests {
             reply: "A kettle on a blue counter.", context: prompt.derivedContext
         )
         let text = state.content.promptText
-        #expect(text.contains("An image was attached"))
         // Not one byte of it. Jev reads text, and a base64 PNG in the state is kilobytes
         // of noise that answers none of the seven questions.
         #expect(!text.contains("iVBORw0KGgo"))
         #expect(!text.contains("base64"))
+
+        // And the note has to say the *contents* are missing, not merely that a picture
+        // existed. "An image was attached" alone reads as evidence the model was given
+        // something, which is the opposite of what this state can vouch for.
+        #expect(text.contains("An image was attached"))
+        #expect(text.contains("contents are not included"))
+        let many = try #require(VerificationQuestions.context(
+            priorTurns: [], imageCount: 3
+        ))
+        #expect(many.contains("3 images were attached"))
+        #expect(many.contains("contents are not included"))
+
+        // The fabrication question says the same thing in its own criteria, because that
+        // is where `jev-1.13` reads it: without the clause, a reply describing the picture
+        // looks like a reply describing something it was given.
+        let fabrication = try #require(
+            VerificationQuestions.questions["claims_unavailable_information"]
+        )
+        let criteria = fabrication.criteria?.promptText ?? ""
+        #expect(criteria.contains("an image was attached"))
+        #expect(criteria.contains("does not make the image's contents available"))
+        // The other half of the same idea, and the question's end of the `withheld`
+        // contract: what this state left out is not proof the model invented it.
+        #expect(criteria.contains("`withheld`"))
+        #expect(criteria.contains("could see it even though you cannot"))
     }
 
     @Test func theStateHoldsOnlyWhatTheQuestionsNeed() throws {
@@ -1251,14 +1282,21 @@ struct VerificationStreamTests {
         #expect(await VerdictRelay.result(of: quick, within: .seconds(3)) == 7)
 
         // Slower than the grace: the stream closes without it…
+        let finished = Landing()
         let slow = Task<Int?, Never> {
             try? await Task.sleep(for: .milliseconds(400))
+            // Recorded rather than returned, because a cancelled task can still return a
+            // value — only the flag can tell the two apart.
+            await finished.note(cancelled: Task.isCancelled)
             return 9
         }
         #expect(await VerdictRelay.result(of: slow, within: .milliseconds(50)) == nil)
-        // …and the work still finishes, which is what puts the verdict on the message and
-        // on /events. Giving up on the wait must never mean giving up on the verdict.
+        // …and the work still finishes, uncancelled, which is what puts the verdict on the
+        // message and on /events. Giving up on the wait must never mean giving up on the
+        // verdict — that is the half that always matters.
         #expect(await slow.value == 9)
+        #expect(await finished.landed == true)
+        #expect(await finished.wasCancelled == false)
 
         // Nothing to report is not the same as being late, and both read as nil here.
         let empty = Task<Int?, Never> { nil }
