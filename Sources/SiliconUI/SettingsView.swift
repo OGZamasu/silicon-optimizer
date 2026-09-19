@@ -1162,6 +1162,9 @@ private struct JevSection: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    if feature == .routing, settings.isOn(.routing) {
+                        JevRoutingFallbackRow()
+                    }
                 }
             }
 
@@ -1273,5 +1276,34 @@ private struct JevSection: View {
             }
             testing = false
         }
+    }
+}
+
+/// Where a routed request goes when Jev cannot be asked or is not sure enough.
+///
+/// Shown under the routing toggle, and only while routing is on: it is that feature's
+/// setting, and an eighth row about a switch nobody has flipped is noise.
+private struct JevRoutingFallbackRow: View {
+    @Environment(AppModel.self) private var app
+    @State private var selection = RoutingFallback.modelID ?? ""
+
+    var body: some View {
+        Picker("Fall back to", selection: $selection) {
+            Text("Whatever is loaded").tag("")
+            ForEach(app.gatewayModelSnapshot(), id: \.id) { model in
+                Text(model.displayName).tag(model.id)
+            }
+        }
+        .onChange(of: selection) { _, value in
+            RoutingFallback.modelID = value.isEmpty ? nil : value
+        }
+        Text(
+            "Auto (`silicon/auto` in the model list) asks Jev which model should answer each "
+            + "request. This is where it sends one when Jev is off, over budget, or not sure "
+            + "enough to choose — by default the model loaded here, or the first one that "
+            + "would answer without a load."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }

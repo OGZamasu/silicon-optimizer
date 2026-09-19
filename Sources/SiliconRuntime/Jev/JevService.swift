@@ -58,7 +58,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// Whether the app actually calls Jev for this yet. The rest are shown in Settings as
     /// the roadmap — off, captioned "coming" — so the owner can see where this is going
     /// rather than meeting eight new toggles at once later.
-    public var isBuilt: Bool { self == .decideTool }
+    public var isBuilt: Bool { self == .decideTool || self == .routing }
 }
 
 /// The shared three-way gate: act, ask, or hand it to a person.

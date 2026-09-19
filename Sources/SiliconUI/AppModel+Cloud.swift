@@ -128,9 +128,33 @@ extension AppModel {
             let owner = (entry["owned_by"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             return CloudModel(
                 id: id, displayName: name, provider: provider, contextWindow: context,
-                owner: owner
+                owner: owner, pricePerMillionInputUSD: inputPrice(in: entry)
             )
         }
+    }
+
+    /// What a million input tokens costs, if the listing says.
+    ///
+    /// OpenRouter prices per token, as a string, in a `pricing` block; the OpenAI-compatible
+    /// servers that price at all use one of the two flat spellings. Everything else — the
+    /// four providers that publish no price in `/models` — comes back nil, which the model
+    /// router reports as unknown rather than guessing at.
+    nonisolated static func inputPrice(in entry: [String: Any]) -> Double? {
+        func number(_ value: Any?) -> Double? {
+            if let value = value as? Double { return value }
+            if let value = value as? Int { return Double(value) }
+            if let text = value as? String { return Double(text) }
+            return nil
+        }
+        if let pricing = entry["pricing"] as? [String: Any],
+           let perToken = number(pricing["prompt"] ?? pricing["input"]) {
+            // Zero is a real answer here: OpenRouter prices its free variants at "0".
+            return perToken * 1_000_000
+        }
+        if let perToken = number(entry["input_cost_per_token"]) {
+            return perToken * 1_000_000
+        }
+        return nil
     }
 
     /// A provider's own words about a failure, dug out of whichever envelope it used.

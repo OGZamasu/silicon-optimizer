@@ -18,6 +18,20 @@ public struct GatewayReadyBackend: Sendable {
     }
 }
 
+/// What routing decided: the real model that will answer, and one line saying why.
+///
+/// The reason is for the log and the stream's own comment line, never for the answer: a
+/// client asked for a chat completion, not for an explanation of the gateway's reasoning.
+public struct GatewayRoutingDecision: Sendable, Equatable {
+    public var modelID: String
+    public var reason: String
+
+    public init(modelID: String, reason: String) {
+        self.modelID = modelID
+        self.reason = reason
+    }
+}
+
 /// The app-side half of the gateway: knows every model, and can make any one of them
 /// answer — loading it locally or starting it on the peer that owns it.
 public protocol GatewayHost: AnyObject, Sendable {
@@ -35,6 +49,23 @@ public protocol GatewayHost: AnyObject, Sendable {
     func gatewayReveal(path: String) async
     /// Jumps the app to the 3D tab, where the newest mesh is already showing.
     func gatewayOpenMeshViewer() async
+    /// Resolves a virtual model id — today only `silicon/auto` — to the real gateway model
+    /// that should answer this particular request, reading the request body for the message
+    /// being routed. Returns nil for every ordinary id, which is what leaves the normal path
+    /// exactly as it was.
+    ///
+    /// This is a question for the app, not for the gateway: the models, the swarm, the keys
+    /// and the Jev settings all live up there, and this target deliberately depends on
+    /// nothing but Foundation and Network.
+    func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision?
+}
+
+extension GatewayHost {
+    /// A host that does not route — every test double, and the app itself before this
+    /// feature — answers the same way for every id: this is not a virtual model.
+    public func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision? {
+        nil
+    }
 }
 
 /// The model gateway: one loopback OpenAI-compatible server over every model this app and
@@ -261,10 +292,15 @@ public actor GatewayServer {
     // MARK: - Chat completions (DeepSeek Harness dialect)
 
     private func serveChat(_ request: HTTPRequest, on connection: NWConnection) async {
-        guard let modelID = GatewayAPI.requestedModel(inBody: request.body) else {
+        guard let requestedID = GatewayAPI.requestedModel(inBody: request.body) else {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
+        // `silicon/auto` is answered by whichever model the app's routing picks; everything
+        // below this line then treats that choice as though the client had named it, which is
+        // the whole trick: ensure, translation, ledger and streaming stay untouched.
+        let routing = await host.gatewayRoute(modelID: requestedID, body: request.body)
+        let modelID = routing?.modelID ?? requestedID
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
         let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
         let isNode: Bool = {
@@ -279,9 +315,14 @@ public actor GatewayServer {
 
         if wantsStream {
             let stream = SSEConnection(connection: connection)
-            guard await stream.sendHead() else {
+            guard await stream.sendHead(extraHeaders: Self.routedHeaders(routing)) else {
                 await finishLedger(entry, ok: false, detail: "client gone before headers")
                 return
+            }
+            if let routing {
+                // A comment: invisible to both harnesses' parsers, legible to anyone
+                // watching the wire wonder which machine just answered.
+                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(routing.reason)"))
             }
             let backend: GatewayReadyBackend
             do {
@@ -314,10 +355,17 @@ public actor GatewayServer {
                 )
                 let warning = status == 200
                     ? GatewayAPI.emptyContentWarning(inResponseBody: data) : nil
-                let out = warning.map {
+                var out = warning.map {
                     GatewayAPI.attachingWarning(toResponseBody: data, warning: $0)
                 } ?? data
-                try? await HTTPResponse(status: status, body: out).write(to: connection)
+                // The client asked `silicon/auto` a question and a real model answered it.
+                // The OpenAI shape has exactly one place to say which: the `model` field.
+                if routing != nil, status == 200 {
+                    out = GatewayAPI.rewritingModel(inBody: out, to: modelID)
+                }
+                var response = HTTPResponse(status: status, body: out)
+                response.extraHeaders = Self.routedHeaders(routing)
+                try? await response.write(to: connection)
 
                 let audit = GatewayStreamAudit()
                 if let compact = String(data: data, encoding: .utf8) {
@@ -336,6 +384,13 @@ public actor GatewayServer {
                 await finishLedger(entry, ok: false, detail: error.localizedDescription)
             }
         }
+    }
+
+    /// The one header a routed reply carries. Empty for every ordinary request, so nothing
+    /// about the normal response changes.
+    static func routedHeaders(_ routing: GatewayRoutingDecision?) -> [String: String] {
+        guard let routing else { return [:] }
+        return [GatewayAPI.routedToHeader: routing.modelID]
     }
 
     private func finishLedger(
@@ -406,10 +461,15 @@ public actor GatewayServer {
     // MARK: - Responses (Codex dialect)
 
     private func serveResponses(_ request: HTTPRequest, on connection: NWConnection) async {
-        guard let modelID = GatewayAPI.requestedModel(inBody: request.body) else {
+        guard let requestedID = GatewayAPI.requestedModel(inBody: request.body) else {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
+        // Codex sees the same model list as the harness does, so it can name `silicon/auto`
+        // too; the translator is then told the real model, which is what Codex records
+        // against the thread.
+        let routing = await host.gatewayRoute(modelID: requestedID, body: request.body)
+        let modelID = routing?.modelID ?? requestedID
         let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)
         let wantsStream = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any])
             .flatMap { $0?["stream"] as? Bool } ?? false
@@ -425,9 +485,12 @@ public actor GatewayServer {
 
         let stream = SSEConnection(connection: connection)
         if wantsStream {
-            guard await stream.sendHead() else {
+            guard await stream.sendHead(extraHeaders: Self.routedHeaders(routing)) else {
                 await finishLedger(entry, ok: false, detail: "client gone before headers")
                 return
+            }
+            if let routing {
+                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(routing.reason)"))
             }
             await stream.send(translator.opening())
         }
@@ -504,8 +567,11 @@ public actor GatewayServer {
                 }
             } else {
                 _ = translator.translate(payload: "[DONE]")
-                try? await HTTPResponse(status: 200, body: translator.completedResponseBody())
-                    .write(to: connection)
+                var response = HTTPResponse(
+                    status: 200, body: translator.completedResponseBody()
+                )
+                response.extraHeaders = Self.routedHeaders(routing)
+                try? await response.write(to: connection)
             }
             await finishLedger(entry, ok: true, warning: audit.warning, audit: audit)
         } catch {
@@ -672,11 +738,15 @@ private actor SSEConnection {
         self.connection = connection
     }
 
-    func sendHead() async -> Bool {
-        let head = "HTTP/1.1 200 OK\r\n"
+    func sendHead(extraHeaders: [String: String] = [:]) async -> Bool {
+        var head = "HTTP/1.1 200 OK\r\n"
             + "Content-Type: text/event-stream\r\n"
             + "Cache-Control: no-store\r\n"
-            + "Connection: close\r\n\r\n"
+            + "Connection: close\r\n"
+        for (name, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+            head += "\(name): \(value)\r\n"
+        }
+        head += "\r\n"
         return await sendRaw(Data(head.utf8))
     }
 

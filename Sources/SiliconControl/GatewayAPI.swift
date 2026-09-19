@@ -92,6 +92,25 @@ public enum GatewayAPI {
         return nil
     }
 
+    // MARK: - The virtual routing model
+
+    /// The one id in this list that is not a model.
+    ///
+    /// A request naming `silicon/auto` is routed — the app asks Jev which real model should
+    /// answer it — and then proxied exactly as if the client had named the chosen one. The
+    /// `silicon/` prefix sits deliberately outside the three real schemes, so `parseModelID`
+    /// returns nil for it and nothing downstream can mistake it for a model some machine
+    /// serves. Harnesses store model ids forever, so this spelling is as permanent as theirs.
+    public static let autoModelID = "silicon/auto"
+    public static let autoModelDisplayName = "Auto — Jev picks"
+
+    public static func isAutoModelID(_ id: String) -> Bool { id == autoModelID }
+
+    /// Names the model that actually answered a routed request. Set on both the buffered
+    /// and the streamed reply, because a client that asked for `silicon/auto` and cannot
+    /// see which machine it reached has been told nothing useful about its own bill.
+    public static let routedToHeader = "X-Silicon-Routed-To"
+
     // MARK: - Model listing
 
     /// One entry in `GET /v1/models`. The `silicon` extension block carries what the OpenAI
