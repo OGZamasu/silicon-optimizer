@@ -438,6 +438,20 @@ Scripts/build-app.sh            # assemble Silicon Optimizer.app into build/
 Scripts/build-app.sh --install  # ...and replace the copy in ~/Applications
 ```
 
+Source builds use ad-hoc signing by default. A changed build has a different signing
+requirement, so macOS may ask again before it can access a saved Keychain credential. If you
+have a code-signing certificate, use the same identity for each build:
+
+```bash
+export SILICON_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+Scripts/build-app.sh --release --install
+```
+
+Set that variable in your shell profile to reuse it across sessions. `--sign "identity"`
+overrides the environment variable for one build. Switching an existing ad-hoc installation
+to your certificate can still require renewed Keychain authorization once; later builds
+signed with the same identity preserve the app's signing requirement.
+
 The tests pin the planner to published benchmark numbers, so a regression in the memory
 model fails the build rather than silently shipping bad advice.
 

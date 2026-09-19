@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 import ServiceManagement
 import SiliconCore
@@ -55,6 +56,7 @@ public enum ChatEngine: String, Codable, Sendable, CaseIterable {
 @propertyWrapper
 public struct KeychainCredential: Codable, Sendable, Equatable {
     public var wrappedValue: String
+    fileprivate var needsAuthorization = false
 
     public init(wrappedValue: String) { self.wrappedValue = wrappedValue }
 
@@ -69,28 +71,62 @@ public struct KeychainCredential: Codable, Sendable, Equatable {
     }
 }
 
+enum CredentialReadResult: Equatable {
+    case found(String)
+    case missing
+    case unavailable
+}
+
 private enum CredentialStore {
     private static let service = "dev.siliconoptimizer.credentials"
     private static let huggingFaceAccount = "hugging-face-access-token"
+    private static let interactionLock = NSLock()
 
-    static func huggingFaceToken() -> String? {
-        let query: [String: Any] = [
+    static func huggingFaceToken(allowInteraction: Bool) -> CredentialReadResult {
+        interactionLock.lock()
+        defer { interactionLock.unlock() }
+        // The file-based login keychain ignores the SecItem no-UI attribute. Scope its
+        // process-wide switch to this synchronous startup read, before app workers start,
+        // and restore the prior value rather than unconditionally enabling prompts.
+        var wasInteractionAllowed: DarwinBoolean = false
+        if !allowInteraction {
+            guard SecKeychainGetUserInteractionAllowed(&wasInteractionAllowed) == errSecSuccess,
+                  SecKeychainSetUserInteractionAllowed(false) == errSecSuccess
+            else { return .unavailable }
+        }
+        defer {
+            if !allowInteraction {
+                SecKeychainSetUserInteractionAllowed(wasInteractionAllowed.boolValue)
+            }
+        }
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: huggingFaceAccount,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
+        if !allowInteraction {
+            // Cover the data-protection implementation as well as the legacy login one.
+            let context = LAContext()
+            context.interactionNotAllowed = true
+            query[kSecUseAuthenticationContext as String] = context
+        }
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return .missing }
+        guard status == errSecSuccess,
               let data = result as? Data,
-              let token = String(data: data, encoding: .utf8), !token.isEmpty
-        else { return nil }
-        return token
+              let token = String(data: data, encoding: .utf8),
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return .unavailable }
+        return .found(token)
     }
 
     @discardableResult
     static func setHuggingFaceToken(_ rawValue: String) -> Bool {
+        interactionLock.lock()
+        defer { interactionLock.unlock() }
         let token = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -219,6 +255,12 @@ public struct Settings: Codable, Sendable, Equatable {
 
     // Credentials
     @KeychainCredential public var huggingFaceToken = ""
+    /// Session-only: a saved credential needs an explicit user action before it can be read
+    /// or migrated. Never encoded; routine preference saves must not prompt or erase it.
+    public private(set) var huggingFaceTokenNeedsAuthorization: Bool {
+        get { _huggingFaceToken.needsAuthorization }
+        set { _huggingFaceToken.needsAuthorization = newValue }
+    }
 
     // Output
 
@@ -531,38 +573,117 @@ public struct Settings: Codable, Sendable, Equatable {
     private static let defaultsKey = "dev.siliconoptimizer.settings"
 
     public static func load() -> Settings {
-        let data = UserDefaults.standard.data(forKey: defaultsKey)
+        load(defaults: .standard, readCredential: CredentialStore.huggingFaceToken)
+    }
+
+    /// Dependencies are injected in persistence tests so they never touch the user's Keychain.
+    static func load(
+        defaults: UserDefaults,
+        readCredential: (Bool) -> CredentialReadResult
+    ) -> Settings {
+        let data = defaults.data(forKey: defaultsKey)
         var settings = data.flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
             ?? Settings()
-        let legacyToken = settings.huggingFaceToken.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let secureToken = CredentialStore.huggingFaceToken()
-        let migrationSucceeded = legacyToken.isEmpty
-            || secureToken != nil
-            || CredentialStore.setHuggingFaceToken(legacyToken)
-        settings.huggingFaceToken = CredentialStore.huggingFaceToken()
-            ?? secureToken
-            ?? legacyToken
-        // Remove the legacy copy only after Keychain confirms the credential is durable.
-        // When Keychain is locked or denied, leave the old document untouched so the next
-        // launch can retry instead of destroying the user's only usable credential.
-        if !legacyToken.isEmpty, migrationSucceeded,
-           let redacted = try? JSONEncoder().encode(settings) {
-            UserDefaults.standard.set(redacted, forKey: defaultsKey)
+        switch readCredential(false) {
+        case .found(let token):
+            settings.huggingFaceToken = token
+            // A successful read proves the secure copy is durable; any old plaintext copy
+            // can now be removed without prompting or rewriting the Keychain item.
+            if let legacy = legacyCredential(in: defaults), !legacy.isEmpty {
+                settings.save(defaults: defaults, preserveLegacyCredential: false)
+            }
+        case .missing:
+            // Old versions stored the token in preferences. Keep it until the user explicitly
+            // saves it to Keychain; launch must never start a migration authorization dialog.
+            settings.huggingFaceTokenNeedsAuthorization = !settings.huggingFaceToken.isEmpty
+        case .unavailable:
+            // Locked, denied, and changed-signature cases are not an absent credential.
+            settings.huggingFaceTokenNeedsAuthorization = true
         }
         return settings
     }
 
-    /// Returns false without rewriting preferences when secure credential persistence fails.
-    /// Existing fire-and-forget callers keep their previous durable settings instead of
-    /// silently replacing them with a redacted credential.
+    /// Persists preferences only. A tab change, port allocation, or text edit must never
+    /// access Keychain. New credentials are stored only by the explicit Settings action.
     @discardableResult
     public func save() -> Bool {
-        guard CredentialStore.setHuggingFaceToken(huggingFaceToken) else { return false }
-        guard let data = try? JSONEncoder().encode(self) else { return false }
-        UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        save(defaults: .standard)
+    }
+
+    @discardableResult
+    func save(defaults: UserDefaults, preserveLegacyCredential: Bool = true) -> Bool {
+        guard let encoded = try? JSONEncoder().encode(self) else { return false }
+        var data = encoded
+        if preserveLegacyCredential, let legacy = Self.legacyCredential(in: defaults),
+           !legacy.isEmpty {
+            // Preserve only the pre-existing migration source, never an in-memory new token.
+            // Denying Keychain access must not make an unrelated save erase the only copy.
+            guard var document = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+            else { return false }
+            document["huggingFaceToken"] = legacy
+            guard let preserved = try? JSONSerialization.data(withJSONObject: document)
+            else { return false }
+            data = preserved
+        }
+        defaults.set(data, forKey: Self.defaultsKey)
         return true
+    }
+
+    private static func legacyCredential(in defaults: UserDefaults) -> String? {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return document["huggingFaceToken"] as? String
+    }
+
+    /// Called only by Save token / Remove token, never the form's general autosave.
+    @discardableResult
+    mutating func saveHuggingFaceToken(
+        _ value: String,
+        defaults: UserDefaults = .standard,
+        writeCredential: (String) -> Bool = CredentialStore.setHuggingFaceToken
+    ) -> Bool {
+        let token = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidate = self
+        candidate.huggingFaceToken = token
+        candidate.huggingFaceTokenNeedsAuthorization = false
+        // Validate serialization before committing the credential, so a failure cannot
+        // replace the Keychain item while the UI reports that the previous token was kept.
+        guard let data = try? JSONEncoder().encode(candidate) else { return false }
+        guard writeCredential(token) else { return false }
+        defaults.set(data, forKey: Self.defaultsKey)
+        self = candidate
+        return true
+    }
+
+    /// The user has explicitly asked macOS to allow access to the saved token.
+    @discardableResult
+    mutating func authorizeHuggingFaceToken(
+        defaults: UserDefaults = .standard,
+        readCredential: (Bool) -> CredentialReadResult = CredentialStore.huggingFaceToken,
+        writeCredential: (String) -> Bool = CredentialStore.setHuggingFaceToken
+    ) -> Bool {
+        switch readCredential(true) {
+        case .found(let token):
+            var candidate = self
+            candidate.huggingFaceToken = token
+            candidate.huggingFaceTokenNeedsAuthorization = false
+            guard candidate.save(defaults: defaults, preserveLegacyCredential: false) else { return false }
+            self = candidate
+            return true
+        case .missing:
+            if let legacy = Self.legacyCredential(in: defaults), !legacy.isEmpty {
+                return saveHuggingFaceToken(legacy, defaults: defaults, writeCredential: writeCredential)
+            }
+            var candidate = self
+            candidate.huggingFaceToken = ""
+            candidate.huggingFaceTokenNeedsAuthorization = false
+            guard candidate.save(defaults: defaults, preserveLegacyCredential: false) else { return false }
+            self = candidate
+            return true
+        case .unavailable:
+            return false
+        }
     }
 
     /// Registers or removes the login item to match `launchAtLogin`.

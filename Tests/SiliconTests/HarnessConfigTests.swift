@@ -3,6 +3,30 @@ import Testing
 import SiliconControl
 @testable import SiliconRuntime
 
+@Suite("Harness launch arguments")
+struct HarnessLaunchTests {
+    @Test(arguments: [nil, "/Users/Test User/dsh/silicon-overlay.patch.yml"] as [String?])
+    func embeddedChatSuppressesBrowserLaunch(overlayPath: String?) throws {
+        let arguments = HarnessRuntime.launchArguments(webPort: 9132, overlayPath: overlayPath)
+
+        // npx launches the pinned web profile, whose options follow any launcher patch.
+        #expect(Array(arguments.prefix(4)) == [
+            "--yes", HarnessRuntime.packageSpec, "--profile", "web",
+        ])
+        let portIndex = try #require(arguments.firstIndex(of: "--port"))
+        #expect(arguments[portIndex + 1] == "9132")
+        let noOpenIndex = try #require(arguments.firstIndex(of: "--no-open"))
+        #expect(noOpenIndex > portIndex)
+        if let overlayPath {
+            let patchIndex = try #require(arguments.firstIndex(of: "--patch"))
+            #expect(arguments[patchIndex + 1] == overlayPath)
+            #expect(patchIndex < portIndex)
+        } else {
+            #expect(!arguments.contains("--patch"))
+        }
+    }
+}
+
 @Suite("Harness provider configuration")
 struct HarnessConfigTests {
 

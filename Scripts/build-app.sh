@@ -8,6 +8,7 @@
 # Usage:
 #   Scripts/build-app.sh [--release] [--sign "Developer ID Application: ..."] [--dmg]
 #                        [--install [DIR]]
+#   SILICON_SIGN_IDENTITY sets the default signing identity; --sign overrides it.
 #
 # --install puts the finished bundle somewhere stable — ~/Applications by default — replacing
 # whatever was there. Without it the only copy lives in build/, which is gitignored and easy to
@@ -20,7 +21,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIGURATION="debug"
-SIGN_IDENTITY=""
+SIGN_IDENTITY="${SILICON_SIGN_IDENTITY:-}"
 MAKE_DMG=0
 INSTALL=0
 INSTALL_DIR="$HOME/Applications"
@@ -41,6 +42,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ -z "$SIGN_IDENTITY" ]]; then
+    echo "==> Ad-hoc signing: changed builds can prompt again for Keychain access."
+    echo "    Set SILICON_SIGN_IDENTITY or pass --sign to reuse your signing certificate."
+fi
 
 APP_NAME="Silicon Optimizer"
 BUNDLE="build/${APP_NAME}.app"
