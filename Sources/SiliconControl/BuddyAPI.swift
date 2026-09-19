@@ -24,6 +24,49 @@ extension ControlAPI {
 
     // MARK: - Pairing
 
+    /// The body of `POST /buddy/invitations` — the Mac asking itself for the same code
+    /// BuddyCenter's "Pair a device" would put on screen.
+    ///
+    /// Only the scope, because nothing else about a code is the caller's to choose: where
+    /// it points is wherever the tailnet listener actually is, and how long it lives is
+    /// `BuddyPairing.codeLifetime`. The field is optional so a caller with nothing to say
+    /// can send `{}`, or no body at all, and get what the Settings window offers by default.
+    public struct BuddyInvitationRequest: Codable, Sendable, Equatable {
+        /// "full" or "chat". Absent means full control.
+        public var scope: String?
+
+        public init(scope: String? = nil) { self.scope = scope }
+    }
+
+    /// A code the owner would otherwise be reading aloud off the Settings window, with the
+    /// two things a device needs in order to spend it: where to dial, and when it stops
+    /// working.
+    ///
+    /// This response is the only place the code exists outside the Mac's own memory. It is
+    /// never logged and never handed out twice — a second `GET` for it would turn a code
+    /// with a five-minute life into one that lasts as long as the process does.
+    public struct BuddyInvitationResponse: Codable, Sendable, Equatable {
+        public var code: String
+        /// The tailnet listener's address and port, never loopback's: loopback takes a
+        /// fresh ephemeral port every launch, so a device sent there would lose this Mac
+        /// the next time it restarted.
+        public var host: String
+        public var port: Int
+        public var expiresAt: String
+        /// "full" or "chat" — what `POST /buddy/pair` will grant whoever spends this code.
+        public var scope: String
+
+        public init(
+            code: String, host: String, port: Int, expiresAt: String, scope: String = "full"
+        ) {
+            self.code = code
+            self.host = host
+            self.port = port
+            self.expiresAt = expiresAt
+            self.scope = scope
+        }
+    }
+
     /// The body of the one unauthenticated POST on this server. A device offers the code the
     /// owner is looking at and says what it is; it gets back a credential of its own.
     public struct BuddyPairRequest: Codable, Sendable, Equatable {
