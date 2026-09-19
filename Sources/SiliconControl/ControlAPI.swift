@@ -758,12 +758,20 @@ public enum ControlAPI {
         public var node: String
         public var model: String
         public var elapsedSeconds: Double
+        /// How the model and the settings were arrived at, when nobody typed them: the
+        /// media router's one line. Absent when the caller named what it wanted — and the
+        /// reason a caller that passed `model_id: "auto"` can find out what it got.
+        public var detail: String?
 
-        public init(file: String, node: String, model: String, elapsedSeconds: Double) {
+        public init(
+            file: String, node: String, model: String, elapsedSeconds: Double,
+            detail: String? = nil
+        ) {
             self.file = file
             self.node = node
             self.model = model
             self.elapsedSeconds = elapsedSeconds
+            self.detail = detail
         }
     }
 

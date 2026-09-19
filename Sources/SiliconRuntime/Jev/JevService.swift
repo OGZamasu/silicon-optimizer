@@ -58,7 +58,11 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// Whether the app actually calls Jev for this yet. The rest are shown in Settings as
     /// the roadmap — off, captioned "coming" — so the owner can see where this is going
     /// rather than meeting eight new toggles at once later.
-    public var isBuilt: Bool { self == .decideTool || self == .routing }
+    public var isBuilt: Bool { Self.built.contains(self) }
+
+    /// One list rather than a chain of `==`, so each feature's own PR adds a line here and
+    /// nothing else.
+    private static let built: Set<JevFeature> = [.decideTool, .routing, .mediaRouting]
 }
 
 /// The shared three-way gate: act, ask, or hand it to a person.
@@ -182,6 +186,22 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// How long an identical question keeps its answer. Zero turns the cache off.
     public var cacheMinutes: Int = 10
 
+    /// Whether an adult prompt may be sent to the uncensored lane without being asked.
+    ///
+    /// Nil is the default and is not the same as false: it means "follow whether an
+    /// uncensored lane is installed", and that is resolved every time it is read rather than
+    /// frozen the first time a settings window is drawn. Someone who installs a lane after
+    /// saying nothing gets the sensible answer; someone who said no keeps it.
+    ///
+    /// Here rather than in `UserDefaults` because it governs where a prompt is allowed to
+    /// go, which is the same kind of decision as the rest of this file — and because
+    /// `GET /jev` and a paired phone should be able to see and set it.
+    public var automaticUncensoredLane: Bool?
+
+    /// Whether the Video tab's composer asks the media router to pick the model and the
+    /// length, rather than using the ones in its own controls.
+    public var composerAutoRoute: Bool = false
+
     /// The largest `state` this app will send, in bytes — a deliberately pessimistic proxy
     /// for tokens. `jev-1.13` allows 32k tokens for the state plus the longest question and
     /// 64k for the state plus *all* the questions, and a byte is not a token: dense prose
@@ -200,6 +220,12 @@ public struct JevSettings: Codable, Sendable, Equatable {
 
     public func isOn(_ feature: JevFeature) -> Bool { features[feature] ?? false }
 
+    /// Whether an adult prompt is routed automatically, resolved against what is installed
+    /// right now. Nil follows the lane; a stored answer overrides it.
+    public func automaticUncensoredLane(uncensoredLaneInstalled: Bool) -> Bool {
+        automaticUncensoredLane ?? uncensoredLaneInstalled
+    }
+
     // MARK: Storage
 
     /// Hand-rolled rather than synthesised for two reasons: a `[JevFeature: Bool]` would
@@ -208,6 +234,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled, model, features, monthlyBudgetUSD, cacheMinutes, maxStateBytes
         case routingFallbackModel
+        case automaticUncensoredLane, composerAutoRoute
     }
 
     public init(from decoder: any Decoder) throws {
@@ -221,6 +248,12 @@ public struct JevSettings: Codable, Sendable, Equatable {
         routingFallbackModel = try container.decodeIfPresent(
             String.self, forKey: .routingFallbackModel
         )
+        automaticUncensoredLane = try container.decodeIfPresent(
+            Bool.self, forKey: .automaticUncensoredLane
+        )
+        composerAutoRoute = try container.decodeIfPresent(
+            Bool.self, forKey: .composerAutoRoute
+        ) ?? composerAutoRoute
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -239,6 +272,10 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encode(cacheMinutes, forKey: .cacheMinutes)
         try container.encode(maxStateBytes, forKey: .maxStateBytes)
         try container.encodeIfPresent(routingFallbackModel, forKey: .routingFallbackModel)
+        // Written only once the owner has actually chosen. Absent still means "follow
+        // whether a lane is installed", which deleting the line restores.
+        try container.encodeIfPresent(automaticUncensoredLane, forKey: .automaticUncensoredLane)
+        try container.encode(composerAutoRoute, forKey: .composerAutoRoute)
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),

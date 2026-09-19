@@ -41,6 +41,10 @@ public struct VideoQueueItem: Identifiable, Codable, Sendable {
     public var error: String?
     public var uncertainSubmission = false
     public var nodeFailed = false
+    /// One line about how this clip's settings were arrived at, when they were not simply
+    /// typed: "Auto → LTX-2.3 (5 s): motion-heavy, no people". Optional, and absent on every
+    /// clip queued before the media router existed, so an older saved queue still decodes.
+    public var detail: String?
 
     public var label: String { "Scene \(scene) · variation \(variation)" }
     public var canReconnect: Bool { status == .failed && nodeJob != nil && !nodeFailed }
@@ -172,24 +176,26 @@ public final class VideoBatchQueue {
     @discardableResult
     public func enqueue(
         prompts: [String], variations: Int, title: String, template: VideoRequest,
-        baseSeed: UInt32? = nil, now: Date = Date()
+        baseSeed: UInt32? = nil, now: Date = Date(), detail: String? = nil
     ) throws -> String {
         try append(prompts: prompts, variations: variations, title: title, template: template,
-                   baseSeed: baseSeed, now: now, singleClip: false)[0].batchID
+                   baseSeed: baseSeed, now: now, singleClip: false, detail: detail)[0].batchID
     }
 
     /// Single clips use the same persistence and serial dispatcher as batches.
     /// A multiline prompt is one clip; reference images are snapshotted privately
     /// so editing or deleting the source while waiting cannot change the render.
     @discardableResult
-    public func enqueueSingle(_ request: VideoRequest, now: Date = Date()) throws -> VideoQueueItem {
+    public func enqueueSingle(
+        _ request: VideoRequest, now: Date = Date(), detail: String? = nil
+    ) throws -> VideoQueueItem {
         try append(prompts: [request.prompt], variations: 1, title: "Single clip", template: request,
-                   baseSeed: request.seed, now: now, singleClip: true)[0]
+                   baseSeed: request.seed, now: now, singleClip: true, detail: detail)[0]
     }
 
     private func append(
         prompts: [String], variations: Int, title: String, template: VideoRequest,
-        baseSeed: UInt32?, now: Date, singleClip: Bool
+        baseSeed: UInt32?, now: Date, singleClip: Bool, detail: String? = nil
     ) throws -> [VideoQueueItem] {
         guard storageError == nil else { throw VideoRuntimeError.failed(storageError!) }
         let prompts = prompts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -252,7 +258,7 @@ public final class VideoBatchQueue {
                 request.image = imageSnapshot
                 added.append(VideoQueueItem(
                     id: id, batchID: batchID, batchName: batchName, scene: sceneIndex + 1,
-                    variation: variation, createdAt: now, request: request
+                    variation: variation, createdAt: now, request: request, detail: detail
                 ))
             }
         }

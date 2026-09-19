@@ -376,7 +376,7 @@ line in the ledger, and they all ship off except the first:
 | Decide tool | Answers the MCP `decide` tool and `POST /decide` with calibrated probabilities | yes |
 | Guardrails | Checks a prompt or a generated file against the rules before it is acted on | coming |
 | Prompt routing | Picks which loaded model, runtime or swarm node takes a request | yes |
-| Media routing | Reads an image, video or mesh request and picks the model and settings | coming |
+| Media routing | Reads an image, video or mesh request and picks the model and settings | yes |
 | Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
 | Model recommendation | Ranks catalogue models against what this Mac is actually used for | coming |
 | Answer verification | Checks a finished answer against its evidence and flags the doubtful ones | coming |
@@ -448,6 +448,72 @@ about a system prompt.
 Auto is listed only while routing could actually answer, and only in the gateway's own model
 list — the app's agent tabs still default to a model you chose, because "let something else
 decide" is not a default anyone asked for.
+
+### Media routing
+
+Ask for a clip and you normally have to answer three questions first: which model, how long,
+and at what settings. Media routing answers them from the prompt. Leave the model unset — or
+pass `"auto"`, or tick **Let Jev pick the model and length** in the Video tab — and Jev reads
+the prompt once, while code does the rest.
+
+What Jev is asked, in one request: which of the installed models suits this prompt (with a
+**none of these** option, so "nothing here fits" is an answer rather than a confident pick of
+the least-bad one), and eleven judgments about what the prompt describes — whether it shows
+people, asks for nudity or sexual content, for graphic violence, for legible text; whether it
+names a real person, or a real brand; whether it is motion-heavy, photographic or stylised;
+how long the clip should be, and how much render quality it calls for. All of them every
+time, because questions are answered in parallel and the code ignores the ones its lane has
+no use for.
+
+What *code* does with the answers, in `Sources/SiliconUI/Jev/MediaRoutingQuestions.swift`,
+where the questions and the thresholds sit together so the whole policy reads in a minute:
+
+- **Sexual content depicting a named real person is never routed.** Not to any lane, not with
+  any setting, not with a model named explicitly. Nothing is queued and the refusal says so.
+  It is the first thing checked, so no later branch can reach around it.
+- **A model you named is used, and so is a length you named.** Routing only fills in what you
+  left open. A named length is honoured exactly or refused with the lengths that do exist —
+  never quietly rounded, which is how asking for fifteen seconds ends up paying for five.
+- **The uncensored lane is gated both ways, on installed lanes only.** A prompt that reads as
+  adult content goes to an uncensored model that something can actually run, or nowhere — a
+  lane no machine offers is not a destination. A prompt that does not never goes to one. When
+  Jev is genuinely unsure, nothing is routed and the refusal tells you to say so in the prompt
+  or name a model.
+- **A model that cannot render the length is not a candidate**, however well it suits the
+  subject. The length then snaps to the nearest one that model actually serves.
+- **A lane something can run is preferred over one nothing can**, in every band. Queueing
+  against a model no machine offers is how a batch sits overnight doing nothing.
+- **Quality maps to the lane's own controls**: denoising steps for images, H3's turbo or full
+  sampling for video, and nothing at all on a lane that has no per-clip control — an invented
+  parameter is a refused job. A distilled model's step count is left alone: FLUX.1 schnell
+  finishes in four steps because it was trained to, and that is not a quality dial.
+- **A low-confidence answer falls back to your own default**, and the clip says "Jev unsure".
+
+Every queued clip keeps the one line it was routed by — *Auto → LTX-2.3 Uncensored v1.4
+(8 s): adult content, motion-heavy, people* — in the Video queue and in `GET /video/queue`,
+so anything reading that route can show it. `POST /video/generate` and the `generate_video`
+tool return it as `detail`; images carry it in the response's warning, and `plan_image` in its
+notes. Planning an image and then generating it is one charge, not two, as long as the answer
+cache is on — its window is **Settings → TypeSafe (Jev)**, and setting it to zero makes them
+two.
+
+The MCP tools `generate_video`, `queue_videos` and `generate_image` all take
+`model_id: "auto"`. 3D is not routed: `POST /mesh/generate` takes an image and no prompt, so
+there is no language to read, and the best installed backend is already chosen in code. Nor
+is the Image tab's own composer, because its memory plan is bound to the model in its picker
+and swapping that underneath would make every figure on screen wrong.
+
+Two settings live in `jev.json` beside the rest, so `GET /jev` shows them and `POST /jev` can
+set them: whether adult prompts go to the uncensored lane automatically — default on when an
+uncensored lane is installed, and that is resolved every time rather than frozen the first
+time Settings is drawn — and whether the Video tab's composer is asking Jev to pick. Turning
+Jev off puts that composer back to exactly what it did before, sampling controls and all.
+
+Only the prompt and the candidate list are sent — the models' names, what the catalog says
+they are for, their clip lengths and sizes, and whether each runs on this Mac or a paired
+machine. Never a node's name, never whether it is ready (code owns that), never the queue,
+never your files. A long prompt is cut to 4,000 characters first: the tenth paragraph of a
+shot list does not change which lane renders the first nine, and it costs accuracy to send it.
 
 **The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
 is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,

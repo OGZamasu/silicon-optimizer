@@ -59,12 +59,16 @@ extension ControlAPI {
             public var outputDirectory: String
             public var error: String?
             public var uncertainSubmission: Bool
+            /// How these settings were arrived at, when they were not typed: the media
+            /// router's one line. Absent on everything queued by hand.
+            public var detail: String?
 
             public init(id: String, batchID: String, title: String, prompt: String,
                         scene: Int, variation: Int, seed: UInt32?, modelID: String,
                         seconds: Int, resolution: String, h3Turbo: Bool?, status: String,
                         nodeJobID: String?, file: String?, outputDirectory: String,
-                        error: String?, uncertainSubmission: Bool, h3Steps: Int? = nil) {
+                        error: String?, uncertainSubmission: Bool, h3Steps: Int? = nil,
+                        detail: String? = nil) {
                 self.id = id; self.batchID = batchID; self.title = title; self.prompt = prompt
                 self.scene = scene; self.variation = variation; self.seed = seed
                 self.modelID = modelID; self.seconds = seconds; self.resolution = resolution
@@ -72,6 +76,7 @@ extension ControlAPI {
                 self.file = file; self.outputDirectory = outputDirectory; self.error = error
                 self.uncertainSubmission = uncertainSubmission
                 self.h3Steps = h3Steps
+                self.detail = detail
             }
         }
         public var paused: Bool

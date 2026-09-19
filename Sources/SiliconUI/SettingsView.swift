@@ -1168,6 +1168,9 @@ private struct JevSection: View {
                             pick: { model in apply { $0.routingFallbackModel = model } }
                         )
                     }
+                    if feature == .mediaRouting, settings.isOn(.mediaRouting) {
+                        MediaRoutingOptions()
+                    }
                 }
             }
 
@@ -1338,6 +1341,79 @@ private struct JevRoutingFallbackRow: View {
             )
             .font(.caption)
             .foregroundStyle(.orange)
+        }
+    }
+}
+
+/// The one thing the owner decides about media routing beyond switching it on.
+///
+/// Shown under the Media routing toggle rather than in a section of its own, because it is
+/// meaningless without it: if nothing is reading prompts, nothing is deciding which lane an
+/// adult one goes to. It writes through `JevService` like every other row here, so a paired
+/// phone reading `GET /jev` sees the same answer.
+private struct MediaRoutingOptions: View {
+    @Environment(AppModel.self) private var model
+    /// The stored answer: nil until the owner actually chooses, which is what keeps the
+    /// default following what is installed rather than freezing the first time this is drawn.
+    @State private var stored: Bool?
+    @State private var laneInstalled = false
+    @State private var saveError: String?
+
+    private var automatic: Bool { stored ?? laneInstalled }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle("Send adult prompts to the uncensored lane automatically", isOn: Binding(
+                get: { automatic },
+                set: { value in save(value) }
+            ))
+            .disabled(!laneInstalled)
+            Text(
+                laneInstalled
+                    ? (automatic
+                        ? "A prompt Jev reads as asking for nudity or sexual content goes "
+                            + "straight to the uncensored model. Off, it is not routed at all "
+                            + "and nothing is queued — name the model yourself to render it."
+                        : "Adult prompts are not routed automatically. Nothing is queued and "
+                            + "nothing is sent to a model that would refuse it; name the model "
+                            + "yourself to render one.")
+                    : "No uncensored lane is installed and ready on any node here, so there "
+                        + "is nowhere to route an adult prompt. Jev says so rather than "
+                        + "sending one to a model that would refuse it."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            Text(
+                "Sexual content depicting a named real person is never routed, whatever this "
+                + "is set to."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            if let saveError {
+                Text(saveError).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(.leading, 18)
+        .task { await reload() }
+    }
+
+    private func reload() async {
+        laneInstalled = model.hasUncensoredVideoLane
+        stored = await JevService.shared.settings().automaticUncensoredLane
+    }
+
+    private func save(_ value: Bool) {
+        stored = value
+        Task {
+            do {
+                try await JevService.shared.update { $0.automaticUncensoredLane = value }
+                saveError = nil
+            } catch {
+                saveError = "Could not save that: \(error.localizedDescription)"
+            }
+            await reload()
         }
     }
 }

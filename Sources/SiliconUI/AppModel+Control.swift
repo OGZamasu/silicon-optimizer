@@ -507,14 +507,29 @@ extension AppModel {
     }
 
     public func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
-        let (entry, configuration) = try resolveImage(request)
-        return describe(
+        // An omitted or "auto" model is the media router's cue; with Jev off this only
+        // normalises the word and the plan is the one this call has always produced.
+        let routed = try await mediaRoutedImage(request)
+        let (entry, configuration) = try resolveImage(routed.request)
+        var plan = describe(
             diffusionPlan(for: entry, configuration: configuration),
             configuration: configuration
         )
+        if let reason = routed.reason { plan.notes.insert(reason, at: 0) }
+        return plan
     }
 
     public func generateImage(
+        _ request: ControlAPI.ImageRequest
+    ) async throws -> ControlAPI.ImageResponse {
+        let routed = try await mediaRoutedImage(request)
+        var response = try await generateRoutedImage(routed.request)
+        response.warning = Self.merged(response.warning, routed.reason)
+        return response
+    }
+
+    /// The image render itself, with the model and the settings already decided.
+    private func generateRoutedImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
         let (entry, configuration) = try resolveImage(request)
@@ -880,8 +895,16 @@ extension AppModel {
     ) async throws -> ControlAPI.VideoResponse {
         let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { throw ControlHostError.badRequest("The prompt is empty.") }
+        // An omitted or "auto" model goes to the media router. It answers nil when Jev is
+        // not available, and everything below then behaves exactly as it did before.
+        let routed = try await mediaRoutedVideo(
+            prompt: prompt, explicitModelID: request.modelID, seconds: request.seconds
+        )
+        // "auto" is a routing instruction rather than a model id, so it never reaches the
+        // catalog: unrouted, it means what an omitted model has always meant.
+        let namedID = MediaRoutingQuestions.isAuto(request.modelID) ? nil : request.modelID
         let explicitEntry: VideoEntry?
-        if let requestedID = request.modelID {
+        if let requestedID = routed?.modelID ?? namedID {
             guard let entry = VideoCatalog.entry(id: requestedID) else {
                 let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
                 throw ControlHostError.badRequest(
@@ -896,12 +919,15 @@ extension AppModel {
         // A cold refresh may replace the historical Wan default with the first exact
         // capability actually available. Resolve an omitted model only after that.
         await refreshSwarmIfStale()
-        let entryID = request.modelID ?? selectedVideoModel
+        let entryID = routed?.modelID ?? namedID ?? selectedVideoModel
         guard let entry = explicitEntry ?? VideoCatalog.entry(id: entryID) else {
             let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
             throw ControlHostError.badRequest("Unknown video model \(entryID). Known: \(known)")
         }
         let seconds: Int
+        // A named length is still checked against the model here, routed or not: the router
+        // honours it exactly or refuses, so it can only agree with this — and a caller that
+        // named both a model and a length never reaches the router at all.
         if let requestedSeconds = request.seconds {
             guard entry.supportedSeconds.contains(requestedSeconds) else {
                 let choices = entry.supportedSeconds.map(String.init).joined(separator: ", ")
@@ -910,6 +936,8 @@ extension AppModel {
                 )
             }
             seconds = requestedSeconds
+        } else if let routedSeconds = routed?.seconds {
+            seconds = routedSeconds
         } else {
             seconds = entry.normalizedSeconds(
                 ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
@@ -931,12 +959,16 @@ extension AppModel {
                 + "off or still setting that model up."
             )
         }
-        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: request.h3Turbo, h3Steps: request.h3Steps, modelID: entry.id)
-        if request.h3Turbo != nil,
+        // The router only sets these when the node advertised them, so they go through the
+        // same checks as a caller's own and are refused the same way if the node changed.
+        let h3Turbo = routed?.h3Turbo ?? request.h3Turbo
+        let h3Steps = routed?.h3Steps ?? request.h3Steps
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: h3Turbo, h3Steps: h3Steps, modelID: entry.id)
+        if h3Turbo != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
             throw ControlHostError.badRequest("This node does not support per-clip h3_turbo; update its video-node adapter or omit that field.")
         }
-        if request.h3Steps != nil,
+        if h3Steps != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_steps") != true {
             throw ControlHostError.badRequest("This node does not advertise h3_steps. Update its video-node adapter and Phosphene, or omit steps for Auto.")
         }
@@ -955,14 +987,14 @@ extension AppModel {
             resolution: request.resolution ?? videoResolution,
             h3ChainPrompts: chainPrompts,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            seed: request.seed, h3Turbo: request.h3Turbo, h3Steps: request.h3Steps
+            seed: request.seed, h3Turbo: h3Turbo, h3Steps: h3Steps
         )
 
         videoError = nil
         // A disconnected synchronous client must not enqueue after a slow
         // capability refresh. Once accepted, only its waiter is cancellable.
         try Task.checkCancellation()
-        let item = try enqueueSingleVideo(videoRequest)
+        let item = try enqueueSingleVideo(videoRequest, detail: routed?.reason)
         // Lease before the first suspension after acceptance, so even a very
         // fast completion + clear cannot beat entry into the polling function.
         videoBatchQueue.retainReceipt(item.id)

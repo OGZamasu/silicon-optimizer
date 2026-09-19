@@ -305,7 +305,8 @@ enum Tools {
             properties: [
                 "prompt": property("string", "Not used for planning, but accepted so the same "
                     + "arguments work for generate_image."),
-                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b."),
+                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b. "
+                    + "\"auto\" plans the model the router would pick for this prompt."),
                 "width": property("number", "Image width in pixels."),
                 "height": property("number", "Image height in pixels."),
                 "steps": property("number", "Denoising steps."),
@@ -321,11 +322,15 @@ enum Tools {
                 the estimate is pessimistic on some models — and reports a warning in the \
                 response instead of refusing beforehand. Use plan_image first if you want to \
                 know the risk before spending the time. The first use of a model downloads its \
-                weights, which can take several minutes.
+                weights, which can take several minutes. Pass model_id "auto" (or omit it) to \
+                let the app pick: with TypeSafe's media routing turned on it reads the prompt \
+                and chooses the model and the denoising steps, and otherwise it falls back to \
+                the best model this Mac can comfortably run.
                 """,
             properties: [
                 "prompt": property("string", "What to draw."),
-                "model_id": property("string", "Optional. Defaults to the best model that fits."),
+                "model_id": property("string", "Optional. \"auto\" asks the app to choose from "
+                    + "the prompt; omitted or unset defaults to the best model that fits."),
                 "width": property("number", "Image width in pixels."),
                 "height": property("number", "Image height in pixels."),
                 "steps": property("number", "Denoising steps. Distilled models need very few."),
@@ -407,14 +412,18 @@ enum Tools {
                 and hailuo-h3 through Phosphene may take several minutes or longer for a \
                 chained clip. Call list_video_models first for availability and supported \
                 lengths. The finished clip also appears in the app's Video tab under Recent \
-                clips.
+                clips. Pass model_id "auto" (or omit it) to let the app pick: with TypeSafe's \
+                media routing turned on it reads the prompt once and chooses the model, the \
+                clip length and the sampling, returns what it chose and why in `detail`, and \
+                refuses rather than sending a prompt to a lane that would reject it.
                 """,
             properties: [
                 "prompt": property("string", "What happens in the clip."),
                 "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min), "
                     + "ltx2-distilled (fast, 1-3 min), ltx23-uncensored (LTX-2.3 merge, "
                     + "adult content allowed, audio, 2-5 min) or hailuo-h3 (local Phosphene, "
-                    + "chained 10/15 s clips). Defaults to the app's selection."),
+                    + "chained 10/15 s clips). \"auto\" reads the prompt and picks one, along "
+                    + "with the clip length. Defaults to the app's selection."),
                 "seconds": .object([
                     "type": .string("number"),
                     "description": .string(
@@ -448,12 +457,13 @@ enum Tools {
         ),
         Tool(
             name: "queue_videos",
-            description: "Persist video prompts and return immediately. Generate 1–20 variations per prompt with distinct saved seeds, up to 200 unfinished clips, one render at a time. Clips and manifests go in batch folders. Leave the app open and the Mac powered with its lid open. A relaunch reconnects to saved jobs. Inspect video_queue before resubmitting after an uncertain response. Call list_video_models for supported controls.",
+            description: "Persist video prompts and return immediately. Generate 1–20 variations per prompt with distinct saved seeds, up to 200 unfinished clips, one render at a time. Clips and manifests go in batch folders. Leave the app open and the Mac powered with its lid open. A relaunch reconnects to saved jobs. Inspect video_queue before resubmitting after an uncertain response. Call list_video_models for supported controls. Pass model_id \"auto\" (or omit it) to let the app read the prompts and choose the model, the clip length and the sampling for the whole batch; each queued clip records what it decided.",
             properties: [
                 "prompts": .object(["type": .string("array"), "minItems": .number(1), "maxItems": .number(200), "items": .object(["type": .string("string"), "minLength": .number(1), "maxLength": .number(12000)]), "description": .string("One prompt per shot, in scene order.")]),
                 "title": property("string", "Optional batch name."),
                 "variations": .object(["type": .string("integer"), "minimum": .number(1), "maximum": .number(20), "description": .string("Generations per prompt; default 1.")]),
-                "model_id": property("string", "Optional model ID; defaults to the app selection."),
+                "model_id": property("string", "Optional model ID. \"auto\" reads the prompts "
+                    + "and picks one, along with the clip length; omitted defaults to the app selection."),
                 "seconds": property("integer", "Supported clip length for the model, up to 15 seconds."),
                 "resolution": property("string", "480p, 720p or 1080p. Higher sizes may need more memory."),
                 "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional base seed, incremented per clip. Omit for random.")]),
