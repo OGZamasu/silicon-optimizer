@@ -310,15 +310,19 @@ struct BuddyAppModelTests {
         let center = BuddyCenter(registry: registry)
         await registry.setAllowsTailnetDevices(true)
 
-        let opened = await registry.invite(host: "100.64.0.9", port: 8788, lifetime: 0.3)
+        // Long enough that a loaded machine cannot let it lapse between here and the
+        // refresh below — an invitation already dead by then would never be adopted, and
+        // this test would be checking nothing.
+        let opened = await registry.invite(host: "100.64.0.9", port: 8788, lifetime: 3)
         await center.refresh(server: nil)
         #expect(center.invitation?.code == opened.code)
 
         // Adopting a code arms its expiry, whichever way the code arrived: the window must
-        // never show a QR the server would now refuse.
-        let deadline = ContinuousClock.now + .seconds(5)
+        // never show a QR the server would now refuse. Polled rather than slept through, so
+        // a slow machine costs time instead of a false failure.
+        let deadline = ContinuousClock.now + .seconds(30)
         while center.invitation != nil, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
+            try await Task.sleep(for: .milliseconds(50))
         }
         #expect(center.invitation == nil)
     }
@@ -330,8 +334,9 @@ struct BuddyAppModelTests {
         let center = BuddyCenter(registry: registry)
         await registry.setAllowsTailnetDevices(true)
 
-        // On screen, and dying shortly.
-        let first = await registry.invite(host: "100.64.0.9", port: 8788, lifetime: 0.3)
+        // On screen, and dying shortly — but not so shortly that a loaded machine could
+        // let it lapse before the refresh below adopts it.
+        let first = await registry.invite(host: "100.64.0.9", port: 8788, lifetime: 3)
         await center.refresh(server: nil)
         #expect(center.invitation?.code == first.code)
 
@@ -347,8 +352,11 @@ struct BuddyAppModelTests {
         #expect(!paired)
         #expect(center.invitation?.code == second.code)
 
-        // Well past the first code's expiry. The live code is still on screen.
-        try await Task.sleep(for: .seconds(1))
+        // Well past the first code's expiry, measured from the deadline itself rather than
+        // guessed at. The live code is still on screen.
+        let past = first.expiresAt.timeIntervalSinceNow + 1
+        if past > 0 { try await Task.sleep(for: .seconds(past)) }
+        #expect(first.expiresAt < Date())
         #expect(center.invitation?.code == second.code)
         #expect(center.invitation?.scope == .chat)
 
