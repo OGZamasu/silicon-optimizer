@@ -75,10 +75,14 @@ extension ControlAPI {
         public var scope: String
         public var pairedAt: String
         public var lastSeen: String?
+        /// True when this device was paired before the tailnet listener took a fixed port
+        /// and therefore holds an address that no longer answers. Nothing is wrong with the
+        /// token — the device simply cannot find this Mac until it is paired again.
+        public var needsRepair: Bool
 
         public init(
             id: String, name: String, platform: String, scope: String = "full",
-            pairedAt: String, lastSeen: String? = nil
+            pairedAt: String, lastSeen: String? = nil, needsRepair: Bool = false
         ) {
             self.id = id
             self.name = name
@@ -86,6 +90,7 @@ extension ControlAPI {
             self.scope = scope
             self.pairedAt = pairedAt
             self.lastSeen = lastSeen
+            self.needsRepair = needsRepair
         }
     }
 

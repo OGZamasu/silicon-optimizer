@@ -495,7 +495,10 @@ public final class BuddyCenter {
             problem = "Turn Silicon Buddy on first — pairing rides on the tailnet listener."
             return
         }
-        guard let host = reachAddress, let port = await server?.listeningPort, port > 0 else {
+        // The tailnet listener's port, never loopback's: loopback takes a fresh ephemeral
+        // port every launch, and a QR pointing at yesterday's is a QR that stops working.
+        guard let host = reachAddress, let port = await server?.tailnetListenerPort, port > 0
+        else {
             problem = problem ?? "The tailnet listener is not up yet. Try again in a moment."
             return
         }

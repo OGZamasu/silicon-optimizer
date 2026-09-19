@@ -277,11 +277,14 @@ struct BuddyControlTests {
                 try await fixture.server.setTailnetAccess(address: "0.0.0.0")
             }
 
-            // Same routes, same auth, a different way in.
+            // Same routes, a different way in — but not the same credentials. The control
+            // token is this Mac's own and is refused out here; a paired device's works.
             #expect(try await fixture.phone.status("GET", "/health", token: nil) == 200)
             #expect(try await fixture.phone.status(
                 "GET", "/status", token: fixture.local.token
-            ) == 200)
+            ) == 401)
+            let paired = try await fixture.pair(name: "Onward")
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
             #expect(try await fixture.phone.status("GET", "/status", token: nil) == 401)
 
             // A tailscale address can move under the app; the listener has to follow.
@@ -303,34 +306,6 @@ struct BuddyControlTests {
                 "GET", "/status", token: fixture.local.token
             ) == 200)
         }
-    }
-
-    /// Swarm LAN access binds every interface, and a device token is only a credential on
-    /// the tailnet listener — so the two cannot both be on, and the window has to say which
-    /// one is in the way rather than blaming a missing tailscale address.
-    @Test func swarmLANAccessKeepsTheTailnetListenerDown() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("buddy-lan-\(UUID())")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
-        await registry.setAllowsTailnetDevices(true)
-        let server = ControlServer(
-            host: BuddyTestHost(tokens: [], pace: .milliseconds(1), failing: false),
-            handshakeURL: directory.appendingPathComponent("control.json"),
-            buddy: registry, discoverTailnetAddress: { nil }
-        )
-        defer { Task { await server.stop() } }
-
-        // Whether the LAN bind itself succeeds is the host machine's business; the
-        // interlock keys off the decision, which `start` makes either way.
-        try await server.start(exposeOnLAN: true, swarmToken: "a-swarm-token")
-        #expect(await server.isExposedOnLAN)
-
-        try await server.setTailnetAccess(address: "127.0.0.1", port: 49_999)
-        #expect(await server.tailnetListenerAddress == nil)
-        #expect(await server.tailnetError?.contains("Swarm LAN access") == true)
-        await server.stop()
     }
 
     /// A tailscale address can move under the app — a re-auth, a different tailnet. A
@@ -989,6 +964,15 @@ actor BuddyTestHost: ControlHost {
     private(set) var eventUpdatesRequested = 0
     private var stored: [ControlAPI.ConversationDetail] = []
     private var answering: Set<String> = []
+    /// Where `GET /swarm` gets its exposure block, when a test cares. The app reads it off
+    /// the control server; a double has to be handed the same thing to read.
+    private var exposureSource: (@Sendable () async -> ControlAPI.SwarmView.Exposure?)?
+
+    func reportExposure(
+        from source: @escaping @Sendable () async -> ControlAPI.SwarmView.Exposure?
+    ) {
+        exposureSource = source
+    }
 
     init(tokens: [String], pace: Duration, failing: Bool) {
         self.tokens = tokens
@@ -1111,7 +1095,9 @@ actor BuddyTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoQueueView {
         await videoQueue()
     }
-    func swarm() async -> ControlAPI.SwarmView { .init(peers: [], polledSecondsAgo: nil) }
+    func swarm() async -> ControlAPI.SwarmView {
+        .init(peers: [], polledSecondsAgo: nil, exposure: await exposureSource?())
+    }
     func profile() async -> ControlAPI.Profile { fatalError("Unexpected test route") }
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
     /// Answered rather than trapped: `/v1/node` is one of the routes a chat-only device
