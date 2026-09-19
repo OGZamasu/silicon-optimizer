@@ -336,15 +336,10 @@ extension AppModel {
             if let file = item.file {
                 mediaID = await MediaRegistry.shared.register(path: file, within: roots)
             }
-            jobs[item.id] = ControlAPI.JobEvent(
-                id: item.id, kind: "video", status: item.status,
-                title: item.title,
+            jobs[item.id] = Self.jobEvent(
+                for: item, active: active,
                 fraction: active ? videoProgress : nil,
-                // Only the clip the app is actually following has a stage. One waiting its
-                // turn has a status, and inventing a stage for it would be a sentence the
-                // renderer never said.
                 stage: active ? videoStage : nil,
-                reason: item.error,
                 mediaID: mediaID
             )
         }
@@ -377,6 +372,30 @@ extension AppModel {
         }
         return BuddyEventPump.Snapshot(
             status: await status(), downloads: downloads, jobs: jobs
+        )
+    }
+
+    /// One queue item as a `job` frame.
+    ///
+    /// Its own function, and pure, because two of its three optional fields are rules
+    /// rather than copies and a rule that only exists inside a snapshot builder is a rule
+    /// nothing can check.
+    ///
+    /// `stage` belongs to the clip the app is actually following: one waiting its turn has
+    /// a status, and inventing a stage for it would be a sentence the renderer never said.
+    /// `reason` belongs to a clip the Mac has *given up on* — a transient failure that is
+    /// waiting to be retried carries an `error` too, and a phone announcing that beside a
+    /// pending status would be reporting a failure that has not happened.
+    nonisolated static func jobEvent(
+        for item: ControlAPI.VideoQueueView.Item, active: Bool,
+        fraction: Double?, stage: String?, mediaID: String?
+    ) -> ControlAPI.JobEvent {
+        ControlAPI.JobEvent(
+            id: item.id, kind: "video", status: item.status, title: item.title,
+            fraction: active ? fraction : nil,
+            stage: active ? stage : nil,
+            reason: item.status == VideoQueueStatus.failed.rawValue ? item.error : nil,
+            mediaID: mediaID
         )
     }
 

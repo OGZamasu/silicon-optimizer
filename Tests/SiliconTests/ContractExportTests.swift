@@ -49,7 +49,6 @@ struct ContractExportTests {
             "POST /plan", "POST /install", "POST /load",
             "POST /unload", "POST /chat", "POST /decide", "POST /v1/systemone",
             "GET /jev", "POST /jev", "GET /jev/guardrails/recent",
-            "GET /jev", "POST /jev",
             "GET /jev/calibration", "POST /jev/calibrate",
             "POST /benchmark", "GET /swarm", "GET /v1/node",
             "GET /image/models", "POST /image/plan", "POST /image/generate",
@@ -167,9 +166,19 @@ struct ContractExportTests {
         #expect(chatRoutes.contains("POST /plan"))
         #expect(!chatRoutes.contains("POST /load"))
         #expect(!chatRoutes.contains("POST /benchmark"))
+        // One route breaks this, and it is written out rather than left to be noticed:
+        // `GET /media/{id}` is reachable at either scope, but *what* a chat-only device may
+        // fetch through it depends on the id — a poster yes, the render itself no. So it is
+        // the only route that is both open to chat and advertises a 403.
         #expect(Self.routes.allSatisfy { route in
-            route.auth != "device" || route.scopes.contains("chat") == (route.errors[403] == nil)
+            route.path == "/media/{id}"
+                || route.auth != "device"
+                || route.scopes.contains("chat") == (route.errors[403] == nil)
         })
+        #expect(errors("GET", "/media/{id}")[403] == ControlServer.fullResultsNeedFullControl)
+        // Its own sentence: being told "pair again to use this" about a route the device is
+        // using right now would be wrong.
+        #expect(ControlServer.fullResultsNeedFullControl != ControlServer.chatOnlyRefusal)
         // File names carry no spaces and no braces, so a generator can use them as symbols.
         #expect(Self.routes.allSatisfy {
             !$0.fileName.contains(" ") && !$0.fileName.contains("{")
@@ -192,6 +201,10 @@ struct ContractExportTests {
         // A render told to start from an id that has been swept says so, rather than
         // reading as "you forgot to send a picture".
         #expect(errors("POST", "/video/generate")[404] == ControlServer.expiredSubject)
+        // What a device is told when the bytes could not be written: one sentence, and
+        // nothing about this Mac's disk.
+        #expect(errors("POST", "/uploads")[500] == ControlServer.uploadNotSaved)
+        #expect(!ControlServer.uploadNotSaved.contains("/"))
 
         // A device is never handed a path to send back. Every route that takes a subject
         // image advertises both ids, and the fixture shows them.
@@ -634,9 +647,24 @@ struct ContractExportTests {
             "and a client never builds one. Ids only ever name files inside the app's own",
             "output folders, so there is no path to send and no traversal to attempt. The",
             "route carries the file's content type, `Accept-Ranges: bytes` and an `ETag`;",
-            "send `Range` for a 206 and `If-None-Match` for a 304. Both device scopes may",
-            "fetch, because looking at something the Mac has already made spends nothing.",
-            "An id stops working when its file is deleted, and that is a 404.",
+            "send `Range` for a 206 and `If-None-Match` for a 304. A multi-range `Range` is",
+            "ignored and the whole file sent, because this server does not write",
+            "`multipart/byteranges`. Media is the one family of responses that is cacheable",
+            "— `Cache-Control: private, max-age=3600` — and everything else stays",
+            "`no-store`. Anything that is not an image or a video also carries",
+            "`Content-Disposition: attachment`, and all of it carries `nosniff`.",
+            "",
+            "**Scope is per id, not per route.** A full-control device may fetch anything it",
+            "has an id for. A chat-only device may fetch the preview images —",
+            "`thumbnailMediaID` — and gets a 403 on the renders themselves: a device paired",
+            "for chat is one that was lent out, and pulling a clip onto it is the permission",
+            "the owner withheld. Both scopes see both ids in `GET /video/queue`.",
+            "",
+            "An id stops working when its file is deleted, moved out of the app's output",
+            "folders, or replaced by a link pointing outside them — the roots are rechecked",
+            "on every fetch, not remembered from when the id was issued. All of those are",
+            "the same 404, and so is another device's upload id: \"that is not yours\" and",
+            "\"that does not exist\" have to look alike, or the route is an oracle.",
             "",
             "`POST /uploads` is how a device names a picture without naming a path. Send the",
             "bytes with a `Content-Type` and an `X-Filename`, or a `multipart/form-data`",
@@ -644,12 +672,16 @@ struct ContractExportTests {
             "file's own first bytes, and anything that is not a PNG, JPEG, GIF, WebP, MP4,",
             "MOV or WebM is a 415. The ceiling is 24 MiB for this route alone; every other",
             "route a device can reach keeps its 4 MiB. Uploads land in a folder per device",
-            "and are deleted after seven days, so `uploadID` and `mediaID` both stop",
-            "resolving then. `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/generate`",
-            "and `POST /video/generate` each take `uploadID` or `mediaID` in place of a path,",
-            "and a device may only use those: a path in a request from a paired phone is",
-            "refused, because a device that could name a file could name any file. Full",
-            "scope only — uploading spends this Mac's disk.",
+            "and are deleted after seven days — swept on every upload and on every queue",
+            "poll — so `uploadID` and `mediaID` both stop resolving then. An upload belongs",
+            "to the device that sent it: another device's id resolves to nothing, by either",
+            "name. `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`,",
+            "`POST /image/generate` and `POST /video/generate` each take `uploadID` or",
+            "`mediaID` in place of a path, and a device may only use those: a path in a",
+            "request from a paired phone is refused, because a device that could name a file",
+            "could name any file. Full scope only — uploading spends this Mac's disk, and",
+            "the 24 MiB ceiling is granted to an identified full-scope device rather than to",
+            "the path, so an unknown bearer gets the ordinary 4 MiB.",
             "",
             "`GET /swarm` says what the Mac's last poll saw, which is why every field beyond",
             "name, address and reachability is optional there. `GET /swarm/peers/{name}/status`",
@@ -1284,11 +1316,13 @@ struct ContractExportTests {
             method: "GET", path: "/media/{id}", auth: "device",
             summary: "The file itself. Answers bytes, not JSON: the content type of the "
                 + "result, `Accept-Ranges: bytes`, an `ETag`, 206 for a `Range` and 304 "
-                + "for a matching `If-None-Match`.",
+                + "for a matching `If-None-Match`. A chat-only device may fetch preview "
+                + "images but not the renders themselves.",
             // No response example, because there is no JSON to give one of. The ids come
             // from `mediaID` and `thumbnailMediaID` on the routes above; a client never
             // constructs one and never parses one.
             errors: [
+                403: ControlServer.fullResultsNeedFullControl,
                 404: ControlServer.noSuchMedia,
                 416: ControlServer.rangeOutsideFile,
             ]
@@ -1312,6 +1346,7 @@ struct ContractExportTests {
                 413: "That request body is larger than this device may send "
                     + "(\(BuddyUploads.maximumBytes) bytes).",
                 415: ControlServer.unreadableUpload,
+                500: ControlServer.uploadNotSaved,
             ]
         ),
         Route(

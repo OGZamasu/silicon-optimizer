@@ -35,7 +35,7 @@ public enum BuddyUploads {
     /// path component either way, so it is sanitised rather than trusted: anything that is
     /// not a letter, a digit, a dash or an underscore is replaced, which leaves no `.` and
     /// no `/` for a bucket name to climb out of.
-    public static func deviceRoot(_ bucket: String) -> URL {
+    public static func deviceRoot(_ bucket: String, at root: URL = BuddyUploads.root) -> URL {
         root.appendingPathComponent(safe(bucket), isDirectory: true)
     }
 

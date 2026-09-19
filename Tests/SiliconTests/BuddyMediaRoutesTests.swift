@@ -94,9 +94,9 @@ struct BuddyMediaRoutesTests {
             #expect(await registry.count == 1)
 
             let id = try #require(first)
-            #expect(await registry.entry(id: id)?.contentType == "video/mp4")
+            #expect(await registry.entry(id: id, within: [directory.path])?.contentType == "video/mp4")
             try FileManager.default.removeItem(at: clip)
-            #expect(await registry.entry(id: id) == nil)
+            #expect(await registry.entry(id: id, within: [directory.path]) == nil)
             // …and forgotten, not merely hidden.
             #expect(await registry.count == 0)
         }
@@ -117,15 +117,53 @@ struct BuddyMediaRoutesTests {
             await first.persist()
 
             let second = MediaRegistry(url: file)
-            #expect(await second.entry(id: id)?.path == clip.path)
+            #expect(await second.entry(id: id, within: [directory.path])?.path == clip.path)
             // And the same path still mints the same id rather than a second one.
             #expect(await second.register(path: clip.path, within: [directory.path]) == id)
         }
     }
 
+    // MARK: - What a body is, read off bytes that may not all be there
+
+    /// B1's shape, pinned: the `ftyp` sniff proved eight bytes and then read twelve.
+    ///
+    /// Eight to eleven bytes starting `....ftyp` is a perfectly ordinary thing for a
+    /// truncated upload to be, and it trapped the whole app — every paired device, the MCP
+    /// bridge, the gateway and the window the owner was looking at, from one request.
+    @Test func aTruncatedHeaderIsRefusedRatherThanTrappingTheApp() {
+        let ftyp: [UInt8] = [0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70]
+        // Exactly the marker and nothing after it, and every length up to the brand.
+        for count in 8...11 {
+            let truncated = Data(ftyp.prefix(count))
+            #expect(MediaSniffer.kind(of: truncated) == nil, "\(count) bytes")
+        }
+        // Twelve is the first length at which the brand exists to be read.
+        let mp4 = Data(ftyp + Array("isom".utf8))
+        #expect(MediaSniffer.kind(of: mp4)?.fileExtension == "mp4")
+        let quicktime = Data(ftyp + Array("qt  ".utf8))
+        #expect(MediaSniffer.kind(of: quicktime)?.contentType == "video/quicktime")
+
+        // And every other branch, at one byte less than it needs and at exactly enough.
+        let shortened: [(String, [UInt8])] = [
+            ("png", [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x08]),
+            ("jpeg", [0xFF, 0xD8, 0xFF]),
+            ("gif", [0x47, 0x49, 0x46, 0x38]),
+            ("webm", [0x1A, 0x45, 0xDF, 0xA3]),
+            ("webp", Array("RIFF".utf8) + [0, 0, 0, 0] + Array("WEBP".utf8)),
+        ]
+        for (label, bytes) in shortened {
+            for count in 0..<bytes.count {
+                // Never a trap, whatever it answers.
+                _ = MediaSniffer.kind(of: Data(bytes.prefix(count)))
+            }
+            _ = label
+        }
+        #expect(MediaSniffer.kind(of: Data())  == nil)
+    }
+
     // MARK: - GET /media/{id}
 
-    @Test func aDeviceFetchesAResultByIdAtEitherScopeAndNeverWithoutAToken() async throws {
+    @Test func aFullDeviceFetchesAResultByIdAndNobodyFetchesWithoutAToken() async throws {
         try await withServer { fixture in
             let clip = try fixture.writeOutput(named: "clip.mp4", bytes: Self.mp4Bytes(count: 4096))
             let id = try #require(
@@ -135,15 +173,11 @@ struct BuddyMediaRoutesTests {
             let full = try await fixture.pair(name: "Studio phone")
             let chat = try await fixture.pair(name: "Lent out", scope: .chat)
 
-            // Full control and chat-only alike: looking at something the Mac already made
-            // spends nothing, which is the same reason a chat device may read the queue.
-            for token in [full.token, chat.token] {
-                let (status, body) = try await fixture.phone.call(
-                    "GET", "/media/\(id)", token: token
-                )
-                #expect(status == 200)
-                #expect(body.count == 4096)
-            }
+            let (status, body) = try await fixture.phone.call(
+                "GET", "/media/\(id)", token: full.token
+            )
+            #expect(status == 200)
+            #expect(body.count == 4096)
 
             // And the loopback listener serves it too — the MCP bridge and this Mac's own
             // tools reach the same route with the control token.
@@ -154,8 +188,65 @@ struct BuddyMediaRoutesTests {
             // No token, a guessed token, and a token from a device that has been revoked.
             #expect(try await fixture.phone.status("GET", "/media/\(id)", token: nil) == 401)
             #expect(try await fixture.phone.status("GET", "/media/\(id)", token: "guessed") == 401)
-            _ = await fixture.registry2.revoke(deviceID: chat.deviceID)
+            _ = await fixture.devices.revoke(deviceID: chat.deviceID)
             #expect(try await fixture.phone.status("GET", "/media/\(id)", token: chat.token) == 401)
+        }
+    }
+
+    /// The scope split that is decided per id rather than per route.
+    ///
+    /// A chat-only device is the one that was lent out, or left at the office. It may see
+    /// what the Mac has been making — the queue has told it that since the queue existed,
+    /// and a poster is a few kilobytes of that — but pulling the renders themselves down
+    /// onto a device the owner does not have in their hand is the permission they withheld.
+    @Test func aChatOnlyDeviceGetsThePosterAndNotTheRender() async throws {
+        try await withServer { fixture in
+            let clip = try fixture.writeOutput(named: "clip.mp4", bytes: Self.mp4Bytes(count: 512))
+            await fixture.host.setQueueFile(clip.path)
+            let full = try await fixture.pair(name: "Studio phone")
+            let chat = try await fixture.pair(name: "Lent out", scope: .chat)
+
+            // The queue view is open to both, and carries both ids to both.
+            let view = try JSONDecoder().decode(
+                ControlAPI.VideoQueueView.self,
+                from: try await fixture.phone.call(
+                    "GET", "/video/queue", token: chat.token
+                ).1
+            )
+            let item = try #require(view.items.first)
+            let render = try #require(item.mediaID)
+            let poster = try #require(item.thumbnailMediaID)
+
+            // The picture of it: yes.
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(poster)", token: chat.token
+            ) == 200)
+            // The thing itself: not on this device.
+            let (refused, body) = try await fixture.phone.call(
+                "GET", "/media/\(render)", token: chat.token
+            )
+            #expect(refused == 403)
+            let sentence = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+            #expect(sentence.error == ControlServer.fullResultsNeedFullControl)
+            // Its own sentence, not the general chat-only one: this is a route the device
+            // may otherwise use, and being told "pair again" about all of it would be wrong.
+            #expect(sentence.error != ControlServer.chatOnlyRefusal)
+
+            // Full control gets both, which is what makes the refusal about scope rather
+            // than about the file.
+            for id in [poster, render] {
+                #expect(try await fixture.phone.status(
+                    "GET", "/media/\(id)", token: full.token
+                ) == 200)
+            }
+            // A 3D file is a render too, whatever its type.
+            let mesh = try fixture.writeOutput(named: "kettle.obj", bytes: Data("v 0 0 0\n".utf8))
+            let meshID = try #require(
+                await fixture.registry.register(path: mesh.path, within: [fixture.outputs.path])
+            )
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(meshID)", token: chat.token
+            ) == 403)
         }
     }
 
@@ -453,8 +544,8 @@ struct BuddyMediaRoutesTests {
             #expect(manager.fileExists(atPath: phone.path))
 
             await registry.forgetMissingFiles()
-            #expect(await registry.entry(id: staleID) == nil)
-            #expect(await registry.entry(id: freshID) != nil)
+            #expect(await registry.entry(id: staleID, within: [directory.path]) == nil)
+            #expect(await registry.entry(id: freshID, within: [directory.path]) != nil)
         }
     }
 
@@ -710,41 +801,56 @@ struct BuddyMediaRoutesTests {
         try await body(directory)
     }
 
-    struct Fixture {
-        let server: ControlServer
-        let local: TestClient
-        let phone: TestClient
-        /// The paired-device store. Named `registry2` beside the media one so neither
-        /// reads as "the registry".
-        let registry2: BuddyRegistry
-        let registry: MediaRegistry
-        let host: MediaTestHost
-        let directory: URL
-        let outputs: URL
-        let uploads: URL
+    private func withServer(_ body: (BuddyMediaFixture) async throws -> Void) async throws {
+        try await BuddyMediaFixture.withServer(body)
+    }
+}
 
-        func writeOutput(named name: String, bytes: Data) throws -> URL {
-            let url = outputs.appendingPathComponent(name)
-            try bytes.write(to: url)
-            return url
-        }
+// MARK: - One server, two suites
 
-        func pair(
-            name: String = "Galaxy S24 Ultra", scope: BuddyScope = .full
-        ) async throws -> ControlAPI.BuddyPairResponse {
-            let invitation = await registry2.invite(
-                host: "127.0.0.1", port: phone.port, scope: scope
-            )
-            let (status, body) = try await phone.call(
-                "POST", "/buddy/pair", token: nil,
-                body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"android"}"#
-            )
-            #expect(status == 200)
-            return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
-        }
+/// A control server with output folders, an uploads root and a poster cache, all inside a
+/// temporary directory. Shared by both suites in this file so there is one answer to "what
+/// does a media server look like" rather than two that drift.
+struct BuddyMediaFixture {
+    let server: ControlServer
+    let local: TestClient
+    let phone: TestClient
+    /// The paired-device store, beside the media one.
+    let devices: BuddyRegistry
+    let registry: MediaRegistry
+    let host: MediaTestHost
+    let directory: URL
+    let outputs: URL
+    let uploads: URL
+
+    /// Kept for the tests written before the rename.
+    var registry2: BuddyRegistry { devices }
+
+    func writeOutput(named name: String, bytes: Data) throws -> URL {
+        let url = outputs.appendingPathComponent(name)
+        try bytes.write(to: url)
+        return url
     }
 
-    private func withServer(_ body: (Fixture) async throws -> Void) async throws {
+    func pair(
+        name: String = "Galaxy S24 Ultra", scope: BuddyScope = .full
+    ) async throws -> ControlAPI.BuddyPairResponse {
+        let invitation = await devices.invite(
+            host: "127.0.0.1", port: phone.port, scope: scope
+        )
+        let (status, body) = try await phone.call(
+            "POST", "/buddy/pair", token: nil,
+            body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"android"}"#
+        )
+        #expect(status == 200)
+        return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
+    }
+
+    static func withServer(
+        writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
+        uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
+        _ body: (BuddyMediaFixture) async throws -> Void
+    ) async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("buddy-media-server-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -763,12 +869,21 @@ struct BuddyMediaRoutesTests {
             host: host, handshakeURL: handshakeURL, buddy: devices,
             events: BuddyEventHub(), media: media,
             uploadsRoot: uploads, postersRoot: posters,
+            uploadSweepInterval: uploadSweepInterval,
+            eventWriteDeadline: writeDeadline,
             discoverTailnetAddress: { nil }
         )
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 64
         configuration.timeoutIntervalForRequest = 30
+        // Media is now deliberately cacheable — `private, max-age=3600`, which is the whole
+        // point of the ETag beside it. That makes URLSession's own cache a liar in a test:
+        // a second request for the same id would be answered locally, and an assertion
+        // about a 401 or a 403 would be an assertion about Foundation. The one test that
+        // asks about caching on purpose reads the header rather than the cache.
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
@@ -785,11 +900,11 @@ struct BuddyMediaRoutesTests {
         await devices.setAllowsTailnetDevices(true)
         let tailnetPort = try await BuddyControlTests.bindTailnetListener(on: server)
 
-        try await body(Fixture(
+        try await body(BuddyMediaFixture(
             server: server,
             local: TestClient(port: handshake.port, token: handshake.token, session: session),
             phone: TestClient(port: tailnetPort, token: handshake.token, session: session),
-            registry2: devices, registry: media, host: host,
+            devices: devices, registry: media, host: host,
             directory: directory, outputs: outputs, uploads: uploads
         ))
         await server.stop()
@@ -805,8 +920,10 @@ struct BuddyMediaRoutesTests {
 /// testing the wrong thing.
 actor MediaTestHost: ControlHost {
 
-    private let roots: [String]
+    private var roots: [String]
     private var queueFile: String?
+    /// What the image routes were handed, after the server resolved whatever was sent.
+    private(set) var lastImagePath: String?
     /// What `POST /mesh/generate` was handed, after the server resolved whatever the
     /// caller sent. Nil means the host was never reached, which is what a refusal looks
     /// like from down here.
@@ -816,6 +933,8 @@ actor MediaTestHost: ControlHost {
 
     func setQueueFile(_ path: String?) { queueFile = path }
     func forgetMesh() { lastMeshImagePath = nil }
+    /// The owner moving their output folder, from the server's point of view.
+    func setRoots(_ roots: [String]) { self.roots = roots }
 
     func controlMediaRoots() async -> [String] { roots }
 
@@ -850,9 +969,21 @@ actor MediaTestHost: ControlHost {
     func generateImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
-        .init(
+        lastImagePath = request.initImagePath
+        return .init(
             path: request.initImagePath ?? "", elapsedSeconds: 1, peakMemoryBytes: nil,
             predictedPeakBytes: 1, model: "fixture"
+        )
+    }
+
+    /// Answers rather than traps, because `/image/plan` is now gated like the render it
+    /// plans and the test that proves it has to get past the gate.
+    func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
+        lastImagePath = request.initImagePath
+        return .init(
+            width: 1024, height: 1024, steps: 8, quantization: "8-bit",
+            peakBytes: 1, peakPhase: "Decode", budgetBytes: 2, verdict: "fits",
+            phases: [], suggestions: [], notes: []
         )
     }
 
@@ -899,18 +1030,22 @@ actor MediaTestHost: ControlHost {
         throw BuddyTestError.unexpectedRoute
     }
     func imageModels() async -> [ControlAPI.ImageModel] { [] }
-    func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
-        throw BuddyTestError.unexpectedRoute
-    }
     func meshModels() async -> [ControlAPI.MeshModel] { [] }
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan {
-        throw BuddyTestError.unexpectedRoute
+        lastMeshImagePath = request.imagePath
+        return .init(
+            model: "fixture", peakBytes: 1, peakPhase: "Bake", budgetBytes: 2,
+            verdict: "fits", isRemote: false, phases: [], suggestions: [], notes: []
+        )
     }
     func videoModels() async -> [ControlAPI.VideoModel] { [] }
     func generateVideo(
         _ request: ControlAPI.VideoGenerateRequest
     ) async throws -> ControlAPI.VideoResponse {
-        throw BuddyTestError.unexpectedRoute
+        // Reached only when the subject resolved; the path-from-a-device test asserts it
+        // is never reached at all.
+        lastImagePath = request.imagePath
+        return .init(file: queueFile ?? "", node: "fixture", model: "fixture", elapsedSeconds: 1)
     }
     func nodeAdvertisement() async -> ControlAPI.NodeAdvertisement {
         .init(
@@ -1313,4 +1448,645 @@ struct BuddyMediaAppTests {
         #expect(jobs(BuddyEventPump.changes(from: snapshot(running), to: snapshot(running)))
             .isEmpty)
     }
+
+    /// Which of a queue item's fields become a frame, and which are withheld.
+    ///
+    /// Two of the three are rules rather than copies. A clip that failed transiently keeps
+    /// its `error` while it waits to be retried — it is how the queue remembers what went
+    /// wrong last time — and a phone showing that beside a pending status would be
+    /// announcing a failure the Mac has not given up on. A clip waiting its turn has no
+    /// stage, because the renderer has not said anything about it.
+    @Test func onlyAGivenUpOnClipCarriesAReasonAndOnlyAFollowedOneAStage() {
+        func item(_ status: String, error: String?) -> ControlAPI.VideoQueueView.Item {
+            .init(
+                id: "9C2F-0001", batchID: "9C2F", title: "Opening shot", prompt: "A tram",
+                scene: 1, variation: 1, seed: 1, modelID: "hailuo-h3", seconds: 5,
+                resolution: "720p", h3Turbo: nil, status: status, nodeJobID: nil, file: nil,
+                outputDirectory: "/Users/you/Movies", error: error, uncertainSubmission: false
+            )
+        }
+
+        // Given up on: the sentence travels.
+        let failed = AppModel.jobEvent(
+            for: item("failed", error: "silicon-node ran out of VRAM."),
+            active: false, fraction: nil, stage: nil, mediaID: nil
+        )
+        #expect(failed.reason == "silicon-node ran out of VRAM.")
+
+        // Waiting to be retried after a transient failure: the queue still remembers the
+        // error, and the phone is not told the render failed.
+        for status in ["pending", "submitting", "rendering", "completed"] {
+            let frame = AppModel.jobEvent(
+                for: item(status, error: "The node stopped answering; it may still be rendering."),
+                active: false, fraction: nil, stage: nil, mediaID: nil
+            )
+            #expect(frame.reason == nil, "\(status) carried a reason")
+        }
+
+        // Stage and fraction belong to the clip the Mac is actually following.
+        let followed = AppModel.jobEvent(
+            for: item("rendering", error: nil), active: true,
+            fraction: 0.4, stage: "video-denoise 12/30", mediaID: "an-id"
+        )
+        #expect(followed.stage == "video-denoise 12/30")
+        #expect(followed.fraction == 0.4)
+        let queued = AppModel.jobEvent(
+            for: item("pending", error: nil), active: false,
+            fraction: 0.4, stage: "video-denoise 12/30", mediaID: nil
+        )
+        #expect(queued.stage == nil)
+        #expect(queued.fraction == nil)
+    }
 }
+
+
+/// The fixes the critic's review of #45 asked for, each pinned by the thing that would
+/// have to break for it to regress.
+@Suite("Silicon Buddy media, the hard edges")
+struct BuddyMediaEdgeTests {
+
+    // MARK: - B2: the upload ceiling is the upload ceiling
+
+    /// The per-route limit used to be clamped by the general one, so the route advertised
+    /// 24 MiB, refused at 16, and quoted 24 in the refusal.
+    @Test func theUploadCeilingIsTwentyFourMiBAndSaysSoWhenItIsPassed() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let paired = try await fixture.pair()
+
+            // Comfortably past the 16 MiB general ceiling, which is where this used to
+            // fail, and comfortably inside the one this route advertises.
+            let eighteen = BuddyMediaRoutesTests.jpegBytes(count: 18 * 1_048_576)
+            #expect(eighteen.count > HTTPRequest.maximumBody)
+            let (accepted, body) = try await fixture.phone.call(
+                "POST", "/uploads", token: paired.token, data: eighteen,
+                contentType: "image/jpeg"
+            )
+            #expect(accepted == 200)
+            let upload = try JSONDecoder().decode(ControlAPI.UploadResponse.self, from: body)
+            #expect(upload.bytes == eighteen.count)
+
+            // And one byte past the advertised figure is refused — on the *declared*
+            // length, before a byte of it is read, which is the whole point of having a
+            // cap rather than receiving the thing and then disapproving of it. Sent as a
+            // bare head for exactly that reason: if the server were reading first, this
+            // request would hang instead of being answered.
+            let over = try await SilentReader.exchange(
+                port: fixture.phone.port,
+                request: "POST /uploads HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Authorization: Bearer \(paired.token)\r\n"
+                    + "Content-Type: image/jpeg\r\n"
+                    + "Content-Length: \(BuddyUploads.maximumBytes + 1)\r\n\r\n"
+            )
+            #expect(over.contains("413 Payload Too Large"))
+            // Quoting the figure this route actually has, and not the general one it used
+            // to be silently clamped to.
+            #expect(over.contains("\(BuddyUploads.maximumBytes)"))
+            #expect(!over.contains("\(HTTPRequest.maximumBody)"))
+        }
+    }
+
+    // MARK: - S3: the raised ceiling belongs to a caller, not to a path
+
+    /// Pointing 24 MiB at `/uploads` with a token nobody issued buys the ordinary 4 MiB.
+    @Test func onlyAnIdentifiedFullDeviceGetsTheRaisedCeiling() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let full = try await fixture.pair(name: "Studio phone")
+            let chat = try await fixture.pair(name: "Lent out", scope: .chat)
+            let big = BuddyMediaRoutesTests.jpegBytes(count: 8 * 1_048_576)
+            #expect(big.count > BuddyLimits.requestBodyBytes)
+
+            // A bearer that is not a device at all: refused on length, before the body.
+            let (guessed, why) = try await fixture.phone.call(
+                "POST", "/uploads", token: "guessed", data: big, contentType: "image/jpeg"
+            )
+            #expect(guessed == 413)
+            let sentence = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: why)
+            #expect(sentence.error.contains("\(BuddyLimits.requestBodyBytes)"))
+
+            // A chat-only device may not use this route at all, so it does not get its
+            // ceiling either — refused on length rather than reaching the 403.
+            #expect(try await fixture.phone.status(
+                "POST", "/uploads", token: chat.token, data: big, contentType: "image/jpeg"
+            ) == 413)
+
+            // A revoked device is a bearer nobody issued, from the next request onward.
+            #expect(try await fixture.phone.status(
+                "POST", "/uploads", token: full.token, data: big, contentType: "image/jpeg"
+            ) == 200)
+            _ = await fixture.devices.revoke(deviceID: full.deviceID)
+            #expect(try await fixture.phone.status(
+                "POST", "/uploads", token: full.token, data: big, contentType: "image/jpeg"
+            ) == 413)
+        }
+    }
+
+    // MARK: - B3 + S5: a device may never name a path, on any route that takes one
+
+    /// The mutation this is proof against: dropping any one of these four routes out of the
+    /// resolver. `/image/plan` really was dropped, and a planner that answers "no image at
+    /// that path" differently from a plan is a yes/no oracle for every path on the Mac.
+    @Test func noRouteThatTakesASubjectLetsADeviceNameAPath() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let paired = try await fixture.pair()
+            let body =
+                #"{"prompt":"a kettle","imagePath":"/etc/passwd","initImagePath":"/etc/passwd"}"#
+
+            for path in ["/mesh/plan", "/mesh/generate", "/image/plan", "/image/generate",
+                         "/video/generate"] {
+                let status = try await fixture.phone.status(
+                    "POST", path, token: paired.token, body: body
+                )
+                #expect(status == 400, "\(path) accepted a path from a device")
+            }
+            // The host is never reached, which is the part that matters: a refusal that
+            // happened after the planner had already looked would still be an oracle.
+            #expect(await fixture.host.lastMeshImagePath == nil)
+            #expect(await fixture.host.lastImagePath == nil)
+
+            // And the same routes take an id perfectly well.
+            let (_, answer) = try await fixture.phone.call(
+                "POST", "/uploads", token: paired.token,
+                data: BuddyMediaRoutesTests.jpegBytes(count: 900), contentType: "image/jpeg"
+            )
+            let upload = try JSONDecoder().decode(ControlAPI.UploadResponse.self, from: answer)
+            #expect(try await fixture.phone.status(
+                "POST", "/image/plan", token: paired.token,
+                body: #"{"prompt":"a kettle","uploadID":"\#(upload.uploadID)"}"#
+            ) == 200)
+            #expect(await fixture.host.lastImagePath != nil)
+        }
+    }
+
+    /// One device's upload is not another's, by either kind of id.
+    @Test func oneDevicesUploadIsNotAnothersByEitherId() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let alice = try await fixture.pair(name: "Alice's phone")
+            let bob = try await fixture.pair(name: "Bob's phone")
+
+            let (_, body) = try await fixture.phone.call(
+                "POST", "/uploads", token: alice.token,
+                data: BuddyMediaRoutesTests.jpegBytes(count: 700), contentType: "image/jpeg"
+            )
+            let hers = try JSONDecoder().decode(ControlAPI.UploadResponse.self, from: body)
+
+            // Hers works.
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(hers.mediaID)", token: alice.token
+            ) == 200)
+            // His does not — and is told the same thing an id that never existed is told,
+            // because "that is not yours" and "that does not exist" must look identical or
+            // the route is an oracle for what other phones have sent.
+            let (refused, why) = try await fixture.phone.call(
+                "GET", "/media/\(hers.mediaID)", token: bob.token
+            )
+            #expect(refused == 404)
+            #expect(
+                try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: why).error
+                    == ControlServer.noSuchMedia
+            )
+
+            // Nor by naming it as the subject of a render, by either id.
+            for field in ["uploadID": hers.uploadID, "mediaID": hers.mediaID] {
+                #expect(try await fixture.phone.status(
+                    "POST", "/mesh/generate", token: bob.token,
+                    body: #"{"\#(field.key)":"\#(field.value)"}"#
+                ) == 404, "\(field.key)")
+            }
+            #expect(await fixture.host.lastMeshImagePath == nil)
+            // …while she can.
+            #expect(try await fixture.phone.status(
+                "POST", "/mesh/generate", token: alice.token,
+                body: #"{"mediaID":"\#(hers.mediaID)"}"#
+            ) == 200)
+        }
+    }
+
+    // MARK: - S1: an id is a promise about a file, rechecked rather than remembered
+
+    /// Registered honestly, then swapped for a symlink out of the roots. The check at
+    /// registration already happened; this is the one that has to happen again.
+    @Test func aFileSwappedForALinkAfterRegistrationStopsBeingServed() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let secret = fixture.directory.appendingPathComponent("private.png")
+            try Data("not yours".utf8).write(to: secret)
+            let clip = try fixture.writeOutput(
+                named: "clip.mp4", bytes: BuddyMediaRoutesTests.mp4Bytes(count: 256)
+            )
+            let id = try #require(
+                await fixture.registry.register(path: clip.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(id)", token: paired.token
+            ) == 200)
+
+            // The swap, after the fact.
+            try FileManager.default.removeItem(at: clip)
+            try FileManager.default.createSymbolicLink(at: clip, withDestinationURL: secret)
+            #expect(FileManager.default.fileExists(atPath: clip.path))
+
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(id)", token: paired.token
+            ) == 404)
+            // And the entry is dropped rather than left to be tried again.
+            #expect(await fixture.registry.entry(
+                id: id, within: [fixture.outputs.path]
+            ) == nil)
+        }
+    }
+
+    /// The swap that the roots check alone does not catch, and that the identity check
+    /// exists for.
+    ///
+    /// A link from inside an output folder to *another file inside a root* passes "is this
+    /// inside the roots?" perfectly well — and serves bytes the id was never a promise
+    /// about. Point it at another device's upload and the id for a render this Mac made
+    /// becomes a way to read a photograph that belongs to somebody else's phone, past both
+    /// the per-device rule and the chat-scope one, because both of those ask about the
+    /// *registered* path and the registered path is still where it always was.
+    @Test func aLinkToAnotherFileInsideTheRootsIsStillNotTheFileThatWasPromised() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let alice = try await fixture.pair(name: "Alice's phone")
+            let bob = try await fixture.pair(name: "Bob's phone")
+            let secret = BuddyMediaRoutesTests.jpegBytes(count: 321)
+            _ = try await fixture.phone.call(
+                "POST", "/uploads", token: alice.token, data: secret, contentType: "image/jpeg"
+            )
+            let hers = try #require(
+                try FileManager.default.contentsOfDirectory(
+                    at: fixture.uploads.appendingPathComponent(alice.deviceID),
+                    includingPropertiesForKeys: nil
+                ).first
+            )
+
+            // An ordinary render of Bob's own, registered honestly.
+            let clip = try fixture.writeOutput(
+                named: "clip.mp4", bytes: BuddyMediaRoutesTests.mp4Bytes(count: 256)
+            )
+            let id = try #require(
+                await fixture.registry.register(path: clip.path, within: [fixture.outputs.path])
+            )
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(id)", token: bob.token
+            ) == 200)
+
+            // …swapped for a link to hers. Inside a root, so the roots check is content.
+            try FileManager.default.removeItem(at: clip)
+            try FileManager.default.createSymbolicLink(at: clip, withDestinationURL: hers)
+
+            let (status, body) = try await fixture.phone.call(
+                "GET", "/media/\(id)", token: bob.token
+            )
+            #expect(status == 404)
+            #expect(body != secret)
+        }
+    }
+
+    /// The owner moves their output folder. Every id minted against the old one stops
+    /// working, because the roots are checked now and not at registration.
+    @Test func idsStopWorkingWhenTheirRootStopsBeingOne() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let clip = try fixture.writeOutput(
+                named: "clip.mp4", bytes: BuddyMediaRoutesTests.mp4Bytes(count: 256)
+            )
+            let id = try #require(
+                await fixture.registry.register(path: clip.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(id)", token: paired.token
+            ) == 200)
+
+            await fixture.host.setRoots([fixture.directory.appendingPathComponent("Other").path])
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(id)", token: paired.token
+            ) == 404)
+        }
+    }
+
+    // MARK: - S2: a reader that stops reading does not keep a connection slot
+
+    /// There are sixty-four of them. A phone that walks out of range mid-clip leaves a
+    /// `send` that never completes and never errors — `Task.cancel` cannot reach into
+    /// Network.framework, so without a deadline that slot is held until the app quits.
+    @Test func aReaderThatStopsReadingIsGivenUpOn() async throws {
+        try await BuddyMediaFixture.withServer(writeDeadline: .milliseconds(200)) { fixture in
+            // Bigger than any socket buffer, so the send genuinely stalls rather than
+            // completing into the kernel and looking like success.
+            let clip = try fixture.writeOutput(
+                named: "big.mp4", bytes: BuddyMediaRoutesTests.mp4Bytes(count: 8 * 1_048_576)
+            )
+            let id = try #require(
+                await fixture.registry.register(path: clip.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+
+            let silent = SilentReader(port: fixture.phone.port)
+            try await silent.connect()
+            try await silent.send(
+                "GET /media/\(id) HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Authorization: Bearer \(paired.token)\r\n\r\n"
+            )
+            // It never reads a byte. The server writes until the window closes, then the
+            // deadline ends it.
+            let deadline = ContinuousClock.now + .seconds(10)
+            while await fixture.server.openConnections > 0 {
+                guard ContinuousClock.now < deadline else {
+                    Issue.record("The stalled reader kept its connection slot.")
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            #expect(await fixture.server.openConnections == 0)
+            silent.stop()
+
+            // And the server is still serving, which is the point of having let go.
+            #expect(try await fixture.phone.status(
+                "GET", "/health", token: paired.token
+            ) == 200)
+        }
+    }
+
+    // MARK: - S4 + S7: the headers a result carries, and the ones everything else does
+
+    @Test func mediaIsCacheableAndEverythingElseIsNot() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let image = try fixture.writeOutput(
+                named: "still.png", bytes: BuddyMediaRoutesTests.pngBytes(count: 200)
+            )
+            let mesh = try fixture.writeOutput(named: "kettle.glb", bytes: Data("glTF".utf8))
+            let imageID = try #require(
+                await fixture.registry.register(path: image.path, within: [fixture.outputs.path])
+            )
+            let meshID = try #require(
+                await fixture.registry.register(path: mesh.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+
+            let picture = try await fixture.phone.range("/media/\(imageID)", token: paired.token)
+            #expect(picture.status == 200)
+            // Cacheable, privately, which is what makes the ETag worth having.
+            #expect(picture["Cache-Control"] == ControlServer.mediaCacheControl)
+            #expect(picture["Cache-Control"]?.contains("no-store") != true)
+            #expect(picture["X-Content-Type-Options"] == "nosniff")
+            // A picture is meant to be shown.
+            #expect(picture["Content-Disposition"] == nil)
+
+            // A mesh is not. And the filename offered is the id, so nothing about this
+            // Mac's folders travels with it.
+            let model = try await fixture.phone.range("/media/\(meshID)", token: paired.token)
+            let disposition = try #require(model["Content-Disposition"])
+            #expect(disposition.hasPrefix("attachment"))
+            #expect(disposition.contains(meshID))
+            #expect(!disposition.contains(fixture.outputs.lastPathComponent))
+            #expect(!disposition.contains("kettle"))
+
+            // Everything this server says about itself stays uncacheable.
+            let status = try await fixture.phone.range("/status", token: paired.token)
+            #expect(status["Cache-Control"] == "no-store")
+        }
+    }
+
+    /// A 304 has no body, so it has no business claiming a length for one.
+    @Test func anUnchangedFetchIsFramedAsTheBodylessThingItIs() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let image = try fixture.writeOutput(
+                named: "still.png", bytes: BuddyMediaRoutesTests.pngBytes(count: 200)
+            )
+            let id = try #require(
+                await fixture.registry.register(path: image.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+            let first = try await fixture.phone.range("/media/\(id)", token: paired.token)
+            let tag = try #require(first["ETag"])
+
+            let raw = try await SilentReader.exchange(
+                port: fixture.phone.port,
+                request: "GET /media/\(id) HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Authorization: Bearer \(paired.token)\r\n"
+                    + "If-None-Match: \(tag)\r\n\r\n"
+            )
+            #expect(raw.contains("304 Not Modified"))
+            #expect(!raw.lowercased().contains("content-length"))
+            #expect(raw.contains("ETag: \(tag)"))
+        }
+    }
+
+    /// A multi-range ask wants `multipart/byteranges`, which this server does not write.
+    /// Answering the first range under a 206 would hand a player bytes it did not ask for.
+    @Test func aMultiRangeAskGetsTheWholeFileRatherThanTheFirstRange() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let payload = BuddyMediaRoutesTests.mp4Bytes(count: 1000)
+            let clip = try fixture.writeOutput(named: "clip.mp4", bytes: payload)
+            let id = try #require(
+                await fixture.registry.register(path: clip.path, within: [fixture.outputs.path])
+            )
+            let paired = try await fixture.pair()
+
+            let answer = try await fixture.phone.range(
+                "/media/\(id)", token: paired.token, range: "bytes=0-99,200-299"
+            )
+            #expect(answer.status == 200)
+            #expect(answer.body == payload)
+            #expect(answer["Content-Range"] == nil)
+        }
+    }
+
+    // MARK: - S6: the sweep runs on a poll, not only on an arrival
+
+    /// A device that uploads once and then only ever polls used to leave that upload for
+    /// good.
+    @Test func pollingTheQueueTakesOutWhatHasExpired() async throws {
+        // An hour between sweeps in the app, because what they look for is a week old and
+        // a directory walk per poll would be a walk a second for nothing. The test
+        // compresses the hour; the default is asserted below.
+        #expect(ControlServer.defaultUploadSweepInterval == 3600)
+        try await BuddyMediaFixture.withServer(uploadSweepInterval: 0) { fixture in
+            let paired = try await fixture.pair()
+            let (_, body) = try await fixture.phone.call(
+                "POST", "/uploads", token: paired.token,
+                data: BuddyMediaRoutesTests.jpegBytes(count: 600), contentType: "image/jpeg"
+            )
+            let upload = try JSONDecoder().decode(ControlAPI.UploadResponse.self, from: body)
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(upload.mediaID)", token: paired.token
+            ) == 200)
+
+            // Age it past the seven days, without touching the server.
+            let folder = fixture.uploads.appendingPathComponent(paired.deviceID)
+            for file in try FileManager.default.contentsOfDirectory(at: folder,
+                                                                    includingPropertiesForKeys: nil) {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: Date().addingTimeInterval(-8 * 24 * 3600)],
+                    ofItemAtPath: file.path
+                )
+            }
+
+            // Nothing new is uploaded. The only thing that happens is a poll.
+            #expect(try await fixture.phone.status(
+                "GET", "/video/queue", token: paired.token
+            ) == 200)
+
+            #expect(!FileManager.default.fileExists(atPath: folder.path))
+            #expect(try await fixture.phone.status(
+                "GET", "/media/\(upload.mediaID)", token: paired.token
+            ) == 404)
+        }
+    }
+
+    // MARK: - S8: a write failure says nothing about this Mac's disk
+
+    @Test func anUnwritableUploadRootIsRefusedWithoutNamingAPath() async throws {
+        try await BuddyMediaFixture.withServer { fixture in
+            let paired = try await fixture.pair()
+            // The uploads root is a *file*, so creating a folder under it cannot work —
+            // the same shape as a full disk or a read-only volume, without needing one.
+            try FileManager.default.removeItem(at: fixture.uploads)
+            try Data("in the way".utf8).write(to: fixture.uploads)
+
+            let (status, body) = try await fixture.phone.call(
+                "POST", "/uploads", token: paired.token,
+                data: BuddyMediaRoutesTests.jpegBytes(count: 400), contentType: "image/jpeg"
+            )
+            #expect(status == 500)
+            let sentence = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+            #expect(sentence.error == ControlServer.uploadNotSaved)
+            // Nothing about where anything is.
+            #expect(!sentence.error.contains("/"))
+            #expect(!sentence.error.contains(fixture.directory.lastPathComponent))
+        }
+    }
+
+    // MARK: - The table does not grow for ever
+
+    @Test func theTableEvictsItsOldestIdsRatherThanGrowingWithoutABound() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-media-bound-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let registry = MediaRegistry(url: nil)
+        var first: String?
+        // One past the ceiling, oldest first.
+        for index in 0...MediaRegistry.maximumEntries {
+            let file = directory.appendingPathComponent("clip-\(index).mp4")
+            try Data("x".utf8).write(to: file)
+            let id = await registry.register(path: file.path, within: [directory.path])
+            if index == 0 { first = id }
+        }
+        #expect(await registry.count == MediaRegistry.maximumEntries)
+        // The oldest link is the one that went, and re-polling mints it again.
+        let oldest = try #require(first)
+        #expect(await registry.entry(id: oldest, within: [directory.path]) == nil)
+        let again = await registry.register(
+            path: directory.appendingPathComponent("clip-0.mp4").path, within: [directory.path]
+        )
+        #expect(again != nil)
+        #expect(again != oldest)
+    }
+}
+
+// MARK: - A client that says nothing back
+
+/// A raw socket that sends a request and then does not read the answer — which is what a
+/// phone that walks out of range looks like to a server, and what `URLSession` will never
+/// do for us because it always drains.
+final class SilentReader: @unchecked Sendable {
+
+    private let connection: NWConnection
+
+    init(port: Int) {
+        connection = NWConnection(
+            host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: UInt16(port))!, using: .tcp
+        )
+    }
+
+    func connect() async throws {
+        connection.start(queue: .global(qos: .userInitiated))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            if case .ready = connection.state { return }
+            guard ContinuousClock.now < deadline else { throw BuddyTestError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func send(_ text: String) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            connection.send(content: Data(text.utf8), completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            })
+        }
+    }
+
+    func stop() { connection.cancel() }
+
+    /// One request and whatever comes back, as text. For the assertions that are about the
+    /// response *head* — which `URLSession` normalises away.
+    static func exchange(port: Int, request: String) async throws -> String {
+        let reader = SilentReader(port: port)
+        defer { reader.stop() }
+        try await reader.connect()
+        try await reader.send(request)
+        var answer = Data()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            let chunk: Data? = try? await withCheckedThrowingContinuation { continuation in
+                reader.connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
+                    data, _, complete, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else if complete && (data?.isEmpty ?? true) { continuation.resume(returning: nil) }
+                    else { continuation.resume(returning: data) }
+                }
+            }
+            guard let chunk else { break }
+            answer.append(chunk)
+            // Stop once the head *and* whatever short body followed it have arrived: the
+            // refusals this is used for carry their sentence in the body.
+            if let end = answer.range(of: Data("\r\n\r\n".utf8)),
+               answer.count > end.upperBound || answer.count > 512 { break }
+        }
+        return String(decoding: answer, as: UTF8.self)
+    }
+}
+    // MARK: - What a body is, read off bytes that may not all be there
+
+    /// B1's shape, pinned: the `ftyp` sniff proved eight bytes and then read twelve.
+    ///
+    /// Eight to eleven bytes starting `....ftyp` is a perfectly ordinary thing for a
+    /// truncated upload to be, and it trapped the whole app — every paired device, the MCP
+    /// bridge, the gateway and the window the owner was looking at, from one request.
+    @Test func aTruncatedHeaderIsRefusedRatherThanTrappingTheApp() {
+        let ftyp: [UInt8] = [0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70]
+        // Exactly the marker and nothing after it, and every length up to the brand.
+        for count in 8...11 {
+            let truncated = Data(ftyp.prefix(count))
+            #expect(MediaSniffer.kind(of: truncated) == nil, "\(count) bytes")
+        }
+        // Twelve is the first length at which the brand exists to be read.
+        let mp4 = Data(ftyp + Array("isom".utf8))
+        #expect(MediaSniffer.kind(of: mp4)?.fileExtension == "mp4")
+        let quicktime = Data(ftyp + Array("qt  ".utf8))
+        #expect(MediaSniffer.kind(of: quicktime)?.contentType == "video/quicktime")
+
+        // And every other branch, at one byte less than it needs and at exactly enough.
+        let shortened: [(String, [UInt8])] = [
+            ("png", [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x08]),
+            ("jpeg", [0xFF, 0xD8, 0xFF]),
+            ("gif", [0x47, 0x49, 0x46, 0x38]),
+            ("webm", [0x1A, 0x45, 0xDF, 0xA3]),
+            ("webp", Array("RIFF".utf8) + [0, 0, 0, 0] + Array("WEBP".utf8)),
+        ]
+        for (label, bytes) in shortened {
+            for count in 0..<bytes.count {
+                // Never a trap, whatever it answers.
+                _ = MediaSniffer.kind(of: Data(bytes.prefix(count)))
+            }
+            _ = label
+        }
+        #expect(MediaSniffer.kind(of: Data())  == nil)
+    }
+
+    // MARK: - GET /media/{id}

@@ -19,18 +19,35 @@ public actor MediaRegistry {
     /// published a second earlier.
     public static let shared = MediaRegistry()
 
+    /// What an id is for. A poster is a few kilobytes of JPEG made *from* a result and
+    /// shown in a list; the result itself is the render. They are different things to be
+    /// allowed to fetch, which is why the difference is recorded rather than inferred.
+    public enum Kind: String, Codable, Sendable {
+        case result
+        case poster
+    }
+
     /// One served file.
     public struct Entry: Codable, Sendable, Equatable {
         public var id: String
         public var path: String
         public var contentType: String
         public var registeredAt: Date
+        /// Optional so a table written before posters were distinguished reads as a table
+        /// of results, which is what it was.
+        public var kind: Kind?
 
-        public init(id: String, path: String, contentType: String, registeredAt: Date) {
+        public var isPoster: Bool { kind == .poster }
+
+        public init(
+            id: String, path: String, contentType: String, registeredAt: Date,
+            kind: Kind = .result
+        ) {
             self.id = id
             self.path = path
             self.contentType = contentType
             self.registeredAt = registeredAt
+            self.kind = kind
         }
     }
 
@@ -75,7 +92,9 @@ public actor MediaRegistry {
     /// outside one. A type this server does not serve is refused here too, so an id can
     /// never exist for something `GET /media` would have to guess the content type of.
     @discardableResult
-    public func register(path: String, within roots: [String]) -> String? {
+    public func register(
+        path: String, within roots: [String], kind: Kind = .result
+    ) -> String? {
         guard let resolved = Self.resolve(path), Self.isInside(resolved, roots: roots) else {
             return nil
         }
@@ -85,20 +104,55 @@ public actor MediaRegistry {
         if let existing = byPath[resolved] { return existing }
         let id = Self.makeID()
         let entry = Entry(
-            id: id, path: resolved, contentType: type, registeredAt: Date()
+            id: id, path: resolved, contentType: type, registeredAt: Date(), kind: kind
         )
         entries[id] = entry
         byPath[resolved] = id
         dirty = true
+        evictOldestIfCrowded()
         return id
     }
 
-    /// What `GET /media/{id}` serves, or nil. An entry whose file has since been deleted is
-    /// dropped rather than returned: the queue keeps history long after a clip has been
-    /// moved to the bin, and a 404 is the truth about it.
-    public func entry(id: String) -> Entry? {
+    /// How many ids this table keeps. A render a month ago is still fetchable if the file
+    /// is still there, but a table that only ever grows is a file somebody finds in a year
+    /// wondering what it is — and the queue's own history stops at two thousand items.
+    public static let maximumEntries = 4000
+
+    /// Drops the oldest registrations once the table is over its ceiling. Oldest rather
+    /// than least-used because there is no use to count: the loser is a link that has been
+    /// in a phone's list longest, and re-polling the queue mints it again.
+    private func evictOldestIfCrowded() {
+        guard entries.count > Self.maximumEntries else { return }
+        let doomed = entries.values
+            .sorted { $0.registeredAt < $1.registeredAt }
+            .prefix(entries.count - Self.maximumEntries)
+        for entry in doomed {
+            entries.removeValue(forKey: entry.id)
+            byPath.removeValue(forKey: entry.path)
+        }
+    }
+
+    /// What `GET /media/{id}` serves, or nil.
+    ///
+    /// The roots are checked **again here**, against the path re-resolved now, and that is
+    /// not belt and braces. Registration proved where a file was at the moment it was
+    /// registered; serving happens minutes or days later, and in between the file can be
+    /// replaced by a symlink pointing anywhere, or the owner can move their output folder
+    /// so a path that was inside one no longer is. An id is a promise about a file, and
+    /// this is where the promise is rechecked rather than remembered.
+    ///
+    /// A miss for any reason — gone, swapped, moved out of the roots — drops the entry and
+    /// answers nil. The caller turns all of them into the same 404, because a caller can
+    /// do nothing with the difference and an attacker could.
+    public func entry(id: String, within roots: [String]) -> Entry? {
         guard let entry = entries[id] else { return nil }
-        guard FileManager.default.fileExists(atPath: entry.path) else {
+        guard FileManager.default.fileExists(atPath: entry.path),
+              let resolved = Self.resolve(entry.path),
+              // Re-resolving lands somewhere else: the file at that path is now a link
+              // out of the roots, or through one.
+              resolved == entry.path,
+              Self.isInside(resolved, roots: roots)
+        else {
             entries.removeValue(forKey: id)
             byPath.removeValue(forKey: entry.path)
             dirty = true
@@ -125,10 +179,30 @@ public actor MediaRegistry {
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        try? data.write(to: url, options: .atomic)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: url.path
-        )
+        try? Self.writeUserOnly(data, to: url)
+    }
+
+    /// Writes a file that is never, for any instant, readable by anyone else.
+    ///
+    /// `Data.write(options: .atomic)` writes a temporary file at the default mode and
+    /// renames it, so chmod-afterwards leaves a window in which the contents are world
+    /// readable. Creating the temporary with the mode already on it closes the window,
+    /// and the rename is still atomic.
+    static func writeUserOnly(_ data: Data, to url: URL) throws {
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+        guard FileManager.default.createFile(
+            atPath: temporary.path, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
     }
 
     /// Forgets every id whose file is gone. Called by the uploads sweep, so a device that
@@ -254,7 +328,12 @@ public enum MediaSniffer {
         }
         // ISO base media: four size bytes, then `ftyp`, then the brand that says which
         // dialect. `qt  ` is QuickTime; everything else this route takes is MP4.
-        if matches([nil, nil, nil, nil, 0x66, 0x74, 0x79, 0x70]) {
+        //
+        // The length guard covers the brand, not just the marker. `matches` proves there
+        // are eight bytes; reading the brand needs twelve, and an eight-to-eleven-byte
+        // body that happens to start `....ftyp` would otherwise slice past the end and
+        // trap the whole app — from an unauthenticated-shaped request, at that.
+        if data.count >= 12, matches([nil, nil, nil, nil, 0x66, 0x74, 0x79, 0x70]) {
             let brand = String(decoding: data[(data.startIndex + 8)..<(data.startIndex + 12)],
                                as: UTF8.self)
             if brand == "qt  " {

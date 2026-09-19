@@ -61,7 +61,9 @@ struct MediaDecoration: Sendable {
                 from: URL(fileURLWithPath: path), to: destination
             ) else { return nil }
         }
-        return await registry.register(path: destination.path, within: roots)
+        // Registered as a poster, not as a result. That distinction is the whole of what
+        // lets `GET /media` tell a chat-only device "you may have the picture of it".
+        return await registry.register(path: destination.path, within: roots, kind: .poster)
     }
 
     /// Whether a path is a video, decided the way the rest of this server decides types:
@@ -138,7 +140,7 @@ struct MediaDecoration: Sendable {
     /// two ids are deliberately not the same lookup, because one is scoped to a device and
     /// the other is not. There is no third form: a device cannot name a path, and a
     /// request from one that tries is refused by the caller rather than resolved here.
-    func path(forID id: String) async -> String? {
-        await registry.entry(id: id)?.path
+    func path(forID id: String, within roots: [String]) async -> String? {
+        await registry.entry(id: id, within: roots)?.path
     }
 }

@@ -333,16 +333,26 @@ routes close that.
 carries a `thumbnailMediaID`, a small JPEG poster frame the Mac pulls half a second into the
 clip. `GET /media/{id}` serves the file itself: the right content type, `Accept-Ranges`, an
 `ETag`, `206` for a `Range` and `304` for an `If-None-Match`, so a player can seek and a list
-of posters costs one fetch each rather than one per scroll. Both device scopes may fetch,
-for the same reason a chat-only device may read the queue that mentions the clip: looking at
-something the Mac has already made spends nothing.
+of posters costs one fetch each rather than one per scroll. Results are the one family of
+responses this server lets a client keep — `Cache-Control: private, max-age=3600`, which is
+what makes the `ETag` worth having; everything else stays `no-store`.
+
+**Scope is decided per id, not per route.** A full-control device may fetch anything it has
+an id for. A chat-only device may fetch the poster frames and is refused the renders
+themselves: a device paired for chat is one that was lent out or left at the office, and
+pulling a clip down onto it is exactly the permission you withheld when you paired it. Both
+see both ids in the queue, so the phone can show the shot and say why it cannot save it.
 
 The id is the point. It is 128 random bits this Mac minted, it is not a path, and it cannot
 be turned into one: the table behind it only ever accepts files that already live inside the
 app's own output folders, resolved for `..` and followed through symlinks first, so a path
-outside them cannot be registered and therefore no id for one can exist to be guessed. An id
-for a file you have since deleted stops working — that is a 404, and the same 404 an id that
-never existed gets.
+outside them cannot be registered and therefore no id for one can exist to be guessed. That
+check runs **again on every fetch**, against the path re-resolved then — an id is a promise
+about a file, and a file can be swapped for a link, or its folder can stop being an output
+folder, in the days between issuing the id and someone using it. A file you have since
+deleted, one that has moved out of the roots, one that has been replaced by a link, and an
+id that never existed all get the same 404, because there is nothing a caller could do with
+the difference and something an attacker could.
 
 **Sending something in.** `POST /uploads` is how a phone makes a mesh out of a photograph.
 Send the bytes with a `Content-Type` and an `X-Filename`, or as `multipart/form-data`; both
@@ -352,19 +362,27 @@ written. The ceiling is **24 MiB for this route alone**; every other route a dev
 reach keeps its 4 MiB, because that cap is what stops an authenticated phone from spending
 this Mac's memory a request at a time. Full control only: uploading spends disk.
 
-Uploads land in `~/Library/Application Support/SiliconOptimizer/uploads/<device id>/`, one
-folder per paired device, `0700` and `0600`, so revoking a phone and deleting what it sent
-are the same gesture. They are **swept after seven days** — an upload is working material
-for one render, not a library — and the sweep runs on every arrival, so it needs no timer.
-The answer says `expiresAt`, so an app can say "available until" rather than discover the
-404 a week later.
+That ceiling belongs to a *caller*, not to a path: it is granted only once the bearer has
+been resolved to a paired device with full control, so pointing 24 MiB at this route with a
+guessed or revoked token buys the ordinary 4 MiB and a 413.
 
-`POST /mesh/plan`, `POST /mesh/generate`, `POST /image/generate` and `POST /video/generate`
-then take `uploadID` or `mediaID` in place of a path, resolved on this side before the
-render sees the request. A **device may only use those**: an `imagePath` in a request
-carrying a device token is refused, because a device that could name one file could name
-any file. This Mac's own token and the swarm secret still pass paths, which is what every
-script and MCP tool written against these routes does.
+Uploads land in `~/Library/Application Support/SiliconOptimizer/uploads/<device id>/`, one
+folder per paired device, `0700` and `0600` from the moment the bytes exist, so revoking a
+phone and deleting what it sent are the same gesture. An upload belongs to the device that
+sent it — another device's id resolves to nothing, by either name. They are **swept after
+seven days** — an upload is working material for one render, not a library — and the sweep
+runs both on arrival and on a queue poll, at most hourly, so a device that uploads once and
+then only ever polls does not leave a picture behind for good. The answer says `expiresAt`,
+so an app can say "available until" rather than discover the 404 a week later.
+
+`POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
+`POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on
+this side before the render sees the request. A **device may only use those**: an
+`imagePath` in a request carrying a device token is refused, because a device that could
+name one file could name any file — and the planning routes are gated exactly like the
+renders they plan, since "no image at that path" and a plan are a yes/no oracle for every
+path on the Mac. This Mac's own token and the swarm secret still pass paths, which is what
+every script and MCP tool written against these routes does.
 
 **Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
 knew about each peer and used to keep to itself: platform, GPU or chip, memory used and
