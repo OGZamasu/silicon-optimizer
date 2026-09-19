@@ -74,6 +74,17 @@ public enum BuddyEvent: Sendable {
         if case .agent = self { return true }
         return false
     }
+
+    /// Whether this is the Mac fetching a model for the phone. Those routes are full
+    /// scope only, so what they would answer is too: a chat-only device and the swarm are
+    /// not told what this Mac is downloading for the owner's phone.
+    var describesPhoneModel: Bool {
+        guard case .download(let download) = self else { return false }
+        return download.id.hasPrefix(ControlAPI.PhoneModel.downloadEventPrefix)
+    }
+
+    /// Sent only to this Mac's own token and full-control devices.
+    var needsFullScope: Bool { describesAgentSession || describesPhoneModel }
 }
 
 /// Where the app posts what changed, and where every subscribed device reads it.
@@ -191,9 +202,10 @@ public actor BuddyEventHub {
             // Encoded at most once, and only if somebody is going to receive it.
             var frame: BuddyEvent.Frame?
             for (id, listener) in listeners where chosen(id) {
-                // The filter that keeps a transcript away from a chat-only phone and from
-                // the swarm. Everything else goes to everyone, as it always has.
-                if event.describesAgentSession, audiences[id]?.seesAgentSessions != true {
+                // The filter that keeps a transcript — and what the Mac is fetching for the
+                // owner's phone — away from a chat-only phone and from the swarm. Everything
+                // else goes to everyone, as it always has.
+                if event.needsFullScope, audiences[id]?.seesAgentSessions != true {
                     continue
                 }
                 if frame == nil {

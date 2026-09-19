@@ -18,13 +18,21 @@ extension ControlAPI {
     /// What `onMac.state` can say.
     public static let phoneModelStates = ["absent", "downloading", "ready", "failed"]
 
+    /// What `onMac.stage` can say while the state is `downloading`: bytes arriving from
+    /// Hugging Face, the Mac hashing what it has, or the file following the model library to
+    /// a new folder. `fraction` is how far that stage has got.
+    public static let phoneModelStages = ["fetching", "checking", "moving"]
+
     /// What `onMac.failure` can say when the state is `failed` — what a phone can do
     /// about it, in one word. `diskFull`: free space on the Mac; retrying will not help.
     /// `checksumMismatch`: the bytes were wrong and have been deleted; a retry starts over.
-    /// `network`: the connection was cut; a retry resumes. `server`: Hugging Face refused.
-    /// `interrupted`: the app quit mid-transfer; a retry resumes. `other`: see `reason`.
+    /// `network`: the connection was cut or never made; a retry resumes. `server`: Hugging
+    /// Face refused, or sent the download somewhere else. `interrupted`: stopped, or never
+    /// checked; a retry resumes or checks. `driveMissing`: the drive the Mac's model library
+    /// is on is not connected; nothing works until it is. `other`: see `reason`.
     public static let phoneModelFailures = [
-        "diskFull", "checksumMismatch", "network", "server", "interrupted", "other",
+        "diskFull", "checksumMismatch", "network", "server", "interrupted", "driveMissing",
+        "other",
     ]
 
     /// `GET /ondevice/models`.
@@ -70,8 +78,10 @@ extension ControlAPI {
         public struct OnMac: Codable, Sendable, Equatable {
             /// One of `ControlAPI.phoneModelStates`.
             public var state: String
-            /// How much of the file the Mac has: while `downloading`, and on a `failed` that
-            /// left a partial to resume from.
+            /// While `downloading`, one of `ControlAPI.phoneModelStages`.
+            public var stage: String?
+            /// While `downloading`, how far the stage has got; on a `failed` that left a
+            /// partial to resume from, how much of the file the Mac has.
             public var fraction: Double?
             /// Why it is `failed`, in a sentence a phone can show.
             public var reason: String?
@@ -79,10 +89,11 @@ extension ControlAPI {
             public var failure: String?
 
             public init(
-                state: String, fraction: Double? = nil, reason: String? = nil,
-                failure: String? = nil
+                state: String, stage: String? = nil, fraction: Double? = nil,
+                reason: String? = nil, failure: String? = nil
             ) {
                 self.state = state
+                self.stage = stage
                 self.fraction = fraction
                 self.reason = reason
                 self.failure = failure
@@ -115,27 +126,57 @@ extension ControlAPI {
             public var device: String
             public var runtime: String
             public var conditions: String
-            /// Seconds to the first word of an answer to a 300-token question.
-            public var secondsToFirstWord300: Double
-            /// Writing speed: the low end of the measured range…
+            /// Writing speed, tokens a second, at `recommended.threadsGenerate`.
             public var tokensPerSecond: Double
-            /// …and its high end, when a range was measured.
-            public var tokensPerSecondMax: Double?
-            /// What a long answer settles to once the phone is hot.
+            /// Every thread count tried, and the writing speed it gave: the sweep
+            /// `tokensPerSecond` was picked from, labelled by thread count.
+            public var threadSweep: [ThreadSample]
+            /// Prompt speed, tokens a second, at `recommended.threadsPrompt`.
+            public var promptTokensPerSecond: Double
+            /// Seconds to the first word of an answer to a 300-token question. An
+            /// estimate, and `firstWordEstimated` says so: 300 ÷ `promptTokensPerSecond`,
+            /// rounded up to a tenth of a second the same way for every model.
+            public var secondsToFirstWord300: Double
+            public var firstWordEstimated: Bool
+            /// What a long answer settles to once the phone is hot. Null when it has not
+            /// been measured — and `sustainedMeasured` says which — never "does not slow".
             public var sustainedTokensPerSecond: Double?
+            public var sustainedMeasured: Bool
+            /// The largest resident memory seen during the runs, and the largest context
+            /// they ran at — well short of `recommended.contextLength`, which is why
+            /// `recommended.minFreeMemoryBytes` asks for more.
+            public var peakMemoryBytes: Int64
+            public var peakMemoryContextTokens: Int
+
+            public struct ThreadSample: Codable, Sendable, Equatable {
+                public var threads: Int
+                public var tokensPerSecond: Double
+
+                public init(threads: Int, tokensPerSecond: Double) {
+                    self.threads = threads
+                    self.tokensPerSecond = tokensPerSecond
+                }
+            }
 
             public init(
-                device: String, runtime: String, conditions: String,
-                secondsToFirstWord300: Double, tokensPerSecond: Double,
-                tokensPerSecondMax: Double? = nil, sustainedTokensPerSecond: Double? = nil
+                device: String, runtime: String, conditions: String, tokensPerSecond: Double,
+                threadSweep: [ThreadSample], promptTokensPerSecond: Double,
+                secondsToFirstWord300: Double, firstWordEstimated: Bool,
+                sustainedTokensPerSecond: Double?, sustainedMeasured: Bool,
+                peakMemoryBytes: Int64, peakMemoryContextTokens: Int
             ) {
                 self.device = device
                 self.runtime = runtime
                 self.conditions = conditions
-                self.secondsToFirstWord300 = secondsToFirstWord300
                 self.tokensPerSecond = tokensPerSecond
-                self.tokensPerSecondMax = tokensPerSecondMax
+                self.threadSweep = threadSweep
+                self.promptTokensPerSecond = promptTokensPerSecond
+                self.secondsToFirstWord300 = secondsToFirstWord300
+                self.firstWordEstimated = firstWordEstimated
                 self.sustainedTokensPerSecond = sustainedTokensPerSecond
+                self.sustainedMeasured = sustainedMeasured
+                self.peakMemoryBytes = peakMemoryBytes
+                self.peakMemoryContextTokens = peakMemoryContextTokens
             }
         }
 
@@ -200,8 +241,11 @@ extension ControlAPI {
 public protocol PhoneModelProvider: Sendable {
     /// `GET /ondevice/models`.
     func phoneModels() async -> ControlAPI.PhoneModelList
-    /// `POST /ondevice/models/{id}/prepare`.
-    func preparePhoneModel(id: String) async throws -> ControlAPI.PhoneModelPreparation
+    /// `POST /ondevice/models/{id}/prepare`, and `?verify=1` to have a ready copy hashed
+    /// again before it is served.
+    func preparePhoneModel(
+        id: String, verify: Bool
+    ) async throws -> ControlAPI.PhoneModelPreparation
     /// `GET /ondevice/models/{id}/file` — the verified file, or `PhoneModelError.notReady`.
     func phoneModelFile(id: String) async throws -> ControlAPI.PhoneModelFile
     /// `DELETE /ondevice/models/{id}` — the entry as it is afterwards.
@@ -217,12 +261,16 @@ public enum PhoneModelError: Error, LocalizedError, ControlStatusError, Equatabl
     case notReady(String)
     /// The Mac has no room for it, said before anything was fetched.
     case noSpace(String)
+    /// The drive the model library — and so the phone models — is on is not connected. The
+    /// sentence names it.
+    case driveMissing(String)
 
     public var errorDescription: String? {
         switch self {
         case .unknownModel: ControlServer.noSuchPhoneModel
         case .notReady: ControlServer.phoneModelNotReady
         case .noSpace(let reason): reason
+        case .driveMissing(let reason): reason
         }
     }
 
@@ -231,6 +279,7 @@ public enum PhoneModelError: Error, LocalizedError, ControlStatusError, Equatabl
         case .unknownModel: 404
         case .notReady: 409
         case .noSpace: 507
+        case .driveMissing: 503
         }
     }
 }
@@ -250,6 +299,10 @@ extension ControlServer {
     public static let noSuchPhoneModel =
         "No phone model with that id. GET /ondevice/models lists the ones this Mac can "
         + "fetch for a phone."
+
+    /// What a `verify` other than `1` or `true` is told.
+    public static let phoneModelVerifyValues =
+        "verify takes 1 or true. Leave it out for an ordinary prepare."
 
     /// Asked for the file before the Mac has it, verified, in place.
     public static let phoneModelNotReady =
