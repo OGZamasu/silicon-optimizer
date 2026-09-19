@@ -388,9 +388,17 @@ struct RoutingQuestionTests {
             RoutingQuestions.questions(for: realistic)
         ).count
 
-        // The state limit is what the service enforces; the pair is what the model reads.
-        #expect(stateBytes < 32 * 1024, "state was \(stateBytes) bytes")
-        #expect(stateBytes + questionBytes < 64 * 1024, "\(stateBytes) + \(questionBytes) bytes")
+        // The service enforces the state limit; the pair is what Jev actually reads, and
+        // both have to stay clear of it. Sixteen models with every trait set and a
+        // two-thousand-word message is the worst case this can produce.
+        #expect(
+            stateBytes < JevService.defaultMaxStateBytes / 2,
+            "the state was \(stateBytes) bytes of \(JevService.defaultMaxStateBytes)"
+        )
+        #expect(
+            stateBytes + questionBytes < JevService.defaultMaxStateBytes,
+            "state \(stateBytes) + questions \(questionBytes) bytes"
+        )
     }
 
     @Test func nothingSentCarriesAModelIDOrAFilePath() throws {

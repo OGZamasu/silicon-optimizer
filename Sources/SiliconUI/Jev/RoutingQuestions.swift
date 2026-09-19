@@ -813,6 +813,9 @@ public enum RoutingQuestions: JevQuestionSet {
     /// One request, through the one door — so the feature switch, the budget, the size
     /// limit, the cache and the ledger all apply without this file remembering them.
     ///
+    /// Not `JevQuestionSet.ask(state:)`: that one asks `questions`, which is the fixed half.
+    /// Routing without its choice over the models would be seven judgments and no decision.
+    ///
     /// The cache key is the conversation's shape plus a hash of the message, so a harness
     /// retrying a dropped stream inside the cache window is one decision and one charge.
     /// `using` is the seam a test points at a loopback server instead of TypeSafe.
