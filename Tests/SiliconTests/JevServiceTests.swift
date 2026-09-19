@@ -116,8 +116,9 @@ struct JevSettingsTests {
         for feature in JevFeature.allCases where feature != .decideTool {
             #expect(!settings.isOn(feature), "\(feature.rawValue) should ship off")
         }
-        // The roadmap is visible but only one of them is wired to anything.
-        #expect(JevFeature.allCases.filter(\.isBuilt) == [.decideTool])
+        // The roadmap is visible; a feature is marked built as its own PR lands it.
+        #expect(JevFeature.decideTool.isBuilt)
+        #expect(JevFeature.routing.isBuilt)
         #expect(JevFeature.allCases.allSatisfy { !$0.summary.isEmpty && !$0.displayName.isEmpty })
     }
 

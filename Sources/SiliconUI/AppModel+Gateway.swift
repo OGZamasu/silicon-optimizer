@@ -70,6 +70,18 @@ extension AppModel: GatewayHost {
     // MARK: - GatewayHost
 
     public func gatewayModels() async -> [GatewayAPI.Model] {
+        // Auto is offered here and not in `gatewayServableModels()`: routing has to be able
+        // to choose between real models, and a virtual id in its own candidate list would
+        // be one of them.
+        await Self.listingAuto(
+            gatewayServableModels(), routingAvailable: JevService.shared.isAvailable(.routing)
+        )
+    }
+
+    /// Every model something could actually be asked of, with what recent traffic measured
+    /// about it. The gateway's list without its virtual entry, and what the router builds
+    /// its candidates from.
+    func gatewayServableModels() async -> [GatewayAPI.Model] {
         var models = gatewayModelSnapshot()
         let stats = await gatewayLedger?.stats() ?? [:]
         for index in models.indices {
@@ -167,6 +179,11 @@ extension AppModel: GatewayHost {
         modelID: String, onStage: @escaping @Sendable (String) -> Void
     ) async throws -> GatewayReadyBackend {
         noteActivity()
+        // Auto is resolved before this, in `gatewayRoute`. Arriving here still wearing the
+        // virtual id means there was nothing to resolve it to.
+        guard !GatewayAPI.isAutoModelID(modelID) else {
+            throw GatewayHostError.autoHasNothingToPick
+        }
         guard let parsed = GatewayAPI.parseModelID(modelID) else {
             throw GatewayHostError.unknownModel(modelID)
         }
@@ -490,6 +507,7 @@ enum GatewayHostError: Error, LocalizedError, GatewayWaitableError {
     case modelBusy(String)
     case contextWontFit(String)
     case peerRendering(String, queueDepth: Int)
+    case autoHasNothingToPick
 
     /// The states a caller's X-Silicon-Wait budget may sit out: machines that are
     /// occupied, not machines that are wrong.
@@ -525,6 +543,9 @@ enum GatewayHostError: Error, LocalizedError, GatewayWaitableError {
             + "its chat model comes back about two minutes after the queue drains — "
             + "roughly \(depth * 2) minutes from now. Retry then, or send an "
             + "X-Silicon-Wait: \(min(depth * 150, 600)) header to wait it out."
+        case .autoHasNothingToPick:
+            "Auto had nothing to choose between: no model is installed on this Mac, no node "
+            + "is offering one, and no remote model is switched on."
         }
     }
 }

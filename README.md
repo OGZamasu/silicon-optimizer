@@ -375,12 +375,79 @@ line in the ledger, and they all ship off except the first:
 |---|---|---|
 | Decide tool | Answers the MCP `decide` tool and `POST /decide` with calibrated probabilities | yes |
 | Guardrails | Checks a prompt or a generated file against the rules before it is acted on | coming |
-| Prompt routing | Picks which loaded model, runtime or swarm node takes a request | coming |
+| Prompt routing | Picks which loaded model, runtime or swarm node takes a request | yes |
 | Media routing | Reads an image, video or mesh request and picks the model and settings | coming |
 | Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
 | Model recommendation | Ranks catalogue models against what this Mac is actually used for | coming |
 | Answer verification | Checks a finished answer against its evidence and flags the doubtful ones | coming |
 | Estimate calibration | Judges whether a speed or memory estimate matched what the machine did | coming |
+
+### Model routing
+
+With **Prompt routing** on, the gateway grows one extra model: **`silicon/auto`**, shown as
+"Auto — Jev picks". It is not a model. A request that names it is routed — the app asks Jev
+which of the models this Mac can actually reach should answer *this* message — and then
+proxied exactly as if you had named the chosen one. Same load-on-demand, same translation,
+same streaming.
+
+You are always told which model answered. A buffered reply carries the real model id in its
+`model` field and in an `X-Silicon-Routed-To` header. A **streamed** reply has no such header,
+deliberately: its head goes out before routing has even been asked about, so that time to
+first byte never waits on another service. It says it twice in the body instead — a comment
+line (`: silicon-routed-to: local/…`, which every SSE parser ignores and every human can
+read) and the `model` field of each chunk.
+
+What Jev is asked, in one request: six yes/no judgments about the message — does it need to
+look at an image, does it need a long document held in one piece, is it code, is it a
+one-line lookup, does it need careful multi-step reasoning, is it imaginative writing — a
+three-level **complexity** score, and a **choice** over the models themselves. The options
+are described by traits the app derives rather than guesses: where each one runs, its
+parameters and quantization, its context window, whether it can see, whether it is tuned for
+code, its measured tokens per second on your own traffic, what it costs per million tokens
+when the provider says, and whether it is loaded right now.
+
+What the app decides for itself, in code you can read in
+`Sources/SiliconUI/Jev/RoutingQuestions.swift`:
+
+- A message that needs eyes only goes to a model that has them, and one that needs the room
+  only goes to a window big enough — whatever the choice said.
+- Jev's pick is used when its confidence is inside the band; below it, the distribution is
+  flat enough that your own default model is the better guess.
+- A trivial one-line lookup goes to something already warm and free, rather than waiting a
+  minute for a bigger model to load.
+- Hard multi-step work goes to a node or a provider, where the big models are — but only
+  when the complexity read is one Jev is confident about, because that direction can cost
+  money; only when the machine at the other end is running something demonstrably bigger
+  than what is here; and never over the top of a choice Jev made at full confidence, which
+  it made while looking at the same traits.
+- A code task prefers a code-tuned model, unless it is a story about a programmer.
+
+How long is long, how sure is sure, how cheap is cheap: every number is in that one file,
+next to the question it reads.
+
+**Routing cannot fail your request.** Jev switched off, no key, the month's budget spent,
+TypeSafe down, a 429 that outlasted its retries, or a turn that contains no user message at
+all — all of them end the same way, with the fallback model from **Settings → TypeSafe
+(Jev)**, and a line in the log saying why. That choice is `routingFallbackModel` in
+`jev.json`, so you can read it, edit it and copy it to another Mac; empty means the model
+loaded here, else the first one that answers without a load. If the model you picked is
+uninstalled or its node goes away, Settings says so rather than quietly falling back.
+Decisions are cached per conversation, message and candidate list for the cache window, so a
+harness retrying a dropped stream does not pay twice.
+
+What is sent is the message (trimmed, head and tail, so a long paste keeps the question at
+the end of it), four facts about the conversation, and up to sixteen candidates — this Mac's
+own models first, then the swarm's, then providers', so ticking thirty remote models cannot
+push your own library out of the question that decides. Never a model id, a file path or a
+machine name: an imported model travels as its own name rather than as
+`local/external:/Users/you/…`, and a node is "a machine on your own network" rather than
+whatever you called it. A turn with no user message in it — the tool-result round trips an
+agent makes between your sentences — is never sent at all; the alternative is paying to ask
+about a system prompt.
+
+Auto is listed only while routing could actually answer, and only in the gateway's own model
+list — the app's agent tabs still default to a model you chose, because "let something else
+decide" is not a default anyone asked for.
 
 **The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
 is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,
