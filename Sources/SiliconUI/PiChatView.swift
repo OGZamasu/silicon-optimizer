@@ -179,6 +179,9 @@ struct PiChatView: View {
                 ForEach(GatewayAPI.mediaPaths(in: item.text), id: \.self) { path in
                     MediaResultCard(path: path)
                 }
+                if let screening = item.screening {
+                    GuardrailVerdictLine(screening: screening)
+                }
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -187,6 +190,8 @@ struct PiChatView: View {
             Label(item.text, systemImage: "info.circle")
                 .font(.callout)
                 .foregroundStyle(.orange)
+        case .approval(_, let tool):
+            PiApprovalCard(item: item, tool: tool)
         }
     }
 
@@ -263,5 +268,90 @@ struct PiChatView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+/// One line saying what the guardrail made of a call: "Jev: safe", "Jev: review:
+/// destructive, outside_working_tree", "Jev: block: exfiltrates".
+///
+/// Shared by the approval card below and by the tool rows that were screened and allowed,
+/// so a person reading the transcript can see that every call went past the guardrail and
+/// not only the ones it stopped.
+struct GuardrailVerdictLine: View {
+    let screening: GuardrailScreening
+
+    var body: some View {
+        Label(screening.summary, systemImage: symbol)
+            .font(.caption)
+            .foregroundStyle(colour)
+            .textSelection(.enabled)
+    }
+
+    /// Grey for a screening that did not happen. It says nothing was checked, and must not
+    /// be mistaken for a pass.
+    private var colour: Color {
+        switch screening.verdict {
+        case .act: .green
+        case .confirm: .orange
+        case .block: .red
+        case nil: .secondary
+        }
+    }
+
+    private var symbol: String {
+        switch screening.verdict {
+        case .act: "checkmark.shield"
+        case .confirm: "exclamationmark.triangle"
+        case .block: "hand.raised.slash"
+        case nil: "questionmark.circle"
+        }
+    }
+}
+
+/// Pi wants to run a tool and the guardrail stopped to ask.
+///
+/// The call is really waiting: the extension's `tool_call` handler is blocked on the answer
+/// these buttons send, so nothing runs until one of them is pressed. The card stays in the
+/// transcript afterwards with the decision on it — what was refused is part of the history.
+private struct PiApprovalCard: View {
+    @Environment(AppModel.self) private var model
+    let item: AppModel.PiItem
+    let tool: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Pi wants to run: \(tool)", systemImage: "wrench.and.screwdriver")
+                .font(.callout.weight(.semibold))
+            if !item.text.isEmpty {
+                Text(item.text)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .lineLimit(8)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.background, in: .rect(cornerRadius: 6))
+            }
+            if let screening = item.screening {
+                GuardrailVerdictLine(screening: screening)
+            }
+            if item.answered {
+                Text("Answered.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    Button("Allow") { model.answerPiApproval(item, allow: true) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("Deny") { model.answerPiApproval(item, allow: false) }
+                        .controlSize(.small)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.1), in: .rect(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.4), lineWidth: 1)
+        }
     }
 }

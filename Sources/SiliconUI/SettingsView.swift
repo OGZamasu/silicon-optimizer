@@ -1171,6 +1171,27 @@ private struct JevSection: View {
                     if feature == .mediaRouting, settings.isOn(.mediaRouting) {
                         MediaRoutingOptions()
                     }
+
+                    // The guardrail's one sub-switch, indented under it because it is
+                    // meaningless on its own: it decides what happens to a verdict, and
+                    // without the guardrail there are no verdicts.
+                    if feature == .guardrails {
+                        Toggle("Auto-approve calls Jev rates safe", isOn: Binding(
+                            get: { settings.autoApproveSafeToolCalls },
+                            set: { value in apply { $0.autoApproveSafeToolCalls = value } }
+                        ))
+                        .disabled(!settings.isOn(.guardrails))
+                        .padding(.leading, 18)
+                        Text(
+                            "Off by default. On, an agent's tool call that Jev rates safe is "
+                            + "approved without asking and one it blocks is declined without "
+                            + "asking; anything it wants reviewed still waits for you, and so "
+                            + "does everything if Jev cannot answer."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 18)
+                    }
                 }
             }
 

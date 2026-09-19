@@ -17,17 +17,30 @@ extension AppModel {
             case thinking
             case tool(name: String)
             case notice
+            /// A tool call held at the guardrail, waiting for the person. `requestID` is
+            /// the `extension_ui_request` id the answer has to quote.
+            case approval(requestID: String, tool: String)
         }
 
         public let id = UUID()
         public let kind: Kind
         public var text: String
         public var running: Bool
+        /// What Jev made of the call this entry is about. Set on a `.tool` entry that was
+        /// screened and allowed, and on every `.approval` entry.
+        public var screening: GuardrailScreening?
+        /// Whether an approval card has been answered. The card stays in the transcript —
+        /// a decision is part of the history — but its buttons go away.
+        public var answered = false
 
-        init(kind: Kind, text: String, running: Bool = false) {
+        init(
+            kind: Kind, text: String, running: Bool = false,
+            screening: GuardrailScreening? = nil
+        ) {
             self.kind = kind
             self.text = text
             self.running = running
+            self.screening = screening
         }
     }
 
@@ -113,7 +126,7 @@ extension AppModel {
     // MARK: - Actions
 
     /// Encodes and ships one RPC command to Pi.
-    private func piSend(_ command: [String: Any]) {
+    func piSend(_ command: [String: Any]) {
         guard let runtime = piRuntime,
               let data = try? JSONSerialization.data(withJSONObject: command),
               let line = String(data: data, encoding: .utf8)
@@ -136,7 +149,161 @@ extension AppModel {
     }
 
     func abortPi() {
+        // Answer anything the guardrail is holding first. An abort that leaves a dialog
+        // open leaves the extension waiting on an answer that is never coming.
+        for item in piItems where !item.answered {
+            guard case .approval(let requestID, _) = item.kind else { continue }
+            item.answered = true
+            item.running = false
+            piSend(["type": "extension_ui_response", "id": requestID, "cancelled": true])
+        }
         piSend(["type": "abort"])
+    }
+
+    // MARK: - Guardrails
+
+    /// One tool call Pi is holding at the gate.
+    ///
+    /// Pi's RPC protocol has no permission request of its own: a client is told that a tool
+    /// ran, not asked whether it may. The gate is installed from the extension this app
+    /// writes into Pi's workspace, whose `tool_call` handler blocks the call and asks
+    /// through `ctx.ui.confirm` — which in RPC mode is an `extension_ui_request` on stdout
+    /// waiting for an `extension_ui_response` on stdin. So this is a real pre-execution
+    /// gate, and a refusal here means the tool does not run.
+    struct PiGuardrailRequest {
+        /// The title the extension's dialog carries, matched exactly. The other half of
+        /// this constant is `GUARDRAIL_MARKER` in `Resources/pi-silicon/silicon.ts`.
+        static let marker = "silicon.guardrail.v1"
+
+        var requestID: String
+        var tool: String
+        var arguments: String
+    }
+
+    /// Routes one `extension_ui_request`.
+    ///
+    /// Ours is answered by the guardrail. Anything else that blocks — a dialog from a
+    /// global Pi extension the user installed themselves — is answered `cancelled` rather
+    /// than ignored: this app has no dialog surface for it, and an unanswered dialog stops
+    /// the turn forever.
+    private func handlePiExtensionUIRequest(_ event: [String: Any]) {
+        guard let id = event["id"] as? String else { return }
+        let method = event["method"] as? String ?? ""
+
+        guard method == "confirm",
+              event["title"] as? String == PiGuardrailRequest.marker
+        else {
+            if ["select", "confirm", "input", "editor"].contains(method) {
+                piSend(["type": "extension_ui_response", "id": id, "cancelled": true])
+            }
+            return
+        }
+
+        let call = Self.parsePiGuardrailRequest(event["message"] as? String ?? "")
+        Task {
+            await screenPiToolCall(PiGuardrailRequest(
+                requestID: id, tool: call.tool, arguments: call.arguments
+            ))
+        }
+    }
+
+    /// The extension sends `{v, tool, toolCallId, arguments}` as the dialog's message.
+    /// A payload that will not parse is screened as-is rather than waved through.
+    static func parsePiGuardrailRequest(_ payload: String) -> (tool: String, arguments: String) {
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return ("tool", payload) }
+        let tool = object["tool"] as? String ?? "tool"
+        guard let raw = object["arguments"],
+              let encoded = try? JSONSerialization.data(
+                withJSONObject: raw, options: [.sortedKeys, .fragmentsAllowed]
+              )
+        else { return (tool, "") }
+        return (tool, String(decoding: encoded, as: UTF8.self))
+    }
+
+    /// Screens one held call and answers the extension.
+    ///
+    /// The same three-way rule the Codex hook follows, and for the same reason: `.confirm`
+    /// is what a person is for, and a screening that could not happen is not a yes.
+    func screenPiToolCall(
+        _ request: PiGuardrailRequest, using service: JevService = .shared
+    ) async {
+        // Off means off. Pi ran unattended before this feature existed, and a guardrail
+        // nobody switched on must not start holding tool calls.
+        guard await JevGuardrails.isTurnedOn(using: service) else {
+            answerPiGuardrail(request.requestID, allow: true)
+            return
+        }
+
+        let screening = await JevGuardrails.screen(
+            engine: .pi,
+            request: lastPiUserMessage(),
+            tool: request.tool,
+            arguments: request.arguments,
+            workingDirectory: PiRuntime.workspaceDirectory.path,
+            recentTranscript: recentPiToolResults(),
+            using: service
+        )
+
+        if await service.settings().autoApproveSafeToolCalls,
+           let verdict = screening.verdict {
+            switch verdict {
+            case .act:
+                markPiToolCall(named: request.tool, with: screening)
+                answerPiGuardrail(request.requestID, allow: true)
+                return
+            case .block:
+                piItems.append(PiItem(
+                    kind: .notice,
+                    text: "Blocked automatically — \(screening.summary).",
+                    screening: screening
+                ))
+                answerPiGuardrail(request.requestID, allow: false)
+                return
+            case .confirm:
+                break
+            }
+        }
+
+        // Everything else waits: a `.confirm`, a screening that could not happen, and — while
+        // auto-approve is off — every verdict, including the safe ones.
+        piItems.append(PiItem(
+            kind: .approval(requestID: request.requestID, tool: request.tool),
+            text: request.arguments, running: true, screening: screening
+        ))
+    }
+
+    /// The buttons on the approval card.
+    public func answerPiApproval(_ item: PiItem, allow: Bool) {
+        guard case .approval(let requestID, _) = item.kind, !item.answered else { return }
+        item.answered = true
+        item.running = false
+        answerPiGuardrail(requestID, allow: allow)
+    }
+
+    private func answerPiGuardrail(_ requestID: String, allow: Bool) {
+        piSend(["type": "extension_ui_response", "id": requestID, "confirmed": allow])
+    }
+
+    /// Puts the verdict on the transcript entry for a call that was allowed without asking,
+    /// so "it ran" and "it was screened" are visible in the same place.
+    private func markPiToolCall(named name: String, with screening: GuardrailScreening) {
+        let item = piItems.last { $0.kind == .tool(name: name) && $0.running }
+        item?.screening = screening
+    }
+
+    func lastPiUserMessage() -> String {
+        piItems.last { $0.kind == .user }?.text ?? ""
+    }
+
+    /// The last few finished tool results — where an injected instruction would have
+    /// arrived. A running entry is this call's own arguments, not a result.
+    func recentPiToolResults() -> [String] {
+        piItems
+            .filter { if case .tool = $0.kind { return !$0.running } else { return false } }
+            .suffix(GuardrailState.maximumResults)
+            .map(\.text)
     }
 
     func setPiModel(_ id: String) {
@@ -221,6 +388,9 @@ extension AppModel {
                     }
                 }
             }
+
+        case "extension_ui_request":
+            handlePiExtensionUIRequest(event)
 
         case "extension_error":
             let text = event["error"] as? String ?? "An extension failed."

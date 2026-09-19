@@ -153,6 +153,7 @@ struct BuddyControlTests {
                 ("POST", "/image/generate"), ("POST", "/mesh/generate"),
                 ("POST", "/video/queue"), ("POST", "/video/queue/control"),
                 ("GET", "/buddy/devices"), ("GET", "/jev"),
+                ("GET", "/jev/guardrails/recent"),
             ] {
                 let (code, body) = try await fixture.phone.call(
                     refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
@@ -222,6 +223,44 @@ struct BuddyControlTests {
             #expect(accepted == 200)
             let after = try JSONDecoder().decode(ControlAPI.JevStatus.self, from: updated)
             #expect(after.enabled && after.model == "jev-latest")
+        }
+    }
+
+    /// The guardrail log is for the screen that approves tool calls, so a full-control
+    /// phone may read it and a chat-only one may not. What it carries matters as much as
+    /// who can read it: verdicts and question ids, never the command that was screened.
+    @Test func theGuardrailLogIsReadableByAPhoneWithFullControl() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            let (status, body) = try await fixture.phone.call(
+                "GET", "/jev/guardrails/recent", token: paired.token
+            )
+            #expect(status == 200)
+            let log = try JSONDecoder().decode(
+                ControlAPI.GuardrailScreenings.self, from: body
+            )
+            #expect(log.available)
+            #expect(log.screenings.first?.screening.verdict == "block")
+            #expect(log.screenings.first?.screening.reasons == ["destructive"])
+            #expect(log.screenings.first?.bands["destructive"] == "fired")
+            #expect(log.questions.contains("destructive"))
+
+            // The Mac's own token reaches it too, and neither answer carries content.
+            let (localStatus, localBody) = try await fixture.local.call(
+                "GET", "/jev/guardrails/recent", token: fixture.local.token
+            )
+            #expect(localStatus == 200)
+            for text in [String(decoding: body, as: UTF8.self),
+                         String(decoding: localBody, as: UTF8.self)] {
+                #expect(!text.contains("rm "))
+                #expect(!text.contains("sk-"))
+                #expect(!text.lowercased().contains("command"))
+                #expect(!text.lowercased().contains("argument"))
+            }
+
+            #expect(try await fixture.phone.status(
+                "GET", "/jev/guardrails/recent", token: nil
+            ) == 401)
         }
     }
 
@@ -1132,6 +1171,20 @@ actor BuddyTestHost: ControlHost {
     /// to get past the route before the control-token gate can refuse it.
     private var jev = ControlAPI.JevStatus.fixture()
     func jevStatus() async -> ControlAPI.JevStatus { jev }
+
+    /// Answered rather than trapped: the scope tests call it with both kinds of token.
+    /// One screening, with no content in it — which is the thing the route promises.
+    func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings {
+        .init(
+            available: true,
+            questions: ["destructive", "harm"],
+            screenings: [.init(
+                at: "2026-09-18T14:04:38Z", engine: "codex",
+                screening: .init(verdict: "block", reasons: ["destructive"], latencyMS: 240),
+                bands: ["destructive": "fired", "harm": "plausible"]
+            )]
+        )
+    }
     func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus {
         if let enabled = update.enabled { jev.enabled = enabled }
         if let model = update.model { jev.model = model }

@@ -114,6 +114,80 @@ extension ControlAPI {
         }
     }
 
+    // MARK: - Guardrails
+
+    /// What the guardrail decided about one tool call.
+    ///
+    /// Carried in two places: `GET /jev/guardrails/recent` below, and — as `screening` — on
+    /// the approval objects the Silicon Buddy agent-session API will hand a phone, so a
+    /// phone deciding whether to allow a command sees the same verdict and the same reasons
+    /// the Mac's own card shows. It is the reason this lives in the wire types rather than
+    /// in the UI: one shape, one vocabulary, both screens.
+    ///
+    /// There is no field here for what was screened, and there will not be one. The command,
+    /// its arguments and the request are never carried off the Mac by this type.
+    public struct GuardrailScreening: Codable, Sendable, Equatable {
+        /// `act`, `confirm` or `block`.
+        public var verdict: String
+        /// The question ids that fired, sorted — `destructive`, `exfiltrates`,
+        /// `outside_working_tree`… Empty for `act`.
+        public var reasons: [String]
+        /// How long the screening took, end to end.
+        public var latencyMS: Double?
+
+        public init(verdict: String, reasons: [String], latencyMS: Double? = nil) {
+            self.verdict = verdict
+            self.reasons = reasons
+            self.latencyMS = latencyMS
+        }
+    }
+
+    /// One remembered screening.
+    public struct GuardrailScreeningRecord: Codable, Sendable, Equatable {
+        /// ISO-8601, like every other timestamp on this wire.
+        public var at: String
+        /// Which engine asked: `codex`, `pi`, `harness`, `buddy`.
+        public var engine: String
+        public var screening: GuardrailScreening
+        /// Question id → `act`, `confirm` or `escalate`: where each answer landed against
+        /// the feature's thresholds. For a hazard, `act` means it held firmly enough to act
+        /// on, `confirm` means it was plausible, and `escalate` means it did not fire.
+        public var bands: [String: String]
+
+        public init(
+            at: String, engine: String, screening: GuardrailScreening, bands: [String: String]
+        ) {
+            self.at = at
+            self.engine = engine
+            self.screening = screening
+            self.bands = bands
+        }
+    }
+
+    /// `GET /jev/guardrails/recent` — the last fifty screenings this Mac made.
+    ///
+    /// Question ids and bands, never content: the buffer holds no command, no argument and
+    /// no request, so a phone reading it learns the pattern of what was refused without
+    /// learning what anyone typed. In memory only; a relaunch starts it empty.
+    public struct GuardrailScreenings: Codable, Sendable, Equatable {
+        /// Whether a screening would happen right now — Jev on, guardrails on, a key
+        /// stored, budget left.
+        public var available: Bool
+        /// Every question id this build asks, in its own order, so a client can label the
+        /// bands without hard-coding the list.
+        public var questions: [String]
+        /// Oldest first.
+        public var screenings: [GuardrailScreeningRecord]
+
+        public init(
+            available: Bool, questions: [String], screenings: [GuardrailScreeningRecord]
+        ) {
+            self.available = available
+            self.questions = questions
+            self.screenings = screenings
+        }
+    }
+
     /// `POST /jev` — a patch, not a replacement. Every field is optional and only what is
     /// sent changes, so a client that knows about four settings cannot wipe a fifth one it
     /// has never heard of.

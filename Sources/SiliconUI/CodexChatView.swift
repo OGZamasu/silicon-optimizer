@@ -474,6 +474,9 @@ private struct CodexApprovalCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if let screening = approval.screening {
+                GuardrailVerdictLine(screening: screening)
+            }
             HStack(spacing: 8) {
                 Button("Allow") { model.answerCodexApproval(approval, accept: true) }
                     .buttonStyle(.borderedProminent)
@@ -489,4 +492,5 @@ private struct CodexApprovalCard: View {
             RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.4), lineWidth: 1)
         }
     }
+
 }

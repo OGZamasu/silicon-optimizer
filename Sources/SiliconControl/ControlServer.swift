@@ -1104,6 +1104,11 @@ public actor ControlServer {
                 return try .encode(await host.decide(try request.decode(ControlAPI.DecideRequest.self)))
             case ("GET", "/jev"):
                 return try .encode(await host.jevStatus())
+            case ("GET", "/jev/guardrails/recent"):
+                // Open to a full-control device as well as the Mac: a phone that approves
+                // tool calls needs to see what the guardrail has been deciding. It is not
+                // in `chatOnlyRoutes`, so a chat-only phone is refused before it gets here.
+                return try .encode(await host.recentGuardrailScreenings())
             case ("POST", "/jev"):
                 // Reading what Jev costs is one thing; changing what this Mac will spend
                 // is another. A full-control phone may look, only the Mac may set.

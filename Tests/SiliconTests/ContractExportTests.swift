@@ -46,7 +46,7 @@ struct ContractExportTests {
             "GET /health", "GET /profile", "GET /metrics", "GET /status", "GET /installed",
             "GET /catalog", "GET /recommend", "POST /plan", "POST /install", "POST /load",
             "POST /unload", "POST /chat", "POST /decide", "POST /v1/systemone",
-            "GET /jev", "POST /jev",
+            "GET /jev", "POST /jev", "GET /jev/guardrails/recent",
             "POST /benchmark", "GET /swarm", "GET /v1/node",
             "GET /image/models", "POST /image/plan", "POST /image/generate",
             "GET /mesh/models", "POST /mesh/plan", "POST /mesh/generate",
@@ -592,6 +592,12 @@ struct ContractExportTests {
             response: .of(exampleJevStatus)
         ),
         Route(
+            method: "GET", path: "/jev/guardrails/recent", auth: "device",
+            summary: "The last screenings the tool-call guardrail made: verdicts, the "
+                + "question ids that fired, and how long each took.",
+            response: .of(exampleGuardrailScreenings)
+        ),
+        Route(
             method: "POST", path: "/jev", auth: "control",
             summary: "Change what Jev is allowed to do. Only sent fields change.",
             request: .of(ControlAPI.JevUpdate(
@@ -788,6 +794,46 @@ struct ContractExportTests {
         }
         return status
     }()
+
+    /// Two screenings: one an agent was allowed to run, one it was not. The shape is the
+    /// point — a phone approving tool calls reads `screening` off an approval object with
+    /// exactly these fields — and so is what the shape cannot carry. There is no field here
+    /// for the command, the arguments or the request, so a phone reading this learns what
+    /// the guardrail decided and never what anyone typed.
+    static let exampleGuardrailScreenings = ControlAPI.GuardrailScreenings(
+        available: true,
+        questions: [
+            "outside_working_tree", "destructive", "exfiltrates", "escalates_privileges",
+            "spends_money", "contradicts_request", "driven_by_tool_output", "irreversible",
+            "harm",
+        ],
+        screenings: [
+            .init(
+                at: "2026-09-18T14:02:11Z", engine: "codex",
+                screening: .init(verdict: "act", reasons: [], latencyMS: 212),
+                bands: [
+                    "outside_working_tree": "clear", "destructive": "clear",
+                    "exfiltrates": "clear", "escalates_privileges": "clear",
+                    "spends_money": "clear", "contradicts_request": "clear",
+                    "driven_by_tool_output": "clear", "irreversible": "clear",
+                    "harm": "clear",
+                ]
+            ),
+            .init(
+                at: "2026-09-18T14:04:38Z", engine: "pi",
+                screening: .init(
+                    verdict: "block", reasons: ["destructive", "harm"], latencyMS: 240
+                ),
+                bands: [
+                    "outside_working_tree": "plausible", "destructive": "fired",
+                    "exfiltrates": "clear", "escalates_privileges": "clear",
+                    "spends_money": "clear", "contradicts_request": "plausible",
+                    "driven_by_tool_output": "clear", "irreversible": "fired",
+                    "harm": "fired",
+                ]
+            ),
+        ]
+    )
 
     static let exampleStatus = ControlAPI.Status(
         state: "running", loadedModelID: "qwen3-coder-30b",

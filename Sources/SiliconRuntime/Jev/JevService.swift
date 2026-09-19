@@ -39,7 +39,8 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .decideTool:
             "Answers the `decide` tool and POST /decide with calibrated probabilities instead of the local model's own."
         case .guardrails:
-            "Checks a prompt or a generated file against the rules before it is acted on."
+            "Screens a tool call before it runs — what it touches, what it would cost, "
+            + "whether the user asked for it — and turns that into run, ask, or refuse."
         case .routing:
             "Picks which loaded model, runtime or swarm node should take a request."
         case .mediaRouting:
@@ -62,7 +63,9 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
 
     /// One list rather than a chain of `==`, so each feature's own PR adds a line here and
     /// nothing else.
-    private static let built: Set<JevFeature> = [.decideTool, .routing, .mediaRouting]
+    private static let built: Set<JevFeature> = [
+        .decideTool, .routing, .mediaRouting, .guardrails,
+    ]
 }
 
 /// The shared three-way gate: act, ask, or hand it to a person.
@@ -202,6 +205,16 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// length, rather than using the ones in its own controls.
     public var composerAutoRoute: Bool = false
 
+    /// Whether an agent's tool call that the guardrail rates safe may be answered without
+    /// the person: `.act` is accepted, `.block` is denied, and `.confirm` still waits for a
+    /// human whatever this says.
+    ///
+    /// Off by default, and it belongs here rather than in the app's settings because it is
+    /// the one switch that lets a model's judgment stand in for the owner's. Turning it on
+    /// is a considered decision about a specific feature; it is not a default anyone should
+    /// acquire by upgrading.
+    public var autoApproveSafeToolCalls: Bool = false
+
     /// The largest `state` this app will send, in bytes — a deliberately pessimistic proxy
     /// for tokens. `jev-1.13` allows 32k tokens for the state plus the longest question and
     /// 64k for the state plus *all* the questions, and a byte is not a token: dense prose
@@ -235,6 +248,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         case enabled, model, features, monthlyBudgetUSD, cacheMinutes, maxStateBytes
         case routingFallbackModel
         case automaticUncensoredLane, composerAutoRoute
+        case autoApproveSafeToolCalls
     }
 
     public init(from decoder: any Decoder) throws {
@@ -254,6 +268,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
         composerAutoRoute = try container.decodeIfPresent(
             Bool.self, forKey: .composerAutoRoute
         ) ?? composerAutoRoute
+        autoApproveSafeToolCalls = try container.decodeIfPresent(
+            Bool.self, forKey: .autoApproveSafeToolCalls
+        ) ?? autoApproveSafeToolCalls
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -276,6 +293,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         // whether a lane is installed", which deleting the line restores.
         try container.encodeIfPresent(automaticUncensoredLane, forKey: .automaticUncensoredLane)
         try container.encode(composerAutoRoute, forKey: .composerAutoRoute)
+        try container.encode(autoApproveSafeToolCalls, forKey: .autoApproveSafeToolCalls)
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),

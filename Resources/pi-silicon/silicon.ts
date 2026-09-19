@@ -9,6 +9,12 @@
  *    every tool the server offers — names, schemas, and all — so the whole silicon
  *    toolbox (chat, images, video, 3D, benchmarks, swarm status…) is callable here
  *    exactly as it is in the other engines.
+ * 3. Hands every tool call to the app before it runs, so the Jev guardrail can screen
+ *    it. Pi's RPC protocol has no tool-permission request of its own — an RPC client
+ *    is told a tool ran, not asked whether it may — but the extension API does: the
+ *    `tool_call` event fires before execution and can block, and `ctx.ui.confirm`
+ *    becomes an `extension_ui_request` the app answers on stdin. That pair is the
+ *    permission hook, and this is the only place it can be installed from.
  *
  * The app writes this file into the Pi workspace and supplies the environment:
  *   SILICON_GATEWAY_PORT — the gateway's loopback port
@@ -20,6 +26,13 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+/**
+ * The title every guardrail request carries. The app matches on it exactly; it is a
+ * protocol token, not a label. Changing it here means changing it in
+ * `AppModel+Pi.swift`, where `PiGuardrailRequest.marker` is the other half.
+ */
+const GUARDRAIL_MARKER = "silicon.guardrail.v1";
 
 type GatewayModel = {
   id: string;
@@ -68,6 +81,40 @@ export default async function (pi: ExtensionAPI) {
     apiKey: "$SILICON_GATEWAY_KEY",
     api: "openai-completions",
     models,
+  });
+
+  // ---- The app's guardrail, in front of every tool ----------------------------
+  //
+  // Fires after `tool_execution_start` and before the tool runs, and what it returns
+  // decides whether the tool runs at all. The app is asked through a confirm dialog
+  // because that is the one channel an RPC client can answer: `ctx.ui.confirm` emits
+  // `extension_ui_request` and blocks until an `extension_ui_response` with the same
+  // id comes back on stdin.
+  //
+  // The title is a marker rather than a sentence — the app matches on it, and no
+  // human ever reads it, because in RPC mode there is no terminal to read it in. The
+  // message is the whole request, as JSON, so the app screens the real arguments
+  // rather than a summary of them. The app answers `true` without asking anyone when
+  // the guardrail is switched off, which is what keeps this transparent for someone
+  // who never turned it on.
+  //
+  // If the app does not answer, the call waits. That is deliberate: a gate that times
+  // out into "allowed" is not a gate. Pi's own abort path still ends the turn.
+  pi.on("tool_call", async (event, ctx) => {
+    const question = JSON.stringify({
+      v: 1,
+      tool: event.toolName,
+      toolCallId: event.toolCallId,
+      arguments: event.input ?? {},
+    });
+    const allowed = await ctx.ui.confirm(GUARDRAIL_MARKER, question);
+    if (allowed) return;
+    return {
+      block: true,
+      reason:
+        "Silicon Optimizer's guardrail did not allow this call. The verdict and its " +
+        "reasons are on the card in the app's Chat tab.",
+    };
   });
 
   // ---- The app's MCP tools, mirrored -----------------------------------------
