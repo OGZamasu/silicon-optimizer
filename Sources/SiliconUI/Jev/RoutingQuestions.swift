@@ -33,12 +33,32 @@ public struct RoutingCandidate: Sendable, Equatable, Identifiable {
             return false
         }
 
-        /// The words a person would use, which is also what goes into the state.
+        /// What the state says. A node's *name* is the owner's name for a machine in their
+        /// house — it is not something a routing question needs, and what matters to the
+        /// judgment is that the work leaves this Mac for a peer rather than for a provider.
         public var describedAs: String {
             switch self {
             case .thisMac: "this Mac"
-            case .node(let name): "the swarm node \(name)"
+            case .node: "a machine on your own network"
             case .cloud(let provider): "\(provider), over the internet"
+            }
+        }
+
+        /// What the log line says, which stays on this Mac and may as well be specific.
+        public var loggedAs: String {
+            switch self {
+            case .thisMac: "this Mac"
+            case .node(let name): "the node \(name)"
+            case .cloud(let provider): provider
+            }
+        }
+
+        /// How far the work travels: none, the local network, the internet.
+        var rank: Int {
+            switch self {
+            case .thisMac: 0
+            case .node: 1
+            case .cloud: 2
             }
         }
     }
@@ -333,7 +353,12 @@ public struct RoutingRequest: Sendable, Equatable {
         }
 
         let conversation = texts.filter { $0.role == "user" || $0.role == "assistant" }
-        let latest = texts.last { $0.role == "user" }?.text ?? texts.last?.text ?? ""
+        // No user message means no message. The tempting fallback — the last thing in the
+        // list — is the system prompt on every turn that is only a tool result, and a
+        // harness's preamble is both private and identical every time: a paid question
+        // about the wrong text with a foregone answer. The router routes on nothing
+        // instead, which it knows how to do.
+        let latest = texts.last { $0.role == "user" }?.text ?? ""
         let system = texts.filter { $0.role == "system" || $0.role == "developer" }
             .map(\.text).joined(separator: "\n")
         let toolsOffered = !((json["tools"] as? [Any])?.isEmpty ?? true)
@@ -381,9 +406,10 @@ public struct RoutingRequest: Sendable, Equatable {
         return "\(head)\n…\n\(tail)"
     }
 
-    /// The cache key: this conversation's shape and this message's content. Two identical
-    /// asks inside the cache window are one decision and must cost one call — a harness
-    /// retrying a dropped stream should not pay TypeSafe twice for the same routing.
+    /// The request half of the cache key: this conversation's shape and this message's
+    /// content. Two identical asks inside the cache window are one decision and must cost
+    /// one call — a harness retrying a dropped stream should not pay TypeSafe twice for the
+    /// same routing.
     ///
     /// Hashed rather than kept whole, so nothing that logs a cache key logs a message.
     public var cacheKey: String {
@@ -645,15 +671,45 @@ public enum RoutingQuestions: JevQuestionSet {
     /// kilobytes of state before the message is added.
     public static let maximumCandidates = 16
 
-    /// Which candidates survive the cap: the ones that can answer without a load first — a
-    /// model nobody has to wait for is the one most likely to be right — then by label, so
-    /// the same library always produces the same question and the cache can do its job.
-    public static func shortlist(_ candidates: [RoutingCandidate]) -> [RoutingCandidate] {
+    /// Which candidates survive the cap.
+    ///
+    /// Bucketed by where they run — this Mac first, then the swarm, then providers — and
+    /// only then by whether they are warm and by label. Without the buckets, ticking thirty
+    /// remote models would push this Mac's own library out of its own routing question,
+    /// which is both wrong for an app about the hardware in front of you and the exact
+    /// shape of an accident: the list that decides is not the list you were looking at.
+    ///
+    /// The consequence is deliberate and worth saying: a library of more than sixteen
+    /// installed models crowds the swarm out of the question. That is the same order
+    /// `gatewayModelSnapshot` already lists them in.
+    ///
+    /// `keeping` is the owner's fallback. It is pinned in whatever the cap would have done,
+    /// because a question that cannot answer "the one you chose" is worse than a short one.
+    public static func shortlist(
+        _ candidates: [RoutingCandidate], keeping pinned: String? = nil
+    ) -> [RoutingCandidate] {
         let ordered = candidates.sorted { first, second in
+            if first.placement.rank != second.placement.rank {
+                return first.placement.rank < second.placement.rank
+            }
             if first.readyNow != second.readyNow { return first.readyNow }
             return first.label < second.label
         }
-        return Array(ordered.prefix(maximumCandidates))
+        guard ordered.count > maximumCandidates else { return ordered }
+        guard let pinned, let keep = ordered.first(where: { $0.id == pinned }) else {
+            return Array(ordered.prefix(maximumCandidates))
+        }
+        var kept = ordered.prefix(maximumCandidates)
+        guard !kept.contains(where: { $0.id == pinned }) else { return Array(kept) }
+        // The pinned model displaces the last of the cap, and the order still holds.
+        kept = kept.dropLast()
+        return (kept + [keep]).sorted { first, second in
+            if first.placement.rank != second.placement.rank {
+                return first.placement.rank < second.placement.rank
+            }
+            if first.readyNow != second.readyNow { return first.readyNow }
+            return first.label < second.label
+        }
     }
 
     static func bestModelQuestion(
@@ -810,14 +866,30 @@ public enum RoutingQuestions: JevQuestionSet {
         ])
     }
 
+    /// What a cached answer is an answer *to*: this message, in this conversation, against
+    /// this set of models.
+    ///
+    /// The last part matters more than it looks. Labels are positional — two quantizations
+    /// of one model are `x` and `x-2` — so the same label can mean a different physical
+    /// model once something is installed, hidden or unplugged. Without the set in the key, a
+    /// cached choice of `x-2` could be resolved against a list where `x-2` is someone else.
+    public static func cacheKey(
+        request: RoutingRequest, candidates: [RoutingCandidate]
+    ) -> String {
+        let shape = candidates
+            .map { "\($0.id)\u{1F}\($0.label)\u{1F}\($0.readyNow)" }
+            .joined(separator: "\u{1E}")
+        let digest = SHA256.hash(data: Data(shape.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        return "\(request.cacheKey)|\(digest)"
+    }
+
     /// One request, through the one door — so the feature switch, the budget, the size
     /// limit, the cache and the ledger all apply without this file remembering them.
     ///
     /// Not `JevQuestionSet.ask(state:)`: that one asks `questions`, which is the fixed half.
     /// Routing without its choice over the models would be seven judgments and no decision.
     ///
-    /// The cache key is the conversation's shape plus a hash of the message, so a harness
-    /// retrying a dropped stream inside the cache window is one decision and one charge.
     /// `using` is the seam a test points at a loopback server instead of TypeSafe.
     public static func ask(
         request: RoutingRequest, candidates: [RoutingCandidate],
@@ -827,7 +899,7 @@ public enum RoutingQuestions: JevQuestionSet {
             feature,
             state: state(request: request, candidates: candidates),
             questions: questions(for: candidates),
-            cacheKey: request.cacheKey
+            cacheKey: cacheKey(request: request, candidates: candidates)
         )
     }
 }
@@ -996,6 +1068,9 @@ public enum RoutingPolicy {
         // 3 — the starting point.
         var chosen: RoutingCandidate
         var why: String
+        /// Whether the starting point is a choice Jev made at full confidence — `act`, not
+        /// merely inside the band. Rule 5 leaves those alone.
+        var isConfidentChoice = false
         let band = answers.bestModel.map {
             _ in RoutingQuestions.thresholds.band(answers.bestModelConfidence)
         }
@@ -1003,6 +1078,7 @@ public enum RoutingPolicy {
            let pick = eligible.first(where: { $0.label == best }) {
             chosen = pick
             why = "Jev picked it (confidence \(rounded(answers.bestModelConfidence)))"
+            isConfidentChoice = band == .act
         } else if let fallback = eligible.first(where: { $0.id == defaultModel }) {
             chosen = fallback
             why = answers.bestModel == nil
@@ -1027,13 +1103,12 @@ public enum RoutingPolicy {
            ).first {
             chosen = warm
             why = "a trivial lookup, and \(warm.name) is already warm and free"
-        } else if isHardWork(answers), chosen.placement.isLocal,
-                  let elsewhere = rank(
-                      eligible.filter { !$0.placement.isLocal }, answers: answers
-                  ).first {
+        } else if isHardWork(answers), chosen.placement.isLocal, !isConfidentChoice,
+                  let elsewhere = biggerElsewhere(than: chosen, among: eligible, answers: answers) {
+            why = "hard multi-step work, and \(elsewhere.name) on "
+                + "\(elsewhere.placement.loggedAs) is bigger "
+                + "(\(sizeLabel(elsewhere)) against \(sizeLabel(chosen)))"
             chosen = elsewhere
-            why = "hard multi-step work, and \(elsewhere.placement.describedAs) "
-                + "has more room than this Mac"
         } else if RoutingQuestions.Cutoff.isCodeTask.says(answers.isCodeTask),
                   !RoutingQuestions.Cutoff.isCreativeWriting.says(answers.isCreativeWriting),
                   !chosen.codeTuned,
@@ -1044,6 +1119,30 @@ public enum RoutingPolicy {
 
         let reason = ([why] + notes).joined(separator: "; ")
         return Decision(modelID: chosen.id, reason: "\(chosen.name) — \(reason)")
+    }
+
+    /// The best model elsewhere that is actually *bigger* than the one already chosen.
+    ///
+    /// "Send hard work to another machine" is only true when the other machine is running
+    /// something with more to it. Moving a hard question off a 30B model here onto an 8B one
+    /// on a node is a downgrade wearing the words of an upgrade — and a model whose size
+    /// nobody published cannot be shown to be an upgrade, so it does not qualify. Both sides
+    /// are compared on what actually does the work: active parameters for a
+    /// mixture-of-experts model, the whole count for a dense one.
+    static func biggerElsewhere(
+        than chosen: RoutingCandidate, among candidates: [RoutingCandidate],
+        answers: RoutingAnswers
+    ) -> RoutingCandidate? {
+        let floor = chosen.workingBillions ?? 0
+        return rank(
+            candidates.filter { !$0.placement.isLocal && ($0.workingBillions ?? 0) > floor },
+            answers: answers
+        ).first
+    }
+
+    static func sizeLabel(_ candidate: RoutingCandidate) -> String {
+        guard let billions = candidate.workingBillions else { return "an unpublished size" }
+        return "\(RoutingQuestions.number(billions))B working"
     }
 
     /// Hard enough to be worth another machine. The complexity read has to be one Jev is

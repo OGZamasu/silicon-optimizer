@@ -208,8 +208,11 @@ public enum GatewayAPI {
     }
 
     public static func sseComment(_ text: String) -> Data {
-        // A comment must be one line; anything else would break framing.
-        let clean = text.replacingOccurrences(of: "\n", with: " ")
+        // A comment must be one line; anything else would break framing. A lone carriage
+        // return ends a line on this wire exactly as a newline does, so both go.
+        let clean = text.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
         return Data(": \(clean)\n\n".utf8)
     }
 
@@ -521,6 +524,32 @@ public enum GatewayAPI {
         else { return body }
         json["model"] = model
         return (try? JSONSerialization.data(withJSONObject: json)) ?? body
+    }
+
+    /// The same rewrite across one SSE frame's `data:` payloads.
+    ///
+    /// Line by line rather than over the whole frame: a frame may carry several payloads and
+    /// a terminal `[DONE]`, and anything that is not a JSON object with a `model` — the
+    /// sentinel, a comment, an event line — is passed through exactly as it arrived.
+    public static func rewritingModel(inFrame frame: Data, to model: String) -> Data {
+        let text = String(decoding: frame, as: UTF8.self)
+        let rewritten = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                guard line.hasPrefix("data:") else { return String(line) }
+                var payload = line.dropFirst("data:".count)
+                let spaced = payload.hasPrefix(" ")
+                if spaced { payload = payload.dropFirst() }
+                guard payload != "[DONE]",
+                      var json = (try? JSONSerialization.jsonObject(with: Data(payload.utf8)))
+                        as? [String: Any],
+                      json["model"] != nil
+                else { return String(line) }
+                json["model"] = model
+                guard let encoded = try? JSONSerialization.data(withJSONObject: json)
+                else { return String(line) }
+                return "data:\(spaced ? " " : "")\(String(decoding: encoded, as: UTF8.self))"
+            }
+        return Data(rewritten.joined(separator: "\n").utf8)
     }
 
     /// Whether a chat-completions request asked for a stream.

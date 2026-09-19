@@ -70,6 +70,18 @@ extension AppModel: GatewayHost {
     // MARK: - GatewayHost
 
     public func gatewayModels() async -> [GatewayAPI.Model] {
+        // Auto is offered here and not in `gatewayServableModels()`: routing has to be able
+        // to choose between real models, and a virtual id in its own candidate list would
+        // be one of them.
+        await Self.listingAuto(
+            gatewayServableModels(), routingAvailable: JevService.shared.isAvailable(.routing)
+        )
+    }
+
+    /// Every model something could actually be asked of, with what recent traffic measured
+    /// about it. The gateway's list without its virtual entry, and what the router builds
+    /// its candidates from.
+    func gatewayServableModels() async -> [GatewayAPI.Model] {
         var models = gatewayModelSnapshot()
         let stats = await gatewayLedger?.stats() ?? [:]
         for index in models.indices {
@@ -102,12 +114,7 @@ extension AppModel: GatewayHost {
                 if stat.inFlight > 0 { models[index].pendingRequests = stat.inFlight }
             }
         }
-        // Auto is offered here and not in `gatewayModelSnapshot()`: the app's own agent
-        // pickers default to the first serving model in that list, and a default of "let
-        // something else decide" is not a default anyone asked for.
-        return Self.listingAuto(
-            models, routingAvailable: await JevService.shared.isAvailable(.routing)
-        )
+        return models
     }
 
     /// The gateway's world view right now, also what the Codex model picker shows —

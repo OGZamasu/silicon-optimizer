@@ -146,15 +146,21 @@ extension AppModel {
             if let text = value as? String { return Double(text) }
             return nil
         }
+        // Zero is a real answer — OpenRouter prices its free variants at "0" — but a
+        // negative one is a sentinel, not a price. OpenRouter writes "-1" for a model whose
+        // cost it cannot state (a BYOK passthrough, an auto-router), and reading that
+        // literally would make it the cheapest model on the list by a million dollars.
+        func price(_ value: Any?) -> Double? {
+            guard let perToken = number(value), perToken.isFinite, perToken >= 0 else {
+                return nil
+            }
+            return perToken * 1_000_000
+        }
         if let pricing = entry["pricing"] as? [String: Any],
-           let perToken = number(pricing["prompt"] ?? pricing["input"]) {
-            // Zero is a real answer here: OpenRouter prices its free variants at "0".
-            return perToken * 1_000_000
+           let perMillion = price(pricing["prompt"] ?? pricing["input"]) {
+            return perMillion
         }
-        if let perToken = number(entry["input_cost_per_token"]) {
-            return perToken * 1_000_000
-        }
-        return nil
+        return price(entry["input_cost_per_token"])
     }
 
     /// A provider's own words about a failure, dug out of whichever envelope it used.

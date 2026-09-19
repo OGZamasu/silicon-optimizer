@@ -16,24 +16,31 @@ extension AppModel {
     // MARK: - GatewayHost
 
     public func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision? {
-        // Every ordinary id goes straight through, untouched and un-awaited-on.
+        // The gateway has already decided this id is the virtual one; this guard is the
+        // second lock on the same door, for any future caller that has not.
         guard GatewayAPI.isAutoModelID(modelID) else { return nil }
 
-        let candidates = RoutingQuestions.shortlist(await routingCandidates())
-        guard let fallback = routingDefaultModelID(among: candidates) else { return nil }
+        let all = routingCandidates(await gatewayServableModels())
+        // The fallback is resolved over everything, not over the shortlist: the owner's own
+        // pick must not be able to fall off the end of a list that exists to keep the
+        // question small. It is then kept, whatever else the cap drops.
+        let fallback = routingDefaultModelID(
+            among: all, pinned: await JevService.shared.settings().routingFallbackModel
+        )
+        guard let fallback else { return nil }
         return await ModelRouter.route(
             request: RoutingRequest.read(body: body),
-            candidates: candidates, defaultModel: fallback
+            candidates: RoutingQuestions.shortlist(all, keeping: fallback),
+            defaultModel: fallback
         )
     }
 
     // MARK: - Candidates
 
     /// Every gateway model Auto may pick between, with the traits the questions describe it
-    /// by. Built from the same list `GET /v1/models` serves, so a model someone hid in the
+    /// by. Given the same list `GET /v1/models` is built from, so a model someone hid in the
     /// Swarm page is not quietly still a candidate.
-    func routingCandidates() async -> [RoutingCandidate] {
-        let models = await gatewayModels().filter { !GatewayAPI.isAutoModelID($0.id) }
+    func routingCandidates(_ models: [GatewayAPI.Model]) -> [RoutingCandidate] {
         // Labels are assigned over the whole list at once, because their only hard job is
         // being unique within one question.
         let labels = RoutingCandidate.labels(for: models.map(\.displayName))
@@ -74,11 +81,10 @@ extension AppModel {
     /// model unless there is nothing else — for the reason `autoSelectableGatewayModels`
     /// gives: ticking a box to make a paid model *available* is not asking to be billed by
     /// something that chose it for you.
-    func routingDefaultModelID(among candidates: [RoutingCandidate]) -> String? {
-        if let pinned = RoutingFallback.modelID,
-           candidates.contains(where: { $0.id == pinned }) {
-            return pinned
-        }
+    func routingDefaultModelID(
+        among candidates: [RoutingCandidate], pinned: String?
+    ) -> String? {
+        if let pinned, candidates.contains(where: { $0.id == pinned }) { return pinned }
         if let loaded = loadedModel, runtimeState.isRunning {
             let id = GatewayAPI.modelID(local: loaded.id)
             if candidates.contains(where: { $0.id == id }) { return id }
@@ -91,6 +97,11 @@ extension AppModel {
     }
 
     /// The model list with Auto in front of it, when Auto is real.
+    ///
+    /// Added by `gatewayModels()`, which is `GET /v1/models`, and not by
+    /// `gatewayModelSnapshot()`: the app's own agent pickers default to the first serving
+    /// model in that list, and a default of "let something else decide" is not a default
+    /// anyone asked for.
     ///
     /// Two conditions, both necessary. Routing has to be able to answer — on, with a key,
     /// inside the budget — and there has to be something to choose between: a harness that
@@ -129,6 +140,14 @@ public enum ModelRouter {
             return GatewayRoutingDecision(modelID: id, reason: "\(name) — \(reason)")
         }
 
+        // Nothing the user said is nothing to route on. Codex sends whole turns that are
+        // only a tool result, and the alternative — routing on the system prompt, which is
+        // the same every turn — would be a paid question with a foregone answer, asked
+        // about the one piece of text most likely to contain someone's private preamble.
+        guard !request.message.isEmpty else {
+            return using(defaultModel, "no user message to route on; used the default")
+        }
+
         // Off, no key, or the month's budget is spent. Not an error: the owner decided this,
         // and Auto still has to answer.
         guard await service.isAvailable(.routing) else {
@@ -151,35 +170,6 @@ public enum ModelRouter {
                 defaultModel,
                 "routing did not answer (\(error.localizedDescription)); used the default"
             )
-        }
-    }
-}
-
-// MARK: - The owner's default
-
-/// Which model Auto falls back to, as the owner set it in Settings.
-///
-/// Its own defaults key rather than a field in `settings.json` or `jev.json`: the first is
-/// the app's own document and the second is owned by an actor that governs spending, and
-/// this is neither — it is one id, written by a picker, read by the router.
-///
-/// Nil means "decide for me", which is the shipped behaviour: the loaded model, else the
-/// first one that answers without a load.
-public enum RoutingFallback {
-
-    public static let defaultsKey = "dev.siliconoptimizer.jev.routingFallbackModel"
-
-    public static var modelID: String? {
-        get {
-            let stored = UserDefaults.standard.string(forKey: defaultsKey)
-            return (stored?.isEmpty ?? true) ? nil : stored
-        }
-        set {
-            if let newValue, !newValue.isEmpty {
-                UserDefaults.standard.set(newValue, forKey: defaultsKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: defaultsKey)
-            }
         }
     }
 }

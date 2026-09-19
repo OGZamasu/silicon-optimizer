@@ -186,15 +186,19 @@ struct RoutingCandidateTests {
           {"id": "minimax/minimax-m3", "name": "MiniMax M3", "context_length": 204800,
            "pricing": {"prompt": "0.0000004", "completion": "0.0000016"}},
           {"id": "free/thing", "pricing": {"prompt": "0"}},
-          {"id": "quiet/thing"}
+          {"id": "quiet/thing"},
+          {"id": "byok/passthrough", "pricing": {"prompt": "-1"}}
         ]}
         """#.utf8)
         let models = AppModel.parseCloudModels(body, provider: .openRouter)
-        #expect(models.count == 3)
+        #expect(models.count == 4)
         // Per token on the wire, per million in the app: 0.0000004 × 1e6.
         #expect(abs((models[0].pricePerMillionInputUSD ?? 0) - 0.4) < 1e-9)
         #expect(models[1].pricePerMillionInputUSD == 0)
         #expect(models[2].pricePerMillionInputUSD == nil)
+        // "-1" is OpenRouter's "cannot say", not a price. Read literally it would have made
+        // this the cheapest model on the list by a million dollars a token.
+        #expect(models[3].pricePerMillionInputUSD == nil)
     }
 
     @Test func aNameGivesAwayWhatItCan() {
@@ -261,6 +265,21 @@ struct RoutingRequestTests {
         """#.utf8))
         #expect(responses.message == "draw me a conclusion")
         #expect(!responses.systemMentionsCodeOrTools)
+    }
+
+    @Test func aTurnWithNoUserMessageRoutesOnNothing() {
+        // What Codex sends between tool calls: a system prompt and a function result, and
+        // not one word from the person. The old fallback — "the last thing in the list" —
+        // was the system prompt, which is private, identical every turn, and not what the
+        // question asks about.
+        let request = RoutingRequest.read(body: Data(#"""
+        {"model": "silicon/auto",
+         "instructions": "SECRET PREAMBLE: the user's name is Ada and her API key is sk-live-1.",
+         "input": [{"type": "function_call_output", "call_id": "c1", "output": "42"}]}
+        """#.utf8))
+        #expect(request.message.isEmpty)
+        #expect(!request.message.contains("SECRET"))
+        #expect(request.messageWords == 0)
     }
 
     @Test func itSeesAttachedImagesAndOfferedTools() {
@@ -358,11 +377,75 @@ struct RoutingQuestionTests {
         #expect(RoutingQuestions.questions(for: []).count == 7)
     }
 
-    @Test func theShortlistPrefersWhatIsWarmAndIsStable() {
+    @Test func theShortlistIsBucketedWarmFirstAndStable() {
         let shortlist = RoutingQuestions.shortlist(Self.candidates)
         #expect(shortlist.count == RoutingQuestions.maximumCandidates)
-        #expect(shortlist.allSatisfy { $0.readyNow }, "warm models come first")
+        // This Mac's own models before the swarm's, and within a bucket the warm ones first.
+        let ranks = shortlist.map(\.placement.rank)
+        #expect(ranks == ranks.sorted())
+        let locals = shortlist.filter { $0.placement.isLocal }
+        #expect(locals.map(\.readyNow) == locals.map(\.readyNow).sorted { $0 && !$1 })
         #expect(shortlist.map(\.label) == RoutingQuestions.shortlist(Self.candidates).map(\.label))
+    }
+
+    @Test func tickingThirtyRemoteModelsCannotEvictThisMacsOwn() {
+        let mine = (0..<4).map { candidate("local-\($0)", ready: $0 == 0) }
+        let theirs = (0..<30).map {
+            candidate(
+                "cloud-\($0)", id: "cloud/open-router/m\($0)",
+                placement: .cloud("OpenRouter"), price: 0.4, ready: true
+            )
+        }
+        // The remote ones are all "serving" and sort earlier by label; only the bucket keeps
+        // them from taking the whole question over.
+        let shortlist = RoutingQuestions.shortlist(theirs + mine)
+        #expect(shortlist.prefix(4).map(\.label) == mine.map(\.label).sorted())
+        #expect(shortlist.filter { $0.placement.isLocal }.count == 4)
+    }
+
+    @Test func theOwnersOwnPickIsNeverCappedOut() {
+        // Sixteen locals fill the cap exactly; the owner's pick is a node model, which the
+        // bucket order puts last of all.
+        let locals = (0..<RoutingQuestions.maximumCandidates).map {
+            candidate("local-\(String(format: "%02d", $0))", ready: true)
+        }
+        let pinned = candidate(
+            "the-big-one", id: "node/studio/big", placement: .node("Studio")
+        )
+        let unpinned = RoutingQuestions.shortlist(locals + [pinned])
+        #expect(!unpinned.contains { $0.id == pinned.id }, "it would fall off the end")
+
+        let kept = RoutingQuestions.shortlist(locals + [pinned], keeping: pinned.id)
+        #expect(kept.count == RoutingQuestions.maximumCandidates)
+        #expect(kept.contains { $0.id == pinned.id })
+        // It displaced the last of the cap, not the first.
+        #expect(kept.contains { $0.label == "local-00" })
+        #expect(!kept.contains { $0.label == "local-15" })
+    }
+
+    @Test func theCacheKeyChangesWhenTheModelsDo() {
+        let request = RoutingRequest(
+            message: "same question", turns: 1, imagesAttached: false,
+            systemMentionsCodeOrTools: false, messageWords: 2
+        )
+        let first = [candidate("x", id: "local/one", ready: true), candidate("x-2", id: "local/two")]
+        // The same labels, in the same positions, meaning different physical models: exactly
+        // what a positional label does when something is installed or unplugged.
+        let second = [candidate("x", id: "local/three", ready: true), candidate("x-2", id: "local/two")]
+        let warmed = [candidate("x", id: "local/one", ready: true), candidate("x-2", id: "local/two", ready: true)]
+
+        #expect(
+            RoutingQuestions.cacheKey(request: request, candidates: first)
+                == RoutingQuestions.cacheKey(request: request, candidates: first)
+        )
+        #expect(
+            RoutingQuestions.cacheKey(request: request, candidates: first)
+                != RoutingQuestions.cacheKey(request: request, candidates: second)
+        )
+        #expect(
+            RoutingQuestions.cacheKey(request: request, candidates: first)
+                != RoutingQuestions.cacheKey(request: request, candidates: warmed)
+        )
     }
 
     @Test func theStateStaysWellInsideTheLimit() throws {
@@ -425,6 +508,27 @@ struct RoutingQuestionTests {
             #expect(!text.contains("external:"))
             #expect(!text.contains("local/"))
         }
+
+        // Nor what someone called their own machine. A node's name is the owner's name for
+        // a computer in their house; what the question needs is that the work would leave
+        // this Mac for a peer rather than for a provider.
+        let node = RoutingCandidate(
+            id: "node/lauras-mac-mini/qwen", label: "qwen", name: "qwen",
+            placement: .node("Laura's Mac mini"), readyNow: true
+        )
+        let nodeState = String(
+            decoding: try encoder.encode(
+                RoutingQuestions.state(request: request, candidates: [node])
+            ), as: UTF8.self
+        )
+        let nodeQuestions = String(
+            decoding: try encoder.encode(RoutingQuestions.questions(for: [node])), as: UTF8.self
+        )
+        #expect(!nodeState.localizedCaseInsensitiveContains("Laura"))
+        #expect(!nodeQuestions.localizedCaseInsensitiveContains("Laura"))
+        #expect(nodeState.contains("your own network"))
+        // It is still specific in the log line, which never leaves the Mac.
+        #expect(node.placement.loggedAs == "the node Laura's Mac mini")
     }
 }
 
@@ -545,25 +649,74 @@ struct RoutingPolicyTests {
         #expect(warm.modelID == small.id)
     }
 
-    @Test func hardWorkGoesToAnotherMachine() {
+    @Test func hardWorkGoesToABiggerMachine() {
+        // No confident pick — Jev is spread across three plausible models — and the work is
+        // hard. The node's 120B has more to it than the 30B here.
         let decision = RoutingPolicy.choose(
             answers: RoutingAnswers(
                 complexity: 1.8, complexityConfidence: 0.8,
-                bestModel: "coder", bestModelConfidence: 0.9
+                bestModel: "coder", bestModelConfidence: 0.45
             ),
             candidates: all, defaultModel: coder.id
         )
         #expect(decision.modelID == big.id)
         #expect(decision.reason.contains("hard multi-step work"))
+        // The reason says what was compared, not just that something was.
+        #expect(decision.reason.contains("120B working"))
+        #expect(decision.reason.contains("30B working"))
 
         // Frontier reasoning alone is enough, without a hard complexity read.
         let frontier = RoutingPolicy.choose(
             answers: RoutingAnswers(
-                needsFrontierReasoning: 0.8, bestModel: "coder", bestModelConfidence: 0.9
+                needsFrontierReasoning: 0.8, bestModel: "coder", bestModelConfidence: 0.45
             ),
             candidates: all, defaultModel: coder.id
         )
         #expect(frontier.modelID == big.id)
+    }
+
+    @Test func hardWorkDoesNotMoveOntoASmallerMachine() {
+        // The node is running an 8B. Moving a hard question off the 30B here onto it is a
+        // downgrade wearing the words of an upgrade.
+        let smallNode = candidate(
+            "little-node", id: "node/studio/little", placement: .node("Studio"),
+            context: 131_072, billions: 8
+        )
+        let decision = RoutingPolicy.choose(
+            answers: RoutingAnswers(
+                complexity: 1.9, complexityConfidence: 0.9,
+                bestModel: "coder", bestModelConfidence: 0.45
+            ),
+            candidates: [coder, smallNode], defaultModel: coder.id
+        )
+        #expect(decision.modelID == coder.id)
+
+        // Nor onto one whose size nobody published: unknown is not bigger.
+        let unsized = candidate(
+            "mystery", id: "node/studio/mystery", placement: .node("Studio"),
+            context: 131_072, billions: nil
+        )
+        #expect(RoutingPolicy.choose(
+            answers: RoutingAnswers(
+                complexity: 1.9, complexityConfidence: 0.9,
+                bestModel: "coder", bestModelConfidence: 0.45
+            ),
+            candidates: [coder, unsized], defaultModel: coder.id
+        ).modelID == coder.id)
+    }
+
+    @Test func aConfidentChoiceIsNotSecondGuessedByTheMachineRule() {
+        // Jev was sure. It could see the node's traits in the candidate list and picked the
+        // local model anyway; "hard work goes elsewhere" is a default, not a correction.
+        let decision = RoutingPolicy.choose(
+            answers: RoutingAnswers(
+                complexity: 1.9, complexityConfidence: 0.9,
+                bestModel: "coder", bestModelConfidence: 0.95
+            ),
+            candidates: all, defaultModel: coder.id
+        )
+        #expect(decision.modelID == coder.id)
+        #expect(decision.reason.contains("Jev picked it"))
     }
 
     @Test func spendingSomeoneElsesMoneyNeedsAConfidentRead() {
@@ -773,6 +926,45 @@ struct ModelRouterTests {
         #expect(server.requests.isEmpty, "nothing should reach TypeSafe")
     }
 
+    @Test func aTurnWithNoUserMessageIsNeverSentToTypeSafe() async throws {
+        let server = try untouchedServer("there is no user message to route on")
+        defer { server.stop() }
+        let harness = try await routingHarness(server)
+        defer { harness.clean() }
+
+        let empty = RoutingRequest.read(body: Data(#"""
+        {"instructions": "You are a coding agent.",
+         "input": [{"type": "function_call_output", "call_id": "c1", "output": "ok"}]}
+        """#.utf8))
+        let decision = await ModelRouter.route(
+            request: empty, candidates: Self.candidates,
+            defaultModel: "local/warm", using: harness.service
+        )
+        #expect(decision.modelID == "local/warm")
+        #expect(decision.reason.contains("no user message"))
+        #expect(server.requests.isEmpty)
+        // Nothing was asked, so nothing was spent and nothing is in the ledger.
+        #expect(await harness.service.ledger().calls == 0)
+        #expect(await harness.service.ledger().month().features["routing"] == nil)
+    }
+
+    @Test func theOwnersFallbackLivesInJevJSON() async throws {
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure()
+        #expect(await harness.service.settings().routingFallbackModel == nil)
+
+        try await harness.service.update { $0.routingFallbackModel = "node/studio/big" }
+        #expect(await harness.service.settings().routingFallbackModel == "node/studio/big")
+        // It survives a round trip through the file a person can open and edit.
+        #expect(JevSettings.load(from: harness.configURL).routingFallbackModel
+            == "node/studio/big")
+
+        // A blank field in a hand-edited file means no pick, not a model called "".
+        try await harness.service.update { $0.routingFallbackModel = "  " }
+        #expect(await harness.service.settings().routingFallbackModel == nil)
+    }
+
     @Test func aRetryOfTheSameMessageIsNotPaidForTwice() async throws {
         let server = try CapturingServer { _ in routingAnswerBody(bestModel: "coder") }
         defer { server.stop() }
@@ -797,6 +989,15 @@ struct ModelRouterTests {
             defaultModel: "local/warm", using: harness.service
         )
         #expect(server.requests.count == 2)
+
+        // So is the same message against a different set of models: the labels are
+        // positional, so a cached answer of "coder" could otherwise name someone else.
+        _ = await ModelRouter.route(
+            request: Self.request,
+            candidates: Self.candidates + [candidate("extra", ready: true)],
+            defaultModel: "local/warm", using: harness.service
+        )
+        #expect(server.requests.count == 3)
     }
 
     @Test func whatIsSentIsTheMessageAndTheCandidatesAndNothingElse() async throws {
@@ -828,10 +1029,13 @@ struct ModelRouterTests {
 /// what it was asked to make ready.
 final class RoutingFakeHost: GatewayHost, @unchecked Sendable {
 
-    /// What the gateway asked to be made ready, in order.
+    /// What the gateway asked to be made ready, in order — and how often it asked the app
+    /// to route anything at all.
     actor Log {
         private(set) var models: [String] = []
+        private(set) var routeCalls = 0
         func add(_ model: String) { models.append(model) }
+        func noteRoute() { routeCalls += 1 }
     }
 
     let backend: URL
@@ -861,7 +1065,8 @@ final class RoutingFakeHost: GatewayHost, @unchecked Sendable {
     }
 
     func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision? {
-        GatewayAPI.isAutoModelID(modelID) ? decision : nil
+        await log.noteRoute()
+        return GatewayAPI.isAutoModelID(modelID) ? decision : nil
     }
 
     func gatewayMediaRoots() async -> [String] { [] }
@@ -871,6 +1076,21 @@ final class RoutingFakeHost: GatewayHost, @unchecked Sendable {
 
 @Suite("Auto through the gateway")
 struct RoutingGatewayTests {
+
+    /// Starts a gateway in front of a host and waits for its port. The server comes back
+    /// with it: nothing else holds it, and a listener nobody holds stops listening.
+    static func started(_ host: RoutingFakeHost) async throws -> (GatewayServer, Int) {
+        let server = GatewayServer(host: host, ledger: nil, token: "gateway-secret")
+        try await server.start(preferredPort: 0)
+        var port = await server.port
+        var waited = 0
+        while port == 0, waited < 100 {
+            try await Task.sleep(for: .milliseconds(20))
+            port = await server.port
+            waited += 1
+        }
+        return (server, port)
+    }
 
     /// Starts a gateway in front of a canned backend and returns both, plus the token.
     private func gateway(
@@ -950,6 +1170,9 @@ struct RoutingGatewayTests {
         #expect(response.value(forHTTPHeaderField: "x-silicon-routed-to") == nil)
         // Untouched: the backend's own answer, with the backend's own model name.
         #expect(json["model"] as? String == "engine-spelling")
+        // And the app was never asked. `silicon/auto` is the gateway's own vocabulary, so
+        // an ordinary request never crosses to the main actor to be told "not that one".
+        #expect(await host.log.routeCalls == 0)
     }
 
     @Test func autoWithoutARouterFailsWithSomethingReadable() async throws {
@@ -964,8 +1187,9 @@ struct RoutingGatewayTests {
         #expect(backend.requests.isEmpty)
     }
 
-    @Test func aStreamedAutoRequestCarriesTheHeaderAndTheComment() async throws {
-        let frames = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+    @Test func aStreamedAutoRequestNamesTheModelInItsCommentAndItsChunks() async throws {
+        let frames = "data: {\"model\":\"engine-spelling\",\"choices\":"
+            + "[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
             + "data: [DONE]\n\n"
         let backend = try CapturingServer { _ in frames }
         defer { backend.stop() }
@@ -973,15 +1197,7 @@ struct RoutingGatewayTests {
             backend: URL(string: "http://127.0.0.1:\(backend.port)/")!,
             decision: GatewayRoutingDecision(modelID: "local/chosen", reason: "Chosen — warm")
         )
-        let server = GatewayServer(host: host, ledger: nil, token: "gateway-secret")
-        try await server.start(preferredPort: 0)
-        var port = await server.port
-        var waited = 0
-        while port == 0, waited < 100 {
-            try await Task.sleep(for: .milliseconds(20))
-            port = await server.port
-            waited += 1
-        }
+        let (server, port) = try await RoutingGatewayTests.started(host)
         defer { Task { await server.stop() } }
 
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
@@ -994,10 +1210,113 @@ struct RoutingGatewayTests {
         )
         let (data, response) = try await URLSession.shared.data(for: request)
         let head = response as! HTTPURLResponse
-        #expect(head.value(forHTTPHeaderField: "x-silicon-routed-to") == "local/chosen")
+        // No header: the head goes out before routing does, so that a streaming client's
+        // first byte does not wait on another service. The stream says it twice instead.
+        #expect(head.value(forHTTPHeaderField: "x-silicon-routed-to") == nil)
         let text = String(decoding: data, as: UTF8.self)
-        #expect(text.contains(": silicon-routed-to: Chosen — warm"))
+        // The id, not the reason — a reason may quote an error, and a comment is one line.
+        #expect(text.contains(": silicon-routed-to: local/chosen"))
+        #expect(!text.contains("Chosen — warm"))
+        // Every chunk that names a model names the one the client can act on.
+        #expect(text.contains("\"model\":\"local\\/chosen\"")
+            || text.contains("\"model\":\"local/chosen\""))
+        #expect(!text.contains("engine-spelling"))
         #expect(text.contains("data: [DONE]"))
+        #expect(text.contains("\"content\":\"hi\""))
+    }
+
+    @Test func anOrdinaryStreamIsNotRewrittenAtAll() async throws {
+        let frames = "data: {\"model\":\"engine-spelling\",\"choices\":"
+            + "[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+            + "data: [DONE]\n\n"
+        let backend = try CapturingServer { _ in frames }
+        defer { backend.stop() }
+        let host = RoutingFakeHost(
+            backend: URL(string: "http://127.0.0.1:\(backend.port)/")!,
+            decision: GatewayRoutingDecision(modelID: "local/chosen", reason: "never asked")
+        )
+        let (server, port) = try await RoutingGatewayTests.started(host)
+        defer { Task { await server.stop() } }
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer gateway-secret", forHTTPHeaderField: "Authorization")
+        request.httpBody = Data(
+            #"{"model":"local/named","stream":true,"messages":[{"role":"user","content":"hi"}]}"#
+                .utf8
+        )
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("engine-spelling"), "an unrouted stream is passed through")
+        #expect(!text.contains("silicon-routed-to"))
+        #expect(await host.log.routeCalls == 0)
+    }
+
+    // MARK: Codex's dialect
+
+    @Test func autoWorksOnTheResponsesEndpointToo() async throws {
+        let frames = "data: {\"model\":\"engine-spelling\",\"choices\":"
+            + "[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"
+            + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+            + "data: [DONE]\n\n"
+        let backend = try CapturingServer { _ in frames }
+        defer { backend.stop() }
+        let host = RoutingFakeHost(
+            backend: URL(string: "http://127.0.0.1:\(backend.port)/")!,
+            decision: GatewayRoutingDecision(modelID: "local/chosen", reason: "Chosen — warm")
+        )
+        let (server, port) = try await RoutingGatewayTests.started(host)
+        defer { Task { await server.stop() } }
+
+        // Non-streaming: Codex gets one assembled response, named for the real model, with
+        // the header — this reply's head is written after routing, so it can carry one.
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer gateway-secret", forHTTPHeaderField: "Authorization")
+        request.httpBody = Data(#"""
+        {"model":"silicon/auto","input":[{"type":"message","role":"user",
+         "content":[{"type":"input_text","text":"hello"}]}]}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let head = response as! HTTPURLResponse
+        #expect(head.statusCode == 200)
+        #expect(head.value(forHTTPHeaderField: "x-silicon-routed-to") == "local/chosen")
+        #expect(await host.log.models == ["local/chosen"])
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        #expect(json["model"] as? String == "local/chosen")
+    }
+
+    @Test func aStreamedResponsesRequestNamesTheModelInItsComment() async throws {
+        let frames = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+            + "\"finish_reason\":\"stop\"}]}\n\n"
+            + "data: [DONE]\n\n"
+        let backend = try CapturingServer { _ in frames }
+        defer { backend.stop() }
+        let host = RoutingFakeHost(
+            backend: URL(string: "http://127.0.0.1:\(backend.port)/")!,
+            decision: GatewayRoutingDecision(modelID: "local/chosen", reason: "Chosen — warm")
+        )
+        let (server, port) = try await RoutingGatewayTests.started(host)
+        defer { Task { await server.stop() } }
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer gateway-secret", forHTTPHeaderField: "Authorization")
+        request.httpBody = Data(#"""
+        {"model":"silicon/auto","stream":true,"input":[{"type":"message","role":"user",
+         "content":[{"type":"input_text","text":"hello"}]}]}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let head = response as! HTTPURLResponse
+        #expect(head.value(forHTTPHeaderField: "x-silicon-routed-to") == nil)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(": silicon-routed-to: local/chosen"))
+        // Codex's own events name the model the translator was given.
+        #expect(text.contains("local/chosen"))
+        #expect(await host.log.models == ["local/chosen"])
     }
 }
 

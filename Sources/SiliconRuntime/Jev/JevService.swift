@@ -169,6 +169,16 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// reaches it, and the features fail closed rather than quietly costing more.
     public var monthlyBudgetUSD: Double?
 
+    /// Which gateway model `silicon/auto` falls back to when Jev cannot be asked, or is not
+    /// sure enough to choose. Nil — the default — means the model loaded on this Mac, else
+    /// the first one that would answer without a load.
+    ///
+    /// Here rather than in the app's own settings because it belongs to a Jev feature, and
+    /// because this file is the one a person can open, read and edit: a fallback that lived
+    /// in `UserDefaults` could not be seen, copied to another Mac, or pointed somewhere else
+    /// by `SILICON_JEV_CONFIG` for a test.
+    public var routingFallbackModel: String?
+
     /// How long an identical question keeps its answer. Zero turns the cache off.
     public var cacheMinutes: Int = 10
 
@@ -197,6 +207,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// build that knows a feature this one does not must not fail the whole load.
     private enum CodingKeys: String, CodingKey {
         case enabled, model, features, monthlyBudgetUSD, cacheMinutes, maxStateBytes
+        case routingFallbackModel
     }
 
     public init(from decoder: any Decoder) throws {
@@ -207,6 +218,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
         monthlyBudgetUSD = try container.decodeIfPresent(Double.self, forKey: .monthlyBudgetUSD)
         cacheMinutes = try container.decodeIfPresent(Int.self, forKey: .cacheMinutes) ?? cacheMinutes
         maxStateBytes = try container.decodeIfPresent(Int.self, forKey: .maxStateBytes) ?? maxStateBytes
+        routingFallbackModel = try container.decodeIfPresent(
+            String.self, forKey: .routingFallbackModel
+        )
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -224,6 +238,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encodeIfPresent(monthlyBudgetUSD, forKey: .monthlyBudgetUSD)
         try container.encode(cacheMinutes, forKey: .cacheMinutes)
         try container.encode(maxStateBytes, forKey: .maxStateBytes)
+        try container.encodeIfPresent(routingFallbackModel, forKey: .routingFallbackModel)
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),
@@ -280,6 +295,12 @@ public struct JevSettings: Codable, Sendable, Equatable {
         copy.maxStateBytes = max(1_024, min(copy.maxStateBytes, JevService.hardMaxStateBytes))
         if let budget = copy.monthlyBudgetUSD, !budget.isFinite || budget < 0 {
             copy.monthlyBudgetUSD = nil
+        }
+        // A hand-edited file may leave the field blank meaning "no pick"; that is nil here,
+        // so the router does not go looking for a model called "".
+        if let fallback = copy.routingFallbackModel,
+           fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            copy.routingFallbackModel = nil
         }
         for feature in JevFeature.allCases where copy.features[feature] == nil {
             copy.features[feature] = Self.defaultFeatures[feature] ?? false

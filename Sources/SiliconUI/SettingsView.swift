@@ -1163,7 +1163,10 @@ private struct JevSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     if feature == .routing, settings.isOn(.routing) {
-                        JevRoutingFallbackRow()
+                        JevRoutingFallbackRow(
+                            selected: settings.routingFallbackModel,
+                            pick: { model in apply { $0.routingFallbackModel = model } }
+                        )
                     }
                 }
             }
@@ -1282,21 +1285,44 @@ private struct JevSection: View {
 /// Where a routed request goes when Jev cannot be asked or is not sure enough.
 ///
 /// Shown under the routing toggle, and only while routing is on: it is that feature's
-/// setting, and an eighth row about a switch nobody has flipped is noise.
+/// setting, and an eighth row about a switch nobody has flipped is noise. The value lives in
+/// `jev.json` with the rest of what Jev is allowed to do, so this row owns none of it — the
+/// selection comes down and the pick goes back up through the same `JevService.update` every
+/// other row here uses.
 private struct JevRoutingFallbackRow: View {
+    let selected: String?
+    let pick: (String?) -> Void
+
     @Environment(AppModel.self) private var app
-    @State private var selection = RoutingFallback.modelID ?? ""
+    /// Read once when the row appears rather than in `body`: building the gateway's model
+    /// list walks the library, the swarm and the cloud lists, and a picker redraws often.
+    @State private var models: [GatewayAPI.Model] = []
+
+    /// A pick that is no longer in the list — the model was deleted, hidden, or its node
+    /// went away. Saying so beats a picker that silently shows "Whatever is loaded" and
+    /// leaves someone thinking their choice is still in force.
+    private var missing: String? {
+        guard let selected, !models.contains(where: { $0.id == selected }) else { return nil }
+        return selected
+    }
 
     var body: some View {
-        Picker("Fall back to", selection: $selection) {
+        Picker(
+            "Fall back to",
+            selection: Binding(
+                get: { selected ?? "" },
+                set: { pick($0.isEmpty ? nil : $0) }
+            )
+        ) {
             Text("Whatever is loaded").tag("")
-            ForEach(app.gatewayModelSnapshot(), id: \.id) { model in
+            ForEach(models, id: \.id) { model in
                 Text(model.displayName).tag(model.id)
             }
+            if let missing {
+                Text("\(missing) (not available)").tag(missing)
+            }
         }
-        .onChange(of: selection) { _, value in
-            RoutingFallback.modelID = value.isEmpty ? nil : value
-        }
+        .onAppear { models = app.gatewayModelSnapshot() }
         Text(
             "Auto (`silicon/auto` in the model list) asks Jev which model should answer each "
             + "request. This is where it sends one when Jev is off, over budget, or not sure "
@@ -1305,5 +1331,13 @@ private struct JevRoutingFallbackRow: View {
         )
         .font(.caption)
         .foregroundStyle(.secondary)
+        if let missing {
+            Text(
+                "\(missing) is not installed or reachable right now, so routing is falling "
+                + "back to whatever is loaded until it comes back or you pick something else."
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+        }
     }
 }

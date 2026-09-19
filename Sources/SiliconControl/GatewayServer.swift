@@ -296,34 +296,30 @@ public actor GatewayServer {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
-        // `silicon/auto` is answered by whichever model the app's routing picks; everything
-        // below this line then treats that choice as though the client had named it, which is
-        // the whole trick: ensure, translation, ledger and streaming stay untouched.
-        let routing = await host.gatewayRoute(modelID: requestedID, body: request.body)
-        let modelID = routing?.modelID ?? requestedID
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
         let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
-        let isNode: Bool = {
-            if case .node = GatewayAPI.parseModelID(modelID) { return true }
-            return false
-        }()
         let (preview, promptChars) = GatewayAPI.promptPreview(inBody: request.body)
-        let entry = await ledger?.begin(
-            endpoint: "chat", modelID: modelID, stream: wantsStream,
-            promptChars: promptChars, promptPreview: preview
-        )
 
         if wantsStream {
+            // The head goes out before anything else, including routing. A streaming client
+            // measures time to first byte, and asking another service which model should
+            // answer is not a reason to make it wait for the status line.
             let stream = SSEConnection(connection: connection)
-            guard await stream.sendHead(extraHeaders: Self.routedHeaders(routing)) else {
-                await finishLedger(entry, ok: false, detail: "client gone before headers")
-                return
-            }
+            guard await stream.sendHead() else { return }
+
+            let routing = await routeIfVirtual(requestedID, body: request.body)
+            let modelID = routing?.modelID ?? requestedID
             if let routing {
                 // A comment: invisible to both harnesses' parsers, legible to anyone
-                // watching the wire wonder which machine just answered.
-                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(routing.reason)"))
+                // watching the wire wonder which machine just answered. The id only — the
+                // reason may quote a service's error text, which does not belong on a
+                // line whose framing depends on there being no newline in it.
+                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(modelID)"))
             }
+            let entry = await ledger?.begin(
+                endpoint: "chat", modelID: modelID, stream: true,
+                promptChars: promptChars, promptPreview: preview
+            )
             let backend: GatewayReadyBackend
             do {
                 backend = try await ensureWithHeartbeat(
@@ -337,9 +333,21 @@ public actor GatewayServer {
                 return
             }
             var body = GatewayAPI.rewritingModel(inBody: request.body, to: backend.backendModel)
-            body = GatewayAPI.normalizingThinking(inBody: body, forNode: isNode)
-            await pipeChatStream(body: body, backend: backend, to: stream, ledgerEntry: entry)
+            body = GatewayAPI.normalizingThinking(
+                inBody: body, forNode: Self.isNodeModel(modelID)
+            )
+            await pipeChatStream(
+                body: body, backend: backend, to: stream, ledgerEntry: entry,
+                routedTo: routing.map { _ in modelID }
+            )
         } else {
+            let routing = await routeIfVirtual(requestedID, body: request.body)
+            let modelID = routing?.modelID ?? requestedID
+            let isNode = Self.isNodeModel(modelID)
+            let entry = await ledger?.begin(
+                endpoint: "chat", modelID: modelID, stream: false,
+                promptChars: promptChars, promptPreview: preview
+            )
             do {
                 let backend = try await ensureRespectingWait(
                     modelID: modelID, budget: waitBudget, onStage: { _ in }
@@ -364,7 +372,7 @@ public actor GatewayServer {
                     out = GatewayAPI.rewritingModel(inBody: out, to: modelID)
                 }
                 var response = HTTPResponse(status: status, body: out)
-                response.extraHeaders = Self.routedHeaders(routing)
+                response.extraHeaders = Self.routedHeaders(routing.map { _ in modelID })
                 try? await response.write(to: connection)
 
                 let audit = GatewayStreamAudit()
@@ -386,11 +394,29 @@ public actor GatewayServer {
         }
     }
 
-    /// The one header a routed reply carries. Empty for every ordinary request, so nothing
-    /// about the normal response changes.
-    static func routedHeaders(_ routing: GatewayRoutingDecision?) -> [String: String] {
-        guard let routing else { return [:] }
-        return [GatewayAPI.routedToHeader: routing.modelID]
+    /// Asks the app to route, but only for a virtual id.
+    ///
+    /// The check is here rather than in the host so that an ordinary request — which is
+    /// almost all of them — never crosses to the main actor to be told "no". `silicon/auto`
+    /// is the gateway's own vocabulary; recognising it is the gateway's job.
+    private func routeIfVirtual(_ id: String, body: Data) async -> GatewayRoutingDecision? {
+        guard GatewayAPI.isAutoModelID(id) else { return nil }
+        return await host.gatewayRoute(modelID: id, body: body)
+    }
+
+    static func isNodeModel(_ id: String) -> Bool {
+        if case .node = GatewayAPI.parseModelID(id) { return true }
+        return false
+    }
+
+    /// The one header a routed reply carries, on buffered responses only.
+    ///
+    /// A streamed reply's head is written before routing has happened — that is the point of
+    /// writing it first — so a stream says which model answered in its comment line and in
+    /// every chunk's `model` field instead.
+    static func routedHeaders(_ modelID: String?) -> [String: String] {
+        guard let modelID else { return [:] }
+        return [GatewayAPI.routedToHeader: modelID]
     }
 
     private func finishLedger(
@@ -413,7 +439,7 @@ public actor GatewayServer {
     /// error the client can show, instead of a bare "stream closed".
     private func pipeChatStream(
         body: Data, backend: GatewayReadyBackend, to stream: SSEConnection,
-        ledgerEntry: String? = nil
+        ledgerEntry: String? = nil, routedTo: String? = nil
     ) async {
         var sawDone = false
         let audit = GatewayStreamAudit()
@@ -427,7 +453,13 @@ public actor GatewayServer {
                 for payload in Self.dataPayloads(inFrame: frame) {
                     audit.feed(payload: payload)
                 }
-                await stream.send(frame + Data("\n\n".utf8))
+                // Untouched, unless the client asked Auto: then each chunk's `model` is
+                // the backend's own spelling of a model the client never named, and the
+                // one field the shape has for saying who answered should say so. The
+                // re-serialisation is paid only by routed streams.
+                let out = routedTo.map { GatewayAPI.rewritingModel(inFrame: frame, to: $0) }
+                    ?? frame
+                await stream.send(out + Data("\n\n".utf8))
             }
             if !sawDone {
                 await stream.send(GatewayAPI.sseErrorPayload(
@@ -465,32 +497,29 @@ public actor GatewayServer {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
-        // Codex sees the same model list as the harness does, so it can name `silicon/auto`
-        // too; the translator is then told the real model, which is what Codex records
-        // against the thread.
-        let routing = await host.gatewayRoute(modelID: requestedID, body: request.body)
-        let modelID = routing?.modelID ?? requestedID
-        let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)
         let wantsStream = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any])
             .flatMap { $0?["stream"] as? Bool } ?? false
         let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
-        let isNode: Bool = {
-            if case .node = GatewayAPI.parseModelID(modelID) { return true }
-            return false
-        }()
+
+        // Codex sees the same model list as the harness does, so it can name `silicon/auto`
+        // too. As with chat, a streaming caller gets its head before anything is asked of
+        // anyone; the translator is then told the real model, which is what Codex records
+        // against the thread.
+        let stream = SSEConnection(connection: connection)
+        if wantsStream {
+            guard await stream.sendHead() else { return }
+        }
+        let routing = await routeIfVirtual(requestedID, body: request.body)
+        let modelID = routing?.modelID ?? requestedID
+        let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)
+        let isNode = Self.isNodeModel(modelID)
         let entry = await ledger?.begin(
             endpoint: "responses", modelID: modelID, stream: wantsStream,
             promptChars: request.body.count, promptPreview: nil
         )
-
-        let stream = SSEConnection(connection: connection)
         if wantsStream {
-            guard await stream.sendHead(extraHeaders: Self.routedHeaders(routing)) else {
-                await finishLedger(entry, ok: false, detail: "client gone before headers")
-                return
-            }
-            if let routing {
-                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(routing.reason)"))
+            if routing != nil {
+                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(modelID)"))
             }
             await stream.send(translator.opening())
         }
@@ -570,7 +599,7 @@ public actor GatewayServer {
                 var response = HTTPResponse(
                     status: 200, body: translator.completedResponseBody()
                 )
-                response.extraHeaders = Self.routedHeaders(routing)
+                response.extraHeaders = Self.routedHeaders(routing.map { _ in modelID })
                 try? await response.write(to: connection)
             }
             await finishLedger(entry, ok: true, warning: audit.warning, audit: audit)
