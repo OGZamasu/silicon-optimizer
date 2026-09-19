@@ -14,15 +14,22 @@ public struct ModelResolver: Sendable {
         public var projector: HuggingFaceClient.RepoFile?
         /// An adapter fetched from its own pinned URL, not the repository.
         public var lora: LoRAAdapter?
+        /// The commit to fetch at. Nil means `main`, which is what the catalogue's own
+        /// models have always used: their filenames are hints resolved against the Hub. A
+        /// file pinned by digest is fetched at the commit that digest belongs to, so a
+        /// later push to the repository cannot change what arrives.
+        public var revision: String?
 
         public init(
             repository: String, files: [HuggingFaceClient.RepoFile],
-            projector: HuggingFaceClient.RepoFile?, lora: LoRAAdapter? = nil
+            projector: HuggingFaceClient.RepoFile?, lora: LoRAAdapter? = nil,
+            revision: String? = nil
         ) {
             self.repository = repository
             self.files = files
             self.projector = projector
             self.lora = lora
+            self.revision = revision
         }
 
         public var totalSize: Bytes {

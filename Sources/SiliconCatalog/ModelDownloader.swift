@@ -57,10 +57,15 @@ public actor ModelDownloader {
     }
 
     private let configuration: URLSessionConfiguration
+    /// Whether this downloader waits for a network that is not there. Read by the test that
+    /// pins the difference between the two initialisers.
+    nonisolated let waitsForConnectivity: Bool
     private let token: String?
     /// Test seam: a local server standing in for huggingface.co, so the multi-file and
     /// resume paths can be exercised for real without moving gigabytes.
     private let overrideBase: URL?
+    /// Which redirects may be followed. Nil follows any.
+    private let redirects: (@Sendable (URL) -> Bool)?
 
     public init(token: String? = nil, baseURL: URL? = nil) {
         let configuration = URLSessionConfiguration.default
@@ -70,8 +75,43 @@ public actor ModelDownloader {
         configuration.timeoutIntervalForResource = 60 * 60 * 24 * 7
         configuration.waitsForConnectivity = true
         self.configuration = configuration
+        self.waitsForConnectivity = configuration.waitsForConnectivity
         self.token = token
         self.overrideBase = baseURL
+        self.redirects = nil
+    }
+
+    /// A downloader for public files, fetched for somebody else: the models this Mac keeps
+    /// for a paired phone.
+    ///
+    /// There is no token parameter, so none can be passed. The session keeps nothing — no
+    /// cookies, no stored credentials, no cache — and follows a redirect only where
+    /// `redirects` allows. And it does not wait for the network: a Mac with no network fails
+    /// at once, with the partial kept to resume, rather than sitting at "0%" for the days a
+    /// catalogue download is allowed to wait. A host that takes the connection and then
+    /// never answers is given up on after the 60-second request timeout.
+    public init(publicFilesFrom baseURL: URL? = nil, redirects: @escaping @Sendable (URL) -> Bool) {
+        self.configuration = Self.publicFileConfiguration()
+        self.waitsForConnectivity = configuration.waitsForConnectivity
+        self.token = nil
+        self.overrideBase = baseURL
+        self.redirects = redirects
+    }
+
+    /// The session a public file is fetched on: ephemeral, and keeping even less than that
+    /// — no cookie store, no credential store, no cache — with no waiting for connectivity.
+    static func publicFileConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 60 * 60 * 12
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return configuration
     }
 
     /// Downloads a resolution into `directory`, reporting progress as it goes.
@@ -110,7 +150,7 @@ public actor ModelDownloader {
             }
 
             try await downloadFile(
-                file, from: resolution.repository, to: destination,
+                file, from: resolution.repository, at: resolution.revision, to: destination,
                 alreadyCompleted: completedBytes, grandTotal: totalBytes,
                 fileIndex: index, fileCount: queue.count, meter: meter, onProgress: onProgress
             )
@@ -159,6 +199,7 @@ public actor ModelDownloader {
     private func downloadFile(
         _ file: HuggingFaceClient.RepoFile,
         from repository: String,
+        at revision: String?,
         to destination: URL,
         alreadyCompleted: Bytes,
         grandTotal: Bytes,
@@ -173,9 +214,12 @@ public actor ModelDownloader {
             existingBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         }
 
-        let remote = overrideBase.map {
-            $0.appendingPathComponent(repository).appendingPathComponent(file.path)
-        } ?? HuggingFaceClient.downloadURL(repository: repository, file: file.path)
+        // One builder for the Hub and for a test's stand-in, so the path a test sees is the
+        // path the Hub is asked for.
+        let remote = HuggingFaceClient.downloadURL(
+            repository: repository, file: file.path, revision: revision ?? "main",
+            base: overrideBase ?? HuggingFaceClient.hub
+        )
         var request = URLRequest(url: remote)
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if existingBytes > 0 {
@@ -195,7 +239,7 @@ public actor ModelDownloader {
         defer { try? handle.close() }
         try handle.seekToEnd()
 
-        let streamer = ChunkedDownload()
+        let streamer = ChunkedDownload(redirects: redirects)
         let events = streamer.start(request, configuration: configuration)
 
         var received = existingBytes

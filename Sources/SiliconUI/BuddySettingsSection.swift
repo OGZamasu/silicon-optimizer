@@ -51,6 +51,8 @@ struct BuddySettingsSection: View {
                     deviceRow(device)
                 }
             }
+
+            BuddyPhoneModelsRow()
         }
         .task { await buddy.refresh(server: model.controlServer) }
         .sheet(isPresented: $showingPairing) {

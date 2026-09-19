@@ -1190,6 +1190,14 @@ public protocol ControlHost: AnyObject, Sendable {
     /// `/v1/node` and `/v1/gguf`, fetched with whatever credential this Mac holds for it.
     /// That credential is never in the answer.
     func controlPeerStatus(name: String) async throws -> ControlAPI.PeerNodeStatus
+
+    // MARK: Models for the phone
+
+    /// What `/ondevice/models` is answered from: the models this Mac fetches, verifies and
+    /// serves to a paired phone for when it is out of reach. Nil — the default — serves an
+    /// empty list. A requirement rather than only an extension method for the reason the
+    /// agent routes give above: the server holds an `any ControlHost`.
+    func phoneModelProvider() async -> (any PhoneModelProvider)?
 }
 
 /// Defaults for the hosts that are not the Mac app — the MCP bridge's doubles and the

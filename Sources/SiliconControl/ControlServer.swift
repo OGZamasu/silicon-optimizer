@@ -69,6 +69,9 @@ public actor ControlServer {
     /// every time one is closed. Nil in the app; the tests count these to prove that two
     /// features asking for the listener produce one socket and not two.
     private let tailnetBindObserver: (@Sendable (TailnetEndpoint?) -> Void)?
+    /// Where `/ondevice/models` is answered from, when a test hands one in. Nil in the app,
+    /// which asks its host — see `phoneModelSource()`.
+    private let phoneModelOverride: (any PhoneModelProvider)?
 
     /// Streams open right now. Read by the tests that prove a dead client is reaped.
     public var openEventStreams: Int { activeEventStreams }
@@ -159,9 +162,11 @@ public actor ControlServer {
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
             SwarmPairing.tailnetIPv4()
         },
-        tailnetBindObserver: (@Sendable (TailnetEndpoint?) -> Void)? = nil
+        tailnetBindObserver: (@Sendable (TailnetEndpoint?) -> Void)? = nil,
+        phoneModels: (any PhoneModelProvider)? = nil
     ) {
         self.host = host
+        self.phoneModelOverride = phoneModels
         self.handshakeURL = handshakeURL
         self.buddy = buddy
         self.events = events
@@ -1266,6 +1271,11 @@ public actor ControlServer {
                 return .error(404, error.localizedDescription)
             }
         }
+        // The models a phone runs by itself when this Mac is out of reach. Their own block
+        // because every path under it shares the same gates.
+        if segments.first == "ondevice" {
+            return await routePhoneModels(request, segments: segments, as: caller, on: origin)
+        }
         // The Chat tab's agent engines. Their own block because every path here has an
         // engine in it and two of them have a second parameter as well.
         if segments.first == "agent" {
@@ -1589,6 +1599,109 @@ public actor ControlServer {
         return (captured[0], captured[1])
     }
 
+    // MARK: - Models for the phone
+
+    /// The provider `/ondevice/models` answers from: a test's, or the host's.
+    private func phoneModelSource() async -> (any PhoneModelProvider)? {
+        if let phoneModelOverride { return phoneModelOverride }
+        return await host.phoneModelProvider()
+    }
+
+    /// `/ondevice/models/...`, in one place because every path under it shares its gates:
+    /// full control, never the swarm, a loopback `Host` on the loopback listener.
+    ///
+    /// Nothing from the path is ever a path. The `{id}` segment is handed to the provider,
+    /// which looks it up in the catalogue and answers 404 for anything that is not a key
+    /// there — a traversal, a file name and a typo alike.
+    private func routePhoneModels(
+        _ request: HTTPRequest, segments: [String], as caller: Caller, on origin: Origin
+    ) async -> HTTPResponse {
+        // A chat-only device never gets here: none of these is in `chatOnlyRoutes`, so the
+        // scope gate has already answered it — which is what makes a route added here full
+        // scope by default rather than by remembering to say so.
+        guard caller != .swarm else { return .error(403, Self.phoneModelsAreNotForPeers) }
+        // Starting a multi-gigabyte download and deleting files are worth the same second
+        // lock as the agent routes. Phones reach this Mac on the tailnet listener, where
+        // there is no browser to rebind a name.
+        if origin == .primary {
+            guard GatewayServer.isValidLoopbackHost(request.headers["host"]),
+                  GatewayServer.isTrustedLoopbackOrigin(request.headers["origin"])
+            else { return .error(403, Self.phoneModelsAreForLoopbackHosts) }
+        }
+        let provider = await phoneModelSource()
+
+        do {
+            if request.method == "GET", segments == ["ondevice", "models"] {
+                return try .encode(
+                    await provider?.phoneModels() ?? ControlAPI.PhoneModelList(models: [])
+                )
+            }
+            if request.method == "POST",
+               let id = Self.parameter(segments, matching: ["ondevice", "models", "*", "prepare"]) {
+                guard let provider else { throw PhoneModelError.unknownModel(id) }
+                // `?verify=1` hashes a ready copy again before it is served — what a phone
+                // asks for once when the file it fetched did not hash to the pin.
+                let verify: Bool
+                switch request.query["verify"]?.lowercased() {
+                case nil, "0", "false": verify = false
+                case "1", "true": verify = true
+                default: return .error(400, Self.phoneModelVerifyValues)
+                }
+                let prepared = try await provider.preparePhoneModel(id: id, verify: verify)
+                // 202 for a fetch that is on its way, started now or already; 200 for a
+                // model that was ready before anyone asked. Either way the body is the entry,
+                // so a phone learns the state from the same answer.
+                return try .encode(prepared.model, status: prepared.wasReady ? 200 : 202)
+            }
+            if request.method == "GET",
+               let id = Self.parameter(segments, matching: ["ondevice", "models", "*", "file"]) {
+                guard let provider else { throw PhoneModelError.unknownModel(id) }
+                return servePhoneModelFile(
+                    try await provider.phoneModelFile(id: id), request: request.headers
+                )
+            }
+            if request.method == "DELETE",
+               let id = Self.parameter(segments, matching: ["ondevice", "models", "*"]) {
+                guard let provider else { throw PhoneModelError.unknownModel(id) }
+                return try .encode(await provider.removePhoneModel(id: id))
+            }
+            return .error(404, "Unknown endpoint \(request.method) \(request.path)")
+        } catch let error as any ControlStatusError {
+            return .error(error.status, error.localizedDescription)
+        } catch {
+            return .error(400, error.localizedDescription)
+        }
+    }
+
+    /// The verified file, as bytes. The same machinery as `GET /media/{id}` — ranges,
+    /// `If-None-Match`, `If-Range`, chunks under the slow-reader deadline — with the digest
+    /// as the tag, because the digest is exactly what identifies these bytes.
+    ///
+    /// `no-store` rather than the media family's hour: a multi-gigabyte model is written
+    /// into the phone's own storage by the app that asked for it, and no cache on the way
+    /// has any business keeping a second copy.
+    private func servePhoneModelFile(
+        _ file: ControlAPI.PhoneModelFile, request: [String: String]
+    ) -> HTTPResponse {
+        let tag = "\"\(file.sha256)\""
+        // The pinned file's own name, which says nothing about this Mac's folders; filtered
+        // anyway, because a header is the wrong place to find out a catalogue entry had a
+        // quote in it.
+        let name = file.fileName.filter { $0.isASCII && $0 != "\"" && !$0.isNewline }
+        let headers = [
+            "Accept-Ranges": "bytes",
+            "X-Content-Type-Options": "nosniff",
+            "ETag": tag,
+            "X-Content-SHA256": file.sha256,
+            "Content-Disposition": "attachment; filename=\"\(name)\"",
+        ]
+        return Self.fileResponse(
+            file.url, size: Int(file.sizeBytes), tag: tag,
+            contentType: "application/octet-stream", headers: headers, cacheControl: "no-store",
+            request: request, writeDeadline: eventWriteDeadline
+        )
+    }
+
     // MARK: - Serving what this Mac made
 
     /// `GET /media/{id}`.
@@ -1650,27 +1763,60 @@ public actor ControlServer {
                 "attachment; filename=\"\(id)\(suffix.isEmpty ? "" : ".\(suffix)")\""
         }
 
-        if let tag, let asked = headers["if-none-match"], asked == tag {
+        return Self.fileResponse(
+            url, size: total, tag: tag, contentType: entry.contentType, headers: extra,
+            cacheControl: Self.mediaCacheControl, request: headers,
+            writeDeadline: eventWriteDeadline
+        )
+    }
+
+    // MARK: - Answering with a file
+
+    /// A file, answered the one way this server answers files, whichever route found it.
+    ///
+    /// `GET /media/{id}` and `GET /ondevice/models/{id}/file` differ in what they serve and
+    /// who may have it. How the bytes go out is the same, and is written here once: `304`
+    /// for an `If-None-Match` that names the current tag, `206` for one `Range`, `416` with
+    /// the real end for a range outside the file, and the whole file otherwise — never read
+    /// into memory, but sent in chunks, each under the slow-reader deadline.
+    ///
+    /// `If-Range` is honoured: a range asked on condition that the file is still the one
+    /// the client started on is served as a range only while the tag matches, and as the
+    /// whole file when it does not. That is what makes resuming safe — a client holding the
+    /// first half of one file must never be handed the second half of another.
+    static func fileResponse(
+        _ url: URL, size total: Int, tag: String?, contentType: String,
+        headers: [String: String], cacheControl: String, request: [String: String],
+        writeDeadline: Duration
+    ) -> HTTPResponse {
+        var extra = headers
+        if let tag, let asked = request["if-none-match"], entityTag(tag, isNamedIn: asked) {
             var unchanged = HTTPResponse(
-                status: 304, body: Data(), contentType: entry.contentType,
-                extraHeaders: extra
+                status: 304, body: Data(), contentType: contentType, extraHeaders: extra
             )
             // A 304 has no body, and a framing header for a body that cannot exist is one
             // more thing for a proxy to disagree with.
             unchanged.omitsContentLength = true
-            unchanged.cacheControl = Self.mediaCacheControl
+            unchanged.cacheControl = cacheControl
             return unchanged
         }
 
         // Players probe with `bytes=0-1` before they will play anything, and seeking is
-        // ranges all the way down; a video endpoint without them plays nothing at all.
+        // ranges all the way down; a video endpoint without them plays nothing at all. A
+        // phone resuming a download asks for `bytes=N-` and must get exactly the rest.
         //
         // One range only. A multi-range request wants `multipart/byteranges`, which this
         // server does not write, and answering the first range as though it were the whole
         // ask would hand a player bytes it did not request under a header saying otherwise.
-        // Ignoring the header and sending the file is the behaviour RFC 9110 allows.
-        if let asked = headers["range"], !asked.contains(",") {
-            guard let range = GatewayAPI.byteRange(header: asked, fileSize: total) else {
+        // Ignoring the header and sending the file is the behaviour RFC 9110 allows — and
+        // it is what a failed `If-Range` requires.
+        var ranged = request["range"]
+        if let condition = request["if-range"], !strongMatch(condition, tag) {
+            ranged = nil
+        }
+        if let asked = ranged, !asked.contains(","), let spec = byteRangeSpec(asked) {
+            guard let range = GatewayAPI.byteRange(header: "bytes=" + spec, fileSize: total)
+            else {
                 // With where the end actually is, so a player that guessed can correct
                 // itself instead of retrying the same range.
                 var refusal = HTTPResponse.error(416, Self.rangeOutsideFile)
@@ -1682,19 +1828,59 @@ public actor ControlServer {
                 "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(total)"
             var partial = HTTPResponse(
                 status: 206, file: url, range: range,
-                contentType: entry.contentType, extraHeaders: extra
+                contentType: contentType, extraHeaders: extra
             )
-            partial.cacheControl = Self.mediaCacheControl
-            partial.writeDeadline = eventWriteDeadline
+            partial.cacheControl = cacheControl
+            partial.writeDeadline = writeDeadline
             return partial
         }
         var whole = HTTPResponse(
             status: 200, file: url, range: 0..<total,
-            contentType: entry.contentType, extraHeaders: extra
+            contentType: contentType, extraHeaders: extra
         )
-        whole.cacheControl = Self.mediaCacheControl
-        whole.writeDeadline = eventWriteDeadline
+        whole.cacheControl = cacheControl
+        whole.writeDeadline = writeDeadline
         return whole
+    }
+
+    /// The part after `bytes=` of a `Range` header, or nil for a range in any other unit —
+    /// which RFC 9110 says a server ignores rather than refuses, so the whole file goes out.
+    /// The unit is compared without regard to case, as the RFC has it.
+    static func byteRangeSpec(_ header: String) -> String? {
+        guard let equals = header.firstIndex(of: "=") else { return nil }
+        let unit = header[..<equals].trimmingCharacters(in: .whitespaces)
+        guard unit.caseInsensitiveCompare("bytes") == .orderedSame else { return nil }
+        return String(header[header.index(after: equals)...])
+    }
+
+    /// An entity tag without its weakness marker and its quotes. A client that sends the
+    /// bare digest it read from `X-Content-SHA256` means the same tag as one that quotes it.
+    private static func opaque(_ tag: String) -> (weak: Bool, value: String) {
+        var value = tag.trimmingCharacters(in: .whitespaces)
+        let weak = value.hasPrefix("W/")
+        if weak { value = String(value.dropFirst(2)) }
+        if value.count >= 2, value.hasPrefix("\""), value.hasSuffix("\"") {
+            value = String(value.dropFirst().dropLast())
+        }
+        return (weak, value)
+    }
+
+    /// Whether an `If-None-Match` names this tag: `*`, or the tag anywhere in its list,
+    /// compared weakly as RFC 9110 has it for this header.
+    static func entityTag(_ tag: String, isNamedIn header: String) -> Bool {
+        let wanted = opaque(tag).value
+        return header.split(separator: ",").contains { candidate in
+            let trimmed = candidate.trimmingCharacters(in: .whitespaces)
+            return trimmed == "*" || opaque(trimmed).value == wanted
+        }
+    }
+
+    /// `If-Range`'s comparison, which is strong: a weak tag never matches, and neither does
+    /// a date, because this server does not send `Last-Modified` for one to be copied from.
+    static func strongMatch(_ condition: String, _ tag: String?) -> Bool {
+        guard let tag else { return false }
+        let asked = opaque(condition), current = opaque(tag)
+        return !asked.weak && !current.weak && asked.value == current.value
     }
 
     /// The one family of responses this server lets a client keep.
@@ -2313,6 +2499,7 @@ struct HTTPResponse {
         case 500: "Internal Server Error"
         case 501: "Not Implemented"
         case 503: "Service Unavailable"
+        case 507: "Insufficient Storage"
         default: "Error"
         }
     }
