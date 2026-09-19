@@ -346,6 +346,11 @@ extension AppModel {
     ///   gets a line saying so.
     public func answerPiApproval(_ item: PiItem, allow: Bool, silently: Bool = false) {
         guard case .approval(let requestID, _) = item.kind, !item.answered else { return }
+        // Which way it went, for any paired device watching this session — see the same
+        // line in `answerCodexApproval` for why it is recorded at the funnel.
+        BuddyAgentSessions.shared.noteAnswerHere(
+            id: item.id.uuidString, owner: agentLedgerOwner, engine: "pi", accept: allow
+        )
         item.answered = true
         item.allowed = allow
         item.running = false
@@ -398,7 +403,7 @@ extension AppModel {
     func setPiModel(_ id: String) {
         guard piRuntime != nil else { return }
         settings.piModel = id
-        settings.save()
+        persistSettings()
         piCurrentModel = id
         piSend(["type": "set_model", "provider": "silicon", "modelId": id])
     }
@@ -408,7 +413,11 @@ extension AppModel {
     /// Maps Pi's RPC events onto transcript items. Streaming text and thinking are
     /// appended to the newest item of their kind; tools get their own entries that
     /// resolve in place when execution ends.
-    private func handlePiEvent(_ event: [String: Any]) {
+    ///
+    /// Internal rather than private so the tests that pin Silicon Buddy's normalisation can
+    /// drive recorded Pi events through the real handler. Normalising a second copy of this
+    /// mapping in a test would only ever prove the copy right.
+    func handlePiEvent(_ event: [String: Any]) {
         switch event["type"] as? String {
         case "agent_start":
             piBusy = true

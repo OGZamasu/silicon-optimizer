@@ -87,6 +87,42 @@ public actor ControlServer {
     /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
     public static let defaultEventWriteDeadline: Duration = .seconds(20)
 
+    /// How the tailnet listener's connections notice a peer that has gone.
+    ///
+    /// A phone that walks out of range does not close its socket; it simply stops
+    /// answering. `/events` writes a heartbeat every fifteen seconds, and left to the
+    /// kernel's defaults an unanswered one is retransmitted for many minutes before the
+    /// connection is given up — minutes in which the stream holds one of sixteen slots and
+    /// the Chat tab's badge says the phone is still watching. So retransmissions that go
+    /// unanswered for `droppedAfter` seconds end the connection, and a connection with
+    /// nothing in flight is probed after `keepaliveIdle` seconds of silence. Either way a
+    /// vanished phone is gone within the minute. A peer that is merely slow, or a swarm
+    /// node holding a long render request open, answers both and is left alone.
+    enum TailnetLiveness {
+        static let keepaliveIdle = 10
+        static let keepaliveInterval = 5
+        static let keepaliveCount = 3
+        static let droppedAfter = 30
+    }
+
+    /// The tailnet listener's parameters: this Mac's tailnet address and nothing else, and
+    /// the liveness rule above. Loopback's listener does not get it — a local process that
+    /// vanishes closes its socket with it.
+    static func tailnetParameters(address: String, port: NWEndpoint.Port) -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = TailnetLiveness.keepaliveIdle
+        tcp.keepaliveInterval = TailnetLiveness.keepaliveInterval
+        tcp.keepaliveCount = TailnetLiveness.keepaliveCount
+        tcp.connectionDropTime = TailnetLiveness.droppedAfter
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(address), port: port
+        )
+        return parameters
+    }
+
     /// Streams hold a connection for minutes or hours, so they get their own ceiling well
     /// under the connection limit — a phone that reconnects on every screen wake must not
     /// be able to starve the MCP bridge of sockets.
@@ -440,11 +476,7 @@ public actor ControlServer {
             closeTailnetListener()
         }
 
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(address), port: boundPort
-        )
+        let parameters = Self.tailnetParameters(address: address, port: boundPort)
         do {
             let listener = try NWListener(using: parameters)
             listener.newConnectionHandler = { [weak self] connection in
@@ -867,9 +899,18 @@ public actor ControlServer {
                 guard let id = caller.deviceID else { return true }
                 return await buddy.isKnown(deviceID: id)
             }
+            // Who is reading decides what they are sent. The hub keeps agent frames from
+            // everyone the agent routes refuse — a device paired for chat, and the swarm —
+            // and counts the full-control devices for the Chat tab's badge.
+            let audience: BuddyEventHub.Audience = switch caller {
+            case .control: .thisMac
+            case .device(let id, let scope): .device(id: id, scope: scope)
+            case .swarm: .peer
+            }
             body = EventSource { writer in
                 await Self.pumpEvents(
-                    writer, hub: hub, host: host, stillAuthorized: stillAuthorized
+                    writer, hub: hub, host: host, audience: audience,
+                    stillAuthorized: stillAuthorized
                 )
             }
         } else {
@@ -953,10 +994,11 @@ public actor ControlServer {
 
     private static func pumpEvents(
         _ writer: EventStreamWriter, hub: BuddyEventHub, host: any ControlHost,
+        audience: BuddyEventHub.Audience,
         stillAuthorized: @escaping @Sendable () async -> Bool = { true }
     ) async {
         guard (try? await writer.open()) != nil else { return }
-        let subscription = await hub.subscribe()
+        let subscription = await hub.subscribe(as: audience)
         // Strictly after subscribing: a host that starts watching its own state and finds
         // no subscribers would stop again before this reader ever registered.
         await host.beginEventUpdates(postingTo: hub)
@@ -964,9 +1006,7 @@ public actor ControlServer {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
                 await withTaskCancellationHandler {
-                    for await event in subscription.stream {
-                        guard (try? await writer.send(event)) != nil else { return }
-                    }
+                    await Self.forward(subscription, from: hub) { try await writer.send($0) }
                 } onCancel: {
                     // Finishing the continuation is the only thing that breaks the reader
                     // above out of its `for await`.
@@ -988,6 +1028,34 @@ public actor ControlServer {
             group.cancelAll()
         }
         await hub.cancel(subscription.id)
+    }
+
+    /// Sends one subscription's frames down its stream, and says so at the gap when some
+    /// were dropped.
+    ///
+    /// The hub drops a slow subscriber's *oldest* frames, so whatever was lost is older
+    /// than the frame just taken off the stream. The `resync` therefore goes out in front
+    /// of that frame: exactly where the gap is, one per gap, before anything newer. The
+    /// cursor a phone holds when it reads the `resync` is the one from the last frame it
+    /// read before the gap — which is precisely where fetching again has to start.
+    ///
+    /// A drop that happens while this frame is being taken, just after it, is counted
+    /// here too. That errs in the safe direction: the phone fetches from an older cursor
+    /// than it strictly needed, and the fetch is authoritative.
+    static func forward(
+        _ subscription: (id: UUID, stream: AsyncStream<BuddyEvent.Frame>),
+        from hub: BuddyEventHub,
+        to send: @Sendable (BuddyEvent.Frame) async throws -> Void
+    ) async {
+        for await frame in subscription.stream {
+            let lost = await hub.takeDropped(subscription.id)
+            if lost > 0 {
+                guard let data = try? BuddyEvent.resync(.init(dropped: lost)).encoded(),
+                      (try? await send(.init(name: "resync", data: data))) != nil
+                else { return }
+            }
+            guard (try? await send(frame)) != nil else { return }
+        }
     }
 
     private var unauthorized: HTTPResponse {
@@ -1198,6 +1266,11 @@ public actor ControlServer {
                 return .error(404, error.localizedDescription)
             }
         }
+        // The Chat tab's agent engines. Their own block because every path here has an
+        // engine in it and two of them have a second parameter as well.
+        if segments.first == "agent" {
+            return await routeAgent(request, segments: segments, as: caller, on: origin)
+        }
 
         do {
             switch (request.method, request.path) {
@@ -1369,6 +1442,151 @@ public actor ControlServer {
         } catch {
             return .error(400, error.localizedDescription)
         }
+    }
+
+    // MARK: - The Chat tab's agent sessions
+
+    /// What a node is told when it reaches for `/agent`.
+    ///
+    /// The swarm secret is a credential everywhere else on this server, because everywhere
+    /// else it buys rendering and model lists — things a peer is *for*. These routes run
+    /// commands on this Mac and approve file changes to it, and a node is a machine with a
+    /// token in a config file, not a person with a phone in their hand. So this is the one
+    /// family the shared secret does not open, and it is refused by name rather than by
+    /// 404: the owner debugging their own swarm should read why, not wonder where the
+    /// route went.
+    public static let agentsAreNotForPeers =
+        "A swarm node may not drive this Mac's agent sessions. These routes run commands "
+        + "here, so they are for the owner's own devices: pair one from "
+        + "Settings → Silicon Buddy."
+
+    /// What a loopback caller with the wrong `Host` is told on an agent route. The control
+    /// token already keeps a web page out — a page cannot read it — so this is the second
+    /// lock rather than the first: a page that rebinds its own name to 127.0.0.1 is still
+    /// a page, and it has no business on the routes that run commands.
+    public static let agentsAreForLoopbackHosts =
+        "Only loopback clients may use the agent sessions on this listener."
+
+    /// `/agent/...`, in one place because every path under it shares its gates — full
+    /// control, never the swarm, a loopback `Host` on the loopback listener — and because
+    /// the shapes are parameterised twice.
+    private func routeAgent(
+        _ request: HTTPRequest, segments: [String], as caller: Caller, on origin: Origin
+    ) async -> HTTPResponse {
+        // Scope has already refused a chat-only device before anything looked at the path:
+        // none of these are in `chatOnlyRoutes`, which is what makes a route added here
+        // full-scope by default rather than by remembering to say so.
+        guard caller != .swarm else { return .error(403, Self.agentsAreNotForPeers) }
+        // The gateway's own DNS-rebinding check, applied where it matters most. Phones
+        // reach this Mac on the tailnet listener, where there is no browser to rebind.
+        if origin == .primary {
+            guard GatewayServer.isValidLoopbackHost(request.headers["host"]),
+                  GatewayServer.isTrustedLoopbackOrigin(request.headers["origin"])
+            else { return .error(403, Self.agentsAreForLoopbackHosts) }
+        }
+        // Noted before the route runs, refusals included: a phone that tried is a phone
+        // that is there, and the badge on the Mac is about who is there.
+        if case .device(let id, .full) = caller {
+            await events.noteAgentActivity(deviceID: id)
+        }
+
+        do {
+            if request.method == "GET", segments == ["agent", "sessions"] {
+                return try .encode(await host.agentSessions(), compact: true)
+            }
+            if request.method == "GET",
+               let engine = Self.parameter(segments, matching: ["agent", "sessions", "*"]) {
+                return try .encode(await host.agentSession(
+                    engine: engine, query: try Self.agentQuery(request.query)
+                ), compact: true)
+            }
+            if request.method == "DELETE",
+               let engine = Self.parameter(segments, matching: ["agent", "sessions", "*"]) {
+                return try .encode(await host.stopAgentSession(engine: engine), compact: true)
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "start"]
+               ) {
+                return try .encode(await host.startAgentSession(engine: engine), compact: true)
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "new"]
+               ) {
+                return try .encode(await host.newAgentThread(engine: engine), compact: true)
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "interrupt"]
+               ) {
+                return try .encode(
+                    await host.interruptAgentSession(engine: engine), compact: true
+                )
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "messages"]
+               ) {
+                let body = try request.decode(ControlAPI.AgentMessageRequest.self)
+                // 202 rather than 200: the turn has been handed to the engine and the
+                // answer arrives on `/events`, which is a different promise from "here is
+                // what it said".
+                return try .encode(
+                    await host.sendAgentMessage(engine: engine, body), status: 202,
+                    compact: true
+                )
+            }
+            if request.method == "POST",
+               let (engine, id) = Self.parameters(
+                   segments, matching: ["agent", "sessions", "*", "approvals", "*"]
+               ) {
+                let body = try request.decode(ControlAPI.AgentApprovalDecision.self)
+                return try .encode(await host.answerAgentApproval(
+                    engine: engine, id: id, decision: body.decision
+                ), compact: true)
+            }
+            return .error(404, "Unknown endpoint \(request.method) \(request.path)")
+        } catch let error as any ControlStatusError {
+            return .error(error.status, error.localizedDescription)
+        } catch {
+            return .error(400, error.localizedDescription)
+        }
+    }
+
+    /// `?since=&epoch=&limit=`, read strictly. A `since` that is not a number is a 400
+    /// rather than "the whole transcript": the one client that would send one is a client
+    /// resuming from an item id, which this contract does not take, and answering it with
+    /// the whole thread every time would hide the bug behind a working screen.
+    static func agentQuery(_ query: [String: String]) throws -> ControlAPI.AgentSessionQuery {
+        func number(_ name: String) throws -> Int? {
+            guard let text = query[name], !text.isEmpty else { return nil }
+            guard let value = Int(text) else { throw AgentSessionError.badQuery(name) }
+            return value
+        }
+        return ControlAPI.AgentSessionQuery(
+            since: try number("since"), epoch: query["epoch"], limit: try number("limit")
+        )
+    }
+
+    /// `parameter`'s two-wildcard sibling, for `/agent/sessions/{engine}/approvals/{id}`.
+    /// Written out rather than generalised into "return every wildcard": two callers, two
+    /// bindings, and a `[String]` result would hand every caller an index to get wrong.
+    static func parameters(
+        _ segments: [String], matching shape: [String]
+    ) -> (String, String)? {
+        guard segments.count == shape.count else { return nil }
+        var captured: [String] = []
+        for (segment, expected) in zip(segments, shape) {
+            if expected == "*" {
+                guard !segment.isEmpty else { return nil }
+                captured.append(segment)
+            } else if segment != expected {
+                return nil
+            }
+        }
+        guard captured.count == 2 else { return nil }
+        return (captured[0], captured[1])
     }
 
     // MARK: - Serving what this Mac made
@@ -1955,10 +2173,20 @@ struct HTTPResponse {
         self.extraHeaders = extraHeaders
     }
 
-    static func encode(_ value: some Encodable) throws -> HTTPResponse {
+    /// - Parameters:
+    ///   - status: 200 unless the route means something else by answering. The one caller
+    ///     that passes anything is `POST .../messages`, which is a 202: the turn has been
+    ///     accepted, not answered.
+    ///   - compact: no indentation. The agent routes answer transcripts, which are the
+    ///     largest JSON this server sends a phone and the most often fetched; the
+    ///     whitespace pretty-printing adds is a fifth of a transcript's bytes and no client
+    ///     reads it. The older routes keep the shape their callers have always had.
+    static func encode(
+        _ value: some Encodable, status: Int = 200, compact: Bool = false
+    ) throws -> HTTPResponse {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return HTTPResponse(status: 200, body: try encoder.encode(value))
+        encoder.outputFormatting = compact ? [.sortedKeys] : [.prettyPrinted, .sortedKeys]
+        return HTTPResponse(status: status, body: try encoder.encode(value))
     }
 
     static func html(_ text: String) -> HTTPResponse {
@@ -2069,6 +2297,7 @@ struct HTTPResponse {
     private static func reason(_ status: Int) -> String {
         switch status {
         case 200: "OK"
+        case 202: "Accepted"
         case 206: "Partial Content"
         case 400: "Bad Request"
         case 401: "Unauthorized"
@@ -2081,6 +2310,9 @@ struct HTTPResponse {
         case 415: "Unsupported Media Type"
         case 416: "Range Not Satisfiable"
         case 429: "Too Many Requests"
+        case 500: "Internal Server Error"
+        case 501: "Not Implemented"
+        case 503: "Service Unavailable"
         default: "Error"
         }
     }

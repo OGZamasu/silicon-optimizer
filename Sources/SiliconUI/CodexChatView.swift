@@ -78,6 +78,7 @@ struct CodexChatView: View {
             modelPicker
             folderPicker
             Spacer(minLength: 0)
+            BuddyWatchingBadge()
             if let usage = model.codexTokenLabel {
                 Text(usage)
                     .font(.caption)

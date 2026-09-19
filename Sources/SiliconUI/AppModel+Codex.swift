@@ -183,34 +183,21 @@ extension AppModel {
 
         let model = codexSelectedModel
         settings.codexModel = model
-        settings.save()
+        persistSettings()
 
         codexItems.append(CodexChatItem(id: UUID().uuidString, kind: .user(trimmed)))
         codexTurnActive = true
         noteActivity()
 
         let cwd = codexWorkingDirectory.path
-        let storedApproval = Self.codexPolicyValue(
-            settings.codexApprovalPolicy, allowed: ["untrusted", "on-request", "never"],
-            fallback: "on-request"
-        )
-        let storedSandbox = Self.codexPolicyValue(
-            settings.codexSandbox,
-            allowed: ["read-only", "workspace-write", "danger-full-access"],
-            fallback: "read-only"
-        )
+        let storedApproval = settings.codexApprovalPolicy
+        let storedSandbox = settings.codexSandbox
 
         Task {
-            // The guardrail screens what Codex *asks* about. A thread started with "never
-            // ask" or full access never asks, so the guardrail would sit there with nothing
-            // to screen while the agent worked unattended — the setting that looks like
-            // more freedom silently turning the safety off. While guardrails are on, the
-            // policy is the one that keeps them in the loop; the picker says so and
-            // disables the other two rows.
-            let guarded = await JevGuardrails.isTurnedOn()
-            let approval = guarded ? Self.guardedApprovalPolicy : storedApproval
-            let sandbox = guarded && storedSandbox == "danger-full-access"
-                ? "workspace-write" : storedSandbox
+            let (approval, sandbox) = Self.codexThreadPolicy(
+                storedApproval: storedApproval, storedSandbox: storedSandbox,
+                guarded: await agentGuardrailsOn()
+            )
             do {
                 let threadID: String
                 if let existing = codexThreadID {
@@ -229,6 +216,12 @@ extension AppModel {
                     }
                     codexThreadID = id
                     threadID = id
+                    // What this thread will keep for its life, for a paired device asking
+                    // whether anything stands between the agent and this Mac.
+                    BuddyAgentSessions.shared.noteThreadPolicy(
+                        owner: agentLedgerOwner, engine: "codex", threadID: id,
+                        approval: approval, sandbox: sandbox
+                    )
                 }
 
                 // Only documented fields ride along: the model may change per turn, the
@@ -251,12 +244,38 @@ extension AppModel {
     /// What Codex's approval policy is pinned to while the Jev guardrail is on: the one
     /// value under which Codex asks before it runs a command, which is the moment the
     /// guardrail gets to look at it.
-    public static let guardedApprovalPolicy = "on-request"
+    nonisolated public static let guardedApprovalPolicy = "on-request"
+
+    /// What a new Codex thread starts with, from the stored choices and whether the
+    /// guardrail is on. One function so `thread/start` and what a paired device is told
+    /// about it cannot disagree.
+    ///
+    /// The guardrail screens what Codex *asks* about. A thread started with "never ask" or
+    /// full access never asks, so the guardrail would sit there with nothing to screen
+    /// while the agent worked unattended — the setting that looks like more freedom
+    /// silently turning the safety off. While guardrails are on, the policy is the one that
+    /// keeps them in the loop; the picker says so and disables the other two rows.
+    nonisolated static func codexThreadPolicy(
+        storedApproval: String?, storedSandbox: String?, guarded: Bool
+    ) -> (approval: String, sandbox: String) {
+        let approval = codexPolicyValue(
+            storedApproval, allowed: ["untrusted", "on-request", "never"],
+            fallback: "on-request"
+        )
+        let sandbox = codexPolicyValue(
+            storedSandbox, allowed: ["read-only", "workspace-write", "danger-full-access"],
+            fallback: "read-only"
+        )
+        return (
+            guarded ? guardedApprovalPolicy : approval,
+            guarded && sandbox == "danger-full-access" ? "workspace-write" : sandbox
+        )
+    }
 
     /// Codex's policy enums are kebab-case on the wire ("on-request", "workspace-write");
     /// anything unrecognized — including values an older build may have stored — falls
     /// back rather than failing thread creation with an opaque enum error.
-    static func codexPolicyValue(
+    nonisolated static func codexPolicyValue(
         _ stored: String?, allowed: Set<String>, fallback: String
     ) -> String {
         guard let stored, allowed.contains(stored) else { return fallback }
@@ -276,6 +295,14 @@ extension AppModel {
     // MARK: - Approvals
 
     public func answerCodexApproval(_ approval: CodexApproval, accept: Bool) {
+        // Which way it went, for any paired device watching this session. Recorded here
+        // because this is the one funnel every answer on this Mac passes through — the
+        // card's buttons and the guardrail's own auto-answer alike — and because removing
+        // the card below destroys the only other evidence of what was decided.
+        BuddyAgentSessions.shared.noteAnswerHere(
+            id: approval.id.uuidString, owner: agentLedgerOwner, engine: "codex",
+            accept: accept
+        )
         // The card goes first, and unconditionally: the decision has been made, and a card
         // left on screen because the sidecar died in the meantime is a lie about what is
         // still pending.

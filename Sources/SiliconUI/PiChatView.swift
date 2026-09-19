@@ -77,6 +77,14 @@ struct PiChatView: View {
 
     private var chat: some View {
         VStack(spacing: 0) {
+            // Pi's controls live in the toolbar, so there is no header row to hang this
+            // on; it gets its own, and only when there is something to say.
+            HStack {
+                Spacer(minLength: 0)
+                BuddyWatchingBadge()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
