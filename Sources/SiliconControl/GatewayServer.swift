@@ -32,6 +32,30 @@ public struct GatewayRoutingDecision: Sendable, Equatable {
     }
 }
 
+/// What pruning decided: the request as it should now go out, and what was taken out of it.
+///
+/// The rewritten body rather than a list of edits, because the decision is made up in the app
+/// — where the Jev settings, the model list and the context windows are — and this target
+/// deliberately knows nothing about any of them. The gateway's job is to send what comes back
+/// and to say, on the wire and in the ledger, that it did.
+public struct GatewayPruning: Sendable, Equatable {
+    /// The chat-completions body to forward, with each dropped tool result replaced by a
+    /// one-line stub.
+    public var body: Data
+    /// The step numbers that were dropped, oldest first.
+    public var droppedSteps: [Int]
+    /// One line, for the log. Never for the answer.
+    public var reason: String
+
+    public init(body: Data, droppedSteps: [Int], reason: String) {
+        self.body = body
+        self.droppedSteps = droppedSteps
+        self.reason = reason
+    }
+
+    public var count: Int { droppedSteps.count }
+}
+
 /// The app-side half of the gateway: knows every model, and can make any one of them
 /// answer — loading it locally or starting it on the peer that owns it.
 public protocol GatewayHost: AnyObject, Sendable {
@@ -58,12 +82,27 @@ public protocol GatewayHost: AnyObject, Sendable {
     /// and the Jev settings all live up there, and this target deliberately depends on
     /// nothing but Foundation and Network.
     func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision?
+
+    /// Offers one chat-completions request for pruning before it is forwarded, now that the
+    /// model that will answer it is known. Returns nil for every request nothing should be
+    /// taken out of, which is almost all of them — the feature is off by default, cloud
+    /// targets are never touched, and a prompt that is not crowding its window is left alone.
+    ///
+    /// A question for the app for the same reason routing is: the Jev settings, the model
+    /// list and each model's context window all live up there, and this target depends on
+    /// nothing but Foundation and Network.
+    func gatewayPrune(modelID: String, body: Data) async -> GatewayPruning?
 }
 
 extension GatewayHost {
     /// A host that does not route — every test double, and the app itself before this
     /// feature — answers the same way for every id: this is not a virtual model.
     public func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision? {
+        nil
+    }
+
+    /// A host that does not prune leaves every request exactly as it arrived.
+    public func gatewayPrune(modelID: String, body: Data) async -> GatewayPruning? {
         nil
     }
 }
@@ -316,10 +355,23 @@ public actor GatewayServer {
                 // line whose framing depends on there being no newline in it.
                 await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(modelID)"))
             }
+            // A streamed reply's head is already out, so the count goes in a comment for the
+            // same reason the routed model does. The target is checked here, before the hop
+            // to the app: a request bound for a provider is never prunable, and answering
+            // that in pure code keeps it off the main actor.
+            let pruning = await pruneIfPrunable(modelID, body: request.body)
+            if let pruning {
+                await stream.send(
+                    GatewayAPI.sseComment("silicon-pruned: \(pruning.count)")
+                )
+            }
             let entry = await ledger?.begin(
                 endpoint: "chat", modelID: modelID, stream: true,
                 promptChars: promptChars, promptPreview: preview
             )
+            if let entry, let pruning {
+                await ledger?.notePruned(entry, steps: pruning.droppedSteps)
+            }
             let backend: GatewayReadyBackend
             do {
                 backend = try await ensureWithHeartbeat(
@@ -332,7 +384,9 @@ public actor GatewayServer {
                 await finishLedger(entry, ok: false, detail: error.localizedDescription)
                 return
             }
-            var body = GatewayAPI.rewritingModel(inBody: request.body, to: backend.backendModel)
+            var body = GatewayAPI.rewritingModel(
+                inBody: pruning?.body ?? request.body, to: backend.backendModel
+            )
             body = GatewayAPI.normalizingThinking(
                 inBody: body, forNode: Self.isNodeModel(modelID)
             )
@@ -344,17 +398,21 @@ public actor GatewayServer {
             let routing = await routeIfVirtual(requestedID, body: request.body)
             let modelID = routing?.modelID ?? requestedID
             let isNode = Self.isNodeModel(modelID)
+            let pruning = await pruneIfPrunable(modelID, body: request.body)
             let entry = await ledger?.begin(
                 endpoint: "chat", modelID: modelID, stream: false,
                 promptChars: promptChars, promptPreview: preview
             )
+            if let entry, let pruning {
+                await ledger?.notePruned(entry, steps: pruning.droppedSteps)
+            }
             do {
                 let backend = try await ensureRespectingWait(
                     modelID: modelID, budget: waitBudget, onStage: { _ in }
                 )
                 if let entry { await ledger?.noteEnsured(entry, backendModel: backend.backendModel) }
                 var body = GatewayAPI.rewritingModel(
-                    inBody: request.body, to: backend.backendModel
+                    inBody: pruning?.body ?? request.body, to: backend.backendModel
                 )
                 body = GatewayAPI.normalizingThinking(inBody: body, forNode: isNode)
                 let (status, data) = try await BackendClient.send(
@@ -373,6 +431,9 @@ public actor GatewayServer {
                 }
                 var response = HTTPResponse(status: status, body: out)
                 response.extraHeaders = Self.routedHeaders(routing.map { _ in modelID })
+                if let pruning {
+                    response.extraHeaders[GatewayAPI.prunedHeader] = String(pruning.count)
+                }
                 try? await response.write(to: connection)
 
                 let audit = GatewayStreamAudit()
@@ -402,6 +463,15 @@ public actor GatewayServer {
     private func routeIfVirtual(_ id: String, body: Data) async -> GatewayRoutingDecision? {
         guard GatewayAPI.isAutoModelID(id) else { return nil }
         return await host.gatewayRoute(modelID: id, body: body)
+    }
+
+    /// Offers a request for pruning, but only for a target that could ever be pruned.
+    ///
+    /// The check is here rather than only in the host so that a request to a provider — or
+    /// to an id this build does not recognise — never crosses to the main actor at all.
+    private func pruneIfPrunable(_ id: String, body: Data) async -> GatewayPruning? {
+        guard GatewayAPI.isPrunableTarget(id) else { return nil }
+        return await host.gatewayPrune(modelID: id, body: body)
     }
 
     static func isNodeModel(_ id: String) -> Bool {

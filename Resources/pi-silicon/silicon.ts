@@ -15,6 +15,16 @@
  *    `tool_call` event fires before execution and can block, and `ctx.ui.confirm`
  *    becomes an `extension_ui_request` the app answers on stdin. That pair is the
  *    permission hook, and this is the only place it can be installed from.
+ * 4. Asks the app, once per turn, which one of this session's tools and skills fits what
+ *    the user just typed, and appends the answer as a single line *after* the system
+ *    prompt Pi built. The roster itself is never touched, so any prefix caching over it
+ *    still holds. `before_agent_start` is the seam: it fires after the user submits and
+ *    before the agent loop, and what it returns replaces the system prompt for that turn.
+ *
+ * The two app-facing dialogs carry distinct titles, and the app matches on both the title
+ * and the method. The guardrail's is a blocking `confirm` with no timeout — a gate that
+ * times out into "allowed" is not a gate. The suggestion's is an `input` with one, because
+ * the right fallback for a hint that does not arrive is no hint.
  *
  * The app writes this file into the Pi workspace and supplies the environment:
  *   SILICON_GATEWAY_PORT — the gateway's loopback port
@@ -33,6 +43,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * `AppModel+Pi.swift`, where `PiGuardrailRequest.marker` is the other half.
  */
 const GUARDRAIL_MARKER = "silicon.guardrail.v1";
+
+/**
+ * The title the tool-relevance request carries. Matched exactly by the app; the other half
+ * is `PiSkillSuggestionRequest.marker` in `AppModel+SkillSelection.swift`.
+ */
+const RELEVANCE_MARKER = "silicon.skillselect.v1";
+
+/** How long the app has to answer before the turn goes ahead without a suggestion. */
+const RELEVANCE_TIMEOUT_MS = 20_000;
+
+/** One roster entry as the app reads it. */
+type RosterEntry = { name: string; kind: "tool" | "skill"; description: string };
 
 type GatewayModel = {
   id: string;
@@ -80,6 +102,72 @@ export default async function (pi: ExtensionAPI) {
         "Silicon Optimizer's guardrail did not allow this call. The verdict and its " +
         "reasons are on the card in the app's Chat tab.",
     };
+  });
+
+  // ---- The app's tool suggestion, once per turn --------------------------------
+  //
+  // Registered here, beside the gate and before anything that can return early, for the
+  // same reason: a session that skipped this registration is a session with no suggestion,
+  // and the handler has to exist before the first turn either way.
+  //
+  // `mcpTools` is filled in further down, once the tool server has answered. An empty
+  // roster on the first turn of a degraded session is not a problem — the app is sent what
+  // there is, and an empty roster suggests nothing.
+  const mcpTools: RosterEntry[] = [];
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    try {
+      const turn = (event.prompt ?? "").trim();
+      if (turn.length === 0 || !ctx.hasUI) return;
+
+      // Pi's own tools and skills, out of the same structured options it built the system
+      // prompt from — so this reads what Pi actually loaded rather than re-discovering it.
+      const options = event.systemPromptOptions ?? { cwd: "" };
+      const snippets: Record<string, string> = options.toolSnippets ?? {};
+      const roster: RosterEntry[] = [];
+      const seen = new Set<string>();
+      const add = (entry: RosterEntry) => {
+        if (entry.name.length === 0 || seen.has(entry.name)) return;
+        seen.add(entry.name);
+        roster.push(entry);
+      };
+      for (const entry of mcpTools) add(entry);
+      for (const name of options.selectedTools ?? []) {
+        add({ name, kind: "tool", description: snippets[name] ?? name });
+      }
+      for (const skill of options.skills ?? []) {
+        // A skill the model may not invoke is not a candidate: suggesting it would point
+        // the agent at something only the user can run.
+        if (skill.disableModelInvocation) continue;
+        add({
+          name: skill.name,
+          kind: "skill",
+          description: skill.description ?? skill.name,
+        });
+      }
+      if (roster.length === 0) return;
+
+      const question = JSON.stringify({
+        v: 1,
+        turn,
+        lastToolResult: lastToolResultText(ctx),
+        roster,
+      });
+      const answer = await ctx.ui.input(RELEVANCE_MARKER, question, {
+        timeout: RELEVANCE_TIMEOUT_MS,
+      });
+      // Nothing to say, or nobody answered in time. Returning undefined leaves the system
+      // prompt exactly as Pi built it, byte for byte — which is the common case, and the
+      // reason a local model's KV cache over the prompt survives most turns.
+      if (typeof answer !== "string" || answer.trim().length === 0) return;
+
+      // Appended, never substituted: the roster above it is byte-identical on every turn,
+      // which is what keeps a provider's prefix cache warm across the session.
+      return { systemPrompt: `${event.systemPrompt}\n\n${answer}` };
+    } catch {
+      // A turn must never fail because a hint did not arrive.
+      return;
+    }
   });
 
   const port = process.env.SILICON_GATEWAY_PORT;
@@ -138,6 +226,13 @@ export default async function (pi: ExtensionAPI) {
   }
 
   for (const tool of tools) {
+    // The roster the suggestion reads. The app derives its own one-line summary from this
+    // description, so the whole text goes over rather than a truncation of it.
+    mcpTools.push({
+      name: tool.name,
+      kind: "tool",
+      description: tool.description ?? tool.name,
+    });
     pi.registerTool({
       name: tool.name,
       label: tool.name,
@@ -162,6 +257,36 @@ export default async function (pi: ExtensionAPI) {
       },
     });
   }
+}
+
+/**
+ * A one-line digest of the newest tool result in the session, or undefined when there is
+ * none. It is the only thing besides the turn itself the app is told about the
+ * conversation: `is_follow_up_to_previous_tool_result` has to read *something*, and a
+ * transcript is neither needed for that nor something to send for it.
+ *
+ * Cut here rather than in the app so a large result never crosses the pipe in the first
+ * place. The app trims and redacts what arrives anyway.
+ */
+function lastToolResultText(ctx: { sessionManager?: any }): string | undefined {
+  try {
+    const entries = ctx.sessionManager?.buildContextEntries?.() ?? [];
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const message = entries[index]?.message;
+      if (!message || message.role !== "toolResult") continue;
+      const blocks = Array.isArray(message.content) ? message.content : [];
+      const text = blocks
+        .filter((block: any) => block?.type === "text" && typeof block.text === "string")
+        .map((block: any) => block.text)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return text.length > 0 ? text.slice(0, 600) : undefined;
+    }
+  } catch {
+    // A session shape this build does not recognise is not a reason to skip the hint.
+  }
+  return undefined;
 }
 
 /**

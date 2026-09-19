@@ -382,21 +382,35 @@ struct GuardrailStateTests {
     }
 
     /// The expensive rule only runs when a credential word is present, which is what keeps
-    /// a big argument from stalling the app. The ceiling is generous on purpose: this is a
-    /// guard against the pathological case, not a benchmark.
+    /// a big argument from stalling the app.
+    ///
+    /// The budgets are deliberately enormous next to what this actually costs — tens of
+    /// milliseconds — and they are not a benchmark. The failure being guarded against is
+    /// catastrophic regular-expression backtracking, where the figure stops being
+    /// milliseconds and becomes seconds or minutes; that is visible against a two-second
+    /// ceiling and a tighter one only measures how busy the machine is. This suite runs a
+    /// thousand tests in parallel, so a hundred-millisecond ceiling fails on a loaded laptop
+    /// and passes on an idle one, which is a test that reports the weather.
     @Test func redactingAHundredKilobytesIsFast() {
         let text = String(repeating: "swift build && swift test # ordinary output\n", count: 2_400)
         #expect(text.utf8.count > 100_000)
-        let started = ContinuousClock.now
-        _ = GuardrailState.redacted(text)
-        let elapsed = ContinuousClock.now - started
-        #expect(elapsed < .milliseconds(100), "redaction took \(elapsed)")
+
+        func elapsed(_ body: () -> Void) -> Duration {
+            let started = ContinuousClock.now
+            body()
+            return ContinuousClock.now - started
+        }
+
+        // No credential word in it, so the costly rule is skipped entirely — the gate that
+        // keeps a big argument from stalling the app.
+        let clean = elapsed { _ = GuardrailState.redacted(text) }
+        #expect(clean < .seconds(2), "redaction took \(clean)")
 
         // And with a credential in it, so the costly rule really does run.
         let withSecret = text + "\nexport API_KEY=sk-proj-9f8a7b6c5d4e3f2a1b0c\n"
-        let secondStart = ContinuousClock.now
-        let redacted = GuardrailState.redacted(withSecret)
-        #expect(ContinuousClock.now - secondStart < .milliseconds(500))
+        var redacted = ""
+        let costly = elapsed { redacted = GuardrailState.redacted(withSecret) }
+        #expect(costly < .seconds(2), "redaction with a credential took \(costly)")
         #expect(!redacted.contains("9f8a7b6c5d4e3f2a1b0c"))
     }
 

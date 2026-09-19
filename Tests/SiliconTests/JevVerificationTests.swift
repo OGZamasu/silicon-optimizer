@@ -104,6 +104,27 @@ actor Landing {
     func note(cancelled: Bool) { landed = true; wasCancelled = cancelled }
 }
 
+/// A one-shot gate a test holds a task behind, so "slower than the grace" is a fact rather
+/// than a hope about the scheduler. A sleep long enough to be reliable is also long enough
+/// to be felt by every run of the suite; this is neither.
+actor Latch {
+    private var opened = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        guard !opened else { return }
+        opened = true
+        let resume = waiting
+        waiting = []
+        for continuation in resume { continuation.resume() }
+    }
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+}
+
 actor EscalationCount {
     private(set) var calls = 0
     func note() { calls += 1 }
@@ -1277,20 +1298,29 @@ struct VerificationStreamTests {
     }
 
     /// The bound on how long a stream waits, in both directions.
+    ///
+    /// Neither half races the clock. The grace on the quick one is far longer than it needs
+    /// to be, because the assertion is "an answer that is ready is used", not "it is used
+    /// within three seconds" — and this suite runs a thousand tests in parallel, where three
+    /// seconds of scheduler starvation is a real thing. The slow one does not sleep at all:
+    /// it waits on a latch the test opens *after* asserting, so it cannot finish early on an
+    /// idle machine however the scheduler feels.
     @Test func theStreamTakesAQuickVerdictAndGivesUpOnASlowOne() async throws {
         let quick = Task<Int?, Never> { 7 }
-        #expect(await VerdictRelay.result(of: quick, within: .seconds(3)) == 7)
+        #expect(await VerdictRelay.result(of: quick, within: .seconds(60)) == 7)
 
         // Slower than the grace: the stream closes without it…
         let finished = Landing()
+        let latch = Latch()
         let slow = Task<Int?, Never> {
-            try? await Task.sleep(for: .milliseconds(400))
+            await latch.wait()
             // Recorded rather than returned, because a cancelled task can still return a
             // value — only the flag can tell the two apart.
             await finished.note(cancelled: Task.isCancelled)
             return 9
         }
         #expect(await VerdictRelay.result(of: slow, within: .milliseconds(50)) == nil)
+        await latch.open()
         // …and the work still finishes, uncancelled, which is what puts the verdict on the
         // message and on /events. Giving up on the wait must never mean giving up on the
         // verdict — that is the half that always matters.
@@ -1300,6 +1330,6 @@ struct VerificationStreamTests {
 
         // Nothing to report is not the same as being late, and both read as nil here.
         let empty = Task<Int?, Never> { nil }
-        #expect(await VerdictRelay.result(of: empty, within: .seconds(3)) == nil)
+        #expect(await VerdictRelay.result(of: empty, within: .seconds(60)) == nil)
     }
 }

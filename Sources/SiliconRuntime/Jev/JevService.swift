@@ -25,7 +25,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .guardrails: "Guardrails"
         case .routing: "Prompt routing"
         case .mediaRouting: "Media routing"
-        case .skillSelection: "Skill selection"
+        case .skillSelection: "Tool selection and pruning"
         case .recommendation: "Model recommendation"
         case .verification: "Answer verification"
         case .calibration: "Decision calibration"
@@ -46,7 +46,8 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .mediaRouting:
             "Reads an image, video or mesh request and picks the model and settings for it."
         case .skillSelection:
-            "Chooses which tools and skills an agent should be offered for the task in hand."
+            "Tool selection and pruning: suggests which tool or skill fits the turn, and "
+            + "which history a small model still needs."
         case .recommendation:
             "Reads your description of the job and ranks the models this Mac can run by "
             + "what that job actually needs."
@@ -68,7 +69,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// keeping both members rather than choosing between two rewritten expressions.
     private static let built: Set<JevFeature> = [
         .decideTool, .routing, .mediaRouting, .guardrails, .recommendation,
-        .verification, .calibration,
+        .verification, .calibration, .skillSelection,
     ]
 }
 
@@ -219,6 +220,24 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// acquire by upgrading.
     public var autoApproveSafeToolCalls: Bool = false
 
+    /// Whether the gateway may drop old tool results out of a chat request bound for a
+    /// model running on hardware you own, once the prompt is crowding that model's window.
+    ///
+    /// Off by default, and deliberately its own switch under the feature rather than part
+    /// of it: suggesting a tool changes what a model is *told*, while this changes what it
+    /// is *given*, and a wrong drop is a turn that has forgotten something. Someone who
+    /// wants the suggestion is not thereby asking for the pruning.
+    public var pruneToolHistory: Bool = false
+
+    /// How full the target model's context window has to be before pruning is considered,
+    /// as a fraction of it. Below this the history is not the problem and the cheapest
+    /// correct thing to do is nothing.
+    ///
+    /// 0.7 leaves the model most of its window before anything is touched, and leaves room
+    /// for the answer after it. Clamped to 0.1…0.95 in `normalized()`: 0 would prune every
+    /// request and 1 would prune none, and neither is a setting anyone means.
+    public var pruneAboveFraction: Double = 0.7
+
     /// The largest `state` this app will send, in bytes — a deliberately pessimistic proxy
     /// for tokens. `jev-1.13` allows 32k tokens for the state plus the longest question and
     /// 64k for the state plus *all* the questions, and a byte is not a token: dense prose
@@ -289,6 +308,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         case autoApproveSafeToolCalls
         case verificationEscalationModel
         case cascadeFloor, cascadeNoulLow, cascadeNoulHigh
+        case pruneToolHistory, pruneAboveFraction
     }
 
     public init(from decoder: any Decoder) throws {
@@ -317,6 +337,12 @@ public struct JevSettings: Codable, Sendable, Equatable {
         cascadeFloor = try container.decodeIfPresent(Double.self, forKey: .cascadeFloor) ?? cascadeFloor
         cascadeNoulLow = try container.decodeIfPresent(Double.self, forKey: .cascadeNoulLow) ?? cascadeNoulLow
         cascadeNoulHigh = try container.decodeIfPresent(Double.self, forKey: .cascadeNoulHigh) ?? cascadeNoulHigh
+        pruneToolHistory = try container.decodeIfPresent(
+            Bool.self, forKey: .pruneToolHistory
+        ) ?? pruneToolHistory
+        pruneAboveFraction = try container.decodeIfPresent(
+            Double.self, forKey: .pruneAboveFraction
+        ) ?? pruneAboveFraction
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -346,6 +372,8 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encode(cascadeFloor, forKey: .cascadeFloor)
         try container.encode(cascadeNoulLow, forKey: .cascadeNoulLow)
         try container.encode(cascadeNoulHigh, forKey: .cascadeNoulHigh)
+        try container.encode(pruneToolHistory, forKey: .pruneToolHistory)
+        try container.encode(pruneAboveFraction, forKey: .pruneAboveFraction)
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),
@@ -431,6 +459,11 @@ public struct JevSettings: Codable, Sendable, Equatable {
         if copy.cascadeNoulLow > copy.cascadeNoulHigh {
             swap(&copy.cascadeNoulLow, &copy.cascadeNoulHigh)
         }
+        // A hand-edited NaN would compare false against every threshold and quietly turn
+        // pruning off; the default is the honest answer to a number that is not one.
+        copy.pruneAboveFraction = copy.pruneAboveFraction.isFinite
+            ? max(0.1, min(copy.pruneAboveFraction, 0.95))
+            : JevSettings().pruneAboveFraction
         if let budget = copy.monthlyBudgetUSD, !budget.isFinite || budget < 0 {
             copy.monthlyBudgetUSD = nil
         }
@@ -579,6 +612,10 @@ public enum JevError: Error, LocalizedError, Equatable {
     case noKey
     case budgetExhausted(spentUSD: Double, budgetUSD: Double)
     case tooLarge(bytes: Int, limit: Int)
+    /// The caller's deadline passed before an answer did. The request itself was *not*
+    /// cancelled — see `ask(_:state:questions:cacheKey:deadline:)` — so this means "not in
+    /// time", not "not sent".
+    case timedOut(JevFeature, seconds: TimeInterval)
 
     public var errorDescription: String? {
         switch self {
@@ -595,6 +632,11 @@ public enum JevError: Error, LocalizedError, Equatable {
             String(
                 format: "That state is %.1f KB; Jev is sent at most %.1f KB. Filter it down to what the question needs.",
                 Double(bytes) / 1024, Double(limit) / 1024
+            )
+        case .timedOut(let feature, let seconds):
+            String(
+                format: "Jev did not answer %@ within %.1fs, so this one went ahead without it.",
+                feature.displayName, seconds
             )
         }
     }
@@ -828,12 +870,26 @@ public actor JevService {
     ///
     /// - Parameter cacheKey: replaces the derived key when the caller knows two states are
     ///   the same decision — a file whose path matters but whose modification date does not.
+    /// - Parameter deadline: how long this caller is prepared to wait, in seconds. Nil — the
+    ///   default, and what routing and the guardrail use — means as long as the retry policy
+    ///   takes, which on two 429s with a 30-second `retry-after` each is over a minute.
+    ///
+    ///   That is fine for a screening a person is waiting on a card for, and wrong for a
+    ///   feature sitting in front of somebody's chat request: a deadline is how a caller says
+    ///   "past this point, going ahead without an answer is the better outcome".
+    ///
+    ///   A deadline does **not** cancel the request. Another feature may be joined to the
+    ///   same bytes, the month has already been reserved for them, and the answer is worth
+    ///   having even late — so the request finishes on its own, records its cost, and lands
+    ///   in the cache, where the next ask of the same question finds it immediately. Only
+    ///   *this* caller stops waiting, with `JevError.timedOut`.
     @discardableResult
     public func ask(
         _ feature: JevFeature,
         state: JSONContent,
         questions: [String: ControlAPI.SystemOneQuestion],
-        cacheKey: String? = nil
+        cacheKey: String? = nil,
+        deadline: TimeInterval? = nil
     ) async throws -> ControlAPI.DecideResponse {
         let settings = settings()
         guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
@@ -872,6 +928,12 @@ public actor JevService {
         // case, not the exotic one, and the cache cannot help until the first lands.
         if let existing = inFlight[key] {
             debug("\(feature.rawValue) joined a call already in flight")
+            // A joiner's deadline is its own: the request it joined was started by somebody
+            // with different patience, and waiting out their retries is exactly what this
+            // caller said it would not do.
+            if let deadline, await !Self.settles(existing, within: deadline) {
+                throw JevError.timedOut(feature, seconds: deadline)
+            }
             return try await existing.value
         }
 
@@ -886,6 +948,21 @@ public actor JevService {
             try await self.send(request, apiKey: apiKey, feature: feature)
         }
         inFlight[key] = work
+
+        if let deadline, await !Self.settles(work, within: deadline) {
+            // Abandoned, not cancelled. The bookkeeping the lines below would have done —
+            // clearing the in-flight slot, releasing the reservation, caching the answer,
+            // recording the cost — is handed to a task that waits for the real end.
+            let settings = settings
+            Task { [weak self] in
+                await self?.settleAbandoned(
+                    key: key, reservation: reservation, work: work, feature: feature,
+                    ledgerURL: ledgerURL, cacheMinutes: settings.cacheMinutes
+                )
+            }
+            debug("\(feature.rawValue) gave up waiting after \(deadline)s")
+            throw JevError.timedOut(feature, seconds: deadline)
+        }
 
         let response: ControlAPI.DecideResponse
         do {
@@ -906,6 +983,77 @@ public actor JevService {
         // billing it twice would be a lie the budget then acts on.
         record(feature: feature, response: response, to: ledgerURL)
         return response
+    }
+
+    /// Whether a request finished inside the caller's patience. True means settled — with an
+    /// answer or with an error, which the caller's own `do`/`catch` then sorts out.
+    ///
+    /// A mailbox both sides can post to, rather than a task group. `await work.value` does
+    /// not return early when the task awaiting *it* is cancelled — that is the documented
+    /// behaviour, and it is the whole reason this cannot be written as a group with
+    /// `cancelAll`: the group would sit on the slow child anyway and the deadline would do
+    /// nothing at all. This is the same shape `VerdictRelay` uses on the UI side, for the
+    /// same reason.
+    ///
+    /// Nothing here cancels `work`. It is unstructured and may be shared with a joined
+    /// caller, and the answer is worth having even late — see `ask`.
+    static func settles(
+        _ work: Task<ControlAPI.DecideResponse, any Error>, within seconds: TimeInterval
+    ) async -> Bool {
+        guard seconds > 0 else { return false }
+        let slot = Mailbox()
+        let forward = Task {
+            _ = try? await work.value
+            await slot.post(true)
+        }
+        let timer = Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            await slot.post(false)
+        }
+        defer { forward.cancel(); timer.cancel() }
+        return await slot.take()
+    }
+
+    /// First writer wins, and an answer that arrives before anyone is listening is kept
+    /// rather than dropped: on a cache-warm path the request can finish before the caller
+    /// reaches `take()`.
+    private actor Mailbox {
+        private var settled: Bool?
+        private var waiting: CheckedContinuation<Bool, Never>?
+
+        func post(_ value: Bool) {
+            guard settled == nil else { return }
+            settled = value
+            waiting?.resume(returning: value)
+            waiting = nil
+        }
+
+        func take() async -> Bool {
+            if let settled { return settled }
+            return await withCheckedContinuation { waiting = $0 }
+        }
+    }
+
+    /// Finishes the bookkeeping for a request whose caller stopped waiting.
+    ///
+    /// Everything the ordinary path does at the end, done late: the slot is cleared so the
+    /// next identical ask starts a fresh one, the reservation is released so the budget is
+    /// not permanently short of it, and — when the answer did land — it is cached and its
+    /// cost recorded, because it was really spent either way.
+    private func settleAbandoned(
+        key: String, reservation: Double,
+        work: Task<ControlAPI.DecideResponse, any Error>,
+        feature: JevFeature, ledgerURL: URL, cacheMinutes: Int
+    ) async {
+        let response = try? await work.value
+        inFlight.removeValue(forKey: key)
+        reservedUSD = max(0, reservedUSD - reservation)
+        guard let response else { return }
+        if cacheMinutes > 0 {
+            cache[key] = CacheEntry(response: response, storedAt: Date())
+            pruneCache(window: Double(cacheMinutes) * 60)
+        }
+        record(feature: feature, response: response, to: ledgerURL)
     }
 
     /// Bytes to tokens for the budget reservation only. One token per byte is the worst

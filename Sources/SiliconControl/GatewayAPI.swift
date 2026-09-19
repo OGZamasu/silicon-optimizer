@@ -111,6 +111,29 @@ public enum GatewayAPI {
     /// see which machine it reached has been told nothing useful about its own bill.
     public static let routedToHeader = "X-Silicon-Routed-To"
 
+    /// How many earlier tool results were dropped out of a request before it was forwarded.
+    /// Set on buffered chat replies only; a streamed one says it in a comment line instead,
+    /// because its head is written before anything has been asked of anyone.
+    ///
+    /// Present even when a caller has no use for it, because a reply computed from less than
+    /// what was sent should say so somewhere a client can see without reading the app's log.
+    public static let prunedHeader = "X-Silicon-Pruned"
+
+    /// Whether a request for this model may have history taken out of it at all.
+    ///
+    /// Answered here, in pure code the gateway can run on its own thread, so an ordinary
+    /// request to a provider never crosses to the main actor to be told "not that one" —
+    /// the same reason `isAutoModelID` is the gateway's own vocabulary. Only models running
+    /// on hardware the owner owns qualify: a provider's window is large, its history is
+    /// what the bill is for, and sending someone else's model less than the client wrote is
+    /// not a decision this app should be making quietly.
+    public static func isPrunableTarget(_ modelID: String) -> Bool {
+        switch parseModelID(modelID) {
+        case .local, .node: true
+        case .cloud, nil: false
+        }
+    }
+
     // MARK: - Model listing
 
     /// One entry in `GET /v1/models`. The `silicon` extension block carries what the OpenAI

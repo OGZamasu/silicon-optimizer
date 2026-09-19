@@ -1206,6 +1206,36 @@ private struct JevSection: View {
                     if feature == .calibration, settings.isOn(.calibration) {
                         JevCalibrationRow()
                     }
+                    // Tool selection's one sub-switch, indented under it for the same
+                    // reason the guardrail's is: it is a different act. Suggesting a tool
+                    // changes what a model is told; this changes what it is given.
+                    if feature == .skillSelection {
+                        Toggle("Drop tool results a small model no longer needs", isOn: Binding(
+                            get: { settings.pruneToolHistory },
+                            set: { value in apply { $0.pruneToolHistory = value } }
+                        ))
+                        .disabled(!settings.isOn(.skillSelection))
+                        .padding(.leading, 18)
+                        Text(
+                            "Off by default. On, a chat request bound for a model on this Mac "
+                            + "or a machine on your network has its older tool results "
+                            + "replaced by one-line stubs once the prompt is crowding that "
+                            + "model's context window. Your messages, the assistant's replies, "
+                            + "the system prompt and the two newest results are never touched, "
+                            + "and nothing is dropped when Jev is unsure or cannot answer. "
+                            + "Models at a provider are never pruned."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 18)
+
+                        JevPruneFractionRow(
+                            fraction: settings.pruneAboveFraction,
+                            enabled: settings.isOn(.skillSelection) && settings.pruneToolHistory,
+                            pick: { value in apply { $0.pruneAboveFraction = value } }
+                        )
+                        .padding(.leading, 18)
+                    }
                 }
             }
 
@@ -1483,6 +1513,52 @@ private struct JevRoutingFallbackRow: View {
             .font(.caption)
             .foregroundStyle(.orange)
         }
+    }
+}
+
+/// How full a model's context window has to be before its tool history is pruned.
+///
+/// A picker over four written fractions rather than a free number field, because the useful
+/// range is narrow and each option says what it means: the row is about when the history
+/// stops being free, and "0.55" on its own says nothing about that.
+private struct JevPruneFractionRow: View {
+    let fraction: Double
+    let enabled: Bool
+    let pick: (Double) -> Void
+
+    /// The offered fractions, and what each one is for. Anything hand-edited into `jev.json`
+    /// between them still works — it is clamped to 0.1…0.95 and used as written; it is just
+    /// shown here as the nearest of these.
+    static let choices: [(value: Double, label: String)] = [
+        (0.55, "Over half full — prune early"),
+        (0.7, "About two thirds full (default)"),
+        (0.85, "Nearly full — prune late"),
+        (0.95, "Only when it is about to overflow"),
+    ]
+
+    private var nearest: Double {
+        Self.choices
+            .min { abs($0.value - fraction) < abs($1.value - fraction) }?.value ?? 0.7
+    }
+
+    var body: some View {
+        Picker(
+            "Prune when the prompt is",
+            selection: Binding(get: { nearest }, set: { pick($0) })
+        ) {
+            ForEach(Self.choices, id: \.value) { choice in
+                Text(choice.label).tag(choice.value)
+            }
+        }
+        .disabled(!enabled)
+        Text(
+            "Below this the history is not the problem, and the cheapest correct thing to do "
+            + "is nothing. A pruned request says how many results it dropped — in an "
+            + "`X-Silicon-Pruned` header, or a `: silicon-pruned:` comment on a stream — and "
+            + "the Fleet log keeps the step numbers."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }
 

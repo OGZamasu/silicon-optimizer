@@ -38,6 +38,14 @@ extension AppModel {
         /// Pi's own id for the tool call this entry is about. How a verdict finds its row
         /// when two calls to the same tool are in flight at once.
         public var callID: String?
+        /// What the tool-selection feature suggested for this turn, on the `.user` row the
+        /// suggestion was made about. Nil on every other row, and on a turn where nothing
+        /// was suggested — which is most of them.
+        public var suggestion: String?
+        /// Which suggestion request this row is the turn for, stamped when the request
+        /// arrives. How `suggestPiTools` finds the row again afterwards: by then the newest
+        /// user row may be a different turn, typed while Jev was thinking.
+        var suggestionRequestID: String?
 
         init(
             kind: Kind, text: String, running: Bool = false,
@@ -190,31 +198,66 @@ extension AppModel {
         var callID: String?
     }
 
-    /// Routes one `extension_ui_request`.
+    /// Which of this app's handlers, if any, owns one `extension_ui_request`.
     ///
-    /// Ours is answered by the guardrail. Anything else that blocks — a dialog from a
-    /// global Pi extension the user installed themselves — is answered `cancelled` rather
-    /// than ignored: this app has no dialog surface for it, and an unanswered dialog stops
-    /// the turn forever.
+    /// A table rather than a chain of `if`s, because it is the one place two features meet
+    /// on one channel and getting it wrong is not a cosmetic mistake: a guardrail `confirm`
+    /// that reached the suggestion handler would be answered with a system-prompt line
+    /// instead of a verdict, and Pi reads anything that is not `confirmed: false` as
+    /// permission. Both are matched on the method *and* the title, so neither marker can
+    /// arrive through the other's method and be mistaken for it.
+    enum PiDialogRoute: Equatable {
+        /// A tool call held at the guardrail's gate. Fails closed.
+        case guardrail
+        /// A turn asking which tool or skill to point Pi at. Fails open.
+        case toolSuggestion
+        /// Somebody else's dialog. This app has no surface for it, and an unanswered dialog
+        /// stops the turn forever, so it is answered `cancelled` rather than ignored.
+        case cancel
+        /// Not a blocking dialog at all — a notification, a status line. Nothing owes it a
+        /// reply.
+        case ignore
+    }
+
+    /// The blocking dialog methods. A fire-and-forget one expects no answer, and sending it
+    /// one would be a response with no request.
+    static let piDialogMethods: Set<String> = ["select", "confirm", "input", "editor"]
+
+    static func piDialogRoute(method: String, title: String?) -> PiDialogRoute {
+        if method == "confirm", title == PiGuardrailRequest.marker { return .guardrail }
+        if method == "input", title == PiSkillSuggestionRequest.marker {
+            return .toolSuggestion
+        }
+        return piDialogMethods.contains(method) ? .cancel : .ignore
+    }
+
+    /// Routes one `extension_ui_request` to whichever handler owns it.
     private func handlePiExtensionUIRequest(_ event: [String: Any]) {
         guard let id = event["id"] as? String else { return }
         let method = event["method"] as? String ?? ""
 
-        guard method == "confirm",
-              event["title"] as? String == PiGuardrailRequest.marker
-        else {
-            if ["select", "confirm", "input", "editor"].contains(method) {
-                piSend(["type": "extension_ui_response", "id": id, "cancelled": true])
+        switch Self.piDialogRoute(method: method, title: event["title"] as? String) {
+        case .guardrail:
+            let call = Self.parsePiGuardrailRequest(event["message"] as? String ?? "")
+            Task {
+                await screenPiToolCall(PiGuardrailRequest(
+                    requestID: id, tool: call.tool, arguments: call.arguments,
+                    callID: call.callID
+                ))
             }
-            return
-        }
-
-        let call = Self.parsePiGuardrailRequest(event["message"] as? String ?? "")
-        Task {
-            await screenPiToolCall(PiGuardrailRequest(
-                requestID: id, tool: call.tool, arguments: call.arguments,
-                callID: call.callID
-            ))
+        case .toolSuggestion:
+            let request = Self.parsePiSuggestionRequest(
+                event["placeholder"] as? String ?? "", requestID: id
+            )
+            // Stamped here, synchronously, before anything is awaited: the turn this is
+            // about is the one on screen now, not whichever one is newest when the answer
+            // comes back a second or two later.
+            stampPiSuggestionTurn(id)
+            Task { await suggestPiTools(request) }
+        case .cancel:
+            piSend(["type": "extension_ui_response", "id": id, "cancelled": true])
+        case .ignore:
+            break
         }
     }
 
