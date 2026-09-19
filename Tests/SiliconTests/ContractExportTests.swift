@@ -1,6 +1,9 @@
 import Foundation
 import Testing
+@testable import SiliconCatalog
 @testable import SiliconControl
+import SiliconCore
+import SiliconRuntime
 
 /// The machine-readable contract the Silicon Buddy apps are generated from.
 ///
@@ -62,6 +65,8 @@ struct ContractExportTests {
             "POST /agent/sessions/{engine}/messages",
             "POST /agent/sessions/{engine}/interrupt",
             "POST /agent/sessions/{engine}/approvals/{id}",
+            "GET /ondevice/models", "POST /ondevice/models/{id}/prepare",
+            "GET /ondevice/models/{id}/file", "DELETE /ondevice/models/{id}",
         ])
         // Deliberately absent, and a phone must never be told to use them: the overlay is
         // an OBS browser source, which cannot set headers and so carries its token in the
@@ -603,6 +608,127 @@ struct ContractExportTests {
         #expect(events.events.contains { $0.0 == "resync" })
     }
 
+    /// The phone's fallback models, in the contract the phone apps are generated from:
+    /// full scope, never the swarm, and pinned to the exact bytes a phone will verify.
+    @Test func thePhoneModelRoutesArePinnedAndFullScope() throws {
+        let routes = Self.routes.filter { $0.path.hasPrefix("/ondevice/") }
+        #expect(routes.count == 4)
+        for route in routes {
+            #expect(route.auth == "device", "\(route.method) \(route.path)")
+            #expect(route.scopes == ["full"], "\(route.method) \(route.path)")
+            #expect(route.errors[403] == ControlServer.chatOnlyRefusal)
+            #expect(route.errors[401] != nil)
+            #expect(
+                route.errorVariants.contains {
+                    $0.0 == 403 && $0.1 == "swarm"
+                        && $0.2 == ControlServer.phoneModelsAreNotForPeers
+                },
+                "\(route.method) \(route.path)"
+            )
+            #expect(route.errorVariants.allSatisfy { route.errors[$0.0] != nil })
+            // Every route with an id in it can be sent one that is not a catalogue key.
+            #expect(route.errors[404] == ControlServer.noSuchPhoneModel
+                || route.path == "/ondevice/models")
+        }
+        // Its own sentence: not the chat refusal, and not the agents' either.
+        #expect(ControlServer.phoneModelsAreNotForPeers != ControlServer.chatOnlyRefusal)
+        #expect(ControlServer.phoneModelsAreNotForPeers != ControlServer.agentsAreNotForPeers)
+
+        func route(_ method: String, _ path: String) throws -> Route {
+            try #require(Self.routes.first { $0.method == method && $0.path == path })
+        }
+        let file = try route("GET", "/ondevice/models/{id}/file")
+        #expect(file.errors[409] == ControlServer.phoneModelNotReady)
+        #expect(file.errors[416] == ControlServer.rangeOutsideFile)
+        #expect(file.response == nil)
+        for header in ["ETag", "X-Content-SHA256", "Range", "If-Range", "Content-Length"] {
+            #expect(file.summary.contains(header), "\(header)")
+        }
+        let prepare = try route("POST", "/ondevice/models/{id}/prepare")
+        #expect(prepare.errors[507]?.contains("not enough space") == true)
+        #expect(prepare.errors[507]?.contains("startup") == false)
+        #expect(prepare.summary.contains("202") && prepare.summary.contains("200"))
+        #expect(prepare.summary.contains("?verify=1"))
+        #expect(prepare.errors[400] == ControlServer.phoneModelVerifyValues)
+        // A drive that is not connected is its own refusal, naming the drive, on every
+        // route that would touch it.
+        for touching in [prepare, file, try route("DELETE", "/ondevice/models/{id}")] {
+            #expect(touching.errors[503] == Self.examplePhoneModelDriveMissing)
+        }
+        #expect(Self.examplePhoneModelDriveMissing.contains("“External SSD”"))
+        // The client rule for a resume, in the words a generated client is built from.
+        #expect(file.summary.contains("If-Range") && file.summary.contains("discard"))
+
+        // The list is the catalogue, pinned exactly, the default first.
+        let list = try JSONDecoder().decode(
+            ControlAPI.PhoneModelList.self,
+            from: try #require(try route("GET", "/ondevice/models").response).encode()
+        )
+        #expect(list.models.map(\.id) == ["qwen3.5-2b-q4_0", "gemma-4-e2b-q4_0"])
+        let qwen = try #require(list.models.first)
+        #expect(qwen.isDefault)
+        #expect(qwen.sizeBytes == 1_296_764_000)
+        #expect(qwen.sha256 == "91c102fc9a86de80e427057ee938e1e34fcaf3bba956b7296e252406e05f36f6")
+        #expect(qwen.source == .init(
+            repo: "bartowski/Qwen_Qwen3.5-2B-GGUF",
+            commit: "7d26695454df6de5fbcce2e58681e62dae06ce43",
+            file: "Qwen_Qwen3.5-2B-Q4_0.gguf"
+        ))
+        #expect(qwen.onMac == .init(state: "ready"))
+        #expect(qwen.measured?.tokensPerSecond == 19.2)
+        #expect(qwen.measured?.firstWordEstimated == true)
+        #expect(qwen.measured?.sustainedMeasured == false)
+        #expect(qwen.measured?.sustainedTokensPerSecond == nil)
+        let gemma = try #require(list.models.last)
+        #expect(gemma.sizeBytes == 3_349_516_256)
+        #expect(gemma.sha256 == "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634")
+        #expect(gemma.slowerOnPhone)
+        #expect(gemma.measured?.sustainedTokensPerSecond == 7.5)
+        #expect(gemma.measured?.sustainedMeasured == true)
+        #expect(gemma.measured?.threadSweep.map(\.threads) == [4, 6])
+        // Every optional in `onMac` is populated somewhere in the export, so a generated
+        // client has seen each of them carry a value.
+        #expect(gemma.onMac.state == "failed")
+        #expect(gemma.onMac.fraction == 0.25)
+        #expect(gemma.onMac.reason?.isEmpty == false)
+        #expect(ControlAPI.phoneModelFailures.contains(gemma.onMac.failure ?? ""))
+        let preparing = try JSONDecoder().decode(
+            ControlAPI.PhoneModel.self, from: try #require(prepare.response).encode()
+        )
+        // A model on its way says what the Mac is doing with it.
+        #expect(preparing.onMac.stage == "fetching")
+        let states = Set(list.models.map(\.onMac.state))
+            .union([preparing.onMac.state])
+            .union([try JSONDecoder().decode(
+                ControlAPI.PhoneModel.self,
+                from: try #require(try route("DELETE", "/ondevice/models/{id}").response).encode()
+            ).onMac.state])
+        #expect(states == Set(ControlAPI.phoneModelStates))
+
+        // The frames a phone ties to a model on /events: the prefix, and the three lives.
+        let events = try route("GET", "/events")
+        let frames = try events.eventVariants.filter { $0.0 == "download" }.map {
+            try JSONDecoder().decode(ControlAPI.DownloadEvent.self, from: try $0.2.encode())
+        }
+        #expect(frames.count == 5)
+        #expect(frames.allSatisfy {
+            $0.id.hasPrefix(ControlAPI.PhoneModel.downloadEventPrefix)
+        })
+        // Done is the one with no stage and no error.
+        #expect(frames.filter { $0.stage == nil && $0.error == nil }.map(\.fraction) == [1])
+        #expect(frames.contains { $0.error?.contains("checksum") == true })
+        #expect(frames.contains { $0.error == PhoneModelService.removedWhileDownloading })
+        #expect(Set(frames.compactMap(\.stage)) == ["fetching", "checking"])
+        #expect(frames.allSatisfy {
+            $0.stage == nil || ControlAPI.phoneModelStages.contains($0.stage!)
+        })
+        // The Mac's own download frame is still the plain one.
+        let mac = try #require(events.events.first { $0.0 == "download" })
+        #expect(try !JSONDecoder().decode(
+            ControlAPI.DownloadEvent.self, from: try mac.1.encode()
+        ).id.hasPrefix(ControlAPI.PhoneModel.downloadEventPrefix))
+    }
+
     @Test func exportsWhenAskedTo() throws {
         guard let directory = ProcessInfo.processInfo.environment["SILICON_EXPORT_CONTRACT"],
               !directory.trimmingCharacters(in: .whitespaces).isEmpty
@@ -994,6 +1120,50 @@ struct ContractExportTests {
             "gap. Fetch what you show again with the cursor from that last frame — it sits just",
             "before the gap, so the answer holds exactly what was dropped.",
             "",
+            "## Models for the phone",
+            "",
+            "`/ondevice/models` is how a phone gets the small model it runs by itself when the",
+            "Mac is out of reach, without ever leaving the tailnet: the Mac fetches the file",
+            "from Hugging Face and serves it. Each entry is pinned — repository, commit, file,",
+            "`sizeBytes` and `sha256` — and carries what the phone needs to run it",
+            "(`recommended`: threads for the prompt and for writing, context length, free",
+            "memory needed, `thinking`) and what a real phone measured (`measured`).",
+            "`measured` is one benchmark on the owner's phone: `tokensPerSecond` at",
+            "`recommended.threadsGenerate`, the `threadSweep` it was picked from,",
+            "`promptTokensPerSecond`, and `secondsToFirstWord300` — an estimate",
+            "(`firstWordEstimated: true`), 300 ÷ the prompt speed rounded up to a tenth.",
+            "`sustainedTokensPerSecond` is null when it was not measured, and",
+            "`sustainedMeasured` says which. `peakMemoryBytes` was taken at no more than",
+            "`peakMemoryContextTokens`; `recommended.minFreeMemoryBytes` grows it to the",
+            "recommended context and adds a quarter.",
+            "",
+            "`onMac.state` is `absent`, `downloading`, `ready` or `failed`. While downloading,",
+            "`stage` says what the Mac is doing — `fetching`, `checking` (hashing what it has)",
+            "or `moving` (following the model library to a new folder) — and `fraction` how",
+            "far it has got; on a failure that kept a partial, `fraction` is how much the Mac",
+            "has. A failure carries `reason`, a sentence to show, and `failure`, one of",
+            "`diskFull` (free space on the Mac), `checksumMismatch` (deleted; a retry starts",
+            "over), `network` and `interrupted` (a retry resumes or checks), `server`,",
+            "`driveMissing` (the drive the Mac's model library is on is not connected) or",
+            "`other`.",
+            "",
+            "`POST .../{id}/prepare` answers **202** with the entry while the fetch is on its",
+            "way — started now, resumed, or already running, which it never restarts — and",
+            "**200** once it is ready; a Mac without room is a **507** before a byte moves, and",
+            "one whose library drive is unplugged a **503** naming it (as are the file and",
+            "`DELETE`). Progress is on `/events` as `download` frames whose `id` is",
+            "`ondevice:<id>`, sent only to full-control devices and this Mac: in progress they",
+            "carry `stage`; done is `fraction: 1` with no `stage` and no `error`; a failure",
+            "carries the `error`, and a removal says so. `GET .../{id}/file` is 409 until the",
+            "Mac has the file *verified*, then answers bytes with the SHA-256 as the `ETag`",
+            "and in `X-Content-SHA256`. Resume with `Range: bytes=N-` and `If-Range` set to",
+            "the `ETag`: a 206 is exactly the rest, and a **200 means the file changed** —",
+            "discard the partial and keep the whole body. Check the digest at the end; if it",
+            "does not match, call `POST .../{id}/prepare?verify=1` once, then fetch again from",
+            "zero. `DELETE .../{id}` removes the Mac's copy and any partial. Ids are catalogue",
+            "keys and nothing else — anything else is a 404. Full scope only, and the swarm",
+            "secret is refused with its own sentence.",
+            "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
         ]
@@ -1011,7 +1181,9 @@ struct ContractExportTests {
     ///
     /// Which scope may call a route is asked of the server's own gate rather than restated,
     /// so the fixtures cannot claim a 403 that cannot happen — or miss one that can.
-    static let routes: [Route] = (buddyRoutes + coreRoutes + agentRoutes + mediaRoutes).map { route in
+    static let routes: [Route] = (
+        buddyRoutes + coreRoutes + agentRoutes + mediaRoutes + phoneModelRoutes
+    ).map { route in
         var decorated = route
         let openToChat = ControlServer.Caller.device(id: "fixture", scope: .chat)
             .mayReach(method: route.method, path: route.path)
@@ -1182,6 +1354,31 @@ struct ContractExportTests {
                 ("agent", "reset", .of(ControlAPI.AgentEvent(
                     engine: "codex", kind: "reset", seq: 41, epoch: exampleFreshEpoch,
                     threadID: nil, turnActive: false, state: "running"
+                ))),
+                // The Mac fetching a model for the phone. The same `download` event, with an
+                // id a phone can tie to the model: `ondevice:` and the model's id. The last
+                // frame of a fetch is either `fraction: 1` or the reason it stopped.
+                ("download", "phone model", .of(PhoneModelService.downloadEvent(
+                    PhoneModelCatalog.gemma4E2B,
+                    state: .downloading(
+                        bytesReceived: 837_379_064, bytesPerSecond: 48_234_496, stage: .fetching
+                    )
+                ))),
+                // Every byte is here and the Mac is hashing it: not done yet.
+                ("download", "phone model checking", .of(PhoneModelService.downloadEvent(
+                    PhoneModelCatalog.qwen35_2B,
+                    state: .downloading(bytesReceived: 648_382_000, bytesPerSecond: 0, stage: .checking)
+                ))),
+                // Done: `fraction` 1, no `stage`, no `error`.
+                ("download", "phone model ready", .of(PhoneModelService.downloadEvent(
+                    PhoneModelCatalog.qwen35_2B, state: .ready
+                ))),
+                ("download", "phone model failed", .of(PhoneModelService.downloadEvent(
+                    PhoneModelCatalog.gemma4E2B, state: .failed(examplePhoneModelMismatch)
+                ))),
+                // The Mac's copy was deleted while it was still arriving.
+                ("download", "phone model removed", .of(PhoneModelService.downloadEvent(
+                    PhoneModelCatalog.gemma4E2B, state: .absent
                 ))),
             ],
             errors: [429: "Too many open streams. Close one before opening another."]
@@ -1617,6 +1814,107 @@ struct ContractExportTests {
     ) -> [(Int, String, String)] {
         [(403, "swarm", ControlServer.agentsAreNotForPeers)] + particular
     }
+
+    // MARK: Models for the phone
+
+    /// What a phone runs when this Mac is out of reach, fetched and served by the Mac so
+    /// the phone never leaves the tailnet. Full scope only, and never the swarm — whose 403
+    /// is its own sentence, like the agent routes'. The examples are built from the real
+    /// catalogue, so a pin changed on this side changes the fixtures with it.
+    static let phoneModelRoutes: [Route] = [
+        Route(
+            method: "GET", path: "/ondevice/models", auth: "device",
+            summary: "The models a phone can run by itself, pinned to exact bytes, and the "
+                + "state of this Mac's copy of each: absent, downloading, ready or failed.",
+            response: .of(examplePhoneModels),
+            errorVariants: phoneModelErrorVariants
+        ),
+        Route(
+            method: "POST", path: "/ondevice/models/{id}/prepare", auth: "device",
+            summary: "Have the Mac fetch the pinned file from Hugging Face and verify it. "
+                + "202 with the entry while it is on its way — started now, resumed, or "
+                + "already running — and 200 once it is ready. Progress arrives on /events "
+                + "as `download` frames with the id `ondevice:<id>`. `?verify=1` has the Mac "
+                + "hash a ready copy again first: call it once when the file you fetched does "
+                + "not hash to `sha256`, then fetch from zero.",
+            response: .of(PhoneModelService.wire(
+                PhoneModelCatalog.gemma4E2B,
+                state: .downloading(bytesReceived: 0, bytesPerSecond: 0, stage: .fetching)
+            )),
+            errors: [
+                400: ControlServer.phoneModelVerifyValues,
+                404: ControlServer.noSuchPhoneModel,
+                503: examplePhoneModelDriveMissing,
+                507: examplePhoneModelNoSpace.reason,
+            ],
+            errorVariants: phoneModelErrorVariants
+        ),
+        Route(
+            method: "GET", path: "/ondevice/models/{id}/file", auth: "device",
+            summary: "The verified file. Answers bytes, not JSON: `application/octet-stream`, "
+                + "`Content-Length`, `Accept-Ranges: bytes`, an `ETag` that is the quoted "
+                + "SHA-256, `X-Content-SHA256` and `Content-Disposition: attachment`. 206 for "
+                + "a `Range` — `bytes=N-` resumes with exactly the rest — and 304 for a "
+                + "matching `If-None-Match`. Resume with `If-Range` set to the `ETag`: a 200 "
+                + "to that request means the file is not the one you started, so discard the "
+                + "partial and keep the whole body.",
+            // No response example: the answer is the file. What a client has to get right
+            // is the headers and the resume, which the summary and the refusals carry.
+            errors: [
+                404: ControlServer.noSuchPhoneModel,
+                409: ControlServer.phoneModelNotReady,
+                416: ControlServer.rangeOutsideFile,
+                503: examplePhoneModelDriveMissing,
+            ],
+            errorVariants: phoneModelErrorVariants
+        ),
+        Route(
+            method: "DELETE", path: "/ondevice/models/{id}", auth: "device",
+            summary: "Delete the Mac's copy and any partial download, stopping a fetch in "
+                + "flight. Idempotent; answers the entry as it now is.",
+            response: .of(PhoneModelService.wire(PhoneModelCatalog.qwen35_2B, state: .absent)),
+            errors: [
+                404: ControlServer.noSuchPhoneModel,
+                503: examplePhoneModelDriveMissing,
+            ],
+            errorVariants: phoneModelErrorVariants
+        ),
+    ]
+
+    static let phoneModelErrorVariants: [(Int, String, String)] = [
+        (403, "swarm", ControlServer.phoneModelsAreNotForPeers),
+    ]
+
+    /// The default fetched and verified; the larger one stopped partway, so the list shows
+    /// a failure's `reason`, `failure` and `fraction` populated.
+    static let examplePhoneModels = ControlAPI.PhoneModelList(models: [
+        PhoneModelService.wire(PhoneModelCatalog.qwen35_2B, state: .ready),
+        PhoneModelService.wire(PhoneModelCatalog.gemma4E2B, state: .failed(
+            PhoneModelStore.failure(
+                for: URLError(.networkConnectionLost), entry: PhoneModelCatalog.gemma4E2B,
+                partial: 837_379_064
+            )
+        )),
+    ])
+
+    static let examplePhoneModelMismatch = PhoneModelStore.failure(
+        for: ModelDownloader.DownloadError.checksumMismatch(
+            file: PhoneModelCatalog.gemma4E2B.file,
+            expected: PhoneModelCatalog.gemma4E2B.sha256,
+            actual: String(repeating: "0", count: 64)
+        ),
+        entry: PhoneModelCatalog.gemma4E2B, partial: 0
+    )
+
+    /// A placeholder drive name, never a real one.
+    static let examplePhoneModelDriveMissing = PhoneModelStore.driveMissingSentence("External SSD")
+
+    static let examplePhoneModelNoSpace = PhoneModelStore.failure(
+        for: ModelDownloader.DownloadError.insufficientDiskSpace(
+            needed: Bytes(PhoneModelCatalog.gemma4E2B.sizeBytes), available: .gib(12)
+        ),
+        entry: PhoneModelCatalog.gemma4E2B, partial: 0
+    )
 
     // MARK: Images, meshes and video
 

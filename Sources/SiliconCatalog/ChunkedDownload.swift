@@ -11,11 +11,30 @@ enum DownloadEvent: Sendable {
     case chunk(Data)
 }
 
+/// A redirect the download's policy would not follow. The transfer ends here, before a byte
+/// of the other host's answer is read.
+public struct RedirectRefused: Error, LocalizedError, Equatable {
+    public var host: String
+
+    public init(host: String) { self.host = host }
+
+    public var errorDescription: String? {
+        "The download was redirected somewhere this Mac does not fetch from (\(host))."
+    }
+}
+
 final class ChunkedDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
 
     private let lock = NSLock()
     private var continuation: AsyncThrowingStream<DownloadEvent, any Error>.Continuation?
     private var task: URLSessionDataTask?
+    /// Which redirects may be followed. Nil follows any, which is what the catalogue's own
+    /// downloads have always done.
+    private let redirects: (@Sendable (URL) -> Bool)?
+
+    init(redirects: (@Sendable (URL) -> Bool)? = nil) {
+        self.redirects = redirects
+    }
 
     /// Starts `request` on its own session and returns the event stream. The first event is
     /// always the response; body chunks follow.
@@ -43,6 +62,23 @@ final class ChunkedDownload: NSObject, URLSessionDataDelegate, @unchecked Sendab
     }
 
     // MARK: - URLSessionDataDelegate
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let redirects else { return completionHandler(request) }
+        guard let url = request.url, redirects(url) else {
+            // Ended with a reason rather than handed back as a 3xx: a download that stopped
+            // because of where it was sent should say so, not report a status code.
+            let host = request.url?.host ?? "an address with no host"
+            lock.withLock { continuation }?.finish(throwing: RedirectRefused(host: host))
+            task.cancel()
+            return completionHandler(nil)
+        }
+        completionHandler(request)
+    }
 
     func urlSession(
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse

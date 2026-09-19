@@ -254,6 +254,13 @@ public actor ModelLibrary {
 
     /// Imports a GGUF file the user already has, without copying it.
     public func importExternal(file: URL, name: String? = nil) throws -> InstalledModel {
+        // The models this Mac keeps for a paired phone are passed along, never run here —
+        // and a Mac model's files can be deleted from the library, which must never be how
+        // a phone's model disappears. Refused by folder, which is also how a folder scan of
+        // the whole library meets them.
+        guard !PhoneModelStore.isInPhoneModelsFolder(file) else {
+            throw PhoneModelFileRefused(file: file.lastPathComponent)
+        }
         let metadata = try GGUFReader().read(at: file)
         let shape = GGUFReader().shape(from: metadata)
         let quantization = Quantization.inferred(fromFilename: file.lastPathComponent) ?? .q4_K_M
@@ -288,5 +295,18 @@ public actor ModelLibrary {
     public nonisolated static func fileSize(_ url: URL) -> Bytes {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return Bytes((attributes?[.size] as? NSNumber)?.int64Value ?? 0)
+    }
+}
+
+/// A file in a phone-models folder offered to the Mac's own model library.
+public struct PhoneModelFileRefused: Error, LocalizedError, Equatable {
+    public var file: String
+
+    public init(file: String) { self.file = file }
+
+    public var errorDescription: String? {
+        "\(file) is one of the models this Mac keeps for your phone, in its "
+            + "\(PhoneModelStore.folderName) folder. Those are handed to the phone, never run "
+            + "on the Mac."
     }
 }
