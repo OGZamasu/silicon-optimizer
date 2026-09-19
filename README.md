@@ -399,6 +399,82 @@ doing, on the clip the Mac is actually following), `reason` (the failure's own s
 on the frame that says a render is done, the `mediaID` to fetch. A phone no longer has to
 poll `GET /video/queue` beside the stream to have something true to show.
 
+### Agent sessions from the phone
+
+The Chat tab's agent engines — **Codex** and **Pi** — are reachable from a paired device,
+and the phone is a **second screen on the session you already have**, not a second session.
+One session per engine, the session id *is* the engine id, and there is no thread registry:
+a message sent from the phone appears in the Mac's own transcript as it is typed, and an
+approval answered on either side is answered once, for both.
+
+`GET /agent/sessions` lists both engines whether or not they are running — a phone that
+cannot see a stopped engine cannot offer to start one — with the state, the thread, the
+model and the models it could pick from, the working folder, whether a turn is in flight,
+how many approvals are waiting and how many rows there are.
+`POST /agent/sessions/{engine}/start` does what opening the tab does and is idempotent,
+`.../new` starts a fresh thread (Codex's own; Pi's `new_session`), and `DELETE` stops the
+sidecar. `GET /agent/sessions/{engine}` carries the transcript in one shape for both
+engines — `user`, `assistant`, `reasoning`, `command`, `fileChange`, `tool`, `notice`,
+`error`, each with a timestamp and, where the engine has one, a status. `?since=` takes
+either a sequence number or the id of the last row you have and answers only what is newer;
+the answer's `seq` is the next `?since=`, and `complete` says whether you are holding a
+catch-up slice or the whole thread, so a `since` from before a new thread replaces rather
+than appends. `POST .../messages` answers **202** with the row your send became, and `model`
+picks the model for that turn — it must be one of the session's `modelChoices`, because a
+turn quietly answered by a different model than the one on screen is the failure you cannot
+see. `POST .../interrupt` stops a turn.
+
+**Approvals are what a person still has to decide.** The Jev guardrail screens every call
+first and answers the ones it is sure about; what reaches the phone is what it left to a
+human, which is exactly what the card on the Mac shows.
+`POST /agent/sessions/{engine}/approvals/{id}` takes `accept` or `decline`. **Either side
+resolves both:** answer at the Mac and the card on the phone comes down by itself, saying
+which way it went, and the other way round. An id that is no longer waiting is a 404; one
+the Mac answered first is a **409** that says so, because the decision *was* made — the
+agent has it, and nothing is ever sent to the runtime twice.
+
+Codex asks over its own protocol and waits, so a refusal there means the command does not
+run. **Pi's RPC has no permission request at all** — a client is told a tool ran, not asked
+whether it may — so the gate is the extension this app writes into Pi's workspace: its
+`tool_call` handler holds the call and asks the Mac through a confirm dialog, which in RPC
+mode is an `extension_ui_request` waiting on stdin. That makes it a real pre-execution gate,
+and it is also why **Pi only ever asks while the guardrail is switched on**: with it off, Pi
+runs unattended exactly as it did before the feature existed, and there is nothing to
+approve from either screen.
+
+On `/events`, the `agent` frame carries all of it live: `state` when a session starts, stops
+or fails, `turn` when one begins or ends, `item` when a row appears or changes, and
+`approval` — with `pending`, `accepted` or `declined` — when a call starts or stops waiting.
+An `item` frame carries the row **whole rather than as a delta**, sampled ten times a second
+per engine, so streamed prose does not become a hundred frames a second down a phone's radio
+and a frame you miss costs you nothing. The Mac's own typing and the Mac's own approvals
+produce these frames too, which is what keeps the two screens honest: the watcher reads the
+app's state rather than being told by the places that change it, so nothing can be forgotten
+into silence.
+
+**Full control only, and never a node.** Every one of these routes runs commands on this
+Mac, so a chat-only device is refused with the same 403 it gets for `POST /load`. So is the
+**swarm token**, which is a credential everywhere else on this server: a node is a machine
+with a token in a config file, not a person with a phone in their hand, and it has no
+business running commands here. The one thing a device may *not* do is choose Codex's
+working folder — a phone that could name a folder could name any folder on this Mac, and
+Codex is trusted inside whatever it is given, so starting Codex before you have picked one
+is a 409 pointing you at the Mac.
+
+When a paired device with full control has `/events` open, the Codex and Pi chat headers say
+so in one line — **"Silicon Buddy is watching"**. It counts full-scope devices only: a
+chat-only phone on the same stream cannot reach these sessions, and this Mac's own token and
+the swarm secret are not devices at all.
+
+The **DeepSeek Harness** is not here, and the blocker is that there is nothing to mirror.
+Its conversation lives inside its own web UI in a `WKWebView`; the app holds no transcript
+of it to normalise, and its client speaks to its server over a single `/api` Typert RPC
+bridge plus two downlink WebSockets — generated method schemas, connection generations, a
+Host trust fence — rather than any thread or message JSON a Mac could proxy. Reaching it
+would mean writing a Typert client against an unpinned release candidate, and its own
+approval seam carries the tool's name without its arguments, so the approvals would be the
+one thing that could not work. Revisit if the harness exposes its session as data.
+
 Every one of these is in the contract fixtures `ContractExportTests` exports, so the phone
 apps are generated from them rather than from this section.
 

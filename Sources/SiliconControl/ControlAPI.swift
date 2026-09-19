@@ -1134,6 +1134,37 @@ public protocol ControlHost: AnyObject, Sendable {
     /// a test drive a real state change onto a real socket.
     func beginEventUpdates(postingTo hub: BuddyEventHub) async
 
+    // MARK: Agent sessions
+
+    // Declared here rather than only in `AgentSessionsAPI.swift` because a default in an
+    // extension is dispatched statically: the server holds an `any ControlHost`, and a
+    // method that exists only in the extension would answer "no agents" even on a host
+    // that has them. The defaults live there; the requirements live here.
+
+    /// `GET /agent/sessions` — every engine, running or not.
+    func agentSessions() async -> ControlAPI.AgentSessionList
+    /// `GET /agent/sessions/{engine}` — the summary, the transcript and what is waiting.
+    /// `since` is a sequence number or an item id; nil means the whole transcript.
+    func agentSession(engine: String, since: String?) async throws -> ControlAPI.AgentSessionDetail
+    /// `POST /agent/sessions/{engine}/start` — exactly what opening the tab does, and
+    /// idempotent for the same reason opening it twice is.
+    func startAgentSession(engine: String) async throws -> ControlAPI.AgentSessionSummary
+    /// `POST /agent/sessions/{engine}/new` — a fresh thread.
+    func newAgentThread(engine: String) async throws -> ControlAPI.AgentSessionSummary
+    /// `DELETE /agent/sessions/{engine}` — stop the engine.
+    func stopAgentSession(engine: String) async throws -> ControlAPI.AgentSessionSummary
+    /// `POST /agent/sessions/{engine}/messages` — send a turn, as if typed on the Mac.
+    func sendAgentMessage(
+        engine: String, _ request: ControlAPI.AgentMessageRequest
+    ) async throws -> ControlAPI.AgentMessageAccepted
+    /// `POST /agent/sessions/{engine}/interrupt` — stop the turn in flight.
+    func interruptAgentSession(engine: String) async throws -> ControlAPI.AgentSessionSummary
+    /// `POST /agent/sessions/{engine}/approvals/{id}` — answer a held call. The answer
+    /// reaches the runtime exactly once, whichever side gives it.
+    func answerAgentApproval(
+        engine: String, id: String, decision: String
+    ) async throws -> ControlAPI.AgentApprovalResult
+
     // MARK: Serving results back
 
     /// The folders a rendered file may come from — the app's own output directories, and

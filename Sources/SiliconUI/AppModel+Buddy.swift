@@ -317,6 +317,10 @@ extension AppModel {
 
     public func beginEventUpdates(postingTo hub: BuddyEventHub) async {
         BuddyEventPump.shared.start(watching: self, hub: hub)
+        // Its own watcher rather than another field on this one: the agent sessions are
+        // sampled ten times a second so streamed prose arrives promptly, and the status
+        // and download frames have no use for that rate.
+        AgentEventPump.shared.start(watching: self, hub: hub)
     }
 
     /// What a subscriber would want to know right now. Built whole and diffed, rather than
@@ -537,6 +541,13 @@ public final class BuddyEventPump {
     /// Bumped on every stop, so a task that is winding down can tell whether the handle it
     /// is about to clear is still its own.
     private var generation = UUID()
+    /// Which model and which hub the running loop is watching.
+    ///
+    /// One of each exists in the app, so this never changes there. It changes constantly
+    /// under a test suite, and the singleton was answering "already running" to a start
+    /// against a *different* hub — leaving the loop feeding a hub nobody reads while the
+    /// one with a subscriber on it got nothing but heartbeats.
+    private var watching: WatchTarget?
     /// Incremented on every start request. A task that reads "no subscribers" and then sees
     /// this move knows a phone arrived during that await, and keeps going — otherwise the
     /// new subscriber would find a pump that had just decided to stop and a handle that was
@@ -552,7 +563,14 @@ public final class BuddyEventPump {
         interval: Duration = .seconds(1)
     ) {
         startRequests += 1
-        guard task == nil else { return }
+        let target = WatchTarget(model: model, hub: hub)
+        // Already doing exactly this: nothing to do, and starting a second loop would
+        // double every frame.
+        if task != nil, watching == target { return }
+        // Running against something else. Whatever it was watching, this is the reader
+        // that is actually here, so the loop is re-pointed rather than turned away.
+        if task != nil { stop() }
+        watching = target
         let mine = UUID()
         generation = mine
         task = Task { [weak self, weak model] in
@@ -580,6 +598,7 @@ public final class BuddyEventPump {
         generation = UUID()
         task?.cancel()
         task = nil
+        watching = nil
     }
 
     /// Whether the loop should give up: nobody is reading, and nobody asked it to keep

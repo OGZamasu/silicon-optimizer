@@ -56,6 +56,12 @@ struct ContractExportTests {
             "GET /video/models", "GET /video/queue", "POST /video/queue",
             "POST /video/queue/control", "POST /video/generate",
             "GET /media/{id}", "POST /uploads", "GET /swarm/peers/{name}/status",
+            "GET /agent/sessions", "GET /agent/sessions/{engine}",
+            "DELETE /agent/sessions/{engine}",
+            "POST /agent/sessions/{engine}/start", "POST /agent/sessions/{engine}/new",
+            "POST /agent/sessions/{engine}/messages",
+            "POST /agent/sessions/{engine}/interrupt",
+            "POST /agent/sessions/{engine}/approvals/{id}",
         ])
         // Deliberately absent, and a phone must never be told to use them: the overlay is
         // an OBS browser source, which cannot set headers and so carries its token in the
@@ -405,6 +411,141 @@ struct ContractExportTests {
         )
     }
 
+    /// The agent sessions, in the contract the phone apps are generated from.
+    ///
+    /// The vocabularies matter more here than anywhere else in this file: two engines are
+    /// mapped onto one set of words, and a generated client that learned a kind the server
+    /// never sends — or missed one it does — would render half a transcript.
+    @Test func theAgentSessionsAreOneVocabularyForTwoEngines() throws {
+        let agent = Self.routes.filter { $0.path.hasPrefix("/agent/") }
+        #expect(agent.count == 8)
+
+        for route in agent {
+            // A paired phone's token, never the Mac-only kind: the point is remote parity.
+            #expect(route.auth == "device", "\(route.method) \(route.path)")
+            // Full scope only, and the 403 in the fixture is the one a phone can actually
+            // provoke — pairing for chat and then reaching for an agent.
+            #expect(route.scopes == ["full"], "\(route.method) \(route.path)")
+            #expect(route.errors[403] == ControlServer.chatOnlyRefusal)
+            // Every one of them has an engine in the path, so every one of them can be
+            // asked about an engine that does not exist.
+            #expect(route.errors[404] != nil || route.path == "/agent/sessions")
+        }
+        // The swarm's refusal is its own sentence, not a copy of the chat-only one: a peer
+        // is not a device that was paired for less, it is not a device at all.
+        #expect(ControlServer.agentsAreNotForPeers != ControlServer.chatOnlyRefusal)
+        #expect(ControlServer.agentsAreNotForPeers.contains("swarm node"))
+
+        func body(_ method: String, _ path: String) throws -> [String: Any] {
+            let route = try #require(
+                Self.routes.first { $0.method == method && $0.path == path }
+            )
+            return try JSONSerialization.jsonObject(
+                with: try #require(route.response).encode()
+            ) as? [String: Any] ?? [:]
+        }
+
+        // Both engines are listed whatever they are doing, and the stopped one carries a
+        // model list anyway — a phone has to be able to pick before it starts.
+        let sessions = try #require(try body("GET", "/agent/sessions")["sessions"]
+            as? [[String: Any]])
+        #expect(sessions.map { $0["engine"] as? String } == ControlAPI.agentEngines)
+        #expect(sessions.contains { $0["state"] as? String == "stopped" })
+        #expect(sessions.allSatisfy {
+            ($0["modelChoices"] as? [[String: Any]])?.isEmpty == false
+        })
+        #expect(sessions.allSatisfy {
+            ControlAPI.agentSessionStates.contains($0["state"] as? String ?? "")
+        })
+        // `where` is what a picker on a phone shows, and the fixture proves both sides of
+        // the swarm appear in it.
+        let choices = try #require(sessions.first?["modelChoices"] as? [[String: Any]])
+        #expect(Set(choices.compactMap { $0["where"] as? String }).count == 2)
+
+        // The transcript: every kind and every status in the fixture is one the contract
+        // names, and the command row is the one that proves `text` and `output` are kept
+        // apart rather than concatenated.
+        let detail = try body("GET", "/agent/sessions/{engine}")
+        let items = try #require(detail["items"] as? [[String: Any]])
+        #expect(items.allSatisfy {
+            ControlAPI.agentItemKinds.contains($0["kind"] as? String ?? "")
+        })
+        #expect(items.allSatisfy {
+            $0["status"] == nil || $0["status"] is NSNull
+                || ControlAPI.agentItemStatuses.contains($0["status"] as? String ?? "")
+        })
+        let command = try #require(items.first { $0["kind"] as? String == "command" })
+        #expect((command["text"] as? String)?.isEmpty == false)
+        #expect((command["output"] as? String)?.isEmpty == false)
+        #expect(command["text"] as? String != command["output"] as? String)
+        // Prose has no status, and the contract does not invent one for it.
+        let prose = try #require(items.first { $0["kind"] as? String == "assistant" })
+        #expect(prose["status"] == nil || prose["status"] is NSNull)
+        // The model is stamped on the row that was the sending, and nowhere else: it is
+        // knowable exactly once.
+        #expect(items.filter { $0["model"] is String }.count == 1)
+        #expect(items.first { $0["model"] is String }?["kind"] as? String == "user")
+        // A catch-up token, and the flag that says whether this is a slice or the whole
+        // thing — without which a client cannot tell "append" from "replace".
+        #expect(detail["seq"] is Int)
+        #expect(detail["complete"] as? Bool == true)
+
+        // 202, not 200: the turn was accepted, not answered.
+        let send = try #require(Self.routes.first {
+            $0.method == "POST" && $0.path == "/agent/sessions/{engine}/messages"
+        })
+        #expect(send.summary.contains("202"))
+        #expect(try body("POST", "/agent/sessions/{engine}/messages")["itemID"] is String)
+
+        // The three refusals a phone acts on differently, and each says a different thing.
+        func errors(_ method: String, _ path: String) -> [Int: String] {
+            Self.routes.first { $0.method == method && $0.path == path }?.errors ?? [:]
+        }
+        let approvals = errors("POST", "/agent/sessions/{engine}/approvals/{id}")
+        #expect(approvals[409] == AgentSessionError.alreadyAnsweredOnTheMac)
+        #expect(approvals[404] != approvals[409])
+        #expect(approvals[400]?.contains("accept") == true)
+        // …and the one that keeps the folder the owner's to pick.
+        #expect(errors("POST", "/agent/sessions/{engine}/start")[409]
+            == AgentSessionError.workingDirectoryIsTheMacsToPick)
+
+        // The `agent` frame's four kinds, all in the export, because each fills in
+        // different optional fields.
+        let events = try #require(Self.routes.first { $0.path == "/events" })
+        var frames: [[String: Any]] = []
+        for (name, example) in events.events where name == "agent" {
+            frames.append(
+                try JSONSerialization.jsonObject(with: try example.encode())
+                    as? [String: Any] ?? [:]
+            )
+        }
+        for (name, _, example) in events.eventVariants where name == "agent" {
+            frames.append(
+                try JSONSerialization.jsonObject(with: try example.encode())
+                    as? [String: Any] ?? [:]
+            )
+        }
+        #expect(Set(frames.compactMap { $0["kind"] as? String })
+            == Set(ControlAPI.agentEventKinds))
+        #expect(frames.allSatisfy { $0["seq"] is Int && $0["engine"] is String })
+        // An `item` frame carries the row whole — that is what lets a missed frame cost
+        // nothing — and never a delta field.
+        let item = try #require(frames.first { $0["kind"] as? String == "item" })
+        #expect((item["item"] as? [String: Any])?["text"] is String)
+        #expect(item["delta"] == nil)
+        // Both halves of an approval's life, so a card can appear and disappear.
+        let approvalFrames = frames.filter { $0["kind"] as? String == "approval" }
+        #expect(Set(approvalFrames.compactMap { $0["state"] as? String })
+            == ["pending", "accepted"])
+        #expect(approvalFrames.allSatisfy {
+            ControlAPI.agentApprovalStates.contains($0["state"] as? String ?? "")
+        })
+        // Both engines appear across the frames: this is not a Codex-only feature with a
+        // second engine bolted to the list.
+        #expect(Set(frames.compactMap { $0["engine"] as? String })
+            == Set(ControlAPI.agentEngines))
+    }
+
     @Test func exportsWhenAskedTo() throws {
         guard let directory = ProcessInfo.processInfo.environment["SILICON_EXPORT_CONTRACT"],
               !directory.trimmingCharacters(in: .whitespaces).isEmpty
@@ -711,6 +852,54 @@ struct ContractExportTests {
             "lane, so a picker never has to offer a size or a field the renderer would",
             "quietly ignore.",
             "",
+            "## Agent sessions",
+            "",
+            "`/agent/sessions` mirrors the Mac's Chat tab: one session per engine — `codex`",
+            "and `pi` — and it is *the* session, not a copy. The session id is the engine",
+            "id; there is no thread registry. Sending appends to the transcript the owner is",
+            "looking at, and an approval answered on either side is answered once, for both.",
+            "",
+            "Every route here is **full scope only**, because every one of them runs commands",
+            "on this Mac. A chat-only device is answered 403 by the same gate that refuses it",
+            "`POST /load`. So is the swarm secret, with its own sentence: a node is a machine",
+            "with a token in a config file, not a person with a phone, and it has no business",
+            "running commands here.",
+            "",
+            "Engines are listed even when stopped, so a phone can offer to start one.",
+            "`POST .../start` is what opening the tab does and is idempotent.",
+            "`POST .../new` starts a fresh thread — Codex's own, and Pi's `new_session` —",
+            "and clears the Mac's transcript with it. `DELETE` stops the sidecar. Codex's",
+            "working folder is the one thing a device may not choose: a phone that could name",
+            "a folder could name any folder, and Codex is trusted inside the one it is given,",
+            "so starting Codex before the owner has picked one is a 409.",
+            "",
+            "`POST .../messages` answers **202** with the transcript row the send became: the",
+            "turn has been handed to the engine and what it does arrives on `/events`.",
+            "`model` picks the model for that turn and must be one of the session's",
+            "`modelChoices`; anything else is a 400 rather than a turn quietly answered by a",
+            "different model than the one on screen.",
+            "",
+            "`GET /agent/sessions/{engine}` carries the whole transcript in one normalised",
+            "shape for both engines — `user`, `assistant`, `reasoning`, `command`,",
+            "`fileChange`, `tool`, `notice`, `error` — and `?since=` takes either a sequence",
+            "number or an item id and answers only what is newer. The answer's `seq` is the",
+            "next `?since=`, and `complete` says whether the items are the whole transcript",
+            "or a catch-up slice: a `since` from before a new thread cannot be caught up, only",
+            "replaced, and says so rather than leaving a silent gap.",
+            "",
+            "Approvals are what a *person* still has to decide. The Jev guardrail screens",
+            "every call first and answers the ones it is sure about; what reaches this list is",
+            "what it left to a human. Answering is `accept` or `decline`. An id that is not",
+            "waiting is a 404 — answered already, or never there — except when the Mac",
+            "answered it first, which is a 409 saying so: the decision was made, the agent",
+            "has it, and nothing was sent twice.",
+            "",
+            "On `/events`, the `agent` frame carries all of this live. `item` frames carry a",
+            "row whole rather than a delta, sampled ten times a second per engine, so a phone",
+            "that misses one has missed nothing. `approval` frames carry `state` —",
+            "`pending`, `accepted` or `declined` — which is how a card answered at the Mac",
+            "disappears from the phone, and the other way round.",
+            "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
         ]
@@ -728,7 +917,7 @@ struct ContractExportTests {
     ///
     /// Which scope may call a route is asked of the server's own gate rather than restated,
     /// so the fixtures cannot claim a 403 that cannot happen — or miss one that can.
-    static let routes: [Route] = (buddyRoutes + coreRoutes + mediaRoutes).map { route in
+    static let routes: [Route] = (buddyRoutes + coreRoutes + agentRoutes + mediaRoutes).map { route in
         var decorated = route
         let openToChat = ControlServer.Caller.device(id: "fixture", scope: .chat)
             .mayReach(method: route.method, path: route.path)
@@ -839,6 +1028,14 @@ struct ContractExportTests {
                     title: "Opening shot", fraction: 0.33, stage: "video-denoise 18/30"
                 ))),
 
+                // The Chat tab's agent sessions, mirrored. The `item` kind is the one that
+                // arrives constantly — a row whole, never a delta — so it is the shape
+                // under the event's own name; the other three are variants below.
+                ("agent", .of(ControlAPI.AgentEvent(
+                    engine: "codex", kind: "item", seq: 39,
+                    item: exampleAgentItems[3]
+                ))),
+
                 ("heartbeat", .of(ControlAPI.HeartbeatEvent(at: "2026-09-18T09:41:00Z"))),
             ],
             // The same `job` event later in the same clip's life. Not more event names —
@@ -855,6 +1052,26 @@ struct ContractExportTests {
                     id: "9C2F-0003", kind: "video", status: "failed",
                     title: "Alfama rooftops at first light",
                     reason: "silicon-node ran out of VRAM at the decode stage."
+                ))),
+                // The other three `agent` kinds. Each fills in different optionals, and a
+                // client that has only ever seen an `item` frame would not know that
+                // `state` means two things: the session's, on a `state` frame, and the
+                // approval's resolution on an `approval` one.
+                ("agent", "state", .of(ControlAPI.AgentEvent(
+                    engine: "pi", kind: "state", seq: 12, state: "running"
+                ))),
+                ("agent", "turn", .of(ControlAPI.AgentEvent(
+                    engine: "codex", kind: "turn", seq: 34, turnActive: true
+                ))),
+                ("agent", "approval", .of(ControlAPI.AgentEvent(
+                    engine: "codex", kind: "approval", seq: 37,
+                    approval: exampleAgentApproval, state: "pending"
+                ))),
+                // And the frame that makes both screens agree: the owner answered this at
+                // the Mac, so the card on the phone goes away by itself.
+                ("agent", "approval answered", .of(ControlAPI.AgentEvent(
+                    engine: "codex", kind: "approval", seq: 40,
+                    approval: exampleAgentApproval, state: "accepted"
                 ))),
             ],
             errors: [429: "Too many open streams. Close one before opening another."]
@@ -1167,6 +1384,99 @@ struct ContractExportTests {
         ),
     ]
 
+    // MARK: The Chat tab's agent sessions
+
+    /// One session per engine, and it is the one the owner is looking at. Every route here
+    /// runs commands on this Mac, so every one of them is full scope — and none is reachable
+    /// with the swarm secret, which is a node's credential and not a person's.
+    static let agentRoutes: [Route] = [
+        Route(
+            method: "GET", path: "/agent/sessions", auth: "device",
+            summary: "Every agent engine, running or not, as the Mac has it right now.",
+            response: .of(ControlAPI.AgentSessionList(
+                sessions: [exampleCodexSession, examplePiSession]
+            ))
+        ),
+        Route(
+            method: "GET", path: "/agent/sessions/{engine}", auth: "device",
+            summary: "One session: the summary, the transcript, and what is waiting. "
+                + "`?since=` takes a sequence or an item id and answers only what is newer.",
+            response: .of(ControlAPI.AgentSessionDetail(
+                session: exampleCodexSession,
+                items: exampleAgentItems,
+                approvals: [exampleAgentApproval],
+                seq: 41,
+                complete: true
+            )),
+            errors: [404: AgentSessionError.unknownEngine("claude").localizedDescription]
+        ),
+        Route(
+            method: "POST", path: "/agent/sessions/{engine}/start", auth: "device",
+            summary: "Start the engine, exactly as opening its tab does. Idempotent.",
+            response: .of(exampleCodexSession),
+            errors: [
+                404: AgentSessionError.unknownEngine("claude").localizedDescription,
+                409: AgentSessionError.workingDirectoryIsTheMacsToPick,
+            ]
+        ),
+        Route(
+            method: "POST", path: "/agent/sessions/{engine}/new", auth: "device",
+            summary: "Start a fresh thread. The Mac's own transcript clears with it.",
+            response: .of(exampleFreshCodexSession),
+            errors: [
+                404: AgentSessionError.unknownEngine("claude").localizedDescription,
+                409: AgentSessionError.notRunning("pi").localizedDescription,
+            ]
+        ),
+        Route(
+            method: "DELETE", path: "/agent/sessions/{engine}", auth: "device",
+            summary: "Stop the engine. Its sidecar goes with it.",
+            response: .of(examplePiSession),
+            errors: [404: AgentSessionError.unknownEngine("claude").localizedDescription]
+        ),
+        Route(
+            method: "POST", path: "/agent/sessions/{engine}/messages", auth: "device",
+            summary: "Send a turn. 202: it is on the Mac's screen, and the answer arrives "
+                + "on /events.",
+            request: .of(ControlAPI.AgentMessageRequest(
+                text: "Run the tests and fix whatever the first failure is.",
+                model: "local/qwen3-coder-30b"
+            )),
+            response: .of(ControlAPI.AgentMessageAccepted(
+                itemID: "7C3E1A50-6B2D-4F19-8E44-0A1B2C3D4E5F"
+            )),
+            errors: [
+                400: AgentSessionError.unknownModel("gpt-5").localizedDescription,
+                404: AgentSessionError.unknownEngine("claude").localizedDescription,
+                409: AgentSessionError.notRunning("codex").localizedDescription,
+            ]
+        ),
+        Route(
+            method: "POST", path: "/agent/sessions/{engine}/interrupt", auth: "device",
+            summary: "Stop the turn in flight. The turn still ends through its own events.",
+            response: .of(exampleCodexSession),
+            errors: [
+                404: AgentSessionError.unknownEngine("claude").localizedDescription,
+                409: AgentSessionError.notRunning("codex").localizedDescription,
+            ]
+        ),
+        Route(
+            method: "POST", path: "/agent/sessions/{engine}/approvals/{id}", auth: "device",
+            summary: "Answer a held call. The runtime is told once, whichever side answers.",
+            request: .of(ControlAPI.AgentApprovalDecision(decision: "accept")),
+            response: .of(ControlAPI.AgentApprovalResult(
+                id: exampleAgentApproval.id, decision: "accepted",
+                session: exampleAnsweredCodexSession
+            )),
+            errors: [
+                400: AgentSessionError.unknownDecision("maybe").localizedDescription,
+                404: AgentSessionError.unknownApproval(exampleAgentApproval.id)
+                    .localizedDescription,
+                409: AgentSessionError.alreadyAnsweredOnTheMac,
+            ]
+        ),
+    ]
+
     // MARK: Images, meshes and video
 
     static let mediaRoutes: [Route] = [
@@ -1385,6 +1695,93 @@ struct ContractExportTests {
     /// repositories and read by generators, and a live six-digit code has five minutes in
     /// which it admits whoever types it. Six zeroes is the one value that is obviously not
     /// an answer.
+    // MARK: The agent sessions' shapes
+
+    /// Two models, one on each side of the swarm, because `where` is the field a picker on
+    /// a phone actually shows and a list with one entry never proves it carries.
+    static let exampleAgentModels = [
+        ControlAPI.AgentModelChoice(
+            id: "local/qwen3-coder-30b",
+            label: "Qwen3-Coder 30B A3B — Q4_K_M — serving now", where: "This Mac"
+        ),
+        ControlAPI.AgentModelChoice(
+            id: "node/studio/qwen3.8-27b", label: "Qwen3.8 27B", where: "studio"
+        ),
+    ]
+
+    static let exampleCodexSession = ControlAPI.AgentSessionSummary(
+        engine: "codex", state: "running",
+        threadID: "0199F2C1-4A7E-4C3B-9D15-6E2A8B0C1D3F",
+        model: "local/qwen3-coder-30b", modelChoices: exampleAgentModels,
+        cwd: "/Users/you/Developer/lisbon", turnActive: true,
+        pendingApprovals: 1, itemCount: 4, updatedAt: "2026-09-19T10:12:44Z"
+    )
+
+    /// The same session a moment after `POST /agent/sessions/codex/new`: same engine, same
+    /// folder, nothing in it.
+    static let exampleFreshCodexSession = ControlAPI.AgentSessionSummary(
+        engine: "codex", state: "running", threadID: nil,
+        model: "local/qwen3-coder-30b", modelChoices: exampleAgentModels,
+        cwd: "/Users/you/Developer/lisbon", turnActive: false,
+        pendingApprovals: 0, itemCount: 0, updatedAt: "2026-09-19T10:13:02Z"
+    )
+
+    /// And a moment after the approval below was answered: the count is what changed, and
+    /// it is what the badge on a phone is drawn from.
+    static let exampleAnsweredCodexSession = ControlAPI.AgentSessionSummary(
+        engine: "codex", state: "running",
+        threadID: "0199F2C1-4A7E-4C3B-9D15-6E2A8B0C1D3F",
+        model: "local/qwen3-coder-30b", modelChoices: exampleAgentModels,
+        cwd: "/Users/you/Developer/lisbon", turnActive: true,
+        pendingApprovals: 0, itemCount: 4, updatedAt: "2026-09-19T10:12:51Z"
+    )
+
+    /// A stopped engine is still listed, because a phone that cannot see one cannot offer
+    /// to start it. Everything that describes a thread is empty rather than absent.
+    static let examplePiSession = ControlAPI.AgentSessionSummary(
+        engine: "pi", state: "stopped", threadID: nil,
+        model: "local/qwen3-coder-30b", modelChoices: exampleAgentModels,
+        cwd: "/Users/you/Library/Application Support/SiliconOptimizer/pi/workspace",
+        turnActive: false, pendingApprovals: 0, itemCount: 0,
+        updatedAt: "2026-09-19T09:58:10Z"
+    )
+
+    /// One turn, in the five row kinds a reader actually meets: what was asked, what the
+    /// model thought, what it said, what it ran, and what it changed.
+    static let exampleAgentItems = [
+        ControlAPI.AgentItem(
+            id: "7C3E1A50-6B2D-4F19-8E44-0A1B2C3D4E5F", kind: "user",
+            text: "Run the tests and fix whatever the first failure is.",
+            model: "local/qwen3-coder-30b", at: "2026-09-19T10:12:31Z"
+        ),
+        ControlAPI.AgentItem(
+            id: "item_reasoning_1", kind: "reasoning",
+            text: "Run the suite first, then read the first failure.",
+            at: "2026-09-19T10:12:33Z"
+        ),
+        ControlAPI.AgentItem(
+            id: "item_message_1", kind: "assistant",
+            text: "Running the suite now.", at: "2026-09-19T10:12:35Z"
+        ),
+        ControlAPI.AgentItem(
+            id: "item_command_1", kind: "command", text: "swift test --filter Lisbon",
+            output: "1 test failed: itineraryFitsInThreeDays", status: "completed",
+            at: "2026-09-19T10:12:38Z"
+        ),
+        ControlAPI.AgentItem(
+            id: "item_patch_1", kind: "fileChange",
+            text: "Sources/Lisbon/Itinerary.swift", status: "running",
+            at: "2026-09-19T10:12:44Z"
+        ),
+    ]
+
+    static let exampleAgentApproval = ControlAPI.AgentApproval(
+        id: "5D8B2F01-9A3C-4E67-8B21-0C4D5E6F7A81", kind: "command",
+        summary: "swift test --filter Lisbon",
+        reason: "Codex asks before running a command in this folder.",
+        requestedAt: "2026-09-19T10:12:36Z"
+    )
+
     static let exampleInvitation = ControlAPI.BuddyInvitationResponse(
         code: "000000", host: "100.64.0.9", port: 8788,
         expiresAt: "2026-09-18T09:17:44Z", scope: "chat"

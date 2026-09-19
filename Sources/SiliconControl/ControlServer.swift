@@ -867,9 +867,17 @@ public actor ControlServer {
                 guard let id = caller.deviceID else { return true }
                 return await buddy.isKnown(deviceID: id)
             }
+            // What the subscriber was paired for, so the hub can answer "is a Silicon Buddy
+            // watching?" — the Chat tab's badge. Nil for this Mac's own token and for the
+            // swarm: neither is a device, and neither should light a badge about one.
+            let scope: BuddyScope? = {
+                guard case .device(_, let scope) = caller else { return nil }
+                return scope
+            }()
             body = EventSource { writer in
                 await Self.pumpEvents(
-                    writer, hub: hub, host: host, stillAuthorized: stillAuthorized
+                    writer, hub: hub, host: host, scope: scope,
+                    stillAuthorized: stillAuthorized
                 )
             }
         } else {
@@ -953,10 +961,11 @@ public actor ControlServer {
 
     private static func pumpEvents(
         _ writer: EventStreamWriter, hub: BuddyEventHub, host: any ControlHost,
+        scope: BuddyScope? = nil,
         stillAuthorized: @escaping @Sendable () async -> Bool = { true }
     ) async {
         guard (try? await writer.open()) != nil else { return }
-        let subscription = await hub.subscribe()
+        let subscription = await hub.subscribe(scope: scope)
         // Strictly after subscribing: a host that starts watching its own state and finds
         // no subscribers would stop again before this reader ever registered.
         await host.beginEventUpdates(postingTo: hub)
@@ -1198,6 +1207,11 @@ public actor ControlServer {
                 return .error(404, error.localizedDescription)
             }
         }
+        // The Chat tab's agent engines. Their own block because every path here has an
+        // engine in it and two of them have a second parameter as well.
+        if segments.first == "agent" {
+            return await routeAgent(request, segments: segments, as: caller)
+        }
 
         do {
             switch (request.method, request.path) {
@@ -1369,6 +1383,113 @@ public actor ControlServer {
         } catch {
             return .error(400, error.localizedDescription)
         }
+    }
+
+    // MARK: - The Chat tab's agent sessions
+
+    /// What a node is told when it reaches for `/agent`.
+    ///
+    /// The swarm secret is a credential everywhere else on this server, because everywhere
+    /// else it buys rendering and model lists — things a peer is *for*. These routes run
+    /// commands on this Mac and approve file changes to it, and a node is a machine with a
+    /// token in a config file, not a person with a phone in their hand. So this is the one
+    /// family the shared secret does not open, and it is refused by name rather than by
+    /// 404: the owner debugging their own swarm should read why, not wonder where the
+    /// route went.
+    public static let agentsAreNotForPeers =
+        "A swarm node may not drive this Mac's agent sessions. These routes run commands "
+        + "here, so they are for the owner's own devices: pair one from "
+        + "Settings → Silicon Buddy."
+
+    /// `/agent/...`, in one place because every path under it shares two gates — full
+    /// control, and never the swarm — and because the shapes are parameterised twice.
+    private func routeAgent(
+        _ request: HTTPRequest, segments: [String], as caller: Caller
+    ) async -> HTTPResponse {
+        // Scope has already refused a chat-only device before anything looked at the path:
+        // none of these are in `chatOnlyRoutes`, which is what makes a route added here
+        // full-scope by default rather than by remembering to say so.
+        guard caller != .swarm else { return .error(403, Self.agentsAreNotForPeers) }
+
+        do {
+            if request.method == "GET", segments == ["agent", "sessions"] {
+                return try .encode(await host.agentSessions())
+            }
+            if request.method == "GET",
+               let engine = Self.parameter(segments, matching: ["agent", "sessions", "*"]) {
+                return try .encode(await host.agentSession(
+                    engine: engine, since: request.query["since"]
+                ))
+            }
+            if request.method == "DELETE",
+               let engine = Self.parameter(segments, matching: ["agent", "sessions", "*"]) {
+                return try .encode(await host.stopAgentSession(engine: engine))
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "start"]
+               ) {
+                return try .encode(await host.startAgentSession(engine: engine))
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "new"]
+               ) {
+                return try .encode(await host.newAgentThread(engine: engine))
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "interrupt"]
+               ) {
+                return try .encode(await host.interruptAgentSession(engine: engine))
+            }
+            if request.method == "POST",
+               let engine = Self.parameter(
+                   segments, matching: ["agent", "sessions", "*", "messages"]
+               ) {
+                let body = try request.decode(ControlAPI.AgentMessageRequest.self)
+                // 202 rather than 200: the turn has been handed to the engine and the
+                // answer arrives on `/events`, which is a different promise from "here is
+                // what it said".
+                return try .encode(
+                    await host.sendAgentMessage(engine: engine, body), status: 202
+                )
+            }
+            if request.method == "POST",
+               let (engine, id) = Self.parameters(
+                   segments, matching: ["agent", "sessions", "*", "approvals", "*"]
+               ) {
+                let body = try request.decode(ControlAPI.AgentApprovalDecision.self)
+                return try .encode(await host.answerAgentApproval(
+                    engine: engine, id: id, decision: body.decision
+                ))
+            }
+            return .error(404, "Unknown endpoint \(request.method) \(request.path)")
+        } catch let error as any ControlStatusError {
+            return .error(error.status, error.localizedDescription)
+        } catch {
+            return .error(400, error.localizedDescription)
+        }
+    }
+
+    /// `parameter`'s two-wildcard sibling, for `/agent/sessions/{engine}/approvals/{id}`.
+    /// Written out rather than generalised into "return every wildcard": two callers, two
+    /// bindings, and a `[String]` result would hand every caller an index to get wrong.
+    static func parameters(
+        _ segments: [String], matching shape: [String]
+    ) -> (String, String)? {
+        guard segments.count == shape.count else { return nil }
+        var captured: [String] = []
+        for (segment, expected) in zip(segments, shape) {
+            if expected == "*" {
+                guard !segment.isEmpty else { return nil }
+                captured.append(segment)
+            } else if segment != expected {
+                return nil
+            }
+        }
+        guard captured.count == 2 else { return nil }
+        return (captured[0], captured[1])
     }
 
     // MARK: - Serving what this Mac made
@@ -1955,10 +2076,13 @@ struct HTTPResponse {
         self.extraHeaders = extraHeaders
     }
 
-    static func encode(_ value: some Encodable) throws -> HTTPResponse {
+    /// - Parameter status: 200 unless the route means something else by answering. The one
+    ///   caller that passes anything is `POST .../messages`, which is a 202: the turn has
+    ///   been accepted, not answered.
+    static func encode(_ value: some Encodable, status: Int = 200) throws -> HTTPResponse {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return HTTPResponse(status: 200, body: try encoder.encode(value))
+        return HTTPResponse(status: status, body: try encoder.encode(value))
     }
 
     static func html(_ text: String) -> HTTPResponse {

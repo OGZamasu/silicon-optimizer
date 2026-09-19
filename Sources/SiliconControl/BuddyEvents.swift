@@ -14,6 +14,14 @@ public enum BuddyEvent: Sendable {
     /// so a phone can attach it to the bubble it is about — or ignore it and read the same
     /// verdict from `GET /conversations/{id}` later.
     case verdict(ControlAPI.ChatVerdict)
+    /// What one of the Chat tab's agent engines just did: a row appeared, a turn started,
+    /// a call is waiting, somebody answered one. See `ControlAPI.AgentEvent` for which
+    /// fields each kind fills in.
+    ///
+    /// Posted from the Mac's own state rather than from the routes, which is what makes
+    /// the owner's typing and the owner's approvals show up on the phone exactly as a
+    /// phone's do.
+    case agent(ControlAPI.AgentEvent)
 
     public var name: String {
         switch self {
@@ -22,6 +30,7 @@ public enum BuddyEvent: Sendable {
         case .job: "job"
         case .heartbeat: "heartbeat"
         case .verdict: "verdict"
+        case .agent: "agent"
         }
     }
 
@@ -36,6 +45,7 @@ public enum BuddyEvent: Sendable {
         case .job(let value): return try encoder.encode(value)
         case .heartbeat(let value): return try encoder.encode(value)
         case .verdict(let value): return try encoder.encode(value)
+        case .agent(let value): return try encoder.encode(value)
         }
     }
 }
@@ -50,12 +60,31 @@ public actor BuddyEventHub {
     public static let shared = BuddyEventHub()
 
     private var listeners: [UUID: AsyncStream<BuddyEvent>.Continuation] = [:]
+    /// The scope behind each subscription, for the one thing the hub is asked about it: how
+    /// many paired devices with full control are watching right now. Nil for this Mac's own
+    /// token and for the swarm, neither of which is a Silicon Buddy.
+    private var scopes: [UUID: BuddyScope] = [:]
 
     public init() {}
 
     public var subscriberCount: Int { listeners.count }
 
-    public func subscribe() -> (id: UUID, stream: AsyncStream<BuddyEvent>) {
+    /// How many paired, full-control devices are reading `/events`.
+    ///
+    /// The Chat tab's "Silicon Buddy is watching" badge, and nothing else. Full scope
+    /// because that is exactly the set of devices that can drive an agent session: a
+    /// chat-only phone watching the same stream cannot send into Codex or answer an
+    /// approval, and saying it was watching *this* would be telling the owner something
+    /// stronger than what is true.
+    public var watchingDeviceCount: Int {
+        scopes.values.count(where: { $0 == .full })
+    }
+
+    /// - Parameter scope: what the subscriber was paired for, or nil when it is not a
+    ///   paired device at all.
+    public func subscribe(
+        scope: BuddyScope? = nil
+    ) -> (id: UUID, stream: AsyncStream<BuddyEvent>) {
         let id = UUID()
         // Buffering the newest few: a phone on a slow link should get the current state,
         // not a queue of every percentage point it missed.
@@ -63,12 +92,14 @@ public actor BuddyEventHub {
             continuation in
             listeners[id] = continuation
         }
+        if let scope { scopes[id] = scope }
         return (id, stream)
     }
 
     /// Ends one subscription. Also what a cancelled `/events` task calls, because finishing
     /// the continuation is the only thing that breaks the reader out of its `for await`.
     public func cancel(_ id: UUID) {
+        scopes.removeValue(forKey: id)
         listeners.removeValue(forKey: id)?.finish()
     }
 

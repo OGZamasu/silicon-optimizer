@@ -276,6 +276,14 @@ extension AppModel {
     // MARK: - Approvals
 
     public func answerCodexApproval(_ approval: CodexApproval, accept: Bool) {
+        // Which way it went, for any paired device watching this session. Recorded here
+        // because this is the one funnel every answer on this Mac passes through — the
+        // card's buttons and the guardrail's own auto-answer alike — and because removing
+        // the card below destroys the only other evidence of what was decided.
+        BuddyAgentSessions.shared.noteAnswerHere(
+            id: approval.id.uuidString, owner: agentLedgerOwner, engine: "codex",
+            accept: accept
+        )
         // The card goes first, and unconditionally: the decision has been made, and a card
         // left on screen because the sidecar died in the meantime is a lie about what is
         // still pending.
