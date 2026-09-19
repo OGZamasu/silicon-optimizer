@@ -86,9 +86,10 @@ public actor ModelDownloader {
     ///
     /// There is no token parameter, so none can be passed. The session keeps nothing — no
     /// cookies, no stored credentials, no cache — and follows a redirect only where
-    /// `redirects` allows. And it does not wait for the network: a Mac that is offline
-    /// fails at once, with the partial kept to resume, rather than sitting at "0%" for the
-    /// days a catalogue download is allowed to wait.
+    /// `redirects` allows. And it does not wait for the network: a Mac with no network fails
+    /// at once, with the partial kept to resume, rather than sitting at "0%" for the days a
+    /// catalogue download is allowed to wait. A host that takes the connection and then
+    /// never answers is given up on after the 60-second request timeout.
     public init(publicFilesFrom baseURL: URL? = nil, redirects: @escaping @Sendable (URL) -> Bool) {
         self.configuration = Self.publicFileConfiguration()
         self.waitsForConnectivity = configuration.waitsForConnectivity

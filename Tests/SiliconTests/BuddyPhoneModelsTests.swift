@@ -114,12 +114,27 @@ struct BuddyPhoneModelsTests {
             #expect(measured.secondsToFirstWord300 - exact < 0.1, "\(entry.id)")
             // The peak was taken at a context far short of the one recommended.
             #expect(measured.peakMemoryContextTokens < entry.recommended.contextLength)
-            // Free memory asked for: more than the peak, by at least a quarter.
-            #expect(Double(entry.recommended.minFreeMemoryBytes)
-                >= Double(measured.peakMemoryBytes) * 1.25, "\(entry.id)")
+            // Free memory asked for: never less than what was measured, and a quarter more
+            // than the working memory — the part that is not the memory-mapped weights.
+            let minimum = entry.recommended.minFreeMemoryBytes
+            #expect(minimum > measured.peakMemoryBytes, "\(entry.id)")
+            let working = measured.peakMemoryBytes - entry.sizeBytes
+            #expect(Double(minimum) >= Double(entry.sizeBytes) + Double(working) * 1.25)
+            // …and no margin on the weights, which Android can page back in from the file.
+            #expect(Double(minimum) < Double(measured.peakMemoryBytes) * 1.25, "\(entry.id)")
         }
-        #expect(PhoneModelCatalog.qwen35_2B.recommended.minFreeMemoryBytes == 3_400_000_000)
-        #expect(PhoneModelCatalog.gemma4E2B.recommended.minFreeMemoryBytes == 5_600_000_000)
+        #expect(PhoneModelCatalog.qwen35_2B.recommended.minFreeMemoryBytes == 3_100_000_000)
+        #expect(PhoneModelCatalog.gemma4E2B.recommended.minFreeMemoryBytes == 4_700_000_000)
+        // The rule, worked by hand from the GGUF headers: weights + (peak − weights + the
+        // KV cache and attention scores grown from 640 to 4,096 tokens) × 1.25.
+        #expect(PhoneModelCatalog.minimumFreeMemory(
+            peak: 2_586_836_992, weights: 1_296_764_000, cacheBytesPerToken: 12_288,
+            attentionHeads: 8, context: 4096
+        ) == 3_100_000_000)
+        #expect(PhoneModelCatalog.minimumFreeMemory(
+            peak: 4_336_910_336, weights: 3_349_516_256, cacheBytesPerToken: 6_144,
+            attentionHeads: 8, context: 4096
+        ) == 4_700_000_000)
     }
 
     /// These are fetched for the phone and passed along. They must never become something
@@ -205,7 +220,7 @@ struct BuddyPhoneModelsTests {
         #expect(absent.source == .init(repo: qwen.repository, commit: qwen.commit, file: qwen.file))
         #expect(absent.recommended == .init(
             threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
-            minFreeMemoryBytes: 3_400_000_000, thinking: false
+            minFreeMemoryBytes: 3_100_000_000, thinking: false
         ))
         let measured = try #require(absent.measured)
         #expect(measured.tokensPerSecond == 19.2)
@@ -600,26 +615,62 @@ struct BuddyPhoneModelsTests {
         }
     }
 
-    /// The room check is the library drive's, with the same reserve as the Mac's own
-    /// downloads — measured where the folder is, not wherever a walk up the path ends.
-    @Test func theRoomCheckMeasuresTheLibrarysDrive() throws {
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("room-\(UUID())/Local Models/Phone Models")
-        // A few bytes always fit.
-        try PhoneModelStore.checkRoom(needed: Bytes(1), at: folder)
-        // A petabyte never does, and the refusal reports the drive this folder is on.
-        do {
-            try PhoneModelStore.checkRoom(needed: Bytes(Int64(1) << 50), at: folder)
-            Issue.record("A petabyte should not fit.")
-        } catch ModelDownloader.DownloadError.insufficientDiskSpace(let needed, let available) {
-            #expect(needed == Bytes(Int64(1) << 50))
-            let values = try FileManager.default.temporaryDirectory.resourceValues(forKeys: [
-                .volumeAvailableCapacityKey, .volumeTotalCapacityKey,
-            ])
-            let total = Int64(try #require(values.volumeTotalCapacity))
-            #expect(available.rawValue > 0 && available.rawValue <= total)
+    /// The room check asks the drive the library folder is on — the nearest part of the
+    /// folder that exists, never somewhere else — and a file fits only if the Mac's 10 GiB
+    /// reserve still does beside it.
+    @Test func theRoomCheckAsksTheLibrarysDriveAndKeepsTheReserve() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("room-\(UUID())")
+        let library = directory.appendingPathComponent("Local Models")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let folder = library.appendingPathComponent("Phone Models")
+        let needed = Bytes(1_296_764_000)
+        let reserve = ModelDownloader.diskReserve
+        #expect(reserve == .gib(10))
+
+        let asked = SharedBox<[String]>([])
+        func check(free: Int64) throws {
+            try PhoneModelStore.checkRoom(needed: needed, at: folder) { url in
+                asked.value.append(url.standardizedFileURL.path)
+                return free
+            }
         }
-        #expect(ModelDownloader.diskReserve == .gib(10))
+        // Exactly the file and the reserve is not enough: the reserve is kept, not spent.
+        #expect(throws: ModelDownloader.DownloadError.self) {
+            try check(free: needed.rawValue + reserve.rawValue)
+        }
+        #expect(throws: ModelDownloader.DownloadError.self) {
+            try check(free: needed.rawValue + reserve.rawValue / 2)
+        }
+        try check(free: needed.rawValue + reserve.rawValue + 1)
+        // Every reading was of the library folder — the part of the path that exists.
+        #expect(Set(asked.value) == [library.standardizedFileURL.path])
+
+        // And the store's own check, reading free space through its volumes.
+        let base = URL(string: "http://127.0.0.1:9")!
+        let readings = SharedBox<[String]>([])
+        let store = PhoneModelStore(
+            catalog: [PhoneModelCatalog.qwen35_2B],
+            stateFile: { directory.appendingPathComponent("phone-models.json") },
+            source: { base },
+            volumes: .init(
+                missingDrive: { _ in nil },
+                availableCapacity: { url in
+                    readings.value.append(url.standardizedFileURL.path)
+                    return 1_000_000_000
+                },
+                volumeID: { PhoneModelStore.volumeID(of: $0) }
+            )
+        )
+        do {
+            _ = try await store.prepare(id: PhoneModelCatalog.qwen35_2B.id, library: library)
+            Issue.record("1 GB free should not fit 1.3 GB and the reserve.")
+        } catch PhoneModelStore.StoreError.noSpace(let failure) {
+            #expect(failure.kind == .diskFull)
+            #expect(failure.reason.contains("1.0 GB is free"))
+        }
+        #expect(Set(readings.value) == [library.standardizedFileURL.path])
     }
 
     /// Removing takes the Mac's copy, anything partial, and a fetch still in flight — and
@@ -1020,6 +1071,343 @@ struct BuddyPhoneModelsTests {
             #expect(!FileManager.default.fileExists(
                 atPath: f.directory.appendingPathComponent("Fallback").path
             ))
+        }
+    }
+
+    /// A move that cannot finish — here the new folder cannot be written to — fails once
+    /// and says why: the model reads as failed with the reason, the Settings notice says
+    /// the same, the old copy keeps its marker, and nothing starts the move again on every
+    /// read.
+    @Test func aMoveThatCannotFinishFailsOnceAndSaysWhy() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            let oldRoot = f.root
+            let stuck = f.directory.appendingPathComponent("Stuck Library")
+            let stuckRoot = stuck.appendingPathComponent("Phone Models")
+            try FileManager.default.createDirectory(at: stuckRoot, withIntermediateDirectories: true)
+            try #require(chmod(stuckRoot.path, 0o555) == 0)
+            defer { _ = chmod(stuckRoot.path, 0o755) }
+            f.library = stuck
+
+            _ = await f.state(f.qwen)
+            await f.settle(f.qwen)
+            for _ in 0..<30 {
+                guard case .failed(let failure) = await f.state(f.qwen) else {
+                    Issue.record("A move that cannot finish should read as failed.")
+                    return
+                }
+                #expect(failure.kind == .other)
+                #expect(failure.reason.contains("could not move"))
+                #expect(!failure.reason.contains("/"))
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            // Started once, not once a read.
+            #expect(await f.store.moveAttempts == 1)
+            let notices = await f.store.notices(library: f.library)
+            #expect(notices.map(\.folder.standardizedFileURL.path)
+                == [oldRoot.standardizedFileURL.path])
+            #expect(notices.first?.reason.contains("could not move") == true)
+            #expect(notices.first?.reason.contains("Moving") == false)
+            // Nothing moved, so nothing about the old copy changed — its marker included.
+            #expect(FileManager.default.fileExists(atPath: f.fileURL(f.qwen, in: oldRoot).path))
+            #expect(FileManager.default.fileExists(
+                atPath: oldRoot.appendingPathComponent(".\(f.qwen.file).verified").path
+            ))
+            // The phone sees the same, and cannot fetch it.
+            let listed = await f.provider.phoneModels().models.first { $0.id == f.qwen.id }
+            #expect(listed?.onMac.state == "failed")
+            #expect(listed?.onMac.failure == "other")
+            #expect(await f.verified(f.qwen) == nil)
+
+            // Once the folder can be written to, asking for the model is asking to try again.
+            _ = chmod(stuckRoot.path, 0o755)
+            #expect(try await f.prepare(f.qwen) == .alreadyDownloading)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(await f.store.moveAttempts == 2)
+            #expect(!FileManager.default.fileExists(atPath: oldRoot.path))
+            #expect(f.huggingFace.requests.count == 1)
+            #expect(await f.store.notices(library: f.library).isEmpty)
+        }
+    }
+
+    /// A new drive without room for the file and the reserve: the model fails as disk
+    /// full, a prepare says so at once, and the move happens by itself once there is room.
+    @Test func aNewDriveWithoutRoomWaitsForRoom() async throws {
+        let full = SharedBox(false)
+        let newLibrary = SharedBox<String>("")
+        let check: PhoneModelStore.SpaceCheck = { needed, folder in
+            guard full.value, !newLibrary.value.isEmpty,
+                  folder.standardizedFileURL.path.hasPrefix(newLibrary.value)
+            else { return }
+            throw ModelDownloader.DownloadError.insufficientDiskSpace(
+                needed: needed, available: .gib(10)
+            )
+        }
+        try await PhoneModelFixture.with(spaceCheck: check) { f in
+            try await f.fetch(f.gemma)
+            let oldRoot = f.root
+            let moved = f.directory.appendingPathComponent("Small Drive")
+            try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
+            newLibrary.value = moved.standardizedFileURL.path
+            full.value = true
+            // Another drive: moving there is a copy, which needs room.
+            f.volumeOf.value = [moved.standardizedFileURL.path: 424_242]
+            f.library = moved
+
+            _ = await f.state(f.gemma)
+            await f.settle(f.gemma)
+            guard case .failed(let failure) = await f.state(f.gemma) else {
+                Issue.record("No room on the new drive should read as failed.")
+                return
+            }
+            #expect(failure.kind == .diskFull)
+            #expect(failure.reason.contains("not enough space"))
+            #expect(failure.reason.contains("moves by itself"))
+            #expect(!failure.reason.contains("/"))
+            for _ in 0..<20 { _ = await f.state(f.gemma) }
+            #expect(await f.store.moveAttempts == 1)
+            do {
+                _ = try await f.prepare(f.gemma)
+                Issue.record("A prepare with still no room should say so.")
+            } catch PhoneModelStore.StoreError.noSpace(let refusal) {
+                #expect(refusal.kind == .diskFull)
+            }
+            #expect(await f.store.moveAttempts == 1)
+            #expect(FileManager.default.fileExists(atPath: f.fileURL(f.gemma, in: oldRoot).path))
+
+            // Room, and the next read moves it without being asked.
+            full.value = false
+            _ = await f.state(f.gemma)
+            await f.settle(f.gemma)
+            #expect(await f.state(f.gemma) == .ready)
+            #expect(await f.store.moveAttempts == 2)
+            #expect(!FileManager.default.fileExists(atPath: oldRoot.path))
+        }
+    }
+
+    /// DELETE while a model is being moved waits for that move once — never again — then
+    /// deletes it from both folders, and returns. And DELETE on a model whose move failed
+    /// returns at once, taking the copy the move left behind.
+    @Test func deleteDuringAMoveWaitsOnceAndClearsBothFolders() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            try await f.fetch(f.gemma)
+            let oldRoot = f.root
+            let gate = PauseGate()
+            f.checkGate.value = gate
+            let moved = f.directory.appendingPathComponent("New Library")
+            f.library = moved
+            _ = await f.state(f.qwen)
+            // The move has renamed the first file across and is about to check it.
+            try await until { await gate.arrivals >= 1 }
+
+            let removed = SharedBox(false)
+            let removing = Task {
+                try await f.remove(f.qwen)
+                removed.value = true
+            }
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(!removed.value)
+            await gate.release()
+            try await removing.value
+            #expect(removed.value)
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) == .absent)
+            for folder in [oldRoot, f.root] {
+                #expect(!f.leftovers(in: folder).contains { $0.contains(f.qwen.file) })
+            }
+            // The other model finished its move.
+            await f.settle(f.gemma)
+            #expect(await f.state(f.gemma) == .ready)
+            #expect(await f.store.moveAttempts == 1)
+
+            // A move that failed: DELETE does not wait for anything, and the stuck copy goes.
+            f.checkGate.value = nil
+            let stuck = f.directory.appendingPathComponent("Stuck Library")
+            let stuckRoot = stuck.appendingPathComponent("Phone Models")
+            try FileManager.default.createDirectory(at: stuckRoot, withIntermediateDirectories: true)
+            try #require(chmod(stuckRoot.path, 0o555) == 0)
+            defer { _ = chmod(stuckRoot.path, 0o755) }
+            let lastRoot = f.root
+            f.library = stuck
+            _ = await f.state(f.gemma)
+            await f.settle(f.gemma)
+            guard case .failed = await f.state(f.gemma) else {
+                Issue.record("The move into a folder that cannot be written should fail.")
+                return
+            }
+            let started = ContinuousClock.now
+            try await f.remove(f.gemma)
+            #expect(ContinuousClock.now - started < .seconds(5))
+            #expect(await f.state(f.gemma) == .absent)
+            #expect(!FileManager.default.fileExists(atPath: f.fileURL(f.gemma, in: lastRoot).path))
+        }
+    }
+
+    /// The same, through the route a phone uses.
+    @Test func theDeleteRouteReturnsDuringAMoveThatCannotFinish() async throws {
+        try await PhoneModelFixture.with { models in
+            try await models.fetch(models.qwen)
+            let stuck = models.directory.appendingPathComponent("Stuck Library")
+            let stuckRoot = stuck.appendingPathComponent("Phone Models")
+            try FileManager.default.createDirectory(at: stuckRoot, withIntermediateDirectories: true)
+            try #require(chmod(stuckRoot.path, 0o555) == 0)
+            defer { _ = chmod(stuckRoot.path, 0o755) }
+            models.library = stuck
+            try await PhoneRouteFixture.with(provider: models.provider, hub: models.hub) { f in
+                let phone = try await f.pair()
+                // Asking starts the move; it fails, and the list says so.
+                _ = try await f.phone.call("GET", "/ondevice/models", token: phone.token)
+                await models.settle(models.qwen)
+                let listed = try JSONDecoder().decode(
+                    ControlAPI.PhoneModelList.self,
+                    from: try await f.phone.call("GET", "/ondevice/models", token: phone.token).1
+                )
+                let stuck = try #require(listed.models.first { $0.id == models.qwen.id })
+                #expect(stuck.onMac.state == "failed")
+                #expect(stuck.onMac.failure == "other")
+                let (status, body) = try await f.phone.call(
+                    "DELETE", "/ondevice/models/\(models.qwen.id)", token: phone.token
+                )
+                #expect(status == 200)
+                let entry = try JSONDecoder().decode(ControlAPI.PhoneModel.self, from: body)
+                #expect(entry.onMac == .init(state: "absent"))
+            }
+        }
+    }
+
+    /// A folder called `/Volumes/<name>` that is not the top of a volume — what writing to
+    /// an unplugged drive's path can leave behind on the startup disk — is not the drive.
+    @Test func aLeftoverVolumesFolderIsNotTheDrive() {
+        let library = URL(fileURLWithPath: "/Volumes/Stale/Local Models")
+        // Its volume is the startup disk's.
+        #expect(PhoneModelStore.missingDrive(
+            for: library, volumeRoot: { _ in URL(fileURLWithPath: "/") }
+        ) == "Stale")
+        // It is nothing at all.
+        #expect(PhoneModelStore.missingDrive(for: library, volumeRoot: { _ in nil }) == "Stale")
+        // It is a volume of its own: connected.
+        #expect(PhoneModelStore.missingDrive(for: library, volumeRoot: { $0 }) == nil)
+        // And a folder deeper down is asked about the drive, not about itself.
+        let asked = SharedBox<[String]>([])
+        _ = PhoneModelStore.missingDrive(for: library) { url in
+            asked.value.append(url.standardizedFileURL.path)
+            return url
+        }
+        #expect(asked.value == ["/Volumes/Stale"])
+    }
+
+    /// A marker says which digest was verified, and a marker for another pin — the same
+    /// file name and size after the catalogue moves to new bytes — is not verification.
+    @Test func aMarkerForAnotherPinIsNotVerification() async throws {
+        try await PhoneModelFixture.with { f in
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            var repinned = f.qwen
+            repinned.sha256 = String(repeating: "0", count: 64)
+            let directory = f.directory
+            let later = PhoneModelStore(
+                catalog: [repinned],
+                stateFile: { directory.appendingPathComponent("later.json") },
+                source: { URL(string: "http://127.0.0.1:9")! }, spaceCheck: { _, _ in }
+            )
+            #expect(await later.state(of: repinned.id, library: f.library) != .ready)
+            await #expect(throws: PhoneModelStore.StoreError.notReady(repinned.id)) {
+                _ = try await later.verifiedFile(id: repinned.id, library: f.library)
+            }
+        }
+    }
+
+    /// A file that changes while it is being hashed is not verified, even when its bytes
+    /// hash to the pin: what was hashed is not what is on disk now.
+    @Test func aFileChangedWhileItIsCheckedIsNotVerified() async throws {
+        try await PhoneModelFixture.with { f in
+            let gate = PauseGate()
+            f.checkGate.value = gate
+            try await f.prepare(f.qwen)
+            try await until { await gate.arrivals == 1 }
+            // The same byte written back: the content is the pin's, the file has changed.
+            let handle = try FileHandle(forWritingTo: f.fileURL(f.qwen))
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: Data([f.qwenBytes[0]]))
+            try handle.close()
+            #expect(PhoneModelFixture.sha256(try Data(contentsOf: f.fileURL(f.qwen)))
+                == f.qwen.sha256)
+            await gate.release()
+            await f.settle(f.qwen)
+            #expect(await f.state(f.qwen) != .ready)
+            #expect(await f.verified(f.qwen) == nil)
+            #expect(!FileManager.default.fileExists(
+                atPath: f.root.appendingPathComponent(".\(f.qwen.file).verified").path
+            ))
+        }
+    }
+
+    /// Stop pressed while the Mac is checking a whole file says so — not that nothing
+    /// arrived — and the next prepare checks it without downloading.
+    @Test func stoppingWhileCheckingSaysTheWholeFileIsHere() async throws {
+        try await PhoneModelFixture.with { f in
+            let gate = PauseGate()
+            f.checkGate.value = gate
+            try await f.prepare(f.qwen)
+            try await until { await gate.arrivals == 1 }
+            let stopping = Task { await f.store.cancel(id: f.qwen.id) }
+            try await Task.sleep(for: .milliseconds(100))
+            await gate.release()
+            await stopping.value
+            f.checkGate.value = nil
+            guard case .failed(let failure) = await f.state(f.qwen) else {
+                Issue.record("A stopped check should read as failed.")
+                return
+            }
+            #expect(failure.kind == .interrupted)
+            #expect(failure.reason.contains("Stopped while checking"))
+            #expect(failure.reason.contains("nothing needs downloading"))
+            #expect(failure.bytesOnDisk == f.qwen.sizeBytes)
+            let listed = await f.provider.phoneModels().models.first { $0.id == f.qwen.id }
+            #expect(listed?.onMac.fraction == 1)
+            try await f.fetch(f.qwen)
+            #expect(await f.state(f.qwen) == .ready)
+            #expect(f.huggingFace.requests.count == 1)
+        }
+    }
+
+    /// The state file is the store's own memory, not a list of folders to act on: garbage
+    /// is logged and ignored, a folder that is not a `Phone Models` folder is never touched
+    /// — let alone deleted — and the list is capped.
+    @Test func theStateFileIsReadWithSuspicion() async throws {
+        try await PhoneModelFixture.with { f in
+            let directory = f.directory
+            func store(_ name: String) -> PhoneModelStore {
+                PhoneModelStore(
+                    catalog: [f.qwen, f.gemma],
+                    stateFile: { directory.appendingPathComponent(name) },
+                    source: { URL(string: "http://127.0.0.1:9")! }, spaceCheck: { _, _ in }
+                )
+            }
+            try Data("{not json".utf8).write(to: directory.appendingPathComponent("garbage.json"))
+            let garbled = store("garbage.json")
+            #expect(await garbled.state(of: f.qwen.id, library: f.library) == .absent)
+            #expect(await garbled.memoryWarnings.contains { $0.contains("could not be read") })
+
+            let precious = directory.appendingPathComponent("Someone's empty folder")
+            try FileManager.default.createDirectory(at: precious, withIntermediateDirectories: true)
+            var former = [precious.path, "relative/Phone Models"]
+            for index in 0..<12 {
+                former.append(directory.appendingPathComponent("Old \(index)/Phone Models").path)
+            }
+            let json = try JSONSerialization.data(withJSONObject: [
+                "current": f.root.path, "former": former,
+            ])
+            try json.write(to: directory.appendingPathComponent("hostile.json"))
+            let wary = store("hostile.json")
+            _ = await wary.state(of: f.qwen.id, library: f.library)
+            await wary.waitUntilSettled(id: f.qwen.id)
+            #expect(FileManager.default.fileExists(atPath: precious.path))
+            let warnings = await wary.memoryWarnings
+            #expect(warnings.contains { $0.contains("not a Phone Models folder") })
+            #expect(warnings.contains { $0.contains("most recent") })
         }
     }
 
@@ -1778,8 +2166,9 @@ struct BuddyPhoneModelsTests {
         let failure = PhoneModelStore.Failure(kind: .diskFull, reason: "No room.", bytesOnDisk: 0)
         #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(qwen, state: .failed(failure)))
             == "1.3 GB · Apache-2.0 · No room.")
-        #expect(BuddyPhoneModelsRow.explain(.folder(URL(fileURLWithPath: "/Volumes/T9/Local Models/Phone Models")))
-            .contains("Kept in /Volumes/T9/Local Models/Phone Models."))
+        #expect(BuddyPhoneModelsRow.explain(
+            .folder(URL(fileURLWithPath: "/Volumes/External/Local Models/Phone Models"))
+        ).contains("Kept in /Volumes/External/Local Models/Phone Models."))
         #expect(BuddyPhoneModelsRow.explain(.driveMissing(drive: "External SSD"))
             .contains("“External SSD”, which is not connected"))
     }

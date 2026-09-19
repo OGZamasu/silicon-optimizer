@@ -37,6 +37,18 @@ struct BuddyPhoneModelsRow: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if !notices.isEmpty {
+                // A move that could not finish is not tried again on its own until something
+                // changes; this is the owner saying something has.
+                Button("Try Again") {
+                    let phoneModels = model.phoneModels
+                    Task {
+                        await phoneModels.retryMoves()
+                        await refresh()
+                    }
+                }
+                .buttonStyle(.link)
+            }
             if let problem {
                 Text(problem)
                     .font(.caption)

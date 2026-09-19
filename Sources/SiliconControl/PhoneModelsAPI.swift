@@ -105,6 +105,9 @@ extension ControlAPI {
             public var threadsPrompt: Int
             public var threadsGenerate: Int
             public var contextLength: Int
+            /// The free memory to see before loading, as a gate: the weights, which are
+            /// memory-mapped and so get no margin, plus the rest of the measured peak grown
+            /// to `contextLength` with a quarter on top.
             public var minFreeMemoryBytes: Int64
             /// Render the chat template with thinking on or off.
             public var thinking: Bool
@@ -300,9 +303,10 @@ extension ControlServer {
         "No phone model with that id. GET /ondevice/models lists the ones this Mac can "
         + "fetch for a phone."
 
-    /// What a `verify` other than `1` or `true` is told.
+    /// What a `verify` it does not know is told.
     public static let phoneModelVerifyValues =
-        "verify takes 1 or true. Leave it out for an ordinary prepare."
+        "verify takes 1 or true to have the Mac check its copy again, or 0 or false (the same "
+        + "as leaving it out) for an ordinary prepare."
 
     /// Asked for the file before the Mac has it, verified, in place.
     public static let phoneModelNotReady =

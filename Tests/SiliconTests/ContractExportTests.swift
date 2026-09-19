@@ -710,7 +710,7 @@ struct ContractExportTests {
         let frames = try events.eventVariants.filter { $0.0 == "download" }.map {
             try JSONDecoder().decode(ControlAPI.DownloadEvent.self, from: try $0.2.encode())
         }
-        #expect(frames.count == 5)
+        #expect(frames.count == 6)
         #expect(frames.allSatisfy {
             $0.id.hasPrefix(ControlAPI.PhoneModel.downloadEventPrefix)
         })
@@ -718,7 +718,7 @@ struct ContractExportTests {
         #expect(frames.filter { $0.stage == nil && $0.error == nil }.map(\.fraction) == [1])
         #expect(frames.contains { $0.error?.contains("checksum") == true })
         #expect(frames.contains { $0.error == PhoneModelService.removedWhileDownloading })
-        #expect(Set(frames.compactMap(\.stage)) == ["fetching", "checking"])
+        #expect(Set(frames.compactMap(\.stage)) == Set(ControlAPI.phoneModelStages))
         #expect(frames.allSatisfy {
             $0.stage == nil || ControlAPI.phoneModelStages.contains($0.stage!)
         })
@@ -1134,8 +1134,9 @@ struct ContractExportTests {
             "(`firstWordEstimated: true`), 300 ÷ the prompt speed rounded up to a tenth.",
             "`sustainedTokensPerSecond` is null when it was not measured, and",
             "`sustainedMeasured` says which. `peakMemoryBytes` was taken at no more than",
-            "`peakMemoryContextTokens`; `recommended.minFreeMemoryBytes` grows it to the",
-            "recommended context and adds a quarter.",
+            "`peakMemoryContextTokens`. `recommended.minFreeMemoryBytes` is a gate: the",
+            "weights, which are memory-mapped and get no margin, plus the rest of the peak",
+            "grown to the recommended context with a quarter on top.",
             "",
             "`onMac.state` is `absent`, `downloading`, `ready` or `failed`. While downloading,",
             "`stage` says what the Mac is doing — `fetching`, `checking` (hashing what it has)",
@@ -1145,7 +1146,9 @@ struct ContractExportTests {
             "`diskFull` (free space on the Mac), `checksumMismatch` (deleted; a retry starts",
             "over), `network` and `interrupted` (a retry resumes or checks), `server`,",
             "`driveMissing` (the drive the Mac's model library is on is not connected) or",
-            "`other`.",
+            "`other`. A model whose move to a new library folder could not finish reads",
+            "`failed` too — `diskFull` when the new drive has no room, and it moves by itself",
+            "once there is; `other` otherwise, and a prepare tries the move again.",
             "",
             "`POST .../{id}/prepare` answers **202** with the entry while the fetch is on its",
             "way — started now, resumed, or already running, which it never restarts — and",
@@ -1160,9 +1163,11 @@ struct ContractExportTests {
             "the `ETag`: a 206 is exactly the rest, and a **200 means the file changed** —",
             "discard the partial and keep the whole body. Check the digest at the end; if it",
             "does not match, call `POST .../{id}/prepare?verify=1` once, then fetch again from",
-            "zero. `DELETE .../{id}` removes the Mac's copy and any partial. Ids are catalogue",
-            "keys and nothing else — anything else is a 404. Full scope only, and the swarm",
-            "secret is refused with its own sentence.",
+            "zero (`verify` takes `1`/`true`, or `0`/`false` for an ordinary prepare). A Mac with",
+            "no network fails a fetch at once; a Hub that never answers, after 60 seconds.",
+            "`DELETE .../{id}` removes the Mac's copy and any partial, including one a move",
+            "left in a former folder. Ids are catalogue keys and nothing else — anything else",
+            "is a 404. Full scope only, and the swarm secret is refused with its own sentence.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -1368,6 +1373,11 @@ struct ContractExportTests {
                 ("download", "phone model checking", .of(PhoneModelService.downloadEvent(
                     PhoneModelCatalog.qwen35_2B,
                     state: .downloading(bytesReceived: 648_382_000, bytesPerSecond: 0, stage: .checking)
+                ))),
+                // Following the model library to a new folder.
+                ("download", "phone model moving", .of(PhoneModelService.downloadEvent(
+                    PhoneModelCatalog.gemma4E2B,
+                    state: .downloading(bytesReceived: 0, bytesPerSecond: 0, stage: .moving)
                 ))),
                 // Done: `fraction` 1, no `stage`, no `error`.
                 ("download", "phone model ready", .of(PhoneModelService.downloadEvent(

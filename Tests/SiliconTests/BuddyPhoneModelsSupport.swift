@@ -86,6 +86,8 @@ struct PhoneModelFixture: Sendable {
     var roomAsked = SharedBox<[URL]>([])
     /// When set, every check of a file waits here first.
     var checkGate = SharedBox<PauseGate?>(nil)
+    /// Folders the test has put on a drive of their own, by path prefix.
+    var volumeOf = SharedBox<[String: Int64]>([:])
 
     var library: URL? {
         get { libraryBox.value }
@@ -201,6 +203,7 @@ struct PhoneModelFixture: Sendable {
         let unplugged = fixture.unplugged
         let asked = fixture.roomAsked
         let check = spaceCheck
+        let volumeOf = fixture.volumeOf
         let gate = fixture.checkGate
         let hooks = PhoneModelStore.Hooks(beforeCheck: { _ in await gate.value?.wait() })
         fixture.store = PhoneModelStore(
@@ -213,11 +216,21 @@ struct PhoneModelFixture: Sendable {
                 asked.value.append(folder)
                 try check?(needed, folder)
             },
-            missingDrive: { folder in
-                let path = folder.standardizedFileURL.path
-                if unplugged.value.contains(where: { path.hasPrefix($0) }) { return "Old Drive" }
-                return PhoneModelStore.missingDrive(for: folder)
-            },
+            volumes: .init(
+                missingDrive: { folder in
+                    let path = folder.standardizedFileURL.path
+                    if unplugged.value.contains(where: { path.hasPrefix($0) }) { return "Old Drive" }
+                    return PhoneModelStore.missingDrive(for: folder)
+                },
+                availableCapacity: { PhoneModelStore.availableCapacity(at: $0) },
+                volumeID: { url in
+                    let path = url.standardizedFileURL.path
+                    if let own = volumeOf.value.first(where: { path.hasPrefix($0.key) }) {
+                        return own.value
+                    }
+                    return PhoneModelStore.volumeID(of: url)
+                }
+            ),
             hooks: hooks
         )
         fixture.service = PhoneModelService(

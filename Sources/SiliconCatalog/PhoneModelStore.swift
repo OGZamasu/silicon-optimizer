@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import SiliconCore
+import os
 
 /// Where the phone's models live on this Mac, worked out at the moment it is asked.
 public enum PhoneModelPlace: Sendable, Equatable {
@@ -40,6 +41,8 @@ public actor PhoneModelStore {
     /// The folder's name, inside the model library.
     public static let folderName = "Phone Models"
 
+    private static let log = Logger(subsystem: "dev.siliconoptimizer", category: "phone-models")
+
     /// Used only when no model library folder is set.
     public static var fallbackRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -60,7 +63,7 @@ public actor PhoneModelStore {
     /// is missing.
     public static func place(
         forLibrary library: URL?, fallback: URL = fallbackRoot,
-        missingDrive: (URL) -> String? = PhoneModelStore.missingDrive(for:)
+        missingDrive: (URL) -> String? = { PhoneModelStore.missingDrive(for: $0) }
     ) -> PhoneModelPlace {
         guard let library else { return .folder(fallback.standardizedFileURL) }
         let folder = library.standardizedFileURL
@@ -77,17 +80,51 @@ public actor PhoneModelStore {
     /// path can leave behind — is not the drive, and neither is a path that merely starts
     /// the same way. Asking the folder's nearest existing ancestor for free space would have
     /// measured the startup disk in both cases.
-    public static func missingDrive(for folder: URL) -> String? {
+    ///
+    /// - Parameter volumeRoot: the top of the volume a path is on — asked of
+    ///   `/Volumes/<drive>` itself. A test hands in one that answers `/` for a leftover
+    ///   folder, which cannot be made for real without being root.
+    public static func missingDrive(
+        for folder: URL,
+        volumeRoot: (URL) -> URL? = { (try? $0.resourceValues(forKeys: [.volumeURLKey]))?.volume }
+    ) -> String? {
         let resolved = folder.standardizedFileURL.resolvingSymlinksInPath()
         let parts = resolved.pathComponents
         guard parts.count >= 3, parts[0] == "/", parts[1] == "Volumes" else { return nil }
         let drive = parts[2]
         let mount = URL(fileURLWithPath: "/Volumes", isDirectory: true)
             .appendingPathComponent(drive, isDirectory: true)
-        guard let volume = (try? mount.resourceValues(forKeys: [.volumeURLKey]))?.volume,
+        guard let volume = volumeRoot(mount),
               volume.standardizedFileURL.path == mount.standardizedFileURL.path
         else { return drive }
         return nil
+    }
+
+    /// What the store asks about drives. The app's is `live`; a test swaps in one that can
+    /// unplug a drive, run one out of room, or put two folders on different volumes.
+    public struct Volumes: Sendable {
+        /// The drive a folder is on, when that drive is not connected.
+        public var missingDrive: @Sendable (URL) -> String?
+        /// Free bytes on the volume an existing path is on, or nil when that cannot be read.
+        public var availableCapacity: @Sendable (URL) -> Int64?
+        /// Which volume a path is on, for telling a rename from a copy.
+        public var volumeID: @Sendable (URL) -> Int64?
+
+        public init(
+            missingDrive: @escaping @Sendable (URL) -> String?,
+            availableCapacity: @escaping @Sendable (URL) -> Int64?,
+            volumeID: @escaping @Sendable (URL) -> Int64?
+        ) {
+            self.missingDrive = missingDrive
+            self.availableCapacity = availableCapacity
+            self.volumeID = volumeID
+        }
+
+        public static let live = Volumes(
+            missingDrive: { PhoneModelStore.missingDrive(for: $0) },
+            availableCapacity: { PhoneModelStore.availableCapacity(at: $0) },
+            volumeID: { PhoneModelStore.volumeID(of: $0) }
+        )
     }
 
     /// Whether a file sits in a folder this store keeps phone models in. The Mac's model
@@ -213,7 +250,8 @@ public actor PhoneModelStore {
     /// Where a test pauses a fetch. Nil in the app.
     public struct Hooks: Sendable {
         /// Called with the model's id each time its file is about to be hashed — after a
-        /// download, for a verify, for a file found in place — before any of it is read.
+        /// download, for a verify, for a file found in place — once the file's fingerprint
+        /// has been taken and before any of it is read.
         public var beforeCheck: (@Sendable (String) async -> Void)?
 
         public init(beforeCheck: (@Sendable (String) async -> Void)? = nil) {
@@ -229,7 +267,7 @@ public actor PhoneModelStore {
     /// Where the files come from. Nil is huggingface.co; a test hands in a loopback server.
     private let source: @Sendable () -> URL?
     private let spaceCheck: SpaceCheck
-    private let missingDrive: @Sendable (URL) -> String?
+    private let volumes: Volumes
     private let hooks: Hooks
 
     private var attempts: [String: Attempt] = [:]
@@ -240,8 +278,8 @@ public actor PhoneModelStore {
     /// the removal to finish rather than fetching into a folder that is being emptied.
     private var removals: [String: Task<Void, Never>] = [:]
     private var relocation: Relocation?
-    /// Why a former folder still holds files, by its path, from the last relocation.
-    private var leftBehind: [String: String] = [:]
+    /// Former folders whose last move could not finish, by path.
+    private var blocked: [String: BlockedMove] = [:]
     private var memory: Memory?
     private var memoryURL: URL?
 
@@ -250,8 +288,8 @@ public actor PhoneModelStore {
         fallback: URL = PhoneModelStore.fallbackRoot,
         stateFile: @escaping @Sendable () -> URL = { PhoneModelStore.defaultStateFile },
         source: @escaping @Sendable () -> URL? = { nil },
-        spaceCheck: @escaping SpaceCheck = PhoneModelStore.checkRoom(needed:at:),
-        missingDrive: @escaping @Sendable (URL) -> String? = PhoneModelStore.missingDrive(for:),
+        spaceCheck: SpaceCheck? = nil,
+        volumes: Volumes = .live,
         hooks: Hooks = Hooks()
     ) {
         // An entry whose file name could climb out of the folder is not an entry at all.
@@ -268,8 +306,14 @@ public actor PhoneModelStore {
         self.fallback = fallback.standardizedFileURL
         self.stateFile = stateFile
         self.source = source
-        self.spaceCheck = spaceCheck
-        self.missingDrive = missingDrive
+        self.volumes = volumes
+        // The room check reads free space through `volumes`, so a test that swaps the
+        // reading swaps it for every check this store makes.
+        self.spaceCheck = spaceCheck ?? { needed, folder in
+            try PhoneModelStore.checkRoom(
+                needed: needed, at: folder, capacity: volumes.availableCapacity
+            )
+        }
         self.hooks = hooks
     }
 
@@ -281,7 +325,7 @@ public actor PhoneModelStore {
 
     /// Where a library setting puts the phone models, by this store's rules.
     public nonisolated func place(forLibrary library: URL?) -> PhoneModelPlace {
-        Self.place(forLibrary: library, fallback: fallback, missingDrive: missingDrive)
+        Self.place(forLibrary: library, fallback: fallback, missingDrive: volumes.missingDrive)
     }
 
     // MARK: - Reading
@@ -313,9 +357,15 @@ public actor PhoneModelStore {
             )
         }
         if isVerified(entry, in: root) { return .ready }
+        // Its move to this folder could not finish: said, with the reason, until something
+        // that stopped it changes.
+        if let failure = blocked.values.lazy.compactMap({ $0.failures[id] }).first {
+            return .failed(failure)
+        }
         let partial = partialBytes(of: entry, in: root)
         if var failure = failures[id] {
-            failure.bytesOnDisk = partial
+            failure.bytesOnDisk = FileManager.default
+                .fileExists(atPath: fileURL(for: entry, in: root).path) ? entry.sizeBytes : partial
             return .failed(failure)
         }
         // The whole file is here and nobody has checked it since it last changed — a
@@ -360,7 +410,7 @@ public actor PhoneModelStore {
     public func notices(library: URL?) -> [Notice] {
         guard case .folder(let root) = settle(library) else { return [] }
         return rememberedFormerFolders().compactMap { folder in
-            if let drive = missingDrive(folder) {
+            if let drive = volumes.missingDrive(folder) {
                 return Notice(
                     folder: folder,
                     reason: "Phone models are still in this folder, on the drive “\(drive)”, "
@@ -368,13 +418,16 @@ public actor PhoneModelStore {
                         + "it is."
                 )
             }
+            if let stuck = blocked[folder.path] {
+                return Notice(
+                    folder: folder,
+                    reason: stuck.failures.values.map(\.reason).sorted().joined(separator: " ")
+                )
+            }
             if relocation != nil {
                 return Notice(
                     folder: folder, reason: "Moving phone models from here to \(root.path)."
                 )
-            }
-            if let reason = leftBehind[folder.path] {
-                return Notice(folder: folder, reason: reason)
             }
             return nil
         }
@@ -413,7 +466,8 @@ public actor PhoneModelStore {
     ///
     /// Idempotent in both directions: a ready model is not fetched again, and a download in
     /// flight is not restarted or doubled. A failed one is retried — resuming from what is
-    /// on disk when the failure left anything there.
+    /// on disk when the failure left anything there, and trying the move again for a model
+    /// whose move to a new library folder could not finish.
     ///
     /// `verify` hashes a ready model's file again before it is served. A phone whose
     /// download did not hash to the pin asks for this once, then fetches from zero: if the
@@ -423,7 +477,20 @@ public actor PhoneModelStore {
         id: String, library: URL?, verify: Bool = false
     ) async throws -> PrepareOutcome {
         guard let entry = entries[id] else { throw StoreError.unknownModel(id) }
-        var root = try settledRoot(library)
+        var root = try settledRoot(library, startingMoves: false)
+        // Asking for a model whose move could not finish is asking to try the move again —
+        // unless room was the problem and there still is none, which is said now.
+        if let (folder, stuck) = blocked.first(where: { $0.value.failures[id] != nil }) {
+            if let needs = stuck.needs {
+                do {
+                    try spaceCheck(Bytes(needs), root)
+                } catch {
+                    throw StoreError.noSpace(stuck.failures[id] ?? Self.unmovable(entry))
+                }
+            }
+            blocked[folder] = nil
+        }
+        root = try settledRoot(library)
         while let removal = removals[id] {
             await finish(removal, of: id)
             root = try settledRoot(library)
@@ -542,46 +609,59 @@ public actor PhoneModelStore {
 
     // MARK: - Removing and stopping
 
-    /// Deletes the Mac's copy and anything partial, stopping a download in flight first.
-    /// Idempotent: removing a model that is not here succeeds and leaves it not here.
+    /// Deletes the Mac's copy and anything partial — here, and in any former folder the
+    /// library has left it in — stopping a download in flight first. Idempotent: removing a
+    /// model that is not here succeeds and leaves it not here.
+    ///
+    /// A move under way is waited for once, never again: whatever it managed, the files end
+    /// up in one of the folders deleted from. A copy in a former folder whose drive is not
+    /// connected is deleted when it is, rather than moved here.
     public func remove(id: String, library: URL?) async throws {
         guard let entry = entries[id] else { throw StoreError.unknownModel(id) }
-        var root = try settledRoot(library)
-        // A model on its way to a new folder is removed from where it lands.
-        while let relocation {
-            await relocation.task.value
-            root = try settledRoot(library)
-        }
+        let root = try settledRoot(library, startingMoves: false)
         if let removal = removals[id] {
             await finish(removal, of: id)
             return
         }
-        // Out of the table before it is cancelled, so the attempt's own ending sees it is
-        // no longer current and records nothing.
+        // Claimed before anything is awaited: a move that is running leaves this model
+        // where it is, a prepare waits, and nothing restarts it. Out of the table before it
+        // is cancelled, so the attempt's own ending sees it is no longer current.
         let attempt = attempts.removeValue(forKey: id)
         failures[id] = nil
-        var doomed = [
-            fileURL(for: entry, in: root), partialURL(for: entry, in: root),
-            markerURL(for: entry, in: root),
-        ]
-        if let other = attempt?.root, other != root {
-            doomed += [
-                fileURL(for: entry, in: other), partialURL(for: entry, in: other),
-                markerURL(for: entry, in: other),
-            ]
+        relocation?.wanted.remove(id)
+        for folder in Array(blocked.keys) {
+            blocked[folder]?.failures[id] = nil
+            if blocked[folder]?.failures.isEmpty == true { blocked[folder] = nil }
         }
+        var folders = [root]
+        var memory = loadMemory()
+        for former in rememberedFormerFolders() {
+            if volumes.missingDrive(former) == nil {
+                folders.append(former)
+            } else if memory.discarded[former.path, default: []].contains(id) == false {
+                memory.discarded[former.path, default: []].append(id)
+            }
+        }
+        saveMemory(memory)
+        if let other = attempt?.root, !folders.contains(other) { folders.append(other) }
+        let doomed = folders.flatMap {
+            [fileURL(for: entry, in: $0), partialURL(for: entry, in: $0), markerURL(for: entry, in: $0)]
+        }
+        let moving = relocation?.task
         let removal = Task {
             attempt?.task.cancel()
             // Waited for, not just cancelled: a fetch that was checking when the cancel
             // arrived would otherwise finish its work after the delete below.
             await attempt?.task.value
+            await moving?.value
             for url in doomed { try? FileManager.default.removeItem(at: url) }
         }
         removals[id] = removal
         await finish(removal, of: id)
     }
 
-    /// Stops a download in flight and keeps what arrived, so the next prepare resumes it.
+    /// Stops a download in flight and keeps what arrived, so the next prepare resumes it —
+    /// or, stopped while the Mac was checking a whole file, checks it.
     public func cancel(id: String) async {
         guard let entry = entries[id] else { return }
         relocation?.wanted.remove(id)
@@ -589,13 +669,19 @@ public actor PhoneModelStore {
         attempt.task.cancel()
         await attempt.task.value
         let kept = partialBytes(of: entry, in: attempt.root)
+        let whole = kept == entry.sizeBytes
+            || FileManager.default.fileExists(atPath: fileURL(for: entry, in: attempt.root).path)
+        let reason = if whole {
+            "Stopped while checking \(entry.label). The Mac has the whole file; prepare it "
+                + "again to check it — nothing needs downloading."
+        } else if kept > 0 {
+            "Stopped at \(Self.percent(kept, of: entry))% of \(entry.label). The Mac kept "
+                + "what arrived; prepare it again to resume."
+        } else {
+            "Stopped before any of \(entry.label) arrived. Prepare it again to start."
+        }
         failures[id] = Failure(
-            kind: .interrupted,
-            reason: kept > 0
-                ? "Stopped at \(Self.percent(kept, of: entry))% of \(entry.label). The Mac kept "
-                    + "what arrived; prepare it again to resume."
-                : "Stopped before any of \(entry.label) arrived. Prepare it again to start.",
-            bytesOnDisk: kept
+            kind: .interrupted, reason: reason, bytesOnDisk: whole ? entry.sizeBytes : kept
         )
     }
 
@@ -606,21 +692,21 @@ public actor PhoneModelStore {
         case driveMissing(String)
     }
 
-    private func settledRoot(_ library: URL?) throws -> URL {
-        switch settle(library) {
+    private func settledRoot(_ library: URL?, startingMoves: Bool = true) throws -> URL {
+        switch settle(library, startingMoves: startingMoves) {
         case .folder(let root): return root
         case .driveMissing(let drive): throw StoreError.driveMissing(Self.driveMissingSentence(drive))
         }
     }
 
-    /// Where the library says to be now, remembering where the store was until now — and
-    /// starting to move whatever is left in a former folder.
+    /// Where the library says to be now, remembering where the store was until now — and,
+    /// unless told not to, starting to move whatever is left in a former folder.
     ///
     /// Every public call comes through here first, so a library moved in Settings is
     /// noticed by the next thing that asks: the Settings row, a phone's request, the
     /// progress watcher. The folder the store last used is written to a small state file,
     /// so the move survives a relaunch in between.
-    private func settle(_ library: URL?) -> Settled {
+    private func settle(_ library: URL?, startingMoves: Bool = true) -> Settled {
         switch place(forLibrary: library) {
         case .driveMissing(let drive):
             return .driveMissing(drive)
@@ -635,7 +721,7 @@ public actor PhoneModelStore {
                 memory.former.removeAll { $0 == path }
                 saveMemory(memory)
             }
-            if relocation == nil { startRelocationIfNeeded(to: root) }
+            if startingMoves, relocation == nil { startRelocationIfNeeded(to: root) }
             return .folder(root)
         }
     }
@@ -644,20 +730,31 @@ public actor PhoneModelStore {
         loadMemory().former.map { URL(fileURLWithPath: $0, isDirectory: true) }
     }
 
+    /// Starts moving what former folders still hold — except from a folder whose last move
+    /// could not finish, until something that stopped it has changed.
     private func startRelocationIfNeeded(to root: URL) {
         var sources: [URL] = []
         var memory = loadMemory()
         for folder in rememberedFormerFolders() {
             // Out of reach for now. Kept in memory, and reported, until the drive is back.
-            if missingDrive(folder) != nil { continue }
-            if holdsPhoneModels(folder) {
-                sources.append(folder)
-            } else {
+            if volumes.missingDrive(folder) != nil { continue }
+            // Models removed while this folder was out of reach go now, rather than here.
+            for id in memory.discarded.removeValue(forKey: folder.path) ?? [] {
+                guard let entry = entries[id] else { continue }
+                deleteFiles(of: entry, in: folder)
+            }
+            guard holdsPhoneModels(folder) else {
                 // Nothing of ours there any more: forget it, and tidy what is ours.
                 tidy(folder)
                 memory.former.removeAll { $0 == folder.path }
-                leftBehind[folder.path] = nil
+                blocked[folder.path] = nil
+                continue
             }
+            if let stuck = blocked[folder.path] {
+                guard shouldRetry(stuck, into: root) else { continue }
+                blocked[folder.path] = nil
+            }
+            sources.append(folder)
         }
         saveMemory(memory)
         let strays = attempts.filter { $0.value.root != root }
@@ -665,17 +762,40 @@ public actor PhoneModelStore {
 
         var involved = Set(strays.keys)
         for source in sources {
-            for entry in catalog where hasFiles(entry, in: source) { involved.insert(entry.id) }
+            for entry in catalog where hasFiles(entry, in: source) && removals[entry.id] == nil {
+                involved.insert(entry.id)
+            }
         }
+        moveAttempts += 1
         let task = Task { await self.relocate(to: root, from: sources) }
         relocation = Relocation(task: task, involved: involved, wanted: [], progress: [:])
     }
 
+    /// Whether a move that could not finish is worth trying again: the library has moved
+    /// on, a different drive is where it was going, or — when room was the problem — there
+    /// is room now. Anything else would fail the same way, on every read.
+    private func shouldRetry(_ stuck: BlockedMove, into root: URL) -> Bool {
+        if stuck.target != root.path { return true }
+        if volumes.volumeID(root) != stuck.targetVolume { return true }
+        if let needs = stuck.needs, (try? spaceCheck(Bytes(needs), root)) != nil { return true }
+        return false
+    }
+
+    /// Tries every move that could not finish once more — the Settings page's Try Again.
+    public func retryMoves(library: URL?) {
+        blocked.removeAll()
+        _ = settle(library)
+    }
+
+    /// How many moves have been started. Read by the tests that prove a move that cannot
+    /// finish is not started again on every read.
+    private(set) var moveAttempts = 0
+
     /// Moves every phone model out of `sources` into `root`: a fetch in flight stops and
     /// resumes here, a finished file comes across and is checked again, and a copy already
     /// here wins over the one being moved once it has been checked. What cannot be moved —
-    /// no room on the new drive, or a failure — stays where it is and is reported, never
-    /// left behind in silence.
+    /// no room on the new drive, or a failure — stays where it is, marker and all, and its
+    /// model reads as failed with the reason until something changes.
     private func relocate(to root: URL, from sources: [URL]) async {
         for (id, attempt) in attempts where attempt.root != root {
             attempts[id] = nil
@@ -684,61 +804,77 @@ public actor PhoneModelStore {
             await attempt.task.value
         }
         for source in sources {
-            var problems: [String] = []
+            var stuck: [String: Failure] = [:]
+            var needs: Int64 = 0
             for entry in catalog where hasFiles(entry, in: source) {
+                // A model being removed stays where it is, for the removal to delete.
+                guard removals[entry.id] == nil else { continue }
                 let progress = ProgressBox(received: 0, stage: .moving)
                 relocation?.progress[entry.id] = progress
-                if let problem = await move(entry, from: source, to: root, progress: progress) {
-                    problems.append(problem)
+                if case .blocked(let failure, let bytes) = await move(
+                    entry, from: source, to: root, progress: progress
+                ) {
+                    stuck[entry.id] = failure
+                    needs += bytes ?? 0
+                    // Its copy is in the old folder: nothing is fetched afresh behind it.
+                    relocation?.wanted.remove(entry.id)
                 }
                 relocation?.progress[entry.id] = nil
                 if relocation?.wanted.contains(entry.id) != true {
                     relocation?.involved.remove(entry.id)
                 }
             }
-            if problems.isEmpty {
+            if stuck.isEmpty {
                 tidy(source)
                 var memory = loadMemory()
                 memory.former.removeAll { $0 == source.path }
                 saveMemory(memory)
-                leftBehind[source.path] = nil
+                blocked[source.path] = nil
             } else {
-                leftBehind[source.path] = problems.joined(separator: " ")
+                blocked[source.path] = BlockedMove(
+                    target: root.path, targetVolume: volumes.volumeID(root),
+                    needs: needs > 0 ? needs : nil, failures: stuck
+                )
             }
         }
         let wanted = relocation?.wanted ?? []
         relocation = nil
         for id in wanted.sorted() {
-            guard let entry = entries[id], attempts[id] == nil, !isVerified(entry, in: root)
+            guard let entry = entries[id], attempts[id] == nil, removals[id] == nil,
+                  !isVerified(entry, in: root)
             else { continue }
             _ = try? begin(entry, in: root)
         }
     }
 
-    /// One model's files from a former folder to the current one. Nil when that went
-    /// well; otherwise the sentence saying why its files are still where they were.
+    private enum MoveOutcome {
+        case moved
+        /// Still where it was, marker and all, and why — with the bytes it needed on the new
+        /// drive when that was the reason.
+        case blocked(Failure, needs: Int64?)
+    }
+
+    /// One model's files from a former folder to the current one.
     private func move(
         _ entry: PhoneModelEntry, from source: URL, to root: URL, progress: ProgressBox
-    ) async -> String? {
+    ) async -> MoveOutcome {
         let manager = FileManager.default
         let oldFile = fileURL(for: entry, in: source)
         let oldPart = partialURL(for: entry, in: source)
+        let oldMarker = markerURL(for: entry, in: source)
         let newFile = fileURL(for: entry, in: root)
         let newPart = partialURL(for: entry, in: root)
         do {
             try manager.createDirectory(at: root, withIntermediateDirectories: true)
         } catch {
-            return "The Mac could not create the phone models folder in the model library, "
-                + "so \(entry.label) stayed where it was."
+            return .blocked(Self.unmovable(entry), needs: nil)
         }
-        defer { try? manager.removeItem(at: markerURL(for: entry, in: source)) }
 
         // A copy already here, checked, beats moving another one over it.
         if manager.fileExists(atPath: newFile.path) {
             if (try? await seal(entry, in: root, progress: progress)) == true {
-                try? manager.removeItem(at: oldFile)
-                try? manager.removeItem(at: oldPart)
-                return nil
+                for url in [oldFile, oldPart, oldMarker] { try? manager.removeItem(at: url) }
+                return .moved
             }
             try? manager.removeItem(at: newFile)
         }
@@ -747,25 +883,28 @@ public actor PhoneModelStore {
         if moving == oldPart, manager.fileExists(atPath: newPart.path) {
             // The partial already here is the one to resume.
             try? manager.removeItem(at: oldPart)
-            return nil
+            return .moved
         }
         let bytes = Self.size(of: moving) ?? 0
-        if !Self.sameVolume(source, root) {
+        // A rename costs nothing; a copy to another drive costs the whole file there.
+        let sameDrive = volumes.volumeID(source).map { $0 == volumes.volumeID(root) } ?? false
+        if !sameDrive {
             do {
                 try spaceCheck(Bytes(bytes), root)
             } catch {
-                return "There was not enough space on the model library's drive to move "
-                    + "\(entry.label) there, so it is still in the old folder. Free some space "
-                    + "on that drive, then open this page again."
+                return .blocked(Self.noRoomToMove(entry, error: error), needs: bytes)
             }
         }
         progress.begin(.moving, at: 0)
         do {
             try await Self.offActor { try FileManager.default.moveItem(at: moving, to: target) }
         } catch {
-            return "The Mac could not move \(entry.label) from the old folder."
+            // Nothing moved, so its marker stays true of the file it describes.
+            return .blocked(Self.unmovable(entry), needs: nil)
         }
         if moving == oldFile {
+            // The file is here now: its old marker describes nothing.
+            try? manager.removeItem(at: oldMarker)
             try? manager.removeItem(at: oldPart)
             try? manager.removeItem(at: newPart)
             // Moved bytes are checked again before anything is served from here. A copy
@@ -774,7 +913,44 @@ public actor PhoneModelStore {
                 try? manager.removeItem(at: newFile)
             }
         }
-        return nil
+        return .moved
+    }
+
+    /// What a model whose move could not finish is told. Fixed words, no paths.
+    static func unmovable(_ entry: PhoneModelEntry) -> Failure {
+        Failure(
+            kind: .other,
+            reason: "The Mac could not move \(entry.label) into the \(folderName) folder in "
+                + "the model library, so it is still in the folder the library used to be in. "
+                + "Check that the folder can be written to, then prepare it again to try "
+                + "once more.",
+            bytesOnDisk: 0
+        )
+    }
+
+    static func noRoomToMove(_ entry: PhoneModelEntry, error: any Error) -> Failure {
+        guard case ModelDownloader.DownloadError.insufficientDiskSpace(let needed, let available)
+            = error
+        else {
+            return Failure(
+                kind: .diskFull,
+                reason: "There is not enough space on the model library's drive to move "
+                    + "\(entry.label) there, so it is still in its old folder. It moves by "
+                    + "itself once there is room.",
+                bytesOnDisk: 0
+            )
+        }
+        let reserve = ModelDownloader.diskReserve
+        let shortfall = Bytes(max(0, needed.rawValue + reserve.rawValue - available.rawValue))
+        return Failure(
+            kind: .diskFull,
+            reason: "There is not enough space on the model library's drive to move "
+                + "\(entry.label) there: it needs \(needed.formatted), and "
+                + "\(available.formatted) is free, of which \(reserve.formatted) is kept free. "
+                + "It is still in its old folder, and moves by itself once about "
+                + "\(shortfall.formatted) more is free.",
+            bytesOnDisk: 0
+        )
     }
 
     private func hasFiles(_ entry: PhoneModelEntry, in folder: URL) -> Bool {
@@ -786,44 +962,132 @@ public actor PhoneModelStore {
         catalog.contains { hasFiles($0, in: folder) }
     }
 
+    private func deleteFiles(of entry: PhoneModelEntry, in folder: URL) {
+        for url in [
+            fileURL(for: entry, in: folder), partialURL(for: entry, in: folder),
+            markerURL(for: entry, in: folder),
+        ] { try? FileManager.default.removeItem(at: url) }
+    }
+
     /// Removes this store's markers from a folder it has left, and the folder itself if
-    /// nothing else is in it. Anything the owner put there stays.
+    /// nothing else is in it — and only ever a folder called `Phone Models`. Anything the
+    /// owner put there stays, and no other folder is touched, whatever the state file says.
     private func tidy(_ folder: URL) {
+        guard folder.lastPathComponent == Self.folderName else { return }
         let manager = FileManager.default
         for entry in catalog { try? manager.removeItem(at: markerURL(for: entry, in: folder)) }
         let left = (try? manager.contentsOfDirectory(atPath: folder.path)) ?? []
         if left.allSatisfy({ $0 == ".DS_Store" }) { try? manager.removeItem(at: folder) }
     }
 
-    private static func sameVolume(_ a: URL, _ b: URL) -> Bool {
-        func device(_ url: URL) -> dev_t? {
-            var probe = url
-            while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
-                probe = probe.deletingLastPathComponent()
-            }
-            var info = stat()
-            return stat(probe.path, &info) == 0 ? info.st_dev : nil
-        }
-        guard let left = device(a), let right = device(b) else { return false }
-        return left == right
+    /// A move out of a former folder that could not finish, and what it would take to try
+    /// again. It is not retried until one of those changes — the library, the drive it is
+    /// going to, room on that drive, or somebody asking — so a move that cannot happen fails
+    /// once and says why, instead of starting over on every read.
+    private struct BlockedMove {
+        /// The folder it was going to, and the volume that folder was on.
+        var target: String
+        var targetVolume: Int64?
+        /// The bytes it needed there, when room was the problem.
+        var needs: Int64?
+        /// What each model that could not move is told.
+        var failures: [String: Failure]
     }
+
+    /// The most former folders the state file keeps. A library moved more often than this
+    /// without its drives ever being there to move from is not a case worth an unbounded
+    /// file; the oldest are dropped, with a log line saying so.
+    static let maximumFormerFolders = 8
 
     private struct Memory: Codable, Equatable {
         var current: String?
         var former: [String] = []
+        /// Models removed while their former folder was out of reach, by that folder:
+        /// deleted there when it is back, rather than moved here.
+        var discarded: [String: [String]] = [:]
+
+        init() {}
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            current = try container.decodeIfPresent(String.self, forKey: .current)
+            former = try container.decodeIfPresent([String].self, forKey: .former) ?? []
+            discarded = try container.decodeIfPresent(
+                [String: [String]].self, forKey: .discarded
+            ) ?? [:]
+        }
+    }
+
+    /// Why the state file was not taken at its word, most recent last. Logged too; kept
+    /// here for the tests, which cannot read the log.
+    private(set) var memoryWarnings: [String] = []
+
+    private func warn(_ message: String) {
+        memoryWarnings.append(message)
+        Self.log.error("\(message, privacy: .public)")
     }
 
     private func loadMemory() -> Memory {
         let url = stateFile()
         if let memory, memoryURL == url { return memory }
-        let loaded = (try? Data(contentsOf: url))
-            .flatMap { try? JSONDecoder().decode(Memory.self, from: $0) } ?? Memory()
+        var loaded = Memory()
+        if let data = try? Data(contentsOf: url) {
+            if let decoded = try? JSONDecoder().decode(Memory.self, from: data) {
+                loaded = sanitized(decoded)
+            } else {
+                warn("The phone models' state file could not be read, so where they were kept "
+                    + "before is not known; starting from where the model library is now.")
+            }
+        }
         memory = loaded
         memoryURL = url
         return loaded
     }
 
+    /// Only what this store would have written: absolute paths to folders called
+    /// `Phone Models`, no repeats, at most `maximumFormerFolders` of them. Anything else is
+    /// dropped with a log line — a state file is not a list of folders to move or delete.
+    private func sanitized(_ raw: Memory) -> Memory {
+        func acceptable(_ path: String) -> Bool {
+            path.hasPrefix("/")
+                && URL(fileURLWithPath: path).lastPathComponent == Self.folderName
+        }
+        var clean = Memory()
+        if let current = raw.current {
+            if acceptable(current) {
+                clean.current = current
+            } else {
+                warn("The phone models' state file named a current folder that is not a "
+                    + "\(Self.folderName) folder; it was ignored.")
+            }
+        }
+        for path in raw.former {
+            guard acceptable(path) else {
+                warn("The phone models' state file named a former folder that is not a "
+                    + "\(Self.folderName) folder; it was ignored and nothing in it touched.")
+                continue
+            }
+            if path != clean.current, !clean.former.contains(path) { clean.former.append(path) }
+        }
+        clean.former = capped(clean.former)
+        for (path, ids) in raw.discarded where clean.former.contains(path) {
+            let known = ids.filter { entries[$0] != nil }
+            if !known.isEmpty { clean.discarded[path] = known }
+        }
+        return clean
+    }
+
+    private func capped(_ former: [String]) -> [String] {
+        guard former.count > Self.maximumFormerFolders else { return former }
+        warn("The phone models had been left in \(former.count) former folders; only the "
+            + "\(Self.maximumFormerFolders) most recent are still looked after.")
+        return Array(former.suffix(Self.maximumFormerFolders))
+    }
+
     private func saveMemory(_ fresh: Memory) {
+        var fresh = fresh
+        fresh.former = capped(fresh.former)
+        fresh.discarded = fresh.discarded.filter { fresh.former.contains($0.key) }
         let url = stateFile()
         guard fresh != memory || memoryURL != url else { return }
         memory = fresh
@@ -860,22 +1124,43 @@ public actor PhoneModelStore {
 
     // MARK: - Room
 
-    /// The same rule, and the same reserve, as the Mac's own model downloads — asked of the
-    /// drive the folder is on. Important-usage capacity counts what macOS can free up, and
-    /// is what the Mac's own downloads use; a volume that does not report it is measured by
-    /// its plain free space instead, never waved through.
-    public static func checkRoom(needed: Bytes, at folder: URL) throws {
-        var probe = folder
+    /// The nearest part of a path that exists — where a volume can be asked about a folder
+    /// that has not been made yet. Asked only after the folder's drive has been found
+    /// connected, so it never walks off the drive onto the startup disk.
+    static func nearestExisting(_ url: URL) -> URL {
+        var probe = url
         while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
             probe = probe.deletingLastPathComponent()
         }
-        let values = try? probe.resourceValues(forKeys: [
+        return probe
+    }
+
+    /// Free bytes on the volume an existing path is on. Important-usage capacity counts what
+    /// macOS can free up, and is what the Mac's own downloads use; a volume that does not
+    /// report it is measured by its plain free space instead, never waved through.
+    public static func availableCapacity(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [
             .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
         ])
-        let important = values?.volumeAvailableCapacityForImportantUsage.flatMap { $0 > 0 ? $0 : nil }
-        guard let available = important ?? values?.volumeAvailableCapacity.map(Int64.init) else {
-            return
+        if let important = values?.volumeAvailableCapacityForImportantUsage, important > 0 {
+            return important
         }
+        return values?.volumeAvailableCapacity.map(Int64.init)
+    }
+
+    /// Which volume a path is on (its device number), asked of its nearest existing part.
+    public static func volumeID(of url: URL) -> Int64? {
+        var info = stat()
+        return stat(nearestExisting(url).path, &info) == 0 ? Int64(info.st_dev) : nil
+    }
+
+    /// The same rule, and the same reserve, as the Mac's own model downloads, asked of the
+    /// drive `folder` is on: `needed` fits only if the reserve still does beside it.
+    public static func checkRoom(
+        needed: Bytes, at folder: URL,
+        capacity: (URL) -> Int64? = PhoneModelStore.availableCapacity(at:)
+    ) throws {
+        guard let available = capacity(nearestExisting(folder)) else { return }
         guard Bytes(available) > needed + ModelDownloader.diskReserve else {
             throw ModelDownloader.DownloadError.insufficientDiskSpace(
                 needed: needed, available: Bytes(available)
@@ -938,14 +1223,12 @@ public actor PhoneModelStore {
         _ entry: PhoneModelEntry, in root: URL, progress: ProgressBox?
     ) async throws -> Bool {
         let file = fileURL(for: entry, in: root)
-        guard Fingerprint.of(file)?.size == entry.sizeBytes else { return false }
-        progress?.begin(.checking, at: 0)
-        await hooks.beforeCheck?(entry.id)
-        try Task.checkCancellation()
-        // Taken after the pause, so the fingerprint is of the file as it is hashed.
         guard let before = Fingerprint.of(file), before.size == entry.sizeBytes else {
             return false
         }
+        progress?.begin(.checking, at: 0)
+        await hooks.beforeCheck?(entry.id)
+        try Task.checkCancellation()
         let digest = try await Self.digest(of: file, progress: progress)
         try Task.checkCancellation()
         guard digest == entry.sha256, let after = Fingerprint.of(file), after == before else {

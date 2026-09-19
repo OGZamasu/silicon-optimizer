@@ -540,9 +540,13 @@ The first word is an estimate, not a measurement: 300 tokens divided by the prom
 measured at the recommended prompt threads (122.9 and 92.6 tokens/s), rounded *up* to a tenth
 of a second for both. Each entry also tells the phone how to run it — threads for reading the
 prompt and for writing (6/4 for Qwen, 4/6 for Gemma), a 4,096-token context, thinking off in
-the chat template — and how much free memory to want first: 3.4 GB and 5.6 GB. That is the
-measured peak (2,467 MiB and 4,136 MiB, taken at no more than a 640-token context), grown by
-what the KV cache and attention scratch need at 4,096 tokens, with a quarter again on top.
+the chat template — and how much free memory to see before loading, as a gate: 3.1 GB and
+4.7 GB. That is the weights (1.30 and 3.35 GB) as they are, plus the rest of the measured
+peak — 2,467 MiB and 4,136 MiB in all, taken at no more than a 640-token context — grown by
+what the KV cache and attention scratch need at 4,096 tokens, with a quarter again on top of
+that part. The weights get no margin because they are memory-mapped from the file: on a busy
+phone Android drops those pages and reads them back, so padding them would refuse a model
+that runs.
 
 **Getting one onto the phone.** `GET /ondevice/models` lists both, pinned, with the state of
 the Mac's copy: `absent`, `downloading`, `ready` or `failed`. While it is downloading, `stage`
@@ -556,7 +560,8 @@ with the numbers — by the same rule as every other download here: 10.7 GB of t
 files go to stays free. A download cut off partway keeps what arrived and resumes from there;
 one whose bytes do not match the pinned SHA-256 is deleted, not kept. The Mac does not wait
 for a network it does not have: offline, the fetch fails at once as a resumable `network`
-failure. It sends no token and keeps no cookies, and it follows a redirect only to Hugging
+failure, and a Hub that takes the connection and never answers is given up on after the
+60-second request timeout. It sends no token and keeps no cookies, and it follows a redirect only to Hugging
 Face over HTTPS. Progress reaches the phone on `/events` as `download` frames whose `id` is
 `ondevice:` and the model's id — sent only to full-control devices and this Mac — with a
 `stage` while it is in progress; the last frame is `fraction: 1` with no stage, or the
@@ -575,7 +580,7 @@ the file is not the one it started on — discard the partial and keep the whole
 end the phone checks the digest; if it does not match, it calls
 `POST /ondevice/models/{id}/prepare?verify=1` **once**, which has the Mac hash its own copy
 again before serving it (and fetch it afresh if that copy was the bad one), then downloads
-from zero.
+from zero. `verify` takes `1` or `true`, or `0` or `false` for an ordinary prepare.
 
 "Ready" means the digest matched, not that a file of the right size is sitting there. The
 Mac hashes every file itself — after a download, a finished `.part` it finds, a copy put in
@@ -584,9 +589,10 @@ file's device, inode, size, modification time and change time. The change time c
 back by hand, so a file edited in place reads as changed even with its date restored, and is
 hashed again before it is served.
 
-**Where they live.** In a **`Phone Models`** folder inside your model library — on this
-owner's Mac, `/Volumes/T9/Local Models/Phone Models` — with a `.part` file beside a model
-while it downloads and a hidden `.<file>.verified` marker once it is checked. Only when no
+**Where they live.** In a **`Phone Models`** folder inside your model library — for a library
+at `/Volumes/External/Local Models`, `/Volumes/External/Local Models/Phone Models` — with a
+`.part` file beside a model while it downloads and a hidden `.<file>.verified` marker once it
+is checked. Only when no
 model library folder is set do they go to
 `~/Library/Application Support/SiliconOptimizer/Phone Models`. The folder is worked out on
 every request from the setting as it is then:
@@ -600,9 +606,17 @@ every request from the setting as it is then:
   already in the new folder is checked and kept. The folder the store last used is written to
   `~/Library/Application Support/SiliconOptimizer/phone-models.json`, a few hundred bytes, so
   this works across a relaunch too.
-- **The old folder can't be moved from** — its drive is unplugged, or the new drive is full:
-  the files stay where they are, Settings → Silicon Buddy says which folder and why, and they
-  move the next time it is possible. Nothing is left behind silently.
+- **The old folder's drive is unplugged:** the files stay where they are, Settings → Silicon
+  Buddy says which folder and why, and they move when the drive is back.
+- **A move can't finish** — the new drive has no room for the file and the 10.7 GB reserve,
+  or the new folder cannot be written to: it is tried once, not on every request. The
+  models read `failed` with the reason (`diskFull` or `other`), Settings says the same beside
+  the old folder, and the old copy is left exactly as it was, marker and all. It is tried
+  again when something changes — the library folder, the drive it is going to, room on that
+  drive (a move that was short of space happens by itself once there is room) — or when
+  asked: a prepare for that model, or **Try Again** in Settings. Removing the model deletes
+  it from both folders, and waits for a move in progress only once. Nothing is left behind
+  silently.
 
 They are never in the Mac's model list, never in the catalogue, and never loaded here: the
 Mac only passes them along, and "Scan folder…" and importing a file refuse anything in a

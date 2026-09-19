@@ -97,6 +97,11 @@ public actor PhoneModelService {
         await store.notices(library: library)
     }
 
+    /// Tries every move that could not finish once more — the Settings page's Try Again.
+    public func retryMoves(library: URL?) async {
+        await store.retryMoves(library: library)
+    }
+
     static func routeError(_ error: PhoneModelStore.StoreError, id: String) -> PhoneModelError {
         switch error {
         case .unknownModel: .unknownModel(id)
@@ -295,6 +300,10 @@ public struct PhoneModelsAtLibrary: PhoneModelProvider {
 
     public func notices() async -> [PhoneModelStore.Notice] {
         await service.notices(library: await library())
+    }
+
+    public func retryMoves() async {
+        await service.retryMoves(library: await library())
     }
 
     /// Where the models are kept right now, or the drive that is missing.

@@ -48,8 +48,11 @@ public struct PhoneModelEntry: Sendable, Hashable, Identifiable {
         public var threadsPrompt: Int
         public var threadsGenerate: Int
         public var contextLength: Int
-        /// How much memory the phone should see free before it loads this: the peak it
-        /// measured, grown to `contextLength`, with a quarter again on top. See
+        /// How much memory the phone should see free before it loads this, as a gate: the
+        /// weights, plus everything else the model was measured using — grown to
+        /// `contextLength`, with a quarter again on top of that part only. The weights are
+        /// memory-mapped from the file, so Android can drop those pages and read them back
+        /// under pressure; padding them would refuse a model that runs. See
         /// `PhoneModelCatalog.minimumFreeMemory`.
         public var minFreeMemoryBytes: Int64
         /// Whether the chat template is rendered with thinking on. Off for both: a phone
@@ -179,9 +182,14 @@ public enum PhoneModelCatalog {
     /// The largest context the benchmark ran at: a 512-token prompt and 128 tokens written.
     static let benchmarkContextTokens = 640
 
-    /// The free memory to ask for before loading: the measured peak, plus what the KV cache
-    /// and the attention scratch grow by between the benchmark's context and `context`, with
-    /// a quarter again on top — rounded up to a tenth of a gigabyte.
+    /// The free memory to ask for before loading: the weights as they are, plus the rest of
+    /// the measured peak — llama.cpp's repacked copy of the weights, the KV cache, scratch —
+    /// grown from the benchmark's context to `context`, with a quarter again on top of that
+    /// part, rounded up to a tenth of a gigabyte.
+    ///
+    /// The margin is on the working memory alone because the weights are memory-mapped: on a
+    /// busy phone Android drops those pages and reads them back from the file, so a quarter
+    /// on 3 GB of them would turn the gate into a refusal of a model that runs.
     ///
     /// The growth is worked out from the model's own header rather than guessed: only the
     /// layers that attend over the whole context grow with it (Qwen3.5 attends fully in one
@@ -189,12 +197,14 @@ public enum PhoneModelCatalog {
     /// its last twenty layers' cache and keeps most of its own to a 512-token window), at
     /// f16 for the cache and f32 for a 512-token batch's attention scores.
     static func minimumFreeMemory(
-        peak: Int64, cacheBytesPerToken: Int64, attentionHeads: Int64, context: Int64
+        peak: Int64, weights: Int64, cacheBytesPerToken: Int64, attentionHeads: Int64,
+        context: Int64
     ) -> Int64 {
         let grownTokens = context - Int64(benchmarkContextTokens)
         let cache = cacheBytesPerToken * grownTokens
         let scores = attentionHeads * 512 * grownTokens * 4
-        let needed = Double(peak + cache + scores) * 1.25
+        let working = Double(peak - weights + cache + scores) * 1.25
+        let needed = Double(weights) + working
         return Int64((needed / 100_000_000).rounded(.up)) * 100_000_000
     }
 
@@ -213,8 +223,8 @@ public enum PhoneModelCatalog {
             threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
             // 2,467 MiB measured; six full-attention layers of 2 KV heads × 256, 8 heads.
             minFreeMemoryBytes: minimumFreeMemory(
-                peak: qwenPeak, cacheBytesPerToken: 6 * 2 * (256 + 256) * 2,
-                attentionHeads: 8, context: 4096
+                peak: qwenPeak, weights: 1_296_764_000,
+                cacheBytesPerToken: 6 * 2 * (256 + 256) * 2, attentionHeads: 8, context: 4096
             ),
             thinking: false
         ),
@@ -250,8 +260,8 @@ public enum PhoneModelCatalog {
             threadsPrompt: 4, threadsGenerate: 6, contextLength: 4096,
             // 4,136 MiB measured; three global layers of 1 KV head × 512 own a growing cache.
             minFreeMemoryBytes: minimumFreeMemory(
-                peak: gemmaPeak, cacheBytesPerToken: 3 * 1 * (512 + 512) * 2,
-                attentionHeads: 8, context: 4096
+                peak: gemmaPeak, weights: 3_349_516_256,
+                cacheBytesPerToken: 3 * 1 * (512 + 512) * 2, attentionHeads: 8, context: 4096
             ),
             thinking: false
         ),
