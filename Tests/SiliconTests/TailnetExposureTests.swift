@@ -246,6 +246,35 @@ struct TailnetExposureTests {
         }
     }
 
+    /// A pairing code admits the next device to this Mac, which is not a thing the swarm
+    /// has any business in: the shared secret is how other Silicon nodes borrow this Mac's
+    /// GPU, not how they hand out credentials for it. It opens neither route, on the
+    /// listener it is holding up or on loopback, where it is otherwise a credential.
+    @Test func theSwarmSecretMintsNoPairingCodes() async throws {
+        try await withExposedServer { fixture in
+            try await fixture.allowDevices(true)
+
+            for route in [("POST", "/buddy/invitations"), ("DELETE", "/buddy/invitations")] {
+                let (method, path) = route
+                #expect(try await fixture.peer.status(method, path, token: Bench.swarmToken)
+                    == 403, "\(method) \(path) with the swarm secret, on the shared listener")
+                // Loopback is not a second chance. The swarm token is a credential here —
+                // it is how this Mac's own tools reach the server — and it is still not
+                // this Mac's own token, which is what these two ask for.
+                #expect(try await fixture.local.status(method, path, token: Bench.swarmToken)
+                    == 403, "\(method) \(path) with the swarm secret, on loopback")
+                // And the control token, out on the shared listener, is nothing at all.
+                #expect(try await fixture.peer.status(method, path, token: fixture.local.token)
+                    == 401, "\(method) \(path) with the control token, on the shared listener")
+            }
+
+            // The Mac's own token on the Mac's own listener is the one way in.
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+        }
+    }
+
     /// The mirror image, and the reason the swarm toggle still means something once Silicon
     /// Buddy can raise the same socket by itself: "let other Silicon nodes reach this Mac",
     /// turned off, has to keep them out even while the listener is up for the phones.
