@@ -3781,8 +3781,18 @@ public final class AppModel {
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
 
+        // Registered so the buddy routes can tell a busy thread from a free one: a phone
+        // posting into the conversation this is answering would carry a half-written reply
+        // as context. See `AppModel+Buddy`.
+        let answering = conversations[index].id
+        BuddyGenerations.shared.begin(answering)
         generationTask = Task { [weak self] in
-            defer { Task { @MainActor in self?.generationTask = nil } }
+            defer {
+                Task { @MainActor in
+                    self?.generationTask = nil
+                    BuddyGenerations.shared.end(answering)
+                }
+            }
             do {
                 let stream = try await runtime.chat(request)
                 for try await event in stream {

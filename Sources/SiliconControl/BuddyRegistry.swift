@@ -259,9 +259,14 @@ public actor BuddyRegistry {
     // MARK: - Streams a device is holding
 
     /// Remembers how to end one stream, and hands back the ticket that releases it.
+    ///
+    /// Nil when the device is no longer one — revoked, or suspended, between the request
+    /// being authorized and its stream being registered. Without that answer a revocation
+    /// landing inside that window would find nothing to cancel and the stream would run on.
     public func registerStream(
         deviceID: String, cancel: @escaping @Sendable () -> Void
-    ) -> UUID {
+    ) -> UUID? {
+        guard isKnown(deviceID: deviceID) else { return nil }
         let ticket = UUID()
         liveStreams[deviceID, default: [:]][ticket] = cancel
         return ticket

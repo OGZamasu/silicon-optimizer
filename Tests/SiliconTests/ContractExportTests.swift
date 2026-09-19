@@ -28,9 +28,14 @@ struct ContractExportTests {
         }
     }
 
-    /// Pinned exactly, not spot-checked. A route added to `ControlServer` without a fixture
-    /// is a mobile client somebody has to write by hand, so it fails here first.
-    @Test func theRouteTableIsExactlyWhatTheServerAnswers() {
+    /// The routes the companion apps are generated from — which is not quite every route
+    /// the server answers, and the difference is listed rather than left implicit.
+    ///
+    /// This is two literals compared, so it catches a route added to `ControlServer` and
+    /// forgotten here only when someone updates one of them. It is a checklist with teeth,
+    /// not a derivation: the server has no enumerable route table to derive from, and
+    /// inventing one so a test could read it would be a worse trade than this comment.
+    @Test func theRouteTableIsTheOneTheAppsAreGeneratedFrom() {
         let names = Self.routes.map { "\($0.method) \($0.path)" }
         #expect(Set(names).count == names.count)
         #expect(Set(names) == [
@@ -47,6 +52,14 @@ struct ContractExportTests {
             "GET /video/models", "GET /video/queue", "POST /video/queue",
             "POST /video/queue/control", "POST /video/generate",
         ])
+        // Deliberately absent, and a phone must never be told to use them: the overlay is
+        // an OBS browser source, which cannot set headers and so carries its token in the
+        // URL. It is read-only and serves the character on screen.
+        #expect(Self.excludedRoutes == [
+            "GET /overlay", "GET /overlay/state", "GET /overlay/portrait",
+            "GET /overlay/portrait-eyes", "GET /overlay/portrait-open",
+        ])
+        #expect(Set(names).isDisjoint(with: Self.excludedRoutes))
         #expect(Self.routes.filter(\.isStream).count == 3)
         #expect(Self.routes.allSatisfy { !$0.summary.isEmpty })
         // Every route says what it answers when it says no, so a generated client has the
@@ -55,6 +68,28 @@ struct ContractExportTests {
         // separate "the app is not running" from "bad token", so it has no failure mode.
         #expect(Self.routes.allSatisfy { $0.path == "/health" || !$0.errors.isEmpty })
         #expect(Self.routes.first { $0.path == "/health" }?.errors.isEmpty == true)
+
+        func errors(_ method: String, _ path: String) -> [Int: String] {
+            Self.routes.first { $0.method == method && $0.path == path }?.errors ?? [:]
+        }
+        // Authenticated routes all carry the two framing refusals and a 401.
+        for route in Self.routes where route.auth != "none" {
+            #expect(route.errors[401] != nil && route.errors[411] != nil
+                && route.errors[413] != nil, "\(route.method) \(route.path)")
+            // And a route with a body can always be sent one it cannot read.
+            #expect((route.request != nil) == (route.errors[400] != nil)
+                || route.errors[400] != nil, "\(route.method) \(route.path)")
+        }
+        #expect(errors("GET", "/recommend")[404] != nil)
+        #expect(errors("POST", "/video/generate")[429]?.contains("/video/queue") == true)
+        #expect(errors("POST", "/chat/stream")[429]?.contains("Close one") == true)
+        #expect(errors("POST", "/conversations/{id}/messages")[409] != nil)
+        #expect(errors("POST", "/conversations/{id}/messages")[429] != nil)
+        // The two control-only routes refuse with their own sentence, not each other's.
+        #expect(errors("GET", "/buddy/devices")[403]?.contains("list") == true)
+        #expect(errors("DELETE", "/buddy/devices/{id}")[403]?.contains("revoke") == true)
+        // And the chat-only refusal is the server's own string, not a copy of it.
+        #expect(errors("POST", "/load")[403] == ControlServer.chatOnlyRefusal)
         // A route a chat-only device may call must not advertise the refusal it would get
         // if it could not, and one it may not must.
         let chatRoutes = Set(
@@ -156,7 +191,9 @@ struct ContractExportTests {
 
         /// The refusals every authenticated route shares, so each entry below only has to
         /// name what is particular to it.
-        static func commonErrors(auth: String, openToChatOnly: Bool) -> [Int: String] {
+        static func commonErrors(
+            auth: String, openToChatOnly: Bool, takesABody: Bool
+        ) -> [Int: String] {
             // An unauthenticated route can only fail in ways particular to it, so it says
             // so itself rather than inheriting refusals it has no token to refuse.
             guard auth != "none" else { return [:] }
@@ -165,11 +202,16 @@ struct ContractExportTests {
                 411: "This server needs a Content-Length. Chunked bodies are not read.",
                 413: "That request body is larger than this device may send (4194304 bytes).",
             ]
+            if takesABody {
+                // Every route with a body can be sent one it cannot read.
+                shared[400] = "The data couldn’t be read because it isn’t in the correct format."
+            }
             if auth == "control" {
                 shared[403] = "Only this Mac can list paired devices."
             } else if !openToChatOnly {
-                shared[403] = "This device is paired for chat only. Pair it again with full "
-                    + "control from Settings → Silicon Buddy on the Mac."
+                // Taken from the server rather than retyped: a fixture that promises a body
+                // the server does not send is worse than one that promises nothing.
+                shared[403] = ControlServer.chatOnlyRefusal
             }
             return shared
         }
@@ -217,6 +259,12 @@ struct ContractExportTests {
             try JSONSerialization.jsonObject(with: try example.encode())
         }
     }
+
+    /// Routes the server answers that the mobile contract deliberately leaves out.
+    static let excludedRoutes: Set<String> = [
+        "GET /overlay", "GET /overlay/state", "GET /overlay/portrait",
+        "GET /overlay/portrait-eyes", "GET /overlay/portrait-open",
+    ]
 
     static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
@@ -281,8 +329,9 @@ struct ContractExportTests {
         // would be a lie to tell about /health.
         decorated.scopes = route.auth == "none"
             ? [] : (route.auth == "device" && openToChat ? ["full", "chat"] : ["full"])
-        decorated.errors = Route.commonErrors(auth: route.auth, openToChatOnly: openToChat)
-            .merging(route.errors) { _, particular in particular }
+        decorated.errors = Route.commonErrors(
+            auth: route.auth, openToChatOnly: openToChat, takesABody: route.request != nil
+        ).merging(route.errors) { _, particular in particular }
         return decorated
     }
 
@@ -315,7 +364,10 @@ struct ContractExportTests {
             method: "DELETE", path: "/buddy/devices/{id}", auth: "control",
             summary: "Revoke one device. Its token stops working at once, streams included.",
             response: .of(["status": "revoked"]),
-            errors: [404: "No paired device with id 7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C."]
+            errors: [
+                403: "Only this Mac can revoke a paired device.",
+                404: "No paired device with id 7A1E0C6E-2C6A-4F4E-9F1E-0B2D3C4A5B6C.",
+            ]
         ),
         Route(
             method: "POST", path: "/chat/stream", auth: "device",
@@ -327,7 +379,10 @@ struct ContractExportTests {
                 ("finished", .of(exampleMetrics)),
                 ("error", .of(ControlAPI.ErrorResponse(error: "The device stopped reading."))),
             ],
-            errors: [400: "No model is loaded."]
+            errors: [
+                400: "No model is loaded.",
+                429: "Too many open streams. Close one before opening another.",
+            ]
         ),
         Route(
             method: "GET", path: "/events", auth: "device",
@@ -392,6 +447,7 @@ struct ContractExportTests {
                 404: "No conversation with id 3F5C1A88-9C1D-4E2B-8A70-1D2E3F405162.",
                 409: "That conversation is still being answered. Wait for it to finish, or "
                     + "start another one.",
+                429: "Too many open streams. Close one before opening another.",
             ]
         ),
     ]
@@ -444,7 +500,8 @@ struct ContractExportTests {
         Route(
             method: "GET", path: "/recommend", auth: "device",
             summary: "The strongest model this machine can actually run.",
-            response: .of(exampleCatalogModel)
+            response: .of(exampleCatalogModel),
+            errors: [404: "No model in the catalog fits this machine."]
         ),
         Route(
             method: "POST", path: "/plan", auth: "device",
@@ -655,7 +712,12 @@ struct ContractExportTests {
             response: .of(ControlAPI.VideoResponse(
                 file: "/Users/you/Movies/Silicon/lisbon-0001.mp4", node: "silicon-node",
                 model: "hailuo-h3", elapsedSeconds: 244.1
-            ))
+            )),
+            errors: [
+                429: "Too many synchronous video requests. No clip was added. Use POST "
+                    + "/video/queue to save work without holding a connection, then GET "
+                    + "/video/queue to follow it.",
+            ]
         ),
     ]
 

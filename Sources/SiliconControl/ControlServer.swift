@@ -50,6 +50,13 @@ public actor ControlServer {
     public var openEventStreams: Int { activeEventStreams }
 
     /// How long one SSE frame may take to leave before the connection is given up on.
+    ///
+    /// Twenty seconds is chosen against the heartbeat, not against a model: a reader that
+    /// has not taken one frame in that long is gone, whatever it was sent. It is a
+    /// per-frame budget, and frames are not coalesced — a token is written the moment the
+    /// runtime yields it. That keeps latency honest and means a slow reader is detected by
+    /// the first frame it fails to take rather than by a backlog; if the token rate ever
+    /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
     public static let defaultEventWriteDeadline: Duration = .seconds(20)
 
     /// Streams hold a connection for minutes or hours, so they get their own ceiling well
@@ -354,6 +361,10 @@ public actor ControlServer {
             }
 
             let caller = await identify(request, from: origin)
+            if let refusal = Self.scopeRefusal(for: request, as: caller) {
+                try await refusal.write(to: connection)
+                return
+            }
 
             switch streamRoute(request, as: caller) {
             case .stream(let events):
@@ -444,6 +455,23 @@ public actor ControlServer {
         ]
     }
 
+    /// The one place scope is enforced, before anything looks at the path — streaming and
+    /// buffered routes alike, so there is exactly one message and no dead branch behind it.
+    ///
+    /// Pairing is exempt: it is unauthenticated, and a device re-pairing to be given more
+    /// than chat would otherwise be refused by the very token it is replacing.
+    static func scopeRefusal(for request: HTTPRequest, as caller: Caller?) -> HTTPResponse? {
+        guard let caller else { return nil }
+        guard !(request.method == "POST" && request.path == "/buddy/pair") else { return nil }
+        guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
+        return .error(403, chatOnlyRefusal)
+    }
+
+    /// Exported in the contract fixtures, so it is written once and read from there.
+    public static let chatOnlyRefusal =
+        "This device is paired for chat only. Pair it again with full control from "
+            + "Settings → Silicon Buddy on the Mac."
+
     private func identify(_ request: HTTPRequest, from origin: Origin) async -> Caller? {
         guard let bearer = request.bearerToken else { return nil }
         if bearer == token { return .control }
@@ -464,9 +492,16 @@ public actor ControlServer {
     /// bridge installs models and posts whole images, so it keeps the original ceiling.
     private func bodyLimit(forHeaders headers: [String: String], from origin: Origin) async -> Int {
         guard origin == .tailnet else { return HTTPRequest.maximumBody }
-        guard let bearer = HTTPRequest.bearerToken(in: headers), bearer != token,
-              !(swarmToken.map { !$0.isEmpty && bearer == $0 } ?? false)
-        else { return HTTPRequest.maximumBody }
+        guard let bearer = HTTPRequest.bearerToken(in: headers) else {
+            // No bearer on the tailnet means `/buddy/pair`, the one route with nothing to
+            // check before the body is read — so the throttle cannot run until the upload
+            // is over. A pairing request is a hundred bytes.
+            return BuddyLimits.unauthenticatedBodyBytes
+        }
+        if bearer == token { return HTTPRequest.maximumBody }
+        if swarmToken.map({ !$0.isEmpty && bearer == $0 }) ?? false {
+            return HTTPRequest.maximumBody
+        }
         return BuddyLimits.requestBodyBytes
     }
 
@@ -500,10 +535,6 @@ public actor ControlServer {
         let segments = request.path.split(separator: "/").map(String.init)
         let host = self.host
         let hub = self.events
-
-        if let caller, !caller.mayReach(method: request.method, path: request.path) {
-            return .refused(.error(403, "This device is paired for chat only."))
-        }
 
         let body: EventSource
         if request.method == "POST", segments == ["chat", "stream"] {
@@ -573,6 +604,9 @@ public actor ControlServer {
         var ticket: UUID?
         if let id = caller?.deviceID {
             ticket = await buddy.registerStream(deviceID: id) { work.cancel() }
+            // Nil means the device stopped being one between `identify` and here. Chat
+            // streams have no heartbeat to re-check them, so this is their only backstop.
+            if ticket == nil { work.cancel() }
         }
         await work.value
         if let id = caller?.deviceID, let ticket {
@@ -737,13 +771,6 @@ public actor ControlServer {
         }
 
         guard let caller else { return unauthorized }
-        guard caller.mayReach(method: request.method, path: request.path) else {
-            return .error(
-                403,
-                "This device is paired for chat only. Pair it again with full control from "
-                    + "Settings → Silicon Buddy on the Mac."
-            )
-        }
 
         let segments = request.path.split(separator: "/").map(String.init)
         if request.method == "GET", segments == ["buddy", "devices"] {

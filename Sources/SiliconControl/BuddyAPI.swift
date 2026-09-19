@@ -297,6 +297,9 @@ public enum BuddyHostError: Error, LocalizedError, Equatable {
 public enum BuddyLimits {
     /// A phone sends prompts and photographs, not model weights.
     public static let requestBodyBytes = 4 * 1_048_576
+    /// What an unauthenticated tailnet caller may send — which is `/buddy/pair` and
+    /// nothing else. Its body is a code, a name and a platform.
+    public static let unauthenticatedBodyBytes = 65_536
     public static let imagesPerMessage = 8
     /// A base64 `data:` URL, so roughly 1.5 MB of actual image.
     public static let imageCharacters = 2_000_000

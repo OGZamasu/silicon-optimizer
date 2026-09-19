@@ -4,7 +4,7 @@ import Testing
 @testable import SiliconControl
 @testable import SiliconUI
 
-@Suite("Control API numeric boundaries")
+@Suite("Control API numeric boundaries", .redirectedConversationStore)
 @MainActor
 struct ControlBoundaryTests {
 

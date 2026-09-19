@@ -5,7 +5,7 @@ import SiliconRuntime
 
 /// The Video tab is six panels of tools plus the player. Opening them all at once made the
 /// tab a wall to scroll past, so they fold — and what someone folds has to stay folded.
-@Suite("Video panels")
+@Suite("Video panels", .redirectedConversationStore)
 @MainActor
 struct VideoPanelTests {
 

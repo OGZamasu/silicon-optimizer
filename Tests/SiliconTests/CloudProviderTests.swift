@@ -12,7 +12,7 @@ import Testing
 /// Everything here is hermetic — no key, no network. What these pin is the wire contract as
 /// the providers document it, so a rename upstream shows up as a failing test rather than as
 /// a picker entry that 404s.
-@Suite("Cloud providers")
+@Suite("Cloud providers", .redirectedConversationStore)
 struct CloudProviderTests {
 
     // MARK: - Gateway ids
@@ -469,7 +469,7 @@ struct CloudProviderTests {
 }
 
 
-@Suite("Install requests")
+@Suite("Install requests", .redirectedConversationStore)
 struct InstallRequestTests {
     /// The MCP binary in the bundle and the app it talks to can differ by a release, so the
     /// install request must decode with or without the newer `directory` field, and must

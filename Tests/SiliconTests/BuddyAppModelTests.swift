@@ -7,7 +7,7 @@ import Testing
 
 /// The Mac's own half: the conversation store a phone reads and writes, what the `/events`
 /// watcher decides is news, and the Settings section's state.
-@Suite("Silicon Buddy on the Mac")
+@Suite("Silicon Buddy on the Mac", .redirectedConversationStore)
 @MainActor
 struct BuddyAppModelTests {
 
@@ -17,10 +17,13 @@ struct BuddyAppModelTests {
     }
 
     /// An `AppModel` built here schedules the same debounced save as the real one, and its
-    /// default target is the owner's own chat history. Every test that touches
-    /// `conversations` redirects that first; a run must not be able to overwrite it.
+    /// default target is the owner's own chat history. The suite trait redirects that before
+    /// any test runs; this checks it actually took, because the cost of it not having is a
+    /// stranger's chat history.
     private func isolatedModel() -> AppModel {
         BuddyTestStore.redirect()
+        let redirected = ProcessInfo.processInfo.environment["SILICON_CONVERSATIONS_PATH"]
+        #expect(redirected?.contains("silicon-test-conversations") == true)
         return AppModel(settings: .init())
     }
 
@@ -95,6 +98,58 @@ struct BuddyAppModelTests {
         }
         let detail = try await model.conversation(id: summary.id)
         #expect(detail.messages.isEmpty)
+    }
+
+    /// The bug this replaced: the busy check asked which conversation was *selected*, so a
+    /// Mac answering in A with B on screen let a phone post into A — carrying a half-written
+    /// reply as context — and falsely refused B.
+    @Test func aBusyConversationIsTheBusyOneWhateverIsOnScreen() async throws {
+        let model = isolatedModel()
+        let busy = await model.createConversation(title: "Being answered")
+        let idle = await model.createConversation(title: "Not being answered")
+        let busyID = try #require(UUID(uuidString: busy.id))
+        let idleID = try #require(UUID(uuidString: idle.id))
+
+        // Whichever thread is on screen, the answer is about the thread being answered.
+        model.selectedConversationID = idleID
+        BuddyGenerations.shared.begin(busyID)
+        defer { BuddyGenerations.shared.end(busyID) }
+
+        #expect(model.isAnswering(busyID))
+        #expect(!model.isAnswering(idleID))
+        #expect(try await model.conversation(id: busy.id).isGenerating)
+        #expect(try await model.conversation(id: idle.id).isGenerating == false)
+
+        await #expect(throws: BuddyHostError.conversationBusy(busy.id)) {
+            _ = try await model.replyInConversation(id: busy.id, to: .init(content: "again"))
+        }
+        // The idle one is refused for a different reason entirely — no model is loaded —
+        // which is how this test tells "busy" apart from "everything is refused".
+        await #expect(throws: ControlHostError.self) {
+            _ = try await model.replyInConversation(id: idle.id, to: .init(content: "hello"))
+        }
+
+        BuddyGenerations.shared.end(busyID)
+        #expect(!model.isAnswering(busyID))
+        await #expect(throws: ControlHostError.self) {
+            _ = try await model.replyInConversation(id: busy.id, to: .init(content: "again"))
+        }
+    }
+
+    /// The window that made the watcher wedge: it reads `subscriberCount` across an await,
+    /// and a phone connecting during it calls `start`, which finds a handle that is not yet
+    /// free and returns. Comparing the start counter is what makes the loop notice.
+    @Test func theWatcherKeepsGoingIfSomeoneArrivedWhileItWasDeciding() {
+        let pump = BuddyEventPump()
+        let requestsAtCheck = pump.startRequestCount
+
+        // Nobody reading, nobody asked: stop.
+        #expect(pump.shouldStop(subscribers: 0, requestsAtCheck: requestsAtCheck))
+        // Somebody reading: carry on, whatever the counter says.
+        #expect(!pump.shouldStop(subscribers: 1, requestsAtCheck: requestsAtCheck))
+        // Nobody reading yet, but a start landed while we were finding that out — which is
+        // exactly the subscriber whose `start` call was turned away.
+        #expect(!pump.shouldStop(subscribers: 0, requestsAtCheck: requestsAtCheck - 1))
     }
 
     // MARK: - What a subscriber is told
@@ -244,10 +299,21 @@ enum BuddyTestStore {
     static func redirect() { _ = redirected }
 }
 
+/// Applied to every suite that builds an `AppModel`, because any of them can schedule the
+/// debounced save — and swift-testing has no bundle-wide hook to put this behind. The trait
+/// runs before each test in the suite; the redirect itself happens once.
+struct RedirectedConversationStore: SuiteTrait, TestTrait {
+    func prepare(for test: Test) async throws { BuddyTestStore.redirect() }
+}
+
+extension Trait where Self == RedirectedConversationStore {
+    static var redirectedConversationStore: Self { Self() }
+}
+
 /// The one test that runs the whole chain: a real `AppModel` as the host, a real control
 /// server, and a real socket. Serialized because the event pump is a process-wide singleton
 /// — it has to be, since `AppModel` is `@Observable` and an extension cannot hold its task.
-@Suite("Silicon Buddy live events", .serialized)
+@Suite("Silicon Buddy live events", .serialized, .redirectedConversationStore)
 @MainActor
 struct BuddyLiveEventTests {
 

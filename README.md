@@ -276,11 +276,12 @@ back a 32-byte token of its own. Five attempts a minute per address, ten wrong g
 anywhere at all burns the code, and ten failures from one address shut it out for a quarter of
 an hour: that is what makes six digits enough.
 
-A **chat-only** device can see what the Mac is and talk to the model it has loaded — status,
-metrics, the catalogue, `/chat`, `/chat/stream`, `/decide` and the conversations. It cannot
-install, load or unload a model, start a render, or touch the device list. Everything else is
-a 403. Full control is the default, because you are standing over the device approving it by
-hand.
+A **chat-only** device can see what the Mac is, ask it what would fit, and talk to the model
+it has loaded: status, metrics, the catalogue, `/recommend`, `/plan`, `/swarm`, `/v1/node`,
+the model lists, `/chat`, `/chat/stream`, `/decide` and the conversations. Reading and
+advising spend nothing. It cannot install, load or unload a model, benchmark, start a render,
+touch the queue, or see the device list — all of that is a 403. Full control is the default,
+because you are standing over the device approving it by hand.
 
 The Mac keeps only a SHA-256 of each device token, in
 `~/Library/Application Support/SiliconOptimizer/buddy.json`, alongside the device's name,

@@ -154,10 +154,14 @@ struct BuddyControlTests {
                 ("POST", "/video/queue"), ("POST", "/video/queue/control"),
                 ("GET", "/buddy/devices"),
             ] {
-                let code = try await fixture.phone.status(
+                let (code, body) = try await fixture.phone.call(
                     refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
                 )
                 #expect(code == 403, "\(refused.0) \(refused.1) should be closed to chat-only")
+                // The body the fixtures promise, from the one branch that can produce it.
+                let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+                #expect(envelope.error == ControlServer.chatOnlyRefusal,
+                        "\(refused.0) \(refused.1) sent a different sentence")
             }
 
             // Chat is the whole point of the scope, streaming included.
@@ -171,6 +175,33 @@ struct BuddyControlTests {
             let full = try await fixture.pair(name: "Studio phone")
             #expect(try await fixture.phone.status(
                 "POST", "/video/queue/control", token: full.token, body: #"{"action":"pause"}"#
+            ) == 200)
+        }
+    }
+
+    /// Pairing cannot be scope-gated: it is unauthenticated, and a phone asking to be given
+    /// more than chat still has its old token in the header while it asks.
+    @Test func aChatOnlyDeviceCanPairAgainForFullControl() async throws {
+        try await withServer { fixture in
+            let chatOnly = try await fixture.pair(scope: .chat)
+            #expect(try await fixture.phone.status(
+                "POST", "/load", token: chatOnly.token, body: "{}"
+            ) == 403)
+
+            let invitation = await fixture.registry.invite(
+                host: "127.0.0.1", port: fixture.phone.port, scope: .full
+            )
+            // Sent with the chat token still attached, which is what a phone would do.
+            let (status, body) = try await fixture.phone.call(
+                "POST", "/buddy/pair", token: chatOnly.token,
+                body: #"{"code":"\#(invitation.code)","deviceName":"Phone","platform":"android"}"#
+            )
+            #expect(status == 200)
+            let upgraded = try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
+            #expect(upgraded.scope == "full")
+            #expect(try await fixture.phone.status(
+                "POST", "/video/queue/control", token: upgraded.token,
+                body: #"{"action":"pause"}"#
             ) == 200)
         }
     }
@@ -228,6 +259,53 @@ struct BuddyControlTests {
         }
     }
 
+    /// Swarm LAN access binds every interface, and a device token is only a credential on
+    /// the tailnet listener — so the two cannot both be on, and the window has to say which
+    /// one is in the way rather than blaming a missing tailscale address.
+    @Test func swarmLANAccessKeepsTheTailnetListenerDown() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-lan-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
+        await registry.setAllowsTailnetDevices(true)
+        let server = ControlServer(
+            host: BuddyTestHost(tokens: [], pace: .milliseconds(1), failing: false),
+            handshakeURL: directory.appendingPathComponent("control.json"),
+            buddy: registry, discoverTailnetAddress: { nil }
+        )
+        defer { Task { await server.stop() } }
+
+        // Whether the LAN bind itself succeeds is the host machine's business; the
+        // interlock keys off the decision, which `start` makes either way.
+        try await server.start(exposeOnLAN: true, swarmToken: "a-swarm-token")
+        #expect(await server.isExposedOnLAN)
+
+        try await server.setTailnetAccess(address: "127.0.0.1", port: 49_999)
+        #expect(await server.tailnetListenerAddress == nil)
+        #expect(await server.tailnetError?.contains("Swarm LAN access") == true)
+        await server.stop()
+    }
+
+    /// A tailscale address can move under the app — a re-auth, a different tailnet. A
+    /// listener still bound to yesterday's endpoint is a feature that silently stopped.
+    @Test func aChangedEndpointRebindsRatherThanBeingIgnored() async throws {
+        try await withServer { fixture in
+            let first = fixture.phone.port
+            // Asked of the kernel rather than guessed: this test allows no retry, so a port
+            // that happened to be busy would look exactly like a listener that did not move.
+            let second = try await Self.freeLoopbackPort()
+
+            // Asked for directly, with no retry loop to paper over a listener that stayed
+            // where it was: this must rebind on the first attempt or not at all.
+            try await fixture.server.setTailnetAccess(address: "127.0.0.1", port: second)
+            try await waitUntil { await BuddyControlTests.reachable(port: second) }
+            await #expect(throws: (any Error).self) {
+                _ = try await fixture.phone.status("GET", "/health", token: nil)
+            }
+        }
+    }
+
     // MARK: - Request framing and size
 
     @Test func aDeviceMaySendAPromptButNotAModel() async throws {
@@ -242,6 +320,30 @@ struct BuddyControlTests {
             #expect(try await fixture.local.status(
                 "POST", "/chat", token: fixture.local.token, body: body
             ) != 413)
+        }
+    }
+
+    /// `/buddy/pair` is the one route whose throttle cannot run until the body is read, so
+    /// the body has to be small before anything else is true about it.
+    @Test func anUnauthenticatedTailnetBodyIsCappedFarBelowADevices() async throws {
+        try await withServer { fixture in
+            await fixture.registry.invite(host: "127.0.0.1", port: fixture.phone.port)
+            let padding = String(repeating: "a", count: BuddyLimits.unauthenticatedBodyBytes)
+            let refused = try await fixture.phone.status(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"000000","deviceName":"\#(padding)","platform":"android"}"#
+            )
+            #expect(refused == 413)
+            // The code survives, because nothing ever looked at it.
+            #expect(await fixture.registry.openInvitation() != nil)
+
+            // A paired device's ceiling is much higher, and the same body gets through it.
+            let paired = try await fixture.pair()
+            let accepted = try await fixture.phone.status(
+                "POST", "/chat", token: paired.token,
+                body: #"{"messages":[{"role":"user","content":"\#(padding)","images":[]}]}"#
+            )
+            #expect(accepted == 200)
         }
     }
 
@@ -561,9 +663,14 @@ struct BuddyControlTests {
     }
 
     /// Binds the second listener on loopback at a port nobody is using.
+    ///
+    /// Kernel-assigned rather than guessed from a range: a guess can land on the primary
+    /// listener's own port — where `SO_REUSEPORT` makes both binds succeed and the two
+    /// listeners then share the connections — or on a port another suite in this process
+    /// is about to want.
     static func bindTailnetListener(on server: ControlServer, avoiding: Int? = nil) async throws -> Int {
         for _ in 0..<16 {
-            let candidate = Int.random(in: 49_152...65_500)
+            let candidate = try await freeLoopbackPort()
             guard candidate != avoiding else { continue }
             try await server.setTailnetAccess(address: "127.0.0.1", port: candidate)
             for _ in 0..<50 {
@@ -575,6 +682,26 @@ struct BuddyControlTests {
             try await server.setTailnetAccess(address: nil)
         }
         throw BuddyTestError.timeout
+    }
+
+    /// A port nobody is on. Binding and letting go is the portable way to ask, and the
+    /// window in between is not one any test here can lose to.
+    static func freeLoopbackPort() async throws -> Int {
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = .loopback
+        parameters.allowLocalEndpointReuse = true
+        let listener = try NWListener(using: parameters, on: .any)
+        listener.newConnectionHandler = { $0.cancel() }
+        listener.start(queue: .global(qos: .userInitiated))
+        defer { listener.cancel() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            if case .ready = listener.state, let port = listener.port {
+                return Int(port.rawValue)
+            }
+            guard ContinuousClock.now < deadline else { throw BuddyTestError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     static func reachable(port: Int) async -> Bool {

@@ -4,7 +4,7 @@ import Testing
 
 /// A model that vanishes without warning is the complaint this answers: someone comes back to
 /// a Mac that has quietly released 20 GB of weights and finds their chat unable to answer.
-@Suite("Idle unload warning")
+@Suite("Idle unload warning", .redirectedConversationStore)
 @MainActor
 struct IdleWarningTests {
 

@@ -96,9 +96,9 @@ extension AppModel {
     public func replyInConversation(
         id: String, to message: ControlAPI.NewMessageRequest
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
-        guard let runtime = activeRuntime, runtimeState.isRunning else {
-            throw ControlHostError.noModelLoaded
-        }
+        // Most specific first: which conversation, then whether it is free, then whether
+        // anything can answer at all. A busy thread is a 409 whatever the runtime is doing,
+        // and it could not be busy without a model loaded anyway.
         guard let index = conversations.firstIndex(where: { $0.id.uuidString == id }) else {
             throw BuddyHostError.noSuchConversation(id)
         }
@@ -106,6 +106,9 @@ extension AppModel {
         // would carry the first one's half-finished reply as context. Refuse instead.
         guard !isAnswering(conversations[index].id) else {
             throw BuddyHostError.conversationBusy(id)
+        }
+        guard let runtime = activeRuntime, runtimeState.isRunning else {
+            throw ControlHostError.noModelLoaded
         }
         let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -186,10 +189,14 @@ extension AppModel {
         }
     }
 
-    /// Whether an answer is still being written into this conversation — by a phone, or by
-    /// the Mac's own chat window, which is generating into whichever thread is selected.
+    /// Whether an answer is still being written into this conversation — by a phone or by
+    /// the Mac's own chat window, both of which register here.
+    ///
+    /// Keyed on the conversation, never on which one happens to be selected: the Mac can be
+    /// answering in one thread while the sidebar shows another, and asking about selection
+    /// would both miss that and falsely refuse the thread that is merely on screen.
     func isAnswering(_ id: Conversation.ID) -> Bool {
-        BuddyGenerations.shared.isBusy(id) || (isGenerating && selectedConversationID == id)
+        BuddyGenerations.shared.isBusy(id)
     }
 
     // MARK: - The /events side channel
@@ -348,7 +355,7 @@ public final class BuddyEventPump {
                 guard let self, let model else { break }
                 let requestsBefore = self.startRequests
                 let subscribers = await hub.subscriberCount
-                if subscribers == 0, self.startRequests == requestsBefore {
+                if self.shouldStop(subscribers: subscribers, requestsAtCheck: requestsBefore) {
                     // No await between the decision and the handle, so a `start` racing
                     // this either bumped the counter above or is yet to run at all.
                     if self.generation == mine { self.task = nil }
@@ -368,6 +375,20 @@ public final class BuddyEventPump {
         task?.cancel()
         task = nil
     }
+
+    /// Whether the loop should give up: nobody is reading, and nobody asked it to keep
+    /// going while it was finding that out.
+    ///
+    /// The second half is the whole point. Reading `subscriberCount` is an await, and a
+    /// phone connecting during it calls `start`, which sees a handle that is not yet free
+    /// and returns — leaving nothing running and a subscriber getting heartbeats for the
+    /// rest of the session. Comparing the counter is how the loop notices that happened.
+    func shouldStop(subscribers: Int, requestsAtCheck: Int) -> Bool {
+        subscribers == 0 && startRequests == requestsAtCheck
+    }
+
+    /// How many starts have been asked for. Read by the test that pins the rule above.
+    var startRequestCount: Int { startRequests }
 
     /// The first reading is entirely news — a phone that has just connected knows nothing,
     /// so it gets the current state rather than waiting for something to move.
@@ -398,6 +419,10 @@ public final class BuddyEventPump {
 
 /// Which conversations have an answer in flight, for the same reason `BuddyEventPump` is a
 /// singleton: `AppModel` is `@Observable` and an extension cannot add a stored property.
+///
+/// Both halves of the app register here — the Chat tab in `AppModel.send` and a phone in
+/// `replyInConversation` — so "is this thread busy?" has one answer rather than two that
+/// disagree.
 @MainActor
 public final class BuddyGenerations {
 

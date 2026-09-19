@@ -294,17 +294,43 @@ struct BuddyPairingRegistryTests {
     /// Revoking reaches what the device is already holding, not merely its next request.
     @Test func endingAStreamIsPartOfRevoking() async {
         let registry = await openRegistry(at: temporaryFile())
+        let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
+        guard case .paired(let phone) = await registry.pair(
+            request(code: invitation.code), from: "100.64.9.9", macName: "Studio", port: 8788
+        ) else { Issue.record("pairing should succeed"); return }
+
         let ended = Ended()
-        let ticket = await registry.registerStream(deviceID: "phone") {
+        let ticket = await registry.registerStream(deviceID: phone.deviceID) {
             Task { await ended.note() }
         }
-        #expect(ticket != UUID())
+        #expect(ticket != nil)
 
-        await registry.revoke(deviceID: "phone")
-        // Nothing was paired under that id, so revoke says no — but a live stream still
-        // has to end, which is why the two are not the same check.
-        await registry.endStreams(forDevice: "phone")
+        #expect(await registry.revoke(deviceID: phone.deviceID))
         await ended.wait()
+
+        // And a device that stopped being one between being authorized and getting here is
+        // told so, rather than being handed a ticket nothing will ever pull. Chat streams
+        // have no heartbeat to re-check them, so this is the only backstop they get.
+        let refused = await registry.registerStream(deviceID: phone.deviceID) {}
+        #expect(refused == nil)
+    }
+
+    /// The same window, from the other direction: suspending everything must also refuse a
+    /// registration that is only now arriving.
+    @Test func aSuspendedRegisterHandsOutNoStreamTickets() async {
+        let registry = await openRegistry(at: temporaryFile())
+        let invitation = await registry.invite(host: "100.64.1.2", port: 8788)
+        guard case .paired(let phone) = await registry.pair(
+            request(code: invitation.code), from: "100.64.9.9", macName: "Studio", port: 8788
+        ) else { Issue.record("pairing should succeed"); return }
+
+        let ended = Ended()
+        _ = await registry.registerStream(deviceID: phone.deviceID) {
+            Task { await ended.note() }
+        }
+        await registry.setAllowsTailnetDevices(false)
+        await ended.wait()
+        #expect(await registry.registerStream(deviceID: phone.deviceID) {} == nil)
     }
 
     @Test func codesAreSixDigitsAndReadableAloud() {
