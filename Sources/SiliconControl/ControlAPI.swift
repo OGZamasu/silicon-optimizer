@@ -542,12 +542,18 @@ public enum ControlAPI {
         public var initImagePath: String?
         /// How strongly that image steers the result, 0–1 (mflux influence semantics).
         public var initImageInfluence: Double?
+        /// The same starting image, named the way a device can name one: an id from
+        /// `POST /uploads` or a `mediaID` this Mac published. The server resolves either
+        /// into `initImagePath` before the render sees the request, so a phone never has to
+        /// know — or be able to say — where anything is on this Mac.
+        public var uploadID: String?
+        public var mediaID: String?
 
         public init(
             prompt: String, modelID: String? = nil, width: Int? = nil, height: Int? = nil,
             steps: Int? = nil, quantization: String? = nil, seed: Int? = nil,
             initImagePath: String? = nil, initImageInfluence: Double? = nil,
-            localOnly: Bool? = nil
+            localOnly: Bool? = nil, uploadID: String? = nil, mediaID: String? = nil
         ) {
             self.prompt = prompt
             self.modelID = modelID
@@ -559,6 +565,8 @@ public enum ControlAPI {
             self.localOnly = localOnly
             self.initImagePath = initImagePath
             self.initImageInfluence = initImageInfluence
+            self.uploadID = uploadID
+            self.mediaID = mediaID
         }
     }
 
@@ -572,10 +580,16 @@ public enum ControlAPI {
         /// attempted anyway; this explains what to expect (swapping, slowdown, or possible
         /// failure) rather than having refused before trying.
         public var warning: String?
+        /// The same file, fetchable by a paired device: `GET /media/{mediaID}`. Absent when
+        /// the render landed somewhere this Mac does not serve from.
+        public var mediaID: String?
+        /// `/media/<id>`, relative, so a phone appends it to whatever address it dialled.
+        public var mediaURL: String?
 
         public init(
             path: String, elapsedSeconds: Double, peakMemoryBytes: Int64?,
-            predictedPeakBytes: Int64, model: String, warning: String? = nil
+            predictedPeakBytes: Int64, model: String, warning: String? = nil,
+            mediaID: String? = nil, mediaURL: String? = nil
         ) {
             self.path = path
             self.elapsedSeconds = elapsedSeconds
@@ -583,6 +597,8 @@ public enum ControlAPI {
             self.predictedPeakBytes = predictedPeakBytes
             self.model = model
             self.warning = warning
+            self.mediaID = mediaID
+            self.mediaURL = mediaURL
         }
     }
 
@@ -646,7 +662,16 @@ public enum ControlAPI {
 
     public struct MeshRequest: Codable, Sendable {
         /// Path to the conditioning image on this machine.
-        public var imagePath: String
+        ///
+        /// Optional since devices got a way to say the same thing without a path: exactly
+        /// one of `imagePath`, `uploadID` or `mediaID` is required, and the server resolves
+        /// the other two into this field before the render sees the request.
+        public var imagePath: String?
+        /// A file this device sent to `POST /uploads`.
+        public var uploadID: String?
+        /// A file this Mac published — a rendered image, or a photograph the device
+        /// uploaded earlier and still has the id for.
+        public var mediaID: String?
         public var modelID: String?
         public var pipelineType: String?
         public var textureSize: Int?
@@ -657,11 +682,14 @@ public enum ControlAPI {
         public var seed: Int?
 
         public init(
-            imagePath: String, modelID: String? = nil, pipelineType: String? = nil,
+            imagePath: String? = nil, modelID: String? = nil, pipelineType: String? = nil,
             textureSize: Int? = nil, steps: Int? = nil, quantize: Int? = nil,
-            octree: Int? = nil, vertexBudget: Int? = nil, seed: Int? = nil
+            octree: Int? = nil, vertexBudget: Int? = nil, seed: Int? = nil,
+            uploadID: String? = nil, mediaID: String? = nil
         ) {
             self.imagePath = imagePath
+            self.uploadID = uploadID
+            self.mediaID = mediaID
             self.modelID = modelID
             self.pipelineType = pipelineType
             self.textureSize = textureSize
@@ -679,16 +707,25 @@ public enum ControlAPI {
         public var elapsedSeconds: Double
         public var model: String
         public var warning: String?
+        /// The GLB where there is one, else the OBJ: whichever a viewer would open first.
+        public var mediaID: String?
+        public var mediaURL: String?
+        /// The other file, when a run produced both.
+        public var objMediaID: String?
 
         public init(
             glbPath: String?, objPath: String?, elapsedSeconds: Double, model: String,
-            warning: String? = nil
+            warning: String? = nil, mediaID: String? = nil, mediaURL: String? = nil,
+            objMediaID: String? = nil
         ) {
             self.glbPath = glbPath
             self.objPath = objPath
             self.elapsedSeconds = elapsedSeconds
             self.model = model
             self.warning = warning
+            self.mediaID = mediaID
+            self.mediaURL = mediaURL
+            self.objMediaID = objMediaID
         }
     }
 
@@ -707,11 +744,19 @@ public enum ControlAPI {
 
         /// Optional renderer controls; absent on older nodes.
         public var supportedParameters: [String]?
+        /// The canvas sizes this lane actually serves, in the spelling `resolution` takes
+        /// — a phone offering a size the lane does not have is a render that comes back at
+        /// something else without saying so.
+        public var supportedResolutions: [String]?
+        /// Whether this lane takes a `negativePrompt`. False on a lane that would quietly
+        /// ignore one, so a phone can hide the field rather than collect text nobody reads.
+        public var supportsNegativePrompt: Bool?
 
         public init(
             id: String, name: String, summary: String, typicalDuration: String,
             supportsImageInput: Bool, supportedSeconds: [Int], available: Bool,
-            node: String?, supportedParameters: [String]? = nil
+            node: String?, supportedParameters: [String]? = nil,
+            supportedResolutions: [String]? = nil, supportsNegativePrompt: Bool? = nil
         ) {
             self.id = id
             self.name = name
@@ -722,6 +767,8 @@ public enum ControlAPI {
             self.available = available
             self.node = node
             self.supportedParameters = supportedParameters
+            self.supportedResolutions = supportedResolutions
+            self.supportsNegativePrompt = supportsNegativePrompt
         }
     }
 
@@ -737,11 +784,18 @@ public enum ControlAPI {
         }
 
         public var prompt: String
+        /// What to keep out of the clip. Passed straight through to the lane's renderer;
+        /// lanes that do not advertise it in `GET /video/models` ignore it.
+        public var negativePrompt: String?
         public var modelID: String?
         public var seconds: Int?
         public var resolution: String?
         /// Optional still to animate (image-to-video), as an absolute path.
         public var imagePath: String?
+        /// The same still, named the way a device can name one. The server resolves either
+        /// into `imagePath` before the render sees the request.
+        public var uploadID: String?
+        public var mediaID: String?
         /// Optional prompt for each five-second H3 window, in temporal order.
         public var h3ChainPrompts: [String]?
         public var seed: UInt32?
@@ -751,6 +805,7 @@ public enum ControlAPI {
 
         enum CodingKeys: String, CodingKey {
             case prompt, modelID, seconds, resolution, imagePath, seed
+            case negativePrompt, uploadID, mediaID
             case h3ChainPrompts = "h3_chain_prompts"
             case h3Turbo = "h3_turbo"
             case h3Steps = "h3_steps"
@@ -803,13 +858,17 @@ public enum ControlAPI {
             prompt: String, modelID: String? = nil, seconds: Int? = nil,
             resolution: String? = nil, imagePath: String? = nil,
             h3ChainPrompts: [String]? = nil, seed: UInt32? = nil, h3Turbo: Bool? = nil,
-            h3Steps: Int? = nil
+            h3Steps: Int? = nil, negativePrompt: String? = nil,
+            uploadID: String? = nil, mediaID: String? = nil
         ) {
             self.prompt = prompt
+            self.negativePrompt = negativePrompt
             self.modelID = modelID
             self.seconds = seconds
             self.resolution = resolution
             self.imagePath = imagePath
+            self.uploadID = uploadID
+            self.mediaID = mediaID
             self.h3ChainPrompts = h3ChainPrompts
             self.seed = seed
             self.h3Turbo = h3Turbo
@@ -826,16 +885,26 @@ public enum ControlAPI {
         /// media router's one line. Absent when the caller named what it wanted — and the
         /// reason a caller that passed `model_id: "auto"` can find out what it got.
         public var detail: String?
+        /// The clip itself, fetchable by a paired device: `GET /media/{mediaID}`.
+        public var mediaID: String?
+        public var mediaURL: String?
+        /// A JPEG poster frame, when one could be made. A list of clips wants a picture,
+        /// not a hundred megabytes of video each.
+        public var thumbnailMediaID: String?
 
         public init(
             file: String, node: String, model: String, elapsedSeconds: Double,
-            detail: String? = nil
+            detail: String? = nil, mediaID: String? = nil, mediaURL: String? = nil,
+            thumbnailMediaID: String? = nil
         ) {
             self.file = file
             self.node = node
             self.model = model
             self.elapsedSeconds = elapsedSeconds
             self.detail = detail
+            self.mediaID = mediaID
+            self.mediaURL = mediaURL
+            self.thumbnailMediaID = thumbnailMediaID
         }
     }
 
@@ -859,15 +928,81 @@ extension ControlAPI {
             public var error: String?
             public var capabilities: [Capability]
 
+            /// Everything below is what the Mac already read off this peer's `/v1/node` and
+            /// `/v1/llm` on its last poll, and used to keep to itself. All of it is
+            /// optional, all of it is absent when the node did not report it, and none of
+            /// it is a second opinion about `reachable` — a peer that is down carries the
+            /// error and nothing else.
+            ///
+            /// "windows-cuda", "macos-apple-silicon".
+            public var platform: String?
+            /// "NVIDIA GeForce RTX 3090 Ti" on a CUDA node, the chip on a Mac.
+            public var hardware: String?
+            /// VRAM on a discrete card, unified memory on a Mac. Used and total together,
+            /// because a busy 24 GB card and a free 4 GB one advertise the same headroom.
+            public var totalMemoryGB: Double?
+            public var usedMemoryGB: Double?
+            public var headroomGB: Double?
+            /// 0–1, not a percentage.
+            public var gpuUtilization: Double?
+            public var queueDepth: Int?
+            /// What the node is busy with, when it says: "job:<kind>", "llm", "external".
+            public var gpuConsumer: String?
+            /// The GGUF this peer is serving right now, and how. Nil when its chat lane is
+            /// installed but stopped, or not installed at all — `lanes.gguf` is the flag,
+            /// this is the name.
+            public var loadedModel: String?
+            public var modelEngine: String?
+            public var modelContextLength: Int?
+            /// Which lanes could take work this moment, folded out of `capabilities` so a
+            /// client does not have to know which capability ids mean "video".
+            public var lanes: Lanes?
+
             public init(
                 name: String, baseURL: String, reachable: Bool,
-                error: String?, capabilities: [Capability]
+                error: String?, capabilities: [Capability],
+                platform: String? = nil, hardware: String? = nil,
+                totalMemoryGB: Double? = nil, usedMemoryGB: Double? = nil,
+                headroomGB: Double? = nil, gpuUtilization: Double? = nil,
+                queueDepth: Int? = nil, gpuConsumer: String? = nil,
+                loadedModel: String? = nil, modelEngine: String? = nil,
+                modelContextLength: Int? = nil, lanes: Lanes? = nil
             ) {
                 self.name = name
                 self.baseURL = baseURL
                 self.reachable = reachable
                 self.error = error
                 self.capabilities = capabilities
+                self.platform = platform
+                self.hardware = hardware
+                self.totalMemoryGB = totalMemoryGB
+                self.usedMemoryGB = usedMemoryGB
+                self.headroomGB = headroomGB
+                self.gpuUtilization = gpuUtilization
+                self.queueDepth = queueDepth
+                self.gpuConsumer = gpuConsumer
+                self.loadedModel = loadedModel
+                self.modelEngine = modelEngine
+                self.modelContextLength = modelContextLength
+                self.lanes = lanes
+            }
+        }
+
+        /// "Could this peer take a video job right now?", for each kind of job there is.
+        /// Derived from the capabilities beside it, never instead of them: a client that
+        /// wants to know *which* video model is ready still reads `capabilities`.
+        public struct Lanes: Codable, Sendable, Equatable {
+            public var video: Bool
+            public var image: Bool
+            public var mesh: Bool
+            /// The chat lane: a GGUF actually serving, not merely installed.
+            public var gguf: Bool
+
+            public init(video: Bool, image: Bool, mesh: Bool, gguf: Bool) {
+                self.video = video
+                self.image = image
+                self.mesh = mesh
+                self.gguf = gguf
             }
         }
 
@@ -998,4 +1133,72 @@ public protocol ControlHost: AnyObject, Sendable {
     /// state while somebody is reading it. The hub is the server's own, which is what lets
     /// a test drive a real state change onto a real socket.
     func beginEventUpdates(postingTo hub: BuddyEventHub) async
+
+    // MARK: Serving results back
+
+    /// The folders a rendered file may come from — the app's own output directories, and
+    /// nothing wider. Every id `GET /media` will ever serve is minted from a path inside
+    /// one of these, which is what makes "a device cannot read an arbitrary file" a
+    /// property of the server rather than a promise about its callers.
+    ///
+    /// The same list the gateway's loopback media serving uses; a host that has no output
+    /// folders of its own answers with none, and `GET /media` then serves nothing at all.
+    func controlMediaRoots() async -> [String]
+
+    /// Writes a JPEG poster frame for a video, and says whether it managed to.
+    ///
+    /// Here rather than in the server because pulling a frame out of an MP4 means
+    /// AVFoundation, and this target deliberately links nothing but Foundation and Network
+    /// — the MCP bridge links it too. A host that cannot make posters says so by doing
+    /// nothing, and the media routes simply have no `thumbnailMediaID` to publish.
+    func controlMakeVideoPoster(from source: URL, to destination: URL) async -> Bool
+
+    /// One peer asked directly, for `GET /swarm/peers/{name}/status`: the node's own
+    /// `/v1/node` and `/v1/gguf`, fetched with whatever credential this Mac holds for it.
+    /// That credential is never in the answer.
+    func controlPeerStatus(name: String) async throws -> ControlAPI.PeerNodeStatus
+}
+
+/// Defaults for the hosts that are not the Mac app — the MCP bridge's doubles and the
+/// fixtures. Each one is the conservative answer: no roots means nothing is servable, no
+/// poster means no thumbnails, and no swarm means the proxy route is a 404 with a sentence.
+extension ControlHost {
+    public func controlMediaRoots() async -> [String] { [] }
+
+    public func controlMakeVideoPoster(from source: URL, to destination: URL) async -> Bool {
+        false
+    }
+
+    public func controlPeerStatus(name: String) async throws -> ControlAPI.PeerNodeStatus {
+        throw ControlAPI.NoSuchPeer(name: name)
+    }
+}
+
+extension ControlAPI {
+    /// Asked about a peer that is not in this Mac's registry. Its own type so the server
+    /// can answer 404 rather than folding it into the 400 everything else gets.
+    public struct NoSuchPeer: Error, LocalizedError, ControlStatusError {
+        public var name: String
+        public init(name: String) { self.name = name }
+        public var status: Int { 404 }
+        public var errorDescription: String? {
+            "No peer named \(name) in this Mac's swarm registry."
+        }
+    }
+
+    /// A render that needs a picture was not told which one — or was told by a device in
+    /// the one way a device may not, with a path.
+    public struct MissingSubject: Error, LocalizedError, ControlStatusError {
+        public init() {}
+        public var status: Int { 400 }
+        public var errorDescription: String? { ControlServer.noSubjectImage }
+    }
+
+    /// An `uploadID` or `mediaID` that named nothing. Usually an upload that has been
+    /// swept, which is a different thing from having forgotten to send one.
+    public struct UnreadableSubject: Error, LocalizedError, ControlStatusError {
+        public init() {}
+        public var status: Int { 404 }
+        public var errorDescription: String? { ControlServer.expiredSubject }
+    }
 }

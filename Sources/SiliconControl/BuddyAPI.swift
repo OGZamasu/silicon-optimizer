@@ -253,15 +253,30 @@ extension ControlAPI {
         public var status: String
         public var title: String
         public var fraction: Double?
+        /// What the renderer is doing right now — "Rendering", "video-denoise", "Texture
+        /// bake". Only ever set for the job the Mac is actually following; a clip waiting
+        /// its turn has a status and no stage.
+        public var stage: String?
+        /// Why it failed, in the words the queue would show. Present only on a terminal
+        /// failure, and the reason a phone no longer has to poll `GET /video/queue`
+        /// alongside the stream to have something true to say when a render breaks.
+        public var reason: String?
+        /// The finished file, fetchable at `GET /media/{mediaID}`. Set on the frame that
+        /// says the job is done, which is the frame a notification is written from.
+        public var mediaID: String?
 
         public init(
-            id: String, kind: String, status: String, title: String, fraction: Double? = nil
+            id: String, kind: String, status: String, title: String, fraction: Double? = nil,
+            stage: String? = nil, reason: String? = nil, mediaID: String? = nil
         ) {
             self.id = id
             self.kind = kind
             self.status = status
             self.title = title
             self.fraction = fraction
+            self.stage = stage
+            self.reason = reason
+            self.mediaID = mediaID
         }
     }
 

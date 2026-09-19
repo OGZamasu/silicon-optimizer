@@ -56,6 +56,14 @@ public enum RuntimeState: Sendable, Equatable {
         case .stopping: "Unloading…"
         }
     }
+
+    /// What is happening right now, or nothing. Unlike `label`, this never manufactures a
+    /// sentence for a state that has none — "Not loaded" is a label for a screen, not a
+    /// stage to put on a `job` event a phone will show under a progress bar.
+    public var stageLine: String? {
+        if case .starting(let stage) = self { return stage }
+        return nil
+    }
 }
 
 /// A concrete request to load a model.

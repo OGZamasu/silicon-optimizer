@@ -56,6 +56,7 @@ struct ContractExportTests {
             "GET /mesh/models", "POST /mesh/plan", "POST /mesh/generate",
             "GET /video/models", "GET /video/queue", "POST /video/queue",
             "POST /video/queue/control", "POST /video/generate",
+            "GET /media/{id}", "POST /uploads", "GET /swarm/peers/{name}/status",
         ])
         // Deliberately absent, and a phone must never be told to use them: the overlay is
         // an OBS browser source, which cannot set headers and so carries its token in the
@@ -172,6 +173,158 @@ struct ContractExportTests {
         // File names carry no spaces and no braces, so a generator can use them as symbols.
         #expect(Self.routes.allSatisfy {
             !$0.fileName.contains(" ") && !$0.fileName.contains("{")
+        })
+
+        // MARK: The media routes
+
+        // Fetching a result is as open as reading the queue that mentions it; sending one,
+        // and asking a node about itself, are not.
+        #expect(chatRoutes.contains("GET /media/{id}"))
+        #expect(!chatRoutes.contains("POST /uploads"))
+        #expect(!chatRoutes.contains("GET /swarm/peers/{name}/status"))
+        #expect(errors("GET", "/media/{id}")[404] == ControlServer.noSuchMedia)
+        #expect(errors("POST", "/uploads")[415] == ControlServer.unreadableUpload)
+        // The one route whose 413 is not the shared one: the whole point of it is a
+        // ceiling six times the ordinary device body.
+        #expect(errors("POST", "/uploads")[413]?.contains("\(BuddyUploads.maximumBytes)") == true)
+        #expect(errors("POST", "/uploads")[413] != errors("POST", "/load")[413])
+        #expect(BuddyUploads.maximumBytes > BuddyLimits.requestBodyBytes)
+        // A render told to start from an id that has been swept says so, rather than
+        // reading as "you forgot to send a picture".
+        #expect(errors("POST", "/video/generate")[404] == ControlServer.expiredSubject)
+
+        // A device is never handed a path to send back. Every route that takes a subject
+        // image advertises both ids, and the fixture shows them.
+        func requestJSON(_ method: String, _ path: String) -> [String: Any] {
+            let route = Self.routes.first { $0.method == method && $0.path == path }
+            let data = (try? route?.request?.encode()) ?? Data()
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        }
+        #expect(requestJSON("POST", "/mesh/generate")["uploadID"] != nil)
+        #expect(requestJSON("POST", "/video/generate")["uploadID"] != nil)
+        // …and a result says how to fetch it, in the relative form a phone appends to
+        // whatever address it dialled.
+        func responseJSON(_ method: String, _ path: String) -> [String: Any] {
+            let route = Self.routes.first { $0.method == method && $0.path == path }
+            let data = (try? route?.response?.encode()) ?? Data()
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        }
+        for (method, path) in [
+            ("POST", "/image/generate"), ("POST", "/mesh/generate"),
+            ("POST", "/video/generate"), ("POST", "/uploads"),
+        ] {
+            let body = responseJSON(method, path)
+            let id = body["mediaID"] as? String
+            #expect(id?.isEmpty == false, "\(method) \(path) has no mediaID")
+            #expect(body["mediaURL"] as? String == "/media/\(id ?? "")")
+        }
+        // And nothing in the export is a real id or a real credential.
+        let exported = Self.routes.compactMap { route -> String? in
+            (try? route.fixture()).map { String(decoding: $0, as: UTF8.self) }
+        }.joined()
+        #expect(!exported.lowercased().contains("swarm_token"))
+        #expect(!exported.contains("/Users/you/Movies/Silicon/Lisbon/lisbon-0002.mp4/"))
+    }
+
+    /// The queue's verbs, and the two constants the phone was guessing.
+    @Test func theQueueContractNamesEveryVerbAndItsFields() throws {
+        let control = try #require(
+            Self.routes.first { $0.method == "POST" && $0.path == "/video/queue/control" }
+        )
+        // Every verb the Mac accepts has an example, and the refusal names the same six.
+        let actions = control.requests.map(\.0)
+        #expect(actions == [
+            "pause", "resume", "retry", "remove", "stop_following", "clear_finished",
+        ])
+        for action in actions {
+            #expect(ControlServer.unknownQueueAction.contains(action), "\(action)")
+        }
+        // Deliberately absent: a clip already handed to a node keeps rendering there.
+        #expect(!ControlServer.unknownQueueAction.contains("cancel"))
+
+        var bodies: [String: [String: Any]] = [:]
+        for (action, example) in control.requests {
+            bodies[action] = try JSONSerialization.jsonObject(with: try example.encode())
+                as? [String: Any] ?? [:]
+        }
+        // Which verbs need an id is the thing one example cannot teach.
+        for action in ["retry", "remove", "stop_following"] {
+            #expect(bodies[action]?["id"] as? String != nil, "\(action) needs an id")
+        }
+        for action in ["pause", "resume", "clear_finished"] {
+            #expect(bodies[action]?["id"] == nil, "\(action) takes no id")
+        }
+        // And `confirmNewRender` belongs to retry alone.
+        #expect(bodies["retry"]?["confirmNewRender"] as? Bool == true)
+        for action in actions where action != "retry" {
+            #expect(bodies[action]?["confirmNewRender"] == nil, "\(action)")
+        }
+        #expect(control.errors[400] == ControlServer.unknownQueueAction)
+    }
+
+    /// The optional fields a phone reads off a queue item and off a lane — populated in
+    /// the fixture, because a client generated from three nulls hard-codes the Mac's
+    /// defaults and then disagrees with it.
+    @Test func theQueueAndLaneFixturesCarryTheirOptionalFields() throws {
+        let queue = try #require(Self.routes.first { $0.path == "/video/queue" && $0.method == "GET" })
+        let view = try JSONSerialization.jsonObject(
+            with: try #require(queue.response).encode()
+        ) as! [String: Any]
+        #expect(view["message"] as? String != nil)
+        let items = try #require(view["items"] as? [[String: Any]])
+        #expect(items.count >= 3)
+        // A finished clip: a file, and the two ids that make it fetchable.
+        let done = try #require(items.first { $0["status"] as? String == "completed" })
+        #expect(done["file"] as? String != nil)
+        #expect(done["mediaID"] as? String == Self.exampleClipMediaID)
+        #expect(done["thumbnailMediaID"] as? String == Self.examplePosterMediaID)
+        // A failed one: the sentence the Mac would show, on the item rather than only in
+        // the queue's own message.
+        let failed = try #require(items.first { $0["status"] as? String == "failed" })
+        #expect((failed["error"] as? String)?.isEmpty == false)
+        #expect(failed["file"] == nil || failed["file"] is NSNull)
+        // And a running one still shows the null shape, so both are in the export.
+        let running = try #require(items.first { $0["status"] as? String == "running" })
+        #expect(running["file"] == nil || running["file"] is NSNull)
+        #expect(running["mediaID"] == nil || running["mediaID"] is NSNull)
+
+        let lanes = try #require(Self.routes.first { $0.path == "/video/models" })
+        let laneBody = try #require(lanes.response).encode()
+        let model = try #require(
+            (try JSONSerialization.jsonObject(with: laneBody) as? [[String: Any]])?.first
+        )
+        #expect((model["supportedParameters"] as? [String])?.isEmpty == false)
+        #expect((model["supportedResolutions"] as? [String])?.isEmpty == false)
+        #expect(model["supportsNegativePrompt"] as? Bool == true)
+        #expect((model["supportedSeconds"] as? [Int])?.isEmpty == false)
+    }
+
+    /// `job` is one event with three lives. All three are in the export, because the two
+    /// the running frame cannot show are the ones a notification is written from.
+    @Test func theJobEventCarriesItsStageReasonAndResult() throws {
+        let events = try #require(Self.routes.first { $0.path == "/events" })
+        func frame(_ example: Example) throws -> [String: Any] {
+            try JSONSerialization.jsonObject(with: try example.encode()) as? [String: Any] ?? [:]
+        }
+        let running = try frame(try #require(events.events.first { $0.0 == "job" }).1)
+        #expect((running["stage"] as? String)?.isEmpty == false)
+        #expect(running["reason"] == nil || running["reason"] is NSNull)
+        #expect(running["mediaID"] == nil || running["mediaID"] is NSNull)
+
+        let finished = try frame(
+            try #require(events.eventVariants.first { $0.0 == "job" && $0.1 == "finished" }).2
+        )
+        #expect(finished["mediaID"] as? String == Self.exampleClipMediaID)
+        #expect(finished["reason"] == nil || finished["reason"] is NSNull)
+
+        let failed = try frame(
+            try #require(events.eventVariants.first { $0.0 == "job" && $0.1 == "failed" }).2
+        )
+        #expect((failed["reason"] as? String)?.isEmpty == false)
+        #expect(failed["mediaID"] == nil || failed["mediaID"] is NSNull)
+        // Every variant is of an event the route really sends.
+        #expect(events.eventVariants.allSatisfy { variant in
+            events.events.contains { $0.0 == variant.0 }
         })
     }
 
@@ -297,9 +450,20 @@ struct ContractExportTests {
         var auth: String
         var summary: String
         var request: Example?
+        /// More request shapes than one, for a route whose body is a verb rather than a
+        /// payload. `POST /video/queue/control` has six, and a generated client that has
+        /// only ever seen `pause` has to guess the other five — including which of them
+        /// need an `id` and what `confirmNewRender` is for.
+        var requests: [(String, Example)] = []
         var response: Example?
         /// SSE event name to payload example, for the routes that answer a stream.
         var events: [(String, Example)] = []
+        /// More shapes of an event already in `events`: its name, a label for the shape,
+        /// and the payload. Kept apart from `events` because that map is "the frames this
+        /// route sends", keyed by the word on the wire, and a second entry called
+        /// "job finished" would teach a generated client an event name that does not
+        /// exist.
+        var eventVariants: [(String, String, Example)] = []
         /// What this route says when it says no, keyed by status. Every entry is an
         /// `ErrorResponse`, which is the only failure envelope this server has.
         var errors: [Int: String] = [:]
@@ -311,8 +475,10 @@ struct ContractExportTests {
         var examples: [(String, Example)] {
             var all: [(String, Example)] = []
             if let request { all.append(("request", request)) }
+            all.append(contentsOf: requests.map { ("request \($0.0)", $0.1) })
             if let response { all.append(("response", response)) }
             all.append(contentsOf: events.map { ("event \($0.0)", $0.1) })
+            all.append(contentsOf: eventVariants.map { ("event \($0.0) \($0.1)", $0.2) })
             all.append(contentsOf: errors.sorted { $0.key < $1.key }.map {
                 ("error \($0.key)", .of(ControlAPI.ErrorResponse(error: $0.value)))
             })
@@ -366,12 +532,24 @@ struct ContractExportTests {
                 "scopes": scopes,
             ]
             body["request"] = try request.map { try json($0) } ?? NSNull()
+            if !requests.isEmpty {
+                var named: [String: Any] = [:]
+                for (label, example) in requests { named[label] = try json(example) }
+                body["requests"] = named
+            }
             body["response"] = try response.map { try json($0) } ?? NSNull()
             if !events.isEmpty {
                 var frames: [String: Any] = [:]
                 for (name, example) in events { frames[name] = try json(example) }
                 body["events"] = frames
                 body["contentType"] = "text/event-stream"
+            }
+            if !eventVariants.isEmpty {
+                var variants: [String: [String: Any]] = [:]
+                for (name, label, example) in eventVariants {
+                    variants[name, default: [:]][label] = try json(example)
+                }
+                body["eventVariants"] = variants
             }
             var refusals: [String: Any] = [:]
             for (status, message) in errors {
@@ -448,6 +626,58 @@ struct ContractExportTests {
             "device scope, and with any token. A minted code carries the tailnet listener's",
             "address and port, lives five minutes and is spent once; with that listener down",
             "the mint is a 409 rather than a code pointing nowhere.",
+            "",
+            "## Results, uploads and the queue's verbs",
+            "",
+            "`GET /media/{id}` is the only route that answers bytes. The id is opaque and",
+            "issued by the Mac: it arrives as `mediaID` or `thumbnailMediaID` on a result,",
+            "and a client never builds one. Ids only ever name files inside the app's own",
+            "output folders, so there is no path to send and no traversal to attempt. The",
+            "route carries the file's content type, `Accept-Ranges: bytes` and an `ETag`;",
+            "send `Range` for a 206 and `If-None-Match` for a 304. Both device scopes may",
+            "fetch, because looking at something the Mac has already made spends nothing.",
+            "An id stops working when its file is deleted, and that is a 404.",
+            "",
+            "`POST /uploads` is how a device names a picture without naming a path. Send the",
+            "bytes with a `Content-Type` and an `X-Filename`, or a `multipart/form-data`",
+            "body; both are read, and neither is believed — the type is decided from the",
+            "file's own first bytes, and anything that is not a PNG, JPEG, GIF, WebP, MP4,",
+            "MOV or WebM is a 415. The ceiling is 24 MiB for this route alone; every other",
+            "route a device can reach keeps its 4 MiB. Uploads land in a folder per device",
+            "and are deleted after seven days, so `uploadID` and `mediaID` both stop",
+            "resolving then. `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/generate`",
+            "and `POST /video/generate` each take `uploadID` or `mediaID` in place of a path,",
+            "and a device may only use those: a path in a request from a paired phone is",
+            "refused, because a device that could name a file could name any file. Full",
+            "scope only — uploading spends this Mac's disk.",
+            "",
+            "`GET /swarm` says what the Mac's last poll saw, which is why every field beyond",
+            "name, address and reachability is optional there. `GET /swarm/peers/{name}/status`",
+            "asks one node now, and is the only place the adapter riding on its loaded GGUF",
+            "appears. The Mac's credential for that node goes out in a header and is never",
+            "in the answer. Full scope only.",
+            "",
+            "`POST /video/queue/control` takes one of six verbs, and the fixture has an",
+            "example of each. `pause` and `resume` and `clear_finished` take no `id`;",
+            "`retry`, `remove` and `stop_following` need one. There is no `cancel`: a clip",
+            "already handed to a node keeps rendering there, and `stop_following` says what",
+            "actually happens — this Mac stops following it and the queue pauses.",
+            "`confirmNewRender` matters on `retry` alone. A failed clip the Mac can",
+            "reconnect to is reconnected; one whose submission is uncertain is refused until",
+            "the caller passes `confirmNewRender: true`, which is the caller saying it has",
+            "checked the node and accepts that a second render may start. A verb that is not",
+            "one of the six is a 400 saying exactly which six there are.",
+            "",
+            "Two constants the phone should stop guessing. A batch is at most 20 variations",
+            "per prompt, at most 200 unfinished clips at once and at most 2,000 items of",
+            "history — over any of those, `POST /video/queue` is a 400 naming all three. And",
+            "the length rule: `seconds` must be one of the chosen model's",
+            "`supportedSeconds` on `POST /video/generate`, which refuses anything else by",
+            "name; an omitted `seconds` falls back to the Mac's current setting snapped to",
+            "the nearest value that model supports. `GET /video/models` carries",
+            "`supportedSeconds`, `supportedResolutions` and `supportsNegativePrompt` per",
+            "lane, so a picker never has to offer a size or a field the renderer would",
+            "quietly ignore.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -567,11 +797,33 @@ struct ContractExportTests {
                     bytesReceived: 8_589_934_592, bytesExpected: 20_401_094_656,
                     bytesPerSecond: 41_943_040
                 ))),
+                // Three frames of the same clip's life, because the interesting fields
+                // are the ones a running job does not have. A phone that has only ever
+                // seen the middle frame has to poll `GET /video/queue` beside the stream
+                // to find out why a render failed or what to fetch when it finished —
+                // which is exactly what the phone was doing.
                 ("job", .of(ControlAPI.JobEvent(
                     id: "9C2F-0001", kind: "video", status: "running",
-                    title: "Opening shot", fraction: 0.33
+                    title: "Opening shot", fraction: 0.33, stage: "video-denoise 18/30"
                 ))),
+
                 ("heartbeat", .of(ControlAPI.HeartbeatEvent(at: "2026-09-18T09:41:00Z"))),
+            ],
+            // The same `job` event later in the same clip's life. Not more event names —
+            // there is one — but the two shapes of it that carry the fields a running
+            // frame cannot, and that a phone otherwise has to poll `GET /video/queue`
+            // beside the stream to learn.
+            eventVariants: [
+                ("job", "finished", .of(ControlAPI.JobEvent(
+                    id: "9C2F-0002", kind: "video", status: "completed",
+                    title: "The same tram, from the tracks",
+                    mediaID: exampleClipMediaID
+                ))),
+                ("job", "failed", .of(ControlAPI.JobEvent(
+                    id: "9C2F-0003", kind: "video", status: "failed",
+                    title: "Alfama rooftops at first light",
+                    reason: "silicon-node ran out of VRAM at the decode stage."
+                ))),
             ],
             errors: [429: "Too many open streams. Close one before opening another."]
         ),
@@ -834,7 +1086,21 @@ struct ContractExportTests {
                 peers: [.init(
                     name: "silicon-node", baseURL: "http://silicon-node:8790",
                     reachable: true, error: nil,
-                    capabilities: [.init(id: "image-to-mesh", kind: "mesh", ready: true)]
+                    capabilities: [
+                        .init(id: "image-to-mesh", kind: "mesh", ready: true),
+                        .init(id: "text-to-video", kind: "video", ready: true),
+                        .init(id: "text-to-image", kind: "image", ready: false),
+                    ],
+                    // Everything from here down is what the Mac's last poll already knew
+                    // and used to keep to itself. A peer that is down carries its error
+                    // and none of this, which is why every field is optional.
+                    platform: "windows-cuda",
+                    hardware: "NVIDIA GeForce RTX 3090 Ti",
+                    totalMemoryGB: 24, usedMemoryGB: 9.4, headroomGB: 14.6,
+                    gpuUtilization: 0.38, queueDepth: 1, gpuConsumer: "job:text-to-video",
+                    loadedModel: "qwen3.8-27b-q4_k_m.gguf", modelEngine: "stock",
+                    modelContextLength: 65_536,
+                    lanes: .init(video: true, image: false, mesh: true, gguf: true)
                 )],
                 polledSecondsAgo: 4,
                 // This Mac's own tailnet address, not a peer's: the block says where
@@ -894,7 +1160,9 @@ struct ContractExportTests {
             response: .of(ControlAPI.ImageResponse(
                 path: "/Users/you/Pictures/Silicon/lisbon-0001.png", elapsedSeconds: 11.4,
                 peakMemoryBytes: 13_958_643_712, predictedPeakBytes: 14_200_000_000,
-                model: "FLUX.2 klein"
+                model: "FLUX.2 klein",
+                mediaID: exampleImageMediaID,
+                mediaURL: "/media/\(exampleImageMediaID)"
             ))
         ),
         Route(
@@ -923,8 +1191,12 @@ struct ContractExportTests {
             summary: "Turn an image into a mesh.",
             request: .of(exampleMeshRequest),
             response: .of(ControlAPI.MeshResponse(
-                glbPath: "/Users/you/Models/kettle.glb", objPath: nil,
-                elapsedSeconds: 323.7, model: "Hunyuan3D 2"
+                glbPath: "/Users/you/Models/kettle.glb",
+                objPath: "/Users/you/Models/kettle.obj",
+                elapsedSeconds: 323.7, model: "Hunyuan3D 2",
+                mediaID: exampleMeshMediaID,
+                mediaURL: "/media/\(exampleMeshMediaID)",
+                objMediaID: exampleMeshOBJMediaID
             ))
         ),
         Route(
@@ -933,7 +1205,14 @@ struct ContractExportTests {
             response: .of([ControlAPI.VideoModel(
                 id: "hailuo-h3", name: "Hailuo H3", summary: "Text and image to video.",
                 typicalDuration: "4 minutes", supportsImageInput: true,
-                supportedSeconds: [5, 10], available: true, node: "silicon-node"
+                supportedSeconds: [5, 10], available: true, node: "silicon-node",
+                // Present in the fixture on purpose. All three are optional on the wire —
+                // an older node advertises none of them — and a generated client that has
+                // never seen them populated ends up hard-coding the Mac's defaults, which
+                // is exactly what the phone was doing before this export carried them.
+                supportedParameters: ["h3_turbo", "h3_steps", "negative_prompt"],
+                supportedResolutions: ["480p", "720p", "1080p"],
+                supportsNegativePrompt: true
             )])
         ),
         Route(
@@ -951,27 +1230,119 @@ struct ContractExportTests {
         ),
         Route(
             method: "POST", path: "/video/queue/control", auth: "device",
-            summary: "Pause, resume, skip or cancel queued work.",
+            summary: "One of six verbs on the queue: pause, resume, retry, remove, "
+                + "stop_following, clear_finished. There is no cancel.",
             request: .of(ControlAPI.VideoQueueControl(action: "pause")),
-            response: .of(exampleVideoQueue)
+            // Every verb the Mac accepts, with the fields each one needs. A client that
+            // has only seen `pause` cannot tell that four of them require an `id`, that
+            // `confirmNewRender` exists at all, or that `cancel` is deliberately not here.
+            requests: [
+                ("pause", .of(ControlAPI.VideoQueueControl(action: "pause"))),
+                ("resume", .of(ControlAPI.VideoQueueControl(action: "resume"))),
+                // Reconnects to the same node job when it can. `confirmNewRender: true` is
+                // the caller saying it has checked the node and accepts a *second* render —
+                // which is the only way past an uncertain submission.
+                ("retry", .of(ControlAPI.VideoQueueControl(
+                    action: "retry", id: "9C2F-0003", confirmNewRender: true
+                ))),
+                ("remove", .of(ControlAPI.VideoQueueControl(action: "remove", id: "9C2F-0003"))),
+                // Stops this Mac following the clip and pauses the queue. The node may
+                // still be rendering it, which is why this is not a cancel.
+                ("stop_following", .of(ControlAPI.VideoQueueControl(
+                    action: "stop_following", id: "9C2F-0001"
+                ))),
+                ("clear_finished", .of(ControlAPI.VideoQueueControl(action: "clear_finished"))),
+            ],
+            response: .of(exampleVideoQueue),
+            errors: [400: ControlServer.unknownQueueAction]
         ),
         Route(
             method: "POST", path: "/video/generate", auth: "device",
             summary: "Render one clip and wait for it. At most eight of these at once.",
             request: .of(ControlAPI.VideoGenerateRequest(
-                prompt: "A tram climbing Alfama at dawn", modelID: "hailuo-h3", seconds: 5
+                prompt: "A tram climbing Alfama at dawn", modelID: "hailuo-h3", seconds: 5,
+                negativePrompt: "blurry, watermark, text overlay",
+                // A device names its starting still this way and never by path. The Mac
+                // resolves it before the render sees the request.
+                uploadID: exampleUploadID
             )),
             response: .of(ControlAPI.VideoResponse(
                 file: "/Users/you/Movies/Silicon/lisbon-0001.mp4", node: "silicon-node",
-                model: "hailuo-h3", elapsedSeconds: 244.1
+                model: "hailuo-h3", elapsedSeconds: 244.1,
+                mediaID: exampleClipMediaID,
+                mediaURL: "/media/\(exampleClipMediaID)",
+                thumbnailMediaID: examplePosterMediaID
             )),
             errors: [
+                404: ControlServer.expiredSubject,
                 429: "Too many synchronous video requests. No clip was added. Use POST "
                     + "/video/queue to save work without holding a connection, then GET "
                     + "/video/queue to follow it.",
             ]
         ),
+        Route(
+            method: "GET", path: "/media/{id}", auth: "device",
+            summary: "The file itself. Answers bytes, not JSON: the content type of the "
+                + "result, `Accept-Ranges: bytes`, an `ETag`, 206 for a `Range` and 304 "
+                + "for a matching `If-None-Match`.",
+            // No response example, because there is no JSON to give one of. The ids come
+            // from `mediaID` and `thumbnailMediaID` on the routes above; a client never
+            // constructs one and never parses one.
+            errors: [
+                404: ControlServer.noSuchMedia,
+                416: ControlServer.rangeOutsideFile,
+            ]
+        ),
+        Route(
+            method: "POST", path: "/uploads", auth: "device",
+            summary: "Send a picture or a short clip, and get back the two ids that let a "
+                + "render start from it. Raw bytes or multipart; at most 24 MiB; kept for "
+                + "seven days.",
+            // Deliberately no request example: the body is a file, not a shape. What a
+            // client has to get right is the headers and the cap, which the summary and
+            // the refusals below carry.
+            response: .of(ControlAPI.UploadResponse(
+                uploadID: exampleUploadID, mediaID: exampleUploadMediaID,
+                bytes: 2_118_404, contentType: "image/jpeg",
+                mediaURL: "/media/\(exampleUploadMediaID)",
+                expiresAt: "2026-09-25T09:41:00Z"
+            )),
+            errors: [
+                400: "That upload has no body in it.",
+                413: "That request body is larger than this device may send "
+                    + "(\(BuddyUploads.maximumBytes) bytes).",
+                415: ControlServer.unreadableUpload,
+            ]
+        ),
+        Route(
+            method: "GET", path: "/swarm/peers/{name}/status", auth: "device",
+            summary: "One peer asked now rather than remembered: its `/v1/node` and "
+                + "`/v1/gguf`, fetched with this Mac's credential for it. The credential "
+                + "is never in the answer.",
+            response: .of(ControlAPI.PeerNodeStatus(
+                name: "silicon-node", baseURL: "http://silicon-node:8790", reachable: true,
+                platform: "windows-cuda", hardware: "NVIDIA GeForce RTX 3090 Ti",
+                totalMemoryGB: 24, usedMemoryGB: 9.4, headroomGB: 14.6,
+                gpuUtilization: 0.38, queueDepth: 1,
+                capabilities: [
+                    .init(id: "text-to-video", kind: "video", ready: true),
+                    .init(id: "image-to-mesh", kind: "mesh", ready: true),
+                ],
+                gguf: .init(
+                    running: true, model: "qwen3.8-27b-q4_k_m.gguf",
+                    // The one field `GET /swarm` cannot carry.
+                    adapter: "bonsai-27b-v3.lora.gguf", engine: "stock",
+                    contextLength: 65_536, uptimeSeconds: 4_281,
+                    installedModels: [
+                        "qwen3.8-27b-q4_k_m.gguf", "qwen3-coder-30b-q4_k_m.gguf",
+                    ],
+                    adapters: ["bonsai-27b-v3.lora.gguf"]
+                )
+            )),
+            errors: [404: "No peer named silicon-node in this Mac's swarm registry."]
+        ),
     ]
+
 
     // MARK: - Shared examples
 
@@ -1186,19 +1557,73 @@ struct ContractExportTests {
         suggestions: [], notes: ["The last phase is the one that decides."]
     )
 
+    /// The path form, which is what this Mac's own token and the MCP bridge send.
+    /// `uploadID` is in the fixture too, because a phone has no path to send and the
+    /// generated client has to know both keys exist and that exactly one is needed.
     static let exampleMeshRequest = ControlAPI.MeshRequest(
-        imagePath: "/Users/you/Pictures/kettle.png", modelID: "hunyuan3d-2", textureSize: 2048
+        imagePath: "/Users/you/Pictures/kettle.png", modelID: "hunyuan3d-2",
+        textureSize: 2048, uploadID: exampleUploadID
     )
 
+    /// Three items, because the optional fields are the whole difficulty of this shape and
+    /// one running clip shows none of them.
+    ///
+    /// A phone reads `file`, `error`, `mediaID` and the queue's `message` and has, until
+    /// now, only ever seen them null in the export — so a generated client either declared
+    /// them non-optional and crashed on the first failure, or guessed. Here the running
+    /// clip has none of them, the finished one has a file and the two ids that make it
+    /// fetchable, and the failed one has the sentence the Mac would show. `message` is the
+    /// queue's own line, set here to the one a stalled queue really produces.
     static let exampleVideoQueue = ControlAPI.VideoQueueView(
-        paused: false, activeID: "9C2F-0001", message: nil,
-        items: [.init(
-            id: "9C2F-0001", batchID: "9C2F", title: "Lisbon",
-            prompt: "A tram climbing Alfama at dawn", scene: 1, variation: 1,
-            seed: 424_242, modelID: "hailuo-h3", seconds: 5, resolution: "768P",
-            h3Turbo: false, status: "running", nodeJobID: "job-1187", file: nil,
-            outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
-            uncertainSubmission: false, h3Steps: 30
-        )]
+        paused: false, activeID: "9C2F-0001",
+        message: "Waiting for silicon-node. The queue is saved; no job has been resubmitted.",
+        items: [
+            .init(
+                id: "9C2F-0001", batchID: "9C2F", title: "Lisbon",
+                prompt: "A tram climbing Alfama at dawn", scene: 1, variation: 1,
+                seed: 424_242, modelID: "hailuo-h3", seconds: 5, resolution: "720p",
+                h3Turbo: false, status: "running", nodeJobID: "job-1187", file: nil,
+                outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
+                uncertainSubmission: false, h3Steps: 30,
+                negativePrompt: "blurry, watermark, text overlay"
+            ),
+            .init(
+                id: "9C2F-0002", batchID: "9C2F", title: "Lisbon",
+                prompt: "The same tram, from the tracks", scene: 2, variation: 1,
+                seed: 424_243, modelID: "hailuo-h3", seconds: 5, resolution: "720p",
+                h3Turbo: false, status: "completed", nodeJobID: "job-1188",
+                file: "/Users/you/Movies/Silicon/Lisbon/lisbon-0002.mp4",
+                outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
+                uncertainSubmission: false, h3Steps: 30,
+                detail: "Hailuo H3 at 5 s — the prompt asks for fast motion.",
+                mediaID: exampleClipMediaID,
+                mediaURL: "/media/\(exampleClipMediaID)",
+                thumbnailMediaID: examplePosterMediaID
+            ),
+            .init(
+                id: "9C2F-0003", batchID: "9C2F", title: "Lisbon",
+                prompt: "Alfama rooftops at first light", scene: 3, variation: 1,
+                seed: 424_244, modelID: "hailuo-h3", seconds: 5, resolution: "720p",
+                h3Turbo: false, status: "failed", nodeJobID: nil, file: nil,
+                outputDirectory: "/Users/you/Movies/Silicon/Lisbon",
+                error: "silicon-node ran out of VRAM at the decode stage.",
+                uncertainSubmission: true, h3Steps: 30
+            ),
+        ]
     )
+
+    // MARK: Media ids
+    //
+    // Placeholders, like the pairing code and the tailnet address: these files are
+    // committed and copied between repositories, and an id that looked real would invite
+    // somebody to try it. They are the right *shape* — base64url, 22 characters — because
+    // that is the part a generated client has to handle.
+
+    static let exampleClipMediaID = "bWVkaWEtY2xpcC1leGFt"
+    static let examplePosterMediaID = "bWVkaWEtcG9zdGVyLWV4"
+    static let exampleImageMediaID = "bWVkaWEtaW1hZ2UtZXhh"
+    static let exampleMeshMediaID = "bWVkaWEtbWVzaC1leGFt"
+    static let exampleMeshOBJMediaID = "bWVkaWEtbWVzaC1vYmpl"
+    static let exampleUploadMediaID = "bWVkaWEtdXBsb2FkLWV4"
+    static let exampleUploadID = "0B7D4C2A-5E31-4F08-9A6B-1C2D3E4F5061"
 }

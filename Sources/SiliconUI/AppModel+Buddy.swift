@@ -326,25 +326,43 @@ extension AppModel {
     func buddyEventSnapshot() async -> BuddyEventPump.Snapshot {
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
+        let roots = await controlMediaRoots()
         for item in queue.items {
+            let active = item.id == activeVideoQueueID
+            // Registered against the shared table the control server publishes from, so the
+            // id on the frame that says "done" is the id `GET /video/queue` was already
+            // handing out — one fetch, not a second poll to find out what to fetch.
+            var mediaID: String?
+            if let file = item.file {
+                mediaID = await MediaRegistry.shared.register(path: file, within: roots)
+            }
             jobs[item.id] = ControlAPI.JobEvent(
                 id: item.id, kind: "video", status: item.status,
                 title: item.title,
-                fraction: item.id == activeVideoQueueID ? videoProgress : nil
+                fraction: active ? videoProgress : nil,
+                // Only the clip the app is actually following has a stage. One waiting its
+                // turn has a status, and inventing a stage for it would be a sentence the
+                // renderer never said.
+                stage: active ? videoStage : nil,
+                reason: item.error,
+                mediaID: mediaID
             )
         }
         if let image = currentImageJob {
             jobs["image"] = ControlAPI.JobEvent(
                 id: "image", kind: "image", status: "running", title: image.modelName,
-                fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil
+                fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil,
+                stage: imageState.stageLine
             )
         }
         if let mesh = currentMeshJob {
             jobs["mesh"] = ControlAPI.JobEvent(
                 id: "mesh", kind: "mesh", status: "running", title: mesh.modelName,
-                fraction: meshProgress
+                fraction: meshProgress,
+                stage: meshState.stageLine
             )
         }
+        await MediaRegistry.shared.persist()
 
         var downloads: [String: ControlAPI.DownloadEvent] = [:]
         for transfer in activeTransfers {

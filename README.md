@@ -320,6 +320,70 @@ model, downloads, render jobs, with a heartbeat every 15 seconds), and the Mac's
 conversations, so a thread started on the phone is on screen in the app and the other way
 round. Only this Mac's own token can list or revoke devices.
 
+### Silicon Buddy media
+
+A render finishes on the Mac and the file lands in your own Movies, Pictures or 3D folder.
+For a while the phone could only tell you where — it had a path and no way to open it, and
+the Mac's own media serving is on the loopback gateway, behind a token no device holds. Three
+routes close that.
+
+**Getting a result back.** Every answer that used to carry only a path now carries a
+`mediaID` and a `mediaURL` beside it — `GET /video/queue` items with a finished file,
+`POST /video/generate`, `POST /image/generate`, `POST /mesh/generate` — and a video also
+carries a `thumbnailMediaID`, a small JPEG poster frame the Mac pulls half a second into the
+clip. `GET /media/{id}` serves the file itself: the right content type, `Accept-Ranges`, an
+`ETag`, `206` for a `Range` and `304` for an `If-None-Match`, so a player can seek and a list
+of posters costs one fetch each rather than one per scroll. Both device scopes may fetch,
+for the same reason a chat-only device may read the queue that mentions the clip: looking at
+something the Mac has already made spends nothing.
+
+The id is the point. It is 128 random bits this Mac minted, it is not a path, and it cannot
+be turned into one: the table behind it only ever accepts files that already live inside the
+app's own output folders, resolved for `..` and followed through symlinks first, so a path
+outside them cannot be registered and therefore no id for one can exist to be guessed. An id
+for a file you have since deleted stops working — that is a 404, and the same 404 an id that
+never existed gets.
+
+**Sending something in.** `POST /uploads` is how a phone makes a mesh out of a photograph.
+Send the bytes with a `Content-Type` and an `X-Filename`, or as `multipart/form-data`; both
+are read and neither is believed — the type is decided from the file's own first bytes, and
+anything that is not a PNG, JPEG, GIF, WebP, MP4, MOV or WebM is refused before a byte is
+written. The ceiling is **24 MiB for this route alone**; every other route a device can
+reach keeps its 4 MiB, because that cap is what stops an authenticated phone from spending
+this Mac's memory a request at a time. Full control only: uploading spends disk.
+
+Uploads land in `~/Library/Application Support/SiliconOptimizer/uploads/<device id>/`, one
+folder per paired device, `0700` and `0600`, so revoking a phone and deleting what it sent
+are the same gesture. They are **swept after seven days** — an upload is working material
+for one render, not a library — and the sweep runs on every arrival, so it needs no timer.
+The answer says `expiresAt`, so an app can say "available until" rather than discover the
+404 a week later.
+
+`POST /mesh/plan`, `POST /mesh/generate`, `POST /image/generate` and `POST /video/generate`
+then take `uploadID` or `mediaID` in place of a path, resolved on this side before the
+render sees the request. A **device may only use those**: an `imagePath` in a request
+carrying a device token is refused, because a device that could name one file could name
+any file. This Mac's own token and the swarm secret still pass paths, which is what every
+script and MCP tool written against these routes does.
+
+**Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
+knew about each peer and used to keep to itself: platform, GPU or chip, memory used and
+total, headroom, GPU utilisation, queue depth, the GGUF it is serving and with which engine,
+and a `lanes` block saying whether its video, image, mesh and chat lanes could take work this
+moment. All of it optional, all of it absent when the node did not report it, and a peer that
+is down still carries its error and nothing else. `GET /swarm/peers/{name}/status` asks one
+node *now* instead, forwarding its `/v1/node` and `/v1/gguf` — the only place the LoRA
+adapter riding on its loaded GGUF appears, because that is a question this Mac's poll never
+asked. The credential goes out in a header and is never in the answer. Full control only.
+
+**Following a job.** The `job` frames on `/events` now carry `stage` (what the renderer is
+doing, on the clip the Mac is actually following), `reason` (the failure's own sentence) and,
+on the frame that says a render is done, the `mediaID` to fetch. A phone no longer has to
+poll `GET /video/queue` beside the stream to have something true to show.
+
+Every one of these is in the contract fixtures `ContractExportTests` exports, so the phone
+apps are generated from them rather than from this section.
+
 ---
 
 ## TypeSafe (Jev)

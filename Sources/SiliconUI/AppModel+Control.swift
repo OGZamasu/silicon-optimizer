@@ -984,7 +984,13 @@ extension AppModel {
         _ request: ControlAPI.MeshRequest
     ) async throws -> ControlAPI.MeshResponse {
         let (entry, configuration) = try resolveMesh(request)
-        let image = URL(fileURLWithPath: (request.imagePath as NSString).expandingTildeInPath)
+        // Optional on the wire since devices got `uploadID`/`mediaID`, which the control
+        // server resolves into this field before the request reaches here. Nothing this
+        // side can do with a request that still has none.
+        guard let named = request.imagePath, !named.isEmpty else {
+            throw ControlHostError.badRequest(ControlServer.noSubjectImage)
+        }
+        let image = URL(fileURLWithPath: (named as NSString).expandingTildeInPath)
         guard FileManager.default.fileExists(atPath: image.path) else {
             throw MeshRuntimeError.generationFailed(
                 "No image at \(image.path). Pass an absolute path to an existing image file."
@@ -1081,7 +1087,9 @@ extension AppModel {
                 supportedSeconds: entry.supportedSeconds,
                 available: node != nil,
                 node: node?.name,
-                supportedParameters: node.flatMap { videoCapability(for: entry, on: $0)?.supportedParameters }
+                supportedParameters: node.flatMap { videoCapability(for: entry, on: $0)?.supportedParameters },
+                supportedResolutions: entry.supportedResolutions,
+                supportsNegativePrompt: entry.supportsNegativePrompt
             )
         }
     }
@@ -1185,7 +1193,14 @@ extension AppModel {
             resolution: request.resolution ?? videoResolution,
             h3ChainPrompts: chainPrompts,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            seed: request.seed, h3Turbo: h3Turbo, h3Steps: h3Steps
+            seed: request.seed, h3Turbo: h3Turbo, h3Steps: h3Steps,
+            // Sent only where the lane takes one. Every node lane does today; dropping it
+            // silently on one that does not is better than a refusal over a field the
+            // caller could not have known about — and `GET /video/models` says which.
+            negativePrompt: entry.supportsNegativePrompt
+                ? request.negativePrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilWhenEmpty
+                : nil
         )
 
         videoError = nil
@@ -1226,7 +1241,28 @@ extension AppModel {
                         ControlAPI.SwarmView.Capability(
                             id: $0.id, kind: $0.kind, ready: $0.ready
                         )
-                    }
+                    },
+                    // Everything below was already on this Mac's own Swarm card and went
+                    // no further. The phone showed a name, an address and a dot; this is
+                    // the rest of what the last poll actually learned. Nothing new is
+                    // fetched to answer it — a peer that is down still carries its error
+                    // and nothing else, because that is all there is to say about it.
+                    platform: peer.platform,
+                    hardware: peer.hardware,
+                    totalMemoryGB: peer.totalGB,
+                    usedMemoryGB: peer.usedGB,
+                    headroomGB: peer.headroomGB,
+                    gpuUtilization: peer.gpuUtil,
+                    queueDepth: peer.queueDepth,
+                    gpuConsumer: peer.gpuConsumer,
+                    // The name only while it is actually serving: a stopped lane has a
+                    // model on disk, which is `lanes.gguf == false` and not a claim that
+                    // something is loaded.
+                    loadedModel: peer.llm?.running == true ? peer.llm?.model : nil,
+                    modelEngine: peer.llm?.running == true ? peer.llm?.engine : nil,
+                    modelContextLength: peer.llm?.running == true
+                        ? peer.llm?.contextLength : nil,
+                    lanes: Self.lanes(of: peer)
                 )
             },
             polledSecondsAgo: lastSwarmPoll.map { Date().timeIntervalSince($0) },
