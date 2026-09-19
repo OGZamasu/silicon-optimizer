@@ -1192,6 +1192,14 @@ private struct JevSection: View {
                         .foregroundStyle(.secondary)
                         .padding(.leading, 18)
                     }
+                    if feature == .verification, settings.isOn(.verification) {
+                        JevEscalationTargetRow(
+                            selected: settings.verificationEscalationModel,
+                            pick: { model in
+                                apply { $0.verificationEscalationModel = model }
+                            }
+                        )
+                    }
                 }
             }
 
@@ -1302,6 +1310,75 @@ private struct JevSection: View {
                 connection = error.localizedDescription
             }
             testing = false
+        }
+    }
+}
+
+/// Which model a flagged answer is re-run on.
+///
+/// Shown under the verification toggle, and only while verification is on — the same
+/// arrangement, and for the same reason, as the routing fallback below it: it is that
+/// feature's setting and means nothing without it. The value lives in `jev.json` with the
+/// rest of what Jev is allowed to do, so this row owns none of it.
+///
+/// The list is `gatewayServableModels()` rather than `gatewayModels()`: `silicon/auto` is a
+/// virtual id that asks the router to choose, and "escalate to whatever routing picks" is
+/// not an escalation, it is a coin toss that may land on the model that just answered.
+private struct JevEscalationTargetRow: View {
+    let selected: String?
+    let pick: (String?) -> Void
+
+    @Environment(AppModel.self) private var app
+    /// Read once when the row appears rather than in `body`: building the list walks the
+    /// library, the swarm and the cloud lists, and a picker redraws often.
+    @State private var models: [GatewayAPI.Model] = []
+
+    /// A pick that is no longer in the list — deleted, hidden, or its node went away.
+    /// Saying so beats a picker that silently shows "Work it out" and leaves someone
+    /// thinking their choice is still in force.
+    private var missing: String? {
+        guard let selected, !models.contains(where: { $0.id == selected }) else { return nil }
+        return selected
+    }
+
+    var body: some View {
+        Picker(
+            "Re-run flagged answers on",
+            selection: Binding(
+                get: { selected ?? "" },
+                set: { pick($0.isEmpty ? nil : $0) }
+            )
+        ) {
+            Text("Work it out — a serving node, else a cloud model").tag("")
+            ForEach(models, id: \.id) { model in
+                Text(model.displayName).tag(model.id)
+            }
+            if let missing {
+                Text("\(missing) (not available)").tag(missing)
+            }
+        }
+        .onAppear {
+            Task { models = await app.gatewayServableModels() }
+        }
+        Text(
+            "When Jev says an answer does not answer the question, describes a document it "
+            + "was never given, contradicts its context or was cut off, `POST /chat` and the "
+            + "MCP `chat` tool ask this model the same thing and return its answer instead, "
+            + "with the reasons attached. One re-run per request, never a loop. Streaming "
+            + "answers are only flagged — their tokens are already on your screen, so they "
+            + "say what they found and suggest the re-run rather than replacing what you are "
+            + "reading. Left alone, this never picks a model on this Mac: that would unload "
+            + "the one that just answered."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        if let missing {
+            Text(
+                "\(missing) is not installed or reachable right now, so a flagged answer "
+                + "will only be annotated until it comes back or you pick something else."
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
         }
     }
 }

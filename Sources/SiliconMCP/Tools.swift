@@ -812,10 +812,27 @@ enum Tools {
                 maxTokens: arguments["max_tokens"]?.intValue
             ))
             let reasoning = response.reasoning ?? ""
-            let footer = String(
+            var footer = String(
                 format: "\n\n---\n%d tokens at %.1f tok/s (local)",
                 response.generatedTokens, response.tokensPerSecond
             )
+            // Jev's verdict, when answer verification is on. It goes under the rule with
+            // the token count rather than into the reply, because it is a note *about* the
+            // answer — and when it says `escalated to`, the text above is that model's
+            // answer, not the local one, which the caller has to be told in so many words.
+            if let verification = response.verification {
+                switch verification.verdict {
+                case "escalate":
+                    footer += "\nJev flagged the local answer"
+                        + (verification.escalatedTo.map { " and re-ran it on \($0)" } ?? "")
+                        + ". " + verification.reasons.joined(separator: " ")
+                case "annotate":
+                    footer += "\nJev flagged this answer: "
+                        + verification.reasons.joined(separator: " ")
+                default:
+                    break
+                }
+            }
 
             // A reasoning model can spend its entire token budget thinking and never reach an
             // answer. Returning an empty string looks like a broken tool, so say what happened

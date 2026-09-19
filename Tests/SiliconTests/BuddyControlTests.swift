@@ -442,6 +442,41 @@ struct BuddyControlTests {
         }
     }
 
+    /// The frame answer verification ends a stream with, on the wire.
+    ///
+    /// A phone that has never heard of `verdict` skips an unknown event name, which is why
+    /// this can be added to a frozen contract at all — and why it has to come after
+    /// `finished` rather than replacing it.
+    @Test func chatStreamEndsWithTheVerdictFrameWhenVerificationIsOn() async throws {
+        let sent = ControlAPI.ChatVerdict(
+            verdict: "escalate",
+            reasons: ["The reply stops mid-thought and the token budget ran out."],
+            escalatedTo: nil,
+            suggestion: "Send this again on cloud/openai/gpt-5.5 for a stronger answer."
+        )
+        try await withServer(tokens: ["Hel", "lo"], verdict: sent) { fixture in
+            let events = try await fixture.local.events(
+                "POST", "/chat/stream", token: fixture.local.token,
+                body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            ) { $0.contains { $0.name == "verdict" } }
+
+            // After the metrics, not before them and not instead of them.
+            let names = events.map(\.name)
+            #expect(names.last == "verdict")
+            #expect(names.firstIndex(of: "finished") ?? 0 < names.count - 1)
+
+            let frame = try #require(events.last)
+            let decoded = try JSONDecoder().decode(
+                ControlAPI.ChatVerdict.self, from: Data(frame.data.utf8)
+            )
+            #expect(decoded == sent)
+            // A stream never escalates: the tokens are already on screen, so it reports
+            // and suggests instead of swapping the message out from under the reader.
+            #expect(decoded.escalatedTo == nil)
+            #expect(decoded.suggestion?.isEmpty == false)
+        }
+    }
+
     /// Nothing is written until the host agrees to start, so a refusal is a status a phone
     /// can act on rather than a 200 whose first frame contradicts it.
     @Test func aRefusalBeforeTheFirstFrameIsAStatusNotAnEvent() async throws {
@@ -775,6 +810,7 @@ struct BuddyControlTests {
 
     private func withServer(
         tokens: [String] = ["ok"], pace: Duration = .milliseconds(1), failing: Bool = false,
+        verdict: ControlAPI.ChatVerdict? = nil,
         hub: BuddyEventHub = BuddyEventHub(),
         writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         _ body: (Fixture) async throws -> Void
@@ -786,7 +822,9 @@ struct BuddyControlTests {
 
         let handshakeURL = directory.appendingPathComponent("control.json")
         let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
-        let host = BuddyTestHost(tokens: tokens, pace: pace, failing: failing)
+        let host = BuddyTestHost(
+            tokens: tokens, pace: pace, failing: failing, verdict: verdict
+        )
         let server = ControlServer(
             host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
             eventWriteDeadline: writeDeadline,
@@ -997,6 +1035,8 @@ actor BuddyTestHost: ControlHost {
     private let tokens: [String]
     private let pace: Duration
     private let failing: Bool
+    /// The `verdict` frame answer verification adds after `finished`, when it is on.
+    private let verdict: ControlAPI.ChatVerdict?
     private(set) var startedStreams = 0
     private(set) var cancelledStreams = 0
     private(set) var emitted = 0
@@ -1013,10 +1053,14 @@ actor BuddyTestHost: ControlHost {
         exposureSource = source
     }
 
-    init(tokens: [String], pace: Duration, failing: Bool) {
+    init(
+        tokens: [String], pace: Duration, failing: Bool,
+        verdict: ControlAPI.ChatVerdict? = nil
+    ) {
         self.tokens = tokens
         self.pace = pace
         self.failing = failing
+        self.verdict = verdict
     }
 
     private func noteCancelled() { cancelledStreams += 1 }
@@ -1050,6 +1094,9 @@ actor BuddyTestHost: ControlHost {
                         promptTokens: 7, generatedTokens: tokens.count,
                         tokensPerSecond: 12.5, timeToFirstToken: 0.25
                     )))
+                    // Strictly last: Jev reads a finished reply, so the verdict cannot
+                    // exist until the final token has already gone out.
+                    if let verdict = self.verdict { continuation.yield(.verdict(verdict)) }
                     continuation.finish()
                 } catch {
                     await self.noteCancelled()

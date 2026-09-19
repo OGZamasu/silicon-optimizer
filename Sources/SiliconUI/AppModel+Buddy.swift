@@ -39,23 +39,63 @@ extension AppModel {
             maxTokens: request.maxTokens ?? (settings.maxTokens > 0 ? settings.maxTokens : nil),
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
+        let budget = chatRequest.maxTokens
         return streamed { [weak self] emit in
             guard let self else { return }
+            var answer = ""
+            var finished = GenerationMetrics()
             // Like `chat`, this path has no `generationTask`, so without `whileGenerating`
             // a long answer reads as idleness — and the idle timer unloads the model, or
             // the Mac sleeps, halfway through writing it.
             try await self.whileGenerating {
                 for try await event in try await runtime.chat(chatRequest) {
                     switch event {
-                    case .token(let token): emit(.token(token))
+                    case .token(let token):
+                        answer += token
+                        emit(.token(token))
                     case .reasoningToken(let token): emit(.reasoning(token))
                     case .finished(let metrics):
                         self.lastGeneration = metrics
+                        finished = metrics
                         emit(.finished(Self.metrics(metrics)))
                     }
                 }
             }
+            if let verdict = await self.streamVerdict(
+                prompt: VerificationPrompt(messages: request.messages),
+                reply: answer, metrics: finished, budget: budget
+            ) {
+                emit(.verdict(verdict))
+            }
         }
+    }
+
+    /// The `verdict` frame a stream ends with, or nil when verification is off or found
+    /// nothing worth saying.
+    ///
+    /// Deliberately after the whole answer and deliberately without escalating. Jev reads a
+    /// finished reply, and the reply is not finished until the last token — and by then the
+    /// reader has it. See `JevVerifier.streamSuggestion` for why a stream suggests rather
+    /// than substitutes; `POST /chat`, which has shown nothing, does escalate.
+    func streamVerdict(
+        prompt: VerificationPrompt, reply: String, metrics: GenerationMetrics, budget: Int?
+    ) async -> ControlAPI.ChatVerdict? {
+        guard !reply.isEmpty else { return nil }
+        guard let (verdict, target) = await verifyWithoutEscalating(
+            prompt: prompt, reply: reply,
+            truncated: metrics.wasTruncated(budget: budget)
+        ) else { return nil }
+        // Nothing fired. A frame saying so is noise on a phone; silence is the accept.
+        guard verdict != .accept else { return nil }
+        return ControlAPI.ChatVerdict(
+            verdict: verdict.name,
+            reasons: verdict.reasons,
+            escalatedTo: nil,
+            suggestion: {
+                if case .escalate = verdict { return JevVerifier.streamSuggestion(target: target) }
+                return nil
+            }()
+        )
     }
 
     // MARK: - Conversations
@@ -139,14 +179,19 @@ extension AppModel {
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
 
+        let budget = chatRequest.maxTokens
+        let asked = chatRequest.messages
         return streamed { [weak self] emit in
             guard let self else { return }
             defer { BuddyGenerations.shared.end(conversationID) }
+            var answer = ""
+            var finished = GenerationMetrics()
             do {
                 try await self.whileGenerating {
                     for try await event in try await runtime.chat(chatRequest) {
                         switch event {
                         case .token(let token):
+                            answer += token
                             self.append(token, to: replyID, in: conversationID, reasoning: false)
                             emit(.token(token))
                         case .reasoningToken(let token):
@@ -154,6 +199,7 @@ extension AppModel {
                             emit(.reasoning(token))
                         case .finished(let metrics):
                             self.lastGeneration = metrics
+                            finished = metrics
                             emit(.finished(Self.metrics(metrics)))
                         }
                     }
@@ -167,6 +213,16 @@ extension AppModel {
                     to: replyID, in: conversationID, reasoning: false
                 )
                 throw error
+            }
+            if let verdict = await self.streamVerdict(
+                prompt: VerificationPrompt(
+                    messages: asked.map {
+                        .init(role: $0.role.rawValue, content: $0.content, images: $0.images)
+                    }
+                ),
+                reply: answer, metrics: finished, budget: budget
+            ) {
+                emit(.verdict(verdict))
             }
         }
     }

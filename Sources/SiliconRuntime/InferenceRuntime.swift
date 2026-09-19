@@ -140,17 +140,35 @@ public struct GenerationMetrics: Sendable, Equatable {
     public var prefillTokensPerSecond: Double
     public var generationTokensPerSecond: Double
     public var timeToFirstToken: TimeInterval
+    /// The OpenAI `finish_reason` the runtime reported on the last chunk: `stop` when the
+    /// model chose to end, `length` when the token budget ran out, nil when the runtime
+    /// said nothing. Carried rather than dropped because "did this answer get cut off?" is
+    /// a fact the server already knows, and asking a model to guess at it instead would be
+    /// inventing an answer to a question code can read.
+    public var finishReason: String?
 
     public init(
         promptTokens: Int = 0, generatedTokens: Int = 0,
         prefillTokensPerSecond: Double = 0, generationTokensPerSecond: Double = 0,
-        timeToFirstToken: TimeInterval = 0
+        timeToFirstToken: TimeInterval = 0, finishReason: String? = nil
     ) {
         self.promptTokens = promptTokens
         self.generatedTokens = generatedTokens
         self.prefillTokensPerSecond = prefillTokensPerSecond
         self.generationTokensPerSecond = generationTokensPerSecond
         self.timeToFirstToken = timeToFirstToken
+        self.finishReason = finishReason
+    }
+
+    /// Whether the token budget, not the model, ended the answer.
+    ///
+    /// The runtime's own word first. A runtime that reports nothing falls back to the only
+    /// other fact available — the budget was set, and every token of it was spent — which
+    /// is what `mlx_lm.server` leaves us with on some builds.
+    public func wasTruncated(budget: Int?) -> Bool {
+        if let finishReason { return finishReason == "length" }
+        guard let budget, budget > 0 else { return false }
+        return generatedTokens >= budget
     }
 }
 

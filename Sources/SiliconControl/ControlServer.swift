@@ -853,6 +853,8 @@ public actor ControlServer {
                     try await writer.send(event: "reasoning", json: ControlAPI.StreamToken(text: text))
                 case .finished(let metrics):
                     try await writer.send(event: "finished", json: metrics)
+                case .verdict(let verdict):
+                    try await writer.send(event: "verdict", json: verdict)
                 }
             }
         } catch is CancellationError {

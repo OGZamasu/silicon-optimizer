@@ -353,12 +353,38 @@ extension AppModel: ControlHost {
         }
         lastGeneration = metrics
 
+        // Verification, and — when the policy says so — a stronger model's answer instead.
+        //
+        // This path can escalate where the streaming ones cannot: it has shown the caller
+        // nothing yet, so replacing the reply costs nobody a message they were reading.
+        // Truncation is read from the runtime's own finish reason against the budget this
+        // request actually sent, never asked of a model.
+        let outcome = await verify(
+            prompt: VerificationPrompt(messages: request.messages),
+            reply: content,
+            truncated: metrics.wasTruncated(budget: chatRequest.maxTokens)
+        )
+        var answer = content
+        var thinking = reasoning
+        if case .escalated(_, let better, _, _) = outcome {
+            answer = better
+            // The local model's chain of thought is not the escalated answer's. Returning
+            // it beside a reply another model wrote would be a plain untruth about where
+            // the answer came from.
+            thinking = ""
+        }
+
         return ControlAPI.ChatResponse(
-            content: content,
-            reasoning: reasoning.isEmpty ? nil : reasoning,
+            content: answer,
+            reasoning: thinking.isEmpty ? nil : thinking,
             promptTokens: metrics.promptTokens,
             generatedTokens: metrics.generatedTokens,
-            tokensPerSecond: metrics.generationTokensPerSecond
+            tokensPerSecond: metrics.generationTokensPerSecond,
+            verification: outcome.verdictName.map {
+                ControlAPI.ChatVerdict(
+                    verdict: $0, reasons: outcome.reasons, escalatedTo: outcome.escalatedTo
+                )
+            }
         )
     }
 

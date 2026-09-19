@@ -381,16 +381,26 @@ public enum ControlAPI {
         public var promptTokens: Int
         public var generatedTokens: Int
         public var tokensPerSecond: Double
+        /// What Jev made of this answer, when answer verification is on. Absent — not
+        /// null, absent — on every Mac where it is off, which is every Mac by default, so
+        /// a client written before this existed reads the same bytes it always did.
+        ///
+        /// When `escalatedTo` is set, `content` above is the *stronger* model's answer,
+        /// not the local one. That is the point of the field: the reply changed, and a
+        /// caller is entitled to know which model wrote what it is reading.
+        public var verification: ChatVerdict?
 
         public init(
             content: String, reasoning: String?, promptTokens: Int,
-            generatedTokens: Int, tokensPerSecond: Double
+            generatedTokens: Int, tokensPerSecond: Double,
+            verification: ChatVerdict? = nil
         ) {
             self.content = content
             self.reasoning = reasoning
             self.promptTokens = promptTokens
             self.generatedTokens = generatedTokens
             self.tokensPerSecond = tokensPerSecond
+            self.verification = verification
         }
     }
 

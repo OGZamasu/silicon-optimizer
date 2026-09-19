@@ -67,6 +67,7 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// keeping both members rather than choosing between two rewritten expressions.
     private static let built: Set<JevFeature> = [
         .decideTool, .routing, .mediaRouting, .guardrails, .recommendation,
+        .verification,
     ]
 }
 
@@ -227,6 +228,15 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// loses accuracy to irrelevant detail anyway.
     public var maxStateBytes: Int = JevService.defaultMaxStateBytes
 
+    /// Which gateway model a flagged answer is re-run on — a `GatewayAPI` model id such as
+    /// `cloud/openai/gpt-5.5` or `node/studio/qwen3.8-27b`, chosen in Settings.
+    ///
+    /// Nil means "work it out": a model a swarm node is already serving, else an enabled
+    /// cloud model, else nothing and the answer is only annotated. Only `.verification`
+    /// reads it, but it lives here because this is the file the owner's Jev decisions are
+    /// kept in and a control client may rewrite.
+    public var verificationEscalationModel: String?
+
     public init() {}
 
     public static let defaultFeatures: [JevFeature: Bool] = Dictionary(
@@ -251,6 +261,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         case routingFallbackModel
         case automaticUncensoredLane, composerAutoRoute
         case autoApproveSafeToolCalls
+        case verificationEscalationModel
     }
 
     public init(from decoder: any Decoder) throws {
@@ -273,6 +284,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
         autoApproveSafeToolCalls = try container.decodeIfPresent(
             Bool.self, forKey: .autoApproveSafeToolCalls
         ) ?? autoApproveSafeToolCalls
+        verificationEscalationModel = try container.decodeIfPresent(
+            String.self, forKey: .verificationEscalationModel
+        )
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -296,6 +310,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encodeIfPresent(automaticUncensoredLane, forKey: .automaticUncensoredLane)
         try container.encode(composerAutoRoute, forKey: .composerAutoRoute)
         try container.encode(autoApproveSafeToolCalls, forKey: .autoApproveSafeToolCalls)
+        try container.encodeIfPresent(
+            verificationEscalationModel, forKey: .verificationEscalationModel
+        )
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),
@@ -358,6 +375,12 @@ public struct JevSettings: Codable, Sendable, Equatable {
         if let fallback = copy.routingFallbackModel,
            fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             copy.routingFallbackModel = nil
+        }
+        // The same for the escalation target: the picker's "work it out" row arrives as an
+        // empty string, and storing that would be a model id no gateway can parse.
+        if let target = copy.verificationEscalationModel,
+           target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            copy.verificationEscalationModel = nil
         }
         for feature in JevFeature.allCases where copy.features[feature] == nil {
             copy.features[feature] = Self.defaultFeatures[feature] ?? false

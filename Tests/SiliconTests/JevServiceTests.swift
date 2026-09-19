@@ -123,9 +123,13 @@ struct JevSettingsTests {
         #expect(JevFeature.mediaRouting.isBuilt)
         #expect(JevFeature.guardrails.isBuilt)
         #expect(JevFeature.recommendation.isBuilt)
+        #expect(JevFeature.verification.isBuilt)
         // Guardrails ship off like the rest, and so does letting Jev answer for you.
         #expect(!settings.isOn(.guardrails))
         #expect(settings.autoApproveSafeToolCalls == false)
+        // Verification too, and with nowhere to escalate to until someone picks one.
+        #expect(!settings.isOn(.verification))
+        #expect(settings.verificationEscalationModel == nil)
         #expect(JevFeature.allCases.allSatisfy { !$0.summary.isEmpty && !$0.displayName.isEmpty })
     }
 

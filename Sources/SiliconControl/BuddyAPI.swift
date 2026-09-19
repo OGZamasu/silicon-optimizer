@@ -101,6 +101,37 @@ extension ControlAPI {
         case token(String)
         case reasoning(String)
         case finished(ChatMetrics)
+        /// Sent after `finished`, and only when answer verification is on. A client that
+        /// has never heard of it ignores an unknown SSE event name, which is what the
+        /// format is for.
+        case verdict(ChatVerdict)
+    }
+
+    /// What Jev made of a finished answer.
+    ///
+    /// One shape for both places it appears — the `verification` field of a `/chat`
+    /// response and the `verdict` SSE frame — so a client parses it once.
+    public struct ChatVerdict: Codable, Sendable, Equatable {
+        /// `accept`, `annotate` or `escalate`.
+        public var verdict: String
+        /// Plain sentences, already written for a reader. Empty on `accept`.
+        public var reasons: [String]
+        /// The gateway model that answered instead, when one did. Always nil on a stream:
+        /// the tokens are already on screen there, so a stream reports and suggests rather
+        /// than silently replacing what the reader has been watching arrive.
+        public var escalatedTo: String?
+        /// What to do about it, when nothing was done automatically.
+        public var suggestion: String?
+
+        public init(
+            verdict: String, reasons: [String] = [], escalatedTo: String? = nil,
+            suggestion: String? = nil
+        ) {
+            self.verdict = verdict
+            self.reasons = reasons
+            self.escalatedTo = escalatedTo
+            self.suggestion = suggestion
+        }
     }
 
     /// The payload of a `token` or `reasoning` event. An object rather than a bare string so

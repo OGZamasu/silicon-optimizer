@@ -379,7 +379,7 @@ line in the ledger, and they all ship off except the first:
 | Media routing | Reads an image, video or mesh request and picks the model and settings | yes |
 | Skill selection | Chooses which tools and skills an agent is offered for the task in hand | coming |
 | Model recommendation | Ranks the models this Mac can run against the job you describe | yes |
-| Answer verification | Checks a finished answer against its evidence and flags the doubtful ones | coming |
+| Answer verification | Checks a finished answer against the prompt, and re-runs the flagged ones on a stronger model | yes |
 | Estimate calibration | Judges whether a speed or memory estimate matched what the machine did | coming |
 
 ### Model routing
@@ -672,6 +672,70 @@ what they will do here rather than on a spec sheet.
 
 Turn **Model recommendation** off, or leave it off, and `POST /recommend` is answered the
 way `GET` always was: the hardware-fit pick, with nothing asked and nothing spent.
+
+### Verification
+
+A small model on your Mac answers fast and cheap, and sometimes it answers the wrong
+question, describes a document you never gave it, or stops mid-sentence because the token
+budget ran out. Verification is the [SDE cascade](https://docs.typesafe.ai/cookbooks/sde_cascade)
+applied to chat: after the local model answers, Jev checks the answer against the prompt,
+and when a check fires the same prompt is re-run on a stronger model and *that* answer comes
+back instead, with the reasons attached.
+
+Seven questions, all in
+[`VerificationQuestions.swift`](Sources/SiliconUI/Jev/VerificationQuestions.swift) with the
+thresholds that read them — six nouls (does the reply answer what was asked; does it state
+facts about a document, tool result or image that was never provided; does it contradict its
+context; is it in the format that was asked for; does it end mid-thought; does it refuse or
+deflect) and one score, 0 to 2, for whether the answer is usable at all. One request, all
+seven answered in parallel.
+
+Only what those questions need is sent: your last message, the system prompt if it is short,
+the reply (head and tail, with the middle elided past 6 KB), and the earlier turns. **Images
+are named, never sent** — "an image was attached" — and the question about invented facts
+says in so many words that this does not make the image's contents available, so a reply
+describing the picture is flagged rather than waved through.
+
+**Whether the answer was cut off is decided in code, not by a model.** It comes from the
+runtime's own `finish_reason` against the budget the request actually sent. A verifier that
+guessed at its own evidence would not be one.
+
+Three outcomes:
+
+| | What happens |
+|---|---|
+| **Accept** | Nothing fired. The local answer goes back untouched. |
+| **Annotate** | Something is in the middle band — a noul near 0.5 is the model saying it cannot tell — or a refusal, or a missed format. The local answer goes back with the reasons. Nothing is re-run: paying a stronger model for "cannot tell" is how a verification feature becomes a bill. |
+| **Escalate** | The reply does not answer the question, invents a source, contradicts its context, was cut off with the budget spent, or is confidently rated unusable. The prompt is re-run once on the escalation model. |
+
+**`POST /chat` and the MCP `chat` tool escalate.** They have shown the caller nothing yet, so
+replacing the reply costs nobody a message they were reading. The response grows an optional
+`verification: {verdict, reasons, escalatedTo}` — absent on every Mac where this is off,
+which is every Mac by default — and when `escalatedTo` is set, `content` is the stronger
+model's answer. The MCP tool says the same thing in a line under the token count.
+
+**`POST /chat/stream` and `POST /conversations/{id}/messages` do not.** By the time the last
+token has gone out, the answer is already on the reader's screen; replacing it would mean
+blanking a message someone has been reading, and appending a second one is not a verdict, it
+is a second answer. So they end with one extra SSE frame, `verdict`, carrying the reasons,
+`escalatedTo: null` and a suggestion — and leave the choice to whoever is reading. Phones get
+that frame too; a client that has never heard of it skips an unknown event name.
+
+**The escalation target** is a gateway model id, picked under the verification toggle in
+Settings. Left as "work it out" it prefers a model a swarm node is already serving, then an
+enabled cloud model, and if there is neither it only annotates. It is never a model on this
+Mac: escalating locally would unload the model that just answered, in the middle of the
+request that answered with it. The re-run goes through this Mac's own loopback gateway, so it
+starts a sleeping node, holds the cloud key and lands in the activity ledger like any other
+request — and it is capped at 2,048 tokens, deliberately this feature's own ceiling rather
+than the caller's.
+
+**One re-run per request, never a loop.** The escalated answer is verified too, because
+"escalated to gpt-5.5" is worth knowing more about when the stronger model also went wrong —
+but its verdict is reported, not acted on. So a flagged answer costs two Jev calls and one
+gateway call, and a clean one costs a single Jev call of a few hundred input tokens. If Jev
+is unreachable there is simply no verdict: a verification feature that turned a TypeSafe
+outage into a failed chat would be worse than none.
 
 **The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
 is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,
