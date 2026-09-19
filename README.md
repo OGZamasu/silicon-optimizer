@@ -690,11 +690,18 @@ context; is it in the format that was asked for; does it end mid-thought; does i
 deflect) and one score, 0 to 2, for whether the answer is usable at all. One request, all
 seven answered in parallel.
 
-Only what those questions need is sent: your last message, the system prompt if it is short,
-the reply (head and tail, with the middle elided past 6 KB), and the earlier turns. **Images
-are named, never sent** — "an image was attached" — and the question about invented facts
+Only what those questions need is sent to Jev: your last message, the system prompt if it is
+short, the reply, and the earlier turns — message, reply and context each head-and-tail if
+they are long, so a pasted document keeps the question at the end of it. **Images are never
+sent to Jev**, only named — "an image was attached" — and the question about invented facts
 says in so many words that this does not make the image's contents available, so a reply
 describing the picture is flagged rather than waved through.
+
+When something *is* left out — a system prompt too long to include, a context whose middle
+was elided — the state says so, and the fabrication check is downgraded to a note rather
+than a re-run. From inside a filtered state, "this is not here" and "this was never given to
+anyone" look identical, and charging a reply for our own trimming would be the cascade
+punishing the wrong thing.
 
 **Whether the answer was cut off is decided in code, not by a model.** It comes from the
 runtime's own `finish_reason` against the budget the request actually sent. A verifier that
@@ -705,8 +712,13 @@ Three outcomes:
 | | What happens |
 |---|---|
 | **Accept** | Nothing fired. The local answer goes back untouched. |
-| **Annotate** | Something is in the middle band — a noul near 0.5 is the model saying it cannot tell — or a refusal, or a missed format. The local answer goes back with the reasons. Nothing is re-run: paying a stronger model for "cannot tell" is how a verification feature becomes a bill. |
-| **Escalate** | The reply does not answer the question, invents a source, contradicts its context, was cut off with the budget spent, or is confidently rated unusable. The prompt is re-run once on the escalation model. |
+| **Annotate** | Something is in the middle band — a noul near 0.5 is the model saying it cannot tell — or a refusal, a missed format, or a poor overall rating. The local answer goes back with the reasons. Nothing is re-run: paying a stronger model for "cannot tell" is how a verification feature becomes a bill. |
+| **Escalate** | The reply does not answer the question, invents a source, contradicts its context, or was cut off with the budget spent. The prompt is re-run once on the escalation model. |
+
+The three "something is wrong" checks fire at 0.7, which is the cascade cookbook's own bar.
+The 0-to-2 quality score never escalates on its own: it is the holistic head, and one
+question that hides six judgments cannot say which of them went wrong — every failure worth
+buying a second answer for has a check of its own above.
 
 **`POST /chat` and the MCP `chat` tool escalate.** They have shown the caller nothing yet, so
 replacing the reply costs nobody a message they were reading. The response grows an optional
@@ -717,18 +729,39 @@ model's answer. The MCP tool says the same thing in a line under the token count
 **`POST /chat/stream` and `POST /conversations/{id}/messages` do not.** By the time the last
 token has gone out, the answer is already on the reader's screen; replacing it would mean
 blanking a message someone has been reading, and appending a second one is not a verdict, it
-is a second answer. So they end with one extra SSE frame, `verdict`, carrying the reasons,
-`escalatedTo: null` and a suggestion — and leave the choice to whoever is reading. Phones get
-that frame too; a client that has never heard of it skips an unknown event name.
+is a second answer. So they report and suggest, and leave the choice to whoever is reading.
+
+A stream still ends at `finished`, and waits at most three seconds past it for Jev — long
+enough that the verdict almost always catches the stream as one more SSE frame, short enough
+that a TypeSafe hiccup cannot make a finished answer look like it is hanging. When it does
+miss, nothing is lost on the conversation route: **the verdict is written onto the message**,
+so `GET /conversations/{id}` carries it from then on, and posted to `/events` as a `verdict`
+frame carrying the conversation and message ids. A phone that had closed the stream, or was
+never listening, still gets it. `POST /chat/stream` has no transcript to hang a late verdict
+on, so there a missed verdict is simply dropped — use the conversation route if you want it
+guaranteed.
+
+> **For the Buddy apps:** `finished` ends the reply and you may stop rendering there. Any SSE
+> event name you do not recognise must be ignored, never treated as an error — that is what
+> lets this contract grow without breaking generated clients.
 
 **The escalation target** is a gateway model id, picked under the verification toggle in
-Settings. Left as "work it out" it prefers a model a swarm node is already serving, then an
-enabled cloud model, and if there is neither it only annotates. It is never a model on this
-Mac: escalating locally would unload the model that just answered, in the middle of the
-request that answered with it. The re-run goes through this Mac's own loopback gateway, so it
-starts a sleeping node, holds the cloud key and lands in the activity ledger like any other
-request — and it is capped at 2,048 tokens, deliberately this feature's own ceiling rather
-than the caller's.
+Settings. It is **never a model on this Mac**: escalating locally would unload the model that
+just answered, in the middle of the request that answered with it — so local models are not
+even offered, and a local id left in the settings file is ignored rather than honoured.
+
+Left as "work it out" it uses a model one of your own machines is already serving, and
+otherwise just annotates. **It never reaches for a cloud model on its own.** A re-run sends
+the whole conversation — every turn, and any images attached to it — to whoever runs the
+model, and inside the swarm that is your hardware while outside it is someone else's. A
+feature that quietly started doing that the first time a local answer looked thin would be
+making that decision for you. So a cloud target is only ever used when you name one in
+Settings, where the row says what is sent and to whom; and `POST /jev`, which can change it,
+takes this Mac's own control token, so a paired phone can see the setting but not make it.
+
+The re-run goes through this Mac's own loopback gateway, so it starts a sleeping node, holds
+the cloud key and lands in the activity ledger like any other request — and it is capped at
+2,048 tokens, deliberately this feature's own ceiling rather than the caller's.
 
 **One re-run per request, never a loop.** The escalated answer is verified too, because
 "escalated to gpt-5.5" is worth knowing more about when the stronger model also went wrong —
@@ -736,6 +769,11 @@ but its verdict is reported, not acted on. So a flagged answer costs two Jev cal
 gateway call, and a clean one costs a single Jev call of a few hundred input tokens. If Jev
 is unreachable there is simply no verdict: a verification feature that turned a TypeSafe
 outage into a failed chat would be worse than none.
+
+The Mac's own Chat tab is **not** verified in this milestone. Verification lives on the
+control API — `POST /chat`, the MCP `chat` tool, and the two streaming routes the phones
+use — and the app's own chat window goes through a different path that this does not touch
+yet.
 
 **The ledger.** TypeSafe charges $0.042 per million input tokens; output is free. Every call
 is recorded in `~/Library/Application Support/SiliconOptimizer/jev-ledger.json` — calls,

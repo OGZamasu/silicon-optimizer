@@ -1321,9 +1321,15 @@ private struct JevSection: View {
 /// feature's setting and means nothing without it. The value lives in `jev.json` with the
 /// rest of what Jev is allowed to do, so this row owns none of it.
 ///
-/// The list is `gatewayServableModels()` rather than `gatewayModels()`: `silicon/auto` is a
-/// virtual id that asks the router to choose, and "escalate to whatever routing picks" is
-/// not an escalation, it is a coin toss that may land on the model that just answered.
+/// Two things are deliberately absent from the list.
+///
+/// **This Mac's own models.** Escalating to one would unload the model that just answered,
+/// in the middle of the request that answered with it, so offering them would be offering a
+/// choice the code then refuses to honour.
+///
+/// **`silicon/auto`.** It is a virtual id that asks the router to choose, and "escalate to
+/// whatever routing picks" is not an escalation — it is a coin toss that can land back on
+/// the model under test. `gatewayServableModels()` is the list without it.
 private struct JevEscalationTargetRow: View {
     let selected: String?
     let pick: (String?) -> Void
@@ -1333,12 +1339,28 @@ private struct JevEscalationTargetRow: View {
     /// library, the swarm and the cloud lists, and a picker redraws often.
     @State private var models: [GatewayAPI.Model] = []
 
+    /// Everything that could actually take an escalation: the swarm's models and, for
+    /// someone who has opted into one, a provider's. Never this Mac's own.
+    private var offered: [GatewayAPI.Model] {
+        models.filter {
+            if case .local = GatewayAPI.parseModelID($0.id) { return false }
+            return true
+        }
+    }
+
     /// A pick that is no longer in the list — deleted, hidden, or its node went away.
     /// Saying so beats a picker that silently shows "Work it out" and leaves someone
     /// thinking their choice is still in force.
     private var missing: String? {
-        guard let selected, !models.contains(where: { $0.id == selected }) else { return nil }
+        guard let selected, !offered.contains(where: { $0.id == selected }) else { return nil }
         return selected
+    }
+
+    /// Whose hardware the chosen model runs on, when it is not the owner's.
+    private var cloudProvider: String? {
+        guard let selected, case .cloud(let provider, _) = GatewayAPI.parseModelID(selected)
+        else { return nil }
+        return CloudProvider(rawValue: provider)?.displayName ?? provider
     }
 
     var body: some View {
@@ -1349,8 +1371,8 @@ private struct JevEscalationTargetRow: View {
                 set: { pick($0.isEmpty ? nil : $0) }
             )
         ) {
-            Text("Work it out — a serving node, else a cloud model").tag("")
-            ForEach(models, id: \.id) { model in
+            Text("Work it out — a model a node is already serving").tag("")
+            ForEach(offered, id: \.id) { model in
                 Text(model.displayName).tag(model.id)
             }
             if let missing {
@@ -1367,11 +1389,26 @@ private struct JevEscalationTargetRow: View {
             + "with the reasons attached. One re-run per request, never a loop. Streaming "
             + "answers are only flagged — their tokens are already on your screen, so they "
             + "say what they found and suggest the re-run rather than replacing what you are "
-            + "reading. Left alone, this never picks a model on this Mac: that would unload "
-            + "the one that just answered."
+            + "reading."
         )
         .font(.caption)
         .foregroundStyle(.secondary)
+        Text(
+            "Left as \"work it out\" this only ever uses a model one of your own machines is "
+            + "already serving, and otherwise just flags the answer. It never picks a cloud "
+            + "model for you and never picks one on this Mac."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        if let cloudProvider {
+            Label(
+                "A re-run sends the whole conversation — every turn, and any images "
+                + "attached to it — to \(cloudProvider).",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+        }
         if let missing {
             Text(
                 "\(missing) is not installed or reachable right now, so a flagged answer "

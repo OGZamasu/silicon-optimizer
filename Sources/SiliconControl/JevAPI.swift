@@ -64,6 +64,16 @@ extension ControlAPI {
         public var automaticUncensoredLaneInEffect: Bool
         /// Whether the Video tab's composer asks the media router to pick.
         public var composerAutoRoute: Bool
+        /// Where `silicon/auto` sends a request when routing cannot answer, and which model
+        /// a flagged answer is re-run on. Both are gateway model ids, both nil when the
+        /// owner has left them to be worked out, and both readable by any client that may
+        /// read this — they name a model, and a model name is not a secret.
+        ///
+        /// Changing them is another matter: `POST /jev` takes this Mac's own control token,
+        /// so a paired phone can see that answers escalate to a cloud model and cannot be
+        /// the thing that decided they should.
+        public var routingFallbackModel: String?
+        public var verificationEscalationModel: String?
         /// In `JevFeature`'s own order, so a client can draw the list without sorting it.
         public var features: [Feature]
         /// Which month the totals below are for, as `2026-09`.
@@ -90,8 +100,12 @@ extension ControlAPI {
             monthlyUSD: [String: Double] = [:], ledgerWriteFailed: Bool = false,
             automaticUncensoredLane: Bool? = nil,
             automaticUncensoredLaneInEffect: Bool = false,
-            composerAutoRoute: Bool = false
+            composerAutoRoute: Bool = false,
+            routingFallbackModel: String? = nil,
+            verificationEscalationModel: String? = nil
         ) {
+            self.routingFallbackModel = routingFallbackModel
+            self.verificationEscalationModel = verificationEscalationModel
             self.automaticUncensoredLane = automaticUncensoredLane
             self.automaticUncensoredLaneInEffect = automaticUncensoredLaneInEffect
             self.composerAutoRoute = composerAutoRoute
@@ -212,14 +226,31 @@ extension ControlAPI {
         /// Needed for the same reason as `clearMonthlyBudget`: absent means "leave alone".
         public var clearAutomaticUncensoredLane: Bool?
         public var composerAutoRoute: Bool?
+        /// Gateway model ids. `POST /jev` takes this Mac's own control token, which is what
+        /// keeps a paired phone from pointing this Mac's escalations at a cloud provider:
+        /// sending a whole conversation to someone else's hardware is the owner's decision,
+        /// made at the Mac, next to the caption that says what is sent and to whom.
+        public var routingFallbackModel: String?
+        public var verificationEscalationModel: String?
+        /// Put them back to "work it out". Needed for the same reason as
+        /// `clearMonthlyBudget`: absent means "leave alone".
+        public var clearRoutingFallback: Bool?
+        public var clearVerificationEscalation: Bool?
 
         public init(
             enabled: Bool? = nil, model: String? = nil, features: [String: Bool]? = nil,
             monthlyBudgetUSD: Double? = nil, clearMonthlyBudget: Bool? = nil,
             cacheMinutes: Int? = nil, maxStateBytes: Int? = nil,
             automaticUncensoredLane: Bool? = nil,
-            clearAutomaticUncensoredLane: Bool? = nil, composerAutoRoute: Bool? = nil
+            clearAutomaticUncensoredLane: Bool? = nil, composerAutoRoute: Bool? = nil,
+            routingFallbackModel: String? = nil,
+            verificationEscalationModel: String? = nil,
+            clearRoutingFallback: Bool? = nil, clearVerificationEscalation: Bool? = nil
         ) {
+            self.routingFallbackModel = routingFallbackModel
+            self.verificationEscalationModel = verificationEscalationModel
+            self.clearRoutingFallback = clearRoutingFallback
+            self.clearVerificationEscalation = clearVerificationEscalation
             self.automaticUncensoredLane = automaticUncensoredLane
             self.clearAutomaticUncensoredLane = clearAutomaticUncensoredLane
             self.composerAutoRoute = composerAutoRoute

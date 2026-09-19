@@ -11,8 +11,9 @@ enum VerificationOutcome: Sendable, Equatable {
     /// A stronger model answered the same prompt, and this is what it said.
     case escalated(to: String, reply: String, reasons: [String], latency: TimeInterval)
     /// Something was flagged but not hard enough — or could not be acted on — to be worth
-    /// another model's time. The local reply goes back with the reasons attached.
-    case annotated(reasons: [String])
+    /// another model's time. The local reply goes back with the reasons attached, and with
+    /// a suggestion when there is something the reader could do about it.
+    case annotated(reasons: [String], suggestion: String? = nil)
     /// Jev is off, this feature is off, there is no key, or the budget is spent. Nothing
     /// was sent and nothing was spent; the caller behaves exactly as it did before.
     case unavailable
@@ -31,8 +32,15 @@ enum VerificationOutcome: Sendable, Equatable {
         switch self {
         case .accepted, .unavailable: []
         case .escalated(_, _, let reasons, _): reasons
-        case .annotated(let reasons): reasons
+        case .annotated(let reasons, _): reasons
         }
+    }
+
+    /// What the reader could do, when nothing was done for them. Kept apart from the
+    /// reasons so a client can show one without the other.
+    var suggestion: String? {
+        if case .annotated(_, let suggestion) = self { return suggestion }
+        return nil
     }
 
     var escalatedTo: String? {
@@ -214,8 +222,9 @@ struct JevVerifier: Sendable {
     var isAvailable: @Sendable () async -> Bool
     /// Asks the seven questions about one state.
     var ask: @Sendable (JSONContent) async throws -> ControlAPI.DecideResponse
-    /// Which gateway model a flagged answer is re-run on, or nil for none.
-    var escalationTarget: @Sendable () async -> String?
+    /// Which gateway model a flagged answer is re-run on, or nil for none. The argument is
+    /// the model that produced the reply, which is never also the answer.
+    var escalationTarget: @Sendable (String?) async -> String?
     /// Runs the prompt on that model and returns what it said.
     var escalate: @Sendable (String, [ControlAPI.ChatRequest.Message], Int) async throws -> String
 
@@ -247,8 +256,11 @@ struct JevVerifier: Sendable {
             context: context ?? prompt.derivedContext
         )
         do {
-            let answers = try VerificationAnswers(try await ask(state))
-            return VerificationPolicy.verdict(answers, wasTruncated: truncated)
+            let answers = try VerificationAnswers(try await ask(state.content))
+            return VerificationPolicy.verdict(
+                answers, wasTruncated: truncated,
+                evidenceIncomplete: state.evidenceIncomplete
+            )
         } catch {
             return nil
         }
@@ -262,7 +274,8 @@ struct JevVerifier: Sendable {
     /// wrong, but its verdict cannot cause a third run: a cascade that can re-enter itself
     /// is a loop with a credit card attached.
     func verify(
-        prompt: VerificationPrompt, reply: String, context: String?, truncated: Bool
+        prompt: VerificationPrompt, reply: String, context: String?, truncated: Bool,
+        answeredBy: String? = nil
     ) async -> VerificationOutcome {
         guard let verdict = await judge(
             prompt: prompt, reply: reply, context: context, truncated: truncated
@@ -274,11 +287,12 @@ struct JevVerifier: Sendable {
         case .annotate(let reasons):
             return .annotated(reasons: reasons)
         case .escalate(let reasons):
-            guard let target = await escalationTarget() else {
+            guard let target = await escalationTarget(answeredBy) else {
                 // Nothing to escalate to. The reader still gets the reasons — which is the
                 // difference between an answer that is merely suspect and one that looks
-                // fine — and nothing is spent pretending otherwise.
-                return .annotated(reasons: reasons + [Self.noTargetNote])
+                // fine — and the note about it goes in `suggestion`, where a client can
+                // show it as advice rather than as a fault in the answer.
+                return .annotated(reasons: reasons, suggestion: Self.noTargetNote)
             }
             let startedAt = Date()
             let better: String
@@ -288,12 +302,12 @@ struct JevVerifier: Sendable {
                 )
             } catch {
                 // The local answer is still the answer. A gateway that refused is a fact
-                // about this Mac, not about the reply, so it is reported beside the
-                // reasons rather than thrown at whoever asked a chat question.
+                // about this Mac, not about the reply, so it is reported as a suggestion
+                // rather than thrown at whoever asked a chat question.
                 return .annotated(
-                    reasons: reasons + [
-                        "Could not re-run this on \(target): \(error.localizedDescription)",
-                    ]
+                    reasons: reasons,
+                    suggestion: "Could not re-run this on \(target): "
+                        + error.localizedDescription
                 )
             }
             let latency = Date().timeIntervalSince(startedAt)
@@ -320,8 +334,9 @@ struct JevVerifier: Sendable {
     }
 
     static let noTargetNote =
-        "No escalation model is set, and no node or cloud model is available to re-run it "
-        + "on. Pick one in Settings → TypeSafe (Jev)."
+        "No escalation model is set and no swarm node is serving one, so this was not "
+        + "re-run. Pick a model in Settings → TypeSafe (Jev) if you want flagged answers "
+        + "answered again."
 
     /// What a streaming caller says instead of escalating.
     ///
@@ -358,22 +373,34 @@ extension AppModel {
         prompt: VerificationPrompt, reply: String, context: String? = nil, truncated: Bool
     ) async -> VerificationOutcome {
         await jevVerifier().verify(
-            prompt: prompt, reply: reply, context: context, truncated: truncated
+            prompt: prompt, reply: reply, context: context, truncated: truncated,
+            answeredBy: servingGatewayModelID()
         )
     }
 
     /// The verdict alone, with no escalation — what the streaming paths use.
+    /// - Parameter using: the app's own verifier unless a test hands over another. The
+    ///   production path never passes one; it exists so the two streaming routes can be
+    ///   exercised against a loopback double rather than the shared service.
     func verifyWithoutEscalating(
-        prompt: VerificationPrompt, reply: String, context: String? = nil, truncated: Bool
+        prompt: VerificationPrompt, reply: String, context: String? = nil, truncated: Bool,
+        using override: JevVerifier? = nil
     ) async -> (verdict: VerificationVerdict, target: String?)? {
-        let verifier = jevVerifier()
+        let verifier = override ?? jevVerifier()
         guard let verdict = await verifier.judge(
             prompt: prompt, reply: reply, context: context, truncated: truncated
         ) else { return nil }
         // Resolved even though nothing is run, so the suggestion can name a model instead
         // of telling the reader to go and find one.
         guard case .escalate = verdict else { return (verdict, nil) }
-        return (verdict, await verifier.escalationTarget())
+        return (verdict, await verifier.escalationTarget(servingGatewayModelID()))
+    }
+
+    /// The gateway id of the model that is answering here right now, or nil when none is.
+    /// The one model an escalation must never be sent to.
+    func servingGatewayModelID() -> String? {
+        guard let loaded = loadedModel, runtimeState.isRunning else { return nil }
+        return GatewayAPI.modelID(local: loaded.id)
     }
 
     /// The production wiring: the shared service, this Mac's own gateway.
@@ -390,9 +417,9 @@ extension AppModel {
                 return await JevService.shared.isAvailable(.verification)
             },
             ask: { state in try await VerificationQuestions.ask(state: state) },
-            escalationTarget: { [weak self] in
+            escalationTarget: { [weak self] answeredBy in
                 guard let self else { return nil }
-                return await self.verificationEscalationTarget()
+                return await self.verificationEscalationTarget(excluding: answeredBy)
             },
             escalate: { modelID, messages, maxTokens in
                 try await gateway.run(
@@ -402,38 +429,58 @@ extension AppModel {
         )
     }
 
+    /// Which model a flagged answer is re-run on, given what the gateway can see.
+    ///
+    /// Split out from the lookup so the rule can be read — and tested — without a gateway,
+    /// a swarm or a settings file behind it.
+    nonisolated static func escalationTarget(
+        chosen: String?, from models: [GatewayAPI.Model], excluding: String?
+    ) -> String? {
+        func usable(_ id: String) -> Bool {
+            guard id != excluding, let parsed = GatewayAPI.parseModelID(id) else { return false }
+            if case .local = parsed { return false }
+            return true
+        }
+
+        // The owner's pick wins, and is honoured even when the gateway cannot see it right
+        // now: a node that is asleep answers with its own error, which is a better thing to
+        // report than silently substituting a model they did not choose. A *local* pick is
+        // the one exception — it is not a choice this app can carry out.
+        if let chosen, !chosen.isEmpty { return usable(chosen) ? chosen : nil }
+
+        return models.first { model in
+            guard usable(model.id), case .node = GatewayAPI.parseModelID(model.id)
+            else { return false }
+            return model.serving
+        }?.id
+    }
+
     /// Which model a flagged answer is re-run on.
     ///
-    /// The owner's pick wins, and is honoured even if the gateway cannot see it right now —
-    /// a node that is asleep answers with its own error, which is a better thing to report
-    /// than silently substituting a model they did not choose.
+    /// Two rules, and they are both about not surprising the owner.
     ///
-    /// Otherwise: a model a swarm node is already serving, then an enabled cloud model.
-    /// Never a model on this Mac, however capable. Escalating to a local model would unload
-    /// the one that just answered, in the middle of the request that answered with it —
-    /// the machine is busy being the thing being verified.
-    func verificationEscalationTarget() async -> String? {
+    /// **Never a model on this Mac.** Escalating locally would unload the model that just
+    /// answered, in the middle of the request that answered with it — the machine is busy
+    /// being the thing under test. A local pick in the settings file (hand-edited, or left
+    /// behind by a model that has since been reinstalled) is ignored for the same reason,
+    /// and so is anything equal to `excluding`, the model that wrote the reply.
+    ///
+    /// **Never a cloud model unless the owner chose one.** Escalation sends the whole
+    /// conversation — every turn, and any images — to whoever runs the model. Inside the
+    /// swarm that is the owner's own hardware. Outside it, it is somebody else's, and a
+    /// feature that quietly started doing that the first time a local answer looked thin
+    /// would be making a privacy decision on the owner's behalf. So the automatic choice
+    /// stops at a serving node; a cloud model is only ever used when it is named in
+    /// Settings, where the row says what is sent and to whom.
+    func verificationEscalationTarget(excluding: String? = nil) async -> String? {
         await JevBootstrap.ready()
-        if let chosen = await JevService.shared.settings().verificationEscalationModel,
-           !chosen.isEmpty {
-            return chosen
-        }
+        let chosen = await JevService.shared.settings().verificationEscalationModel
         // `gatewayServableModels()`, not `gatewayModels()`: the latter offers the virtual
         // `silicon/auto`, and "escalate to whatever routing picks" is not an escalation —
-        // it is a coin toss that may land on the model that just answered.
-        let models = await gatewayServableModels()
-        func kind(_ id: String) -> GatewayAPI.ParsedModelID? { GatewayAPI.parseModelID(id) }
-
-        if let serving = models.first(where: { model in
-            guard case .node = kind(model.id) else { return false }
-            return model.serving
-        }) { return serving.id }
-
-        if let cloud = models.first(where: {
-            if case .cloud = kind($0.id) { return true }
-            return false
-        }) { return cloud.id }
-
-        return nil
+        // it is a coin toss that may land on the model that just answered. Skipped
+        // entirely when the owner has already named one, so drawing a settings row cannot
+        // be what walks the library and the swarm.
+        let models = chosen?.isEmpty == false ? [] : await gatewayServableModels()
+        return Self.escalationTarget(chosen: chosen, from: models, excluding: excluding)
     }
 }

@@ -378,6 +378,11 @@ public enum ControlAPI {
     public struct ChatResponse: Codable, Sendable {
         public var content: String
         public var reasoning: String?
+        /// The three below describe **the run that produced `content`**, and the only run
+        /// this Mac measures is its own. When `verification.escalatedTo` is set, `content`
+        /// came from that model instead: the local run's numbers would describe text that
+        /// was discarded, so they are zero rather than misleading, and nothing is claimed
+        /// about the model that did answer.
         public var promptTokens: Int
         public var generatedTokens: Int
         public var tokensPerSecond: Double

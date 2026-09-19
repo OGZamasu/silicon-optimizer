@@ -162,11 +162,14 @@ public struct GenerationMetrics: Sendable, Equatable {
 
     /// Whether the token budget, not the model, ended the answer.
     ///
-    /// The runtime's own word first. A runtime that reports nothing falls back to the only
-    /// other fact available — the budget was set, and every token of it was spent — which
-    /// is what `mlx_lm.server` leaves us with on some builds.
+    /// Either signal is enough, and that is deliberate. `llama-server` says `length` and
+    /// means it; some `mlx_lm.server` builds stop exactly at `max_tokens` and still report
+    /// `stop`, so believing the finish reason alone would read a truncated answer as a
+    /// finished one. An answer that used every token it was given is truncated whatever the
+    /// server called it — the cost of being wrong here is one unnecessary escalation, and
+    /// the cost of the other error is shipping half a sentence as if it were the answer.
     public func wasTruncated(budget: Int?) -> Bool {
-        if let finishReason { return finishReason == "length" }
+        if finishReason == "length" { return true }
         guard let budget, budget > 0 else { return false }
         return generatedTokens >= budget
     }

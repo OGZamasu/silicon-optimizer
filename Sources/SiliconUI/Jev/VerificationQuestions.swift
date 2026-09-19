@@ -66,7 +66,9 @@ enum VerificationQuestions: JevQuestionSet {
                 "false": .string(
                     "Everything `reply` attributes to a document, tool or image is present "
                     + "in the state above, or `reply` makes no such claim at all — general "
-                    + "knowledge, opinion and reasoning are not claims about a source."
+                    + "knowledge, opinion and reasoning are not claims about a source. Also "
+                    + "false when `withheld` says the material was left out of this state: "
+                    + "the model that wrote `reply` could see it even though you cannot."
                 ),
             ])
         ),
@@ -174,6 +176,13 @@ enum VerificationQuestions: JevQuestionSet {
 
     // MARK: - State
 
+    /// The longest message this app sends, in UTF-8 bytes.
+    ///
+    /// A pasted document arrives as the message, and the question a pasted document ends
+    /// with is at the end of it — so the same head-and-tail treatment the reply gets, for
+    /// the same reason: the state must not grow past the point where `jev-1.13` starts
+    /// losing the question in the bulk around it.
+    static let maximumMessageBytes = 4 * 1024
     /// The longest reply this app sends to be judged, in UTF-8 bytes.
     ///
     /// A chat answer can be tens of kilobytes and `jev-1.13` loses accuracy to irrelevant
@@ -187,28 +196,59 @@ enum VerificationQuestions: JevQuestionSet {
     static let maximumSystemPromptBytes = 2 * 1024
     static let maximumContextBytes = 8 * 1024
 
-    /// The state, holding only what these seven questions need.
+    /// The state, and whether anything the questions ask about was left out of it.
     ///
+    /// The flag is the important half. `claims_unavailable_information` asks whether the
+    /// reply describes a source that is not in this state — and if this state is a filtered
+    /// copy of what the model actually saw, "not here" and "never existed" look identical
+    /// from inside it. So the state says in words what was withheld, and the policy refuses
+    /// to escalate on that head when anything was.
+    struct BuiltState: Sendable {
+        var content: JSONContent
+        /// True when the system prompt was dropped, or the context was elided — the two
+        /// places evidence for the reply could have been and now is not.
+        var evidenceIncomplete: Bool
+    }
+
     /// Nothing else about the Mac goes in: not the model's name, not its settings, not what
     /// else is loaded. None of the questions ask about any of it, and unrelated material in
     /// the state costs accuracy.
     static func state(
         message: String, systemPrompt: String?, reply: String, context: String?
-    ) -> JSONContent {
+    ) -> BuiltState {
         var fields: [String: JSONContent] = [
-            "message": .string(message),
+            "message": .string(trimmed(message, toBytes: maximumMessageBytes)),
             "reply": .string(trimmed(reply, toBytes: maximumReplyBytes)),
         ]
-        // Omitted rather than sent empty: an empty string is still a key the model reads and
-        // has to decide means nothing.
-        if let systemPrompt, !systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           systemPrompt.utf8.count <= maximumSystemPromptBytes {
-            fields["system_prompt"] = .string(systemPrompt)
+        var withheld: [String] = []
+
+        let prompt = systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !prompt.isEmpty {
+            if systemPrompt!.utf8.count <= maximumSystemPromptBytes {
+                // Omitted rather than sent empty: an empty string is still a key the model
+                // reads and has to decide means nothing.
+                fields["system_prompt"] = .string(systemPrompt!)
+            } else {
+                withheld.append(
+                    "The system prompt was too long to include here. The model that wrote "
+                    + "`reply` could see it."
+                )
+            }
         }
+
         if let context, !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            fields["context"] = .string(trimmed(context, toBytes: maximumContextBytes))
+            let cut = trimmed(context, toBytes: maximumContextBytes)
+            fields["context"] = .string(cut)
+            if cut != context {
+                withheld.append(
+                    "The middle of `context` was removed to keep this short. The model that "
+                    + "wrote `reply` could see all of it."
+                )
+            }
         }
-        return .object(fields)
+
+        if !withheld.isEmpty { fields["withheld"] = .string(withheld.joined(separator: " ")) }
+        return BuiltState(content: .object(fields), evidenceIncomplete: !withheld.isEmpty)
     }
 
     /// Head and tail, with a marked gap. Cutting at character boundaries rather than bytes
@@ -366,18 +406,28 @@ enum VerificationPolicy {
 
     /// `claims_unavailable_information`: at or above this, it is describing something it
     /// was never given. Escalates — this is the failure the cascade exists for.
-    static let unavailableEscalatesAtOrAbove = 0.6
+    ///
+    /// 0.7 rather than a bare majority, which is the cascade cookbook's own `FIRE_T`. A
+    /// noul at 0.55 is the model leaning, not the model finding; escalating on a lean buys
+    /// a second answer for every borderline reply and turns the annotate band — which is
+    /// where a lean belongs — into decoration. The three escalating heads share the number
+    /// deliberately, so there is one bar to argue about rather than three.
+    static let unavailableEscalatesAtOrAbove = fireThreshold
     /// …and above this it is worth mentioning. Annotates.
     static let unavailableClearsAtOrBelow = 0.3
 
     /// `contradicts_context`, on the same two bars and for the same reason.
-    static let contradictsEscalatesAtOrAbove = 0.6
+    static let contradictsEscalatesAtOrAbove = fireThreshold
     static let contradictsClearsAtOrBelow = 0.3
 
     /// `is_cut_off`: at or above this the text reads as unfinished. Whether that escalates
     /// depends on `wasTruncated`, which is the runtime's word and not the model's.
-    static let cutOffFiresAtOrAbove = 0.6
+    static let cutOffFiresAtOrAbove = fireThreshold
     static let cutOffClearsAtOrBelow = 0.3
+
+    /// The bar a per-head "something is wrong" noul has to clear to be worth paying a
+    /// stronger model: TypeSafe's SDE cascade uses 0.7 for exactly this decision.
+    static let fireThreshold = 0.7
 
     /// `refuses_or_deflects`: at or above this, say so. Never escalates on its own — a
     /// refusal is often the right answer, and a stronger model is not the cure for one.
@@ -388,8 +438,14 @@ enum VerificationPolicy {
     static let formatFiresAtOrBelow = 0.35
 
     /// `answer_quality`: at or below this expected level — nearer "unusable" than
-    /// "acceptable" — escalate, but only if the score is confident enough to be worth
-    /// paying for.
+    /// "acceptable" — say so.
+    ///
+    /// **Annotate only, at every level.** This is the holistic head, and the cascade
+    /// cookbook does not gate on its equivalent either: it computes the whole-record judge
+    /// and then drives escalation from the per-field battery, because one question that
+    /// hides six judgments cannot say *which* of them went wrong. It is worth reporting and
+    /// worth reading; it is not worth buying a second answer on its own, and every failure
+    /// that is worth buying one for has its own head above.
     static let qualityEscalatesAtOrBelow = 0.5
     static let qualityConfidenceFloor = 0.5
     /// …and below this level it is thin. Annotates.
@@ -397,11 +453,20 @@ enum VerificationPolicy {
 
     /// The whole policy, as a pure function.
     ///
-    /// - Parameter wasTruncated: whether the token budget, not the model, ended the answer.
-    ///   Read from the runtime's `finish_reason` by `GenerationMetrics.wasTruncated(budget:)`
-    ///   and passed in. Jev is never asked it: it is a fact this process already has, and
-    ///   the one thing a verifier must not do is guess at its own evidence.
-    static func verdict(_ answers: VerificationAnswers, wasTruncated: Bool) -> VerificationVerdict {
+    /// - Parameters:
+    ///   - wasTruncated: whether the token budget, not the model, ended the answer. Read
+    ///     from the runtime's `finish_reason` by `GenerationMetrics.wasTruncated(budget:)`
+    ///     and passed in. Jev is never asked it: it is a fact this process already has, and
+    ///     the one thing a verifier must not do is guess at its own evidence.
+    ///   - evidenceIncomplete: whether the state Jev saw was missing something the model
+    ///     that wrote the reply could see — a system prompt too long to send, a context
+    ///     elided in the middle. When it is, `claims_unavailable_information` cannot
+    ///     escalate: from inside a filtered state, "this is not here" and "this was never
+    ///     given to anyone" look the same, and paying for a second answer on that
+    ///     confusion is the cascade punishing a reply for our own trimming.
+    static func verdict(
+        _ answers: VerificationAnswers, wasTruncated: Bool, evidenceIncomplete: Bool = false
+    ) -> VerificationVerdict {
         var escalations: [(String, String)] = []
         var notes: [(String, String)] = []
 
@@ -417,11 +482,18 @@ enum VerificationPolicy {
             ))
         }
 
-        if answers.claimsUnavailableInformation >= unavailableEscalatesAtOrAbove {
+        if answers.claimsUnavailableInformation >= unavailableEscalatesAtOrAbove,
+           !evidenceIncomplete {
             escalations.append((
                 "claims_unavailable_information",
                 "The reply states things about a document, tool result or image that was "
                 + "never provided."
+            ))
+        } else if answers.claimsUnavailableInformation >= unavailableEscalatesAtOrAbove {
+            notes.append((
+                "claims_unavailable_information",
+                "The reply may be describing a source that was never provided — though part "
+                + "of what the model was given was too long to check against."
             ))
         } else if answers.claimsUnavailableInformation > unavailableClearsAtOrBelow {
             notes.append((
@@ -476,10 +548,10 @@ enum VerificationPolicy {
 
         if answers.answerQuality <= qualityEscalatesAtOrBelow {
             if answers.answerQualityConfidence >= qualityConfidenceFloor {
-                escalations.append(("answer_quality", "The reply is rated unusable."))
+                notes.append(("answer_quality", "The reply is rated unusable."))
             } else {
                 // Rated badly, but the distribution is flat: the model is unsure, and an
-                // unsure bad rating is not worth a second model's time.
+                // unsure bad rating is worth even less than a confident one.
                 notes.append((
                     "answer_quality",
                     "The reply may be unusable, though the rating is not a confident one."

@@ -80,7 +80,11 @@ func testVerifier(
     JevVerifier(
         isAvailable: { await service.isAvailable(.verification) },
         ask: { state in try await VerificationQuestions.ask(state: state, using: service) },
-        escalationTarget: { target },
+        escalationTarget: { answeredBy in
+            // The production resolver's identity guard, in miniature: a fake target that
+            // is the model under test is no target at all.
+            target == answeredBy ? nil : target
+        },
         escalate: { modelID, messages, maxTokens in
             await escalations?.note()
             guard let gateway else {
@@ -164,7 +168,7 @@ struct VerificationPolicyTests {
         #expect(verdict.name == "escalate")
         #expect(verdict.reasons.first?.contains("never provided") == true)
 
-        let maybe = VerificationAnswers.clean.with { $0.claimsUnavailableInformation = 0.45 }
+        let maybe = VerificationAnswers.clean.with { $0.claimsUnavailableInformation = 0.65 }
         #expect(VerificationPolicy.verdict(maybe, wasTruncated: false).name == "annotate")
 
         // A confident no is as certain as a confident yes — the other end of the noul, and
@@ -176,12 +180,12 @@ struct VerificationPolicyTests {
     }
 
     @Test func contradictingTheContextEscalates() {
-        let clash = VerificationAnswers.clean.with { $0.contradictsContext = 0.7 }
+        let clash = VerificationAnswers.clean.with { $0.contradictsContext = 0.85 }
         let verdict = VerificationPolicy.verdict(clash, wasTruncated: false)
         #expect(verdict.name == "escalate")
         #expect(verdict.reasons == ["The reply contradicts the context it was given."])
 
-        let maybe = VerificationAnswers.clean.with { $0.contradictsContext = 0.4 }
+        let maybe = VerificationAnswers.clean.with { $0.contradictsContext = 0.65 }
         #expect(VerificationPolicy.verdict(maybe, wasTruncated: false).name == "annotate")
     }
 
@@ -232,17 +236,26 @@ struct VerificationPolicyTests {
         ).name == "annotate")
     }
 
-    @Test func anUnusableRatingEscalatesOnlyWhenItIsAConfidentOne() {
+    /// The holistic head reports and never gates — the cascade cookbook's arrangement.
+    @Test func theQualityRatingIsReportedAndNeverEscalates() {
         let bad = VerificationAnswers.clean.with {
             $0.answerQuality = 0.3
             $0.answerQualityConfidence = 0.8
         }
         let verdict = VerificationPolicy.verdict(bad, wasTruncated: false)
-        #expect(verdict.name == "escalate")
+        #expect(verdict.name == "annotate")
         #expect(verdict.reasons == ["The reply is rated unusable."])
+        // Not at the floor either, however sure it is: one question that hides six
+        // judgments cannot say which of them went wrong, so it cannot buy a second answer.
+        #expect(VerificationPolicy.verdict(
+            VerificationAnswers.clean.with {
+                $0.answerQuality = 0
+                $0.answerQualityConfidence = 1
+            }, wasTruncated: true
+        ).name == "annotate")
 
-        // Same rating, flat distribution: the model is telling us it cannot tell, and
-        // "cannot tell" is not worth another model's time.
+        // Same rating, flat distribution: the model is telling us it cannot tell, and the
+        // sentence says so rather than reading as a finding.
         let unsure = bad.with { $0.answerQualityConfidence = 0.2 }
         let soft = VerificationPolicy.verdict(unsure, wasTruncated: false)
         #expect(soft.name == "annotate")
@@ -255,12 +268,37 @@ struct VerificationPolicyTests {
         #expect(note.reasons == ["The reply is rated thin."])
     }
 
+    /// The fabrication head cannot fire on evidence this state never carried.
+    @Test func aWithheldSystemPromptDowngradesTheFabricationHead() {
+        let invented = VerificationAnswers.clean.with { $0.claimsUnavailableInformation = 0.95 }
+
+        // Everything the model saw is in the state: a confident yes is a finding.
+        #expect(VerificationPolicy.verdict(
+            invented, wasTruncated: false, evidenceIncomplete: false
+        ).name == "escalate")
+
+        // The system prompt was too long to send, or the context was elided. The same
+        // number now means "not in what you showed me", which is not the same claim.
+        let guarded = VerificationPolicy.verdict(
+            invented, wasTruncated: false, evidenceIncomplete: true
+        )
+        #expect(guarded.name == "annotate")
+        #expect(guarded.reasons.first?.contains("too long to check against") == true)
+
+        // The other heads are untouched by it — only this one reads absence as evidence.
+        #expect(VerificationPolicy.verdict(
+            VerificationAnswers.clean.with { $0.answersTheQuestion = 0.1 },
+            wasTruncated: false, evidenceIncomplete: true
+        ).name == "escalate")
+    }
+
     @Test func oneEscalationOutweighsAnyNumberOfNotesAndReasonsAreInQuestionOrder() {
         let mess = VerificationAnswers.clean.with {
             $0.answersTheQuestion = 0.1           // escalates
             $0.claimsUnavailableInformation = 0.9 // escalates
             $0.refusesOrDeflects = 0.9            // notes only
             $0.followsRequestedFormat = 0.1       // notes only
+            $0.answerQuality = 0                  // notes only
         }
         let verdict = VerificationPolicy.verdict(mess, wasTruncated: false)
         #expect(verdict.name == "escalate")
@@ -286,6 +324,21 @@ struct VerificationPolicyTests {
             < VerificationPolicy.cutOffFiresAtOrAbove)
         #expect(VerificationPolicy.qualityEscalatesAtOrBelow
             < VerificationPolicy.qualityClearsAtOrAbove)
+        // And the three escalating heads share one bar, which is the cookbook's.
+        #expect(VerificationPolicy.fireThreshold == 0.7)
+        #expect(VerificationPolicy.unavailableEscalatesAtOrAbove
+            == VerificationPolicy.fireThreshold)
+        #expect(VerificationPolicy.contradictsEscalatesAtOrAbove
+            == VerificationPolicy.fireThreshold)
+        #expect(VerificationPolicy.cutOffFiresAtOrAbove == VerificationPolicy.fireThreshold)
+        // A lean is not a finding: at 0.65 every one of them only annotates.
+        for answers in [
+            VerificationAnswers.clean.with { $0.claimsUnavailableInformation = 0.65 },
+            VerificationAnswers.clean.with { $0.contradictsContext = 0.65 },
+            VerificationAnswers.clean.with { $0.isCutOff = 0.65 },
+        ] {
+            #expect(VerificationPolicy.verdict(answers, wasTruncated: true).name == "annotate")
+        }
     }
 }
 
@@ -337,7 +390,7 @@ struct VerificationQuestionTests {
             message: prompt.lastUserMessage, systemPrompt: prompt.systemPrompt,
             reply: "A kettle on a blue counter.", context: prompt.derivedContext
         )
-        let text = state.promptText
+        let text = state.content.promptText
         #expect(text.contains("An image was attached"))
         // Not one byte of it. Jev reads text, and a base64 PNG in the state is kilobytes
         // of noise that answers none of the seven questions.
@@ -355,7 +408,7 @@ struct VerificationQuestionTests {
             message: prompt.lastUserMessage, systemPrompt: prompt.systemPrompt,
             reply: "• one\n• two\n• three", context: prompt.derivedContext
         )
-        let fields = try #require(state.objectValue)
+        let fields = try #require(state.content.objectValue)
         #expect(Set(fields.keys) == ["message", "reply", "system_prompt", "context"])
         #expect(fields["message"]?.stringValue == "Summarise it in three bullets.")
         // The last user turn is the question, not part of the context around it.
@@ -368,20 +421,75 @@ struct VerificationQuestionTests {
         let trimmedState = VerificationQuestions.state(
             message: "hi", systemPrompt: wordy, reply: "hello", context: nil
         )
-        #expect(trimmedState.objectValue?["system_prompt"] == nil)
+        #expect(trimmedState.content.objectValue?["system_prompt"] == nil)
         // And an absent context is an absent key, not an empty string the model has to
         // decide means nothing.
-        #expect(trimmedState.objectValue?["context"] == nil)
-        #expect(Set(trimmedState.objectValue?.keys ?? [:].keys) == ["message", "reply"])
+        #expect(trimmedState.content.objectValue?["context"] == nil)
+        // …but the state says the prompt was withheld, so the fabrication head cannot be
+        // escalated on evidence this state never had.
+        #expect(trimmedState.evidenceIncomplete)
+        #expect(Set(trimmedState.content.objectValue?.keys ?? [:].keys)
+            == ["message", "reply", "withheld"])
+    }
+
+    @Test func aPastedDocumentIsSentHeadAndTailLikeEverythingElse() throws {
+        // The question a pasted document ends with is at the end of it, so the message gets
+        // the same treatment the reply does — anything else either drops the question or
+        // sends a state big enough to lose it in.
+        let pasted = String(repeating: "Paragraph of the report. ", count: 1_000)
+            + "\n\nWhich quarter does this cover?"
+        #expect(pasted.utf8.count > VerificationQuestions.maximumMessageBytes)
+
+        let state = VerificationQuestions.state(
+            message: pasted, systemPrompt: nil, reply: "The third quarter.", context: nil
+        )
+        let sent = try #require(state.content.objectValue?["message"]?.stringValue)
+        #expect(sent.utf8.count < pasted.utf8.count)
+        #expect(sent.hasSuffix("Which quarter does this cover?"))
+        #expect(sent.hasPrefix("Paragraph of the report."))
+        #expect(sent.contains("[…]"))
+        // Trimming the message is not withholding evidence — the message is the question,
+        // not a source the reply could be quoting.
+        #expect(!state.evidenceIncomplete)
+
+        // And the whole thing still fits what this app will send Jev at all.
+        #expect(try JevService.stateBytes(state.content) < JevService.defaultMaxStateBytes)
+    }
+
+    @Test func anElidedContextSaysSoInTheState() throws {
+        let long = String(repeating: "Minutes of the meeting. ", count: 1_000)
+        let state = VerificationQuestions.state(
+            message: "Summarise it.", systemPrompt: nil,
+            reply: "They agreed to postpone.", context: long
+        )
+        let fields = try #require(state.content.objectValue)
+        #expect(fields["context"]?.stringValue?.contains("[…]") == true)
+        // Said in words, so the fabrication question can read it…
+        #expect(fields["withheld"]?.stringValue?.contains("middle of `context`") == true)
+        // …and flagged, so the policy refuses to escalate on that head.
+        #expect(state.evidenceIncomplete)
+
+        // A context that fits is sent whole and withholds nothing.
+        let short = VerificationQuestions.state(
+            message: "Summarise it.", systemPrompt: "Be terse.",
+            reply: "They agreed to postpone.", context: "The meeting was postponed."
+        )
+        #expect(short.content.objectValue?["withheld"] == nil)
+        #expect(!short.evidenceIncomplete)
     }
 
     @Test func truncationIsReadFromTheRuntimeNotTheModel() {
-        // The runtime's own word wins whenever it has one.
+        // The runtime saying `length` is enough on its own.
         #expect(GenerationMetrics(generatedTokens: 5, finishReason: "length")
             .wasTruncated(budget: 4096))
-        #expect(!GenerationMetrics(generatedTokens: 4096, finishReason: "stop")
+        // …and so is spending the whole budget, whatever it called the ending. Some
+        // `mlx_lm.server` builds stop exactly at `max_tokens` and still report `stop`;
+        // believing the word alone would ship half a sentence as a finished answer.
+        #expect(GenerationMetrics(generatedTokens: 4096, finishReason: "stop")
             .wasTruncated(budget: 4096))
-        // A runtime that reports nothing falls back to the only other fact available.
+        #expect(!GenerationMetrics(generatedTokens: 4095, finishReason: "stop")
+            .wasTruncated(budget: 4096))
+        // A runtime that reports nothing falls back to the same arithmetic.
         #expect(GenerationMetrics(generatedTokens: 512).wasTruncated(budget: 512))
         #expect(!GenerationMetrics(generatedTokens: 511).wasTruncated(budget: 512))
         // No budget and no finish reason is not evidence of anything.
@@ -492,6 +600,7 @@ struct JevVerificationTests {
         #expect(outcome == .annotated(
             reasons: ["It is not clear the reply answers what was asked."]
         ))
+        #expect(outcome.suggestion == nil)
         #expect(outcome.verdictName == "annotate")
         #expect(outcome.escalatedTo == nil)
         #expect(await counted.calls == 0)
@@ -573,6 +682,67 @@ struct JevVerificationTests {
         #expect(ledger.month().features["decideTool"] == nil)
     }
 
+    /// What actually goes on the wire when the prompt has a system turn, a history and an
+    /// image: the same conversation, in OpenAI's shape, images and all.
+    @Test func theEscalationSendsTheWholeConversationImagesIncluded() async throws {
+        let jev = try CapturingServer { _, served in
+            .init(body: served == 0
+                ? jevVerificationBody(.clean.with { $0.answersTheQuestion = 0.05 })
+                : jevVerificationBody())
+        }
+        defer { jev.stop() }
+        let gateway = try CapturingServer { _, _ in
+            .init(body: gatewayCompletion("A copper kettle on a blue counter."))
+        }
+        defer { gateway.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(jev.port)")!)
+        try await harness.enableVerification()
+
+        let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+        let prompt = chatPrompt(
+            "What is in this picture?",
+            system: "You are terse.",
+            history: [("user", "Hello."), ("assistant", "Hi.")],
+            images: [image]
+        )
+        let verifier = testVerifier(
+            service: harness.service, target: "cloud/open-router/gpt-5.5",
+            gateway: GatewayEscalation(
+                baseURL: URL(string: "http://127.0.0.1:\(gateway.port)")!, token: "gw"
+            )
+        )
+        let outcome = await verifier.verify(
+            prompt: prompt, reply: "I cannot see it.", context: nil, truncated: false
+        )
+        #expect(outcome.escalatedTo == "cloud/open-router/gpt-5.5")
+
+        let body = try JSONSerialization.jsonObject(
+            with: try #require(gateway.requests.first).body
+        ) as! [String: Any]
+        let messages = body["messages"] as! [[String: Any]]
+        // Every turn, in order, including the system one — the escalation model is
+        // answering the same question under the same instructions, not a summary of it.
+        #expect(messages.count == 4)
+        #expect(messages.map { $0["role"] as! String } == ["system", "user", "assistant", "user"])
+        #expect(messages[0]["content"] as? String == "You are terse.")
+        #expect(messages[1]["content"] as? String == "Hello.")
+
+        // The turn with the image becomes OpenAI content parts rather than a bare string.
+        let parts = try #require(messages[3]["content"] as? [[String: Any]])
+        #expect(parts.first?["type"] as? String == "text")
+        #expect(parts.first?["text"] as? String == "What is in this picture?")
+        #expect(parts.last?["type"] as? String == "image_url")
+        #expect((parts.last?["image_url"] as? [String: Any])?["url"] as? String == image)
+
+        // Jev, meanwhile, was told an image existed and given none of it — the two
+        // destinations are deliberately not sent the same thing.
+        let asked = String(decoding: try #require(jev.requests.first).body, as: UTF8.self)
+        #expect(asked.contains("An image was attached"))
+        #expect(!asked.contains("iVBORw0KGgo"))
+    }
+
     /// The second look is reported, never acted on.
     @Test func aStillBadEscalatedAnswerIsReturnedWithItsOwnVerdictAttached() async throws {
         let jev = try CapturingServer { _, _ in
@@ -609,6 +779,7 @@ struct JevVerificationTests {
         // Returned regardless of the second verdict — and the second verdict said so.
         #expect(reply == "Also not an answer.")
         #expect(reasons.count == 2)
+        #expect(reasons.first == "The reply does not answer what was asked.")
         #expect(reasons.last?.hasPrefix("The stronger model's answer was flagged too:") == true)
         // Still exactly one escalation. No third rung, ever.
         #expect(await counted.calls == 1)
@@ -636,8 +807,10 @@ struct JevVerificationTests {
         #expect(outcome.verdictName == "annotate")
         // The reader still learns what was wrong — the difference between an answer that
         // is merely suspect and one that looks fine — plus what to do about it.
-        #expect(outcome.reasons.first == "The reply contradicts the context it was given.")
-        #expect(outcome.reasons.last == JevVerifier.noTargetNote)
+        // The reason says what is wrong with the answer; the note about there being
+        // nowhere to send it is advice, so it travels in `suggestion` instead.
+        #expect(outcome.reasons == ["The reply contradicts the context it was given."])
+        #expect(outcome.suggestion == JevVerifier.noTargetNote)
         #expect(await counted.calls == 0)
         // One verification only: there was no second answer to verify.
         #expect(jev.requests.count == 1)
@@ -670,9 +843,9 @@ struct JevVerificationTests {
         // A gateway that refused is a fact about this Mac, not about the reply. Reported
         // beside the reasons, never thrown at whoever asked a chat question.
         #expect(outcome.verdictName == "annotate")
-        #expect(outcome.reasons.first == "The reply does not answer what was asked.")
-        #expect(outcome.reasons.last?.contains("node/studio/qwen3.8-27b") == true)
-        #expect(outcome.reasons.last?.contains("502") == true)
+        #expect(outcome.reasons == ["The reply does not answer what was asked."])
+        #expect(outcome.suggestion?.contains("node/studio/qwen3.8-27b") == true)
+        #expect(outcome.suggestion?.contains("502") == true)
     }
 
     /// A TypeSafe outage must not turn a working chat into a failed one.
@@ -725,6 +898,42 @@ struct JevVerificationTests {
         #expect(suggestion.contains("cloud/openai/gpt-5.5"))
         #expect(suggestion.contains("POST /chat"))
         #expect(JevVerifier.streamSuggestion(target: nil) == JevVerifier.noTargetNote)
+    }
+
+    /// The settings a control client may read, and the token it takes to change them.
+    @Test func theEscalationTargetIsReadableButOnlyTheMacMaySetIt() async throws {
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure()
+        try await harness.service.update {
+            $0.enabled = true
+            $0.features[.verification] = true
+            $0.verificationEscalationModel = "cloud/open-router/gpt-5.5"
+        }
+
+        let status = await AppModel.jevStatus(from: harness.service)
+        #expect(status.verificationEscalationModel == "cloud/open-router/gpt-5.5")
+        // Named, never hidden: a phone is entitled to see that its answers are being
+        // re-run on somebody else's hardware. `POST /jev` is what it may not call, and
+        // that gate is the route's own (asserted in the contract export).
+        let json = String(
+            decoding: try JSONEncoder().encode(status), as: UTF8.self
+        )
+        #expect(json.contains("verificationEscalationModel"))
+        #expect(!json.lowercased().contains("apikey"))
+
+        // The patch sets it, and has a separate way of saying "go back to working it out"
+        // — an absent field means "leave alone", so nil could not say it.
+        let set = ControlAPI.JevUpdate(verificationEscalationModel: "node/studio/qwen3.8-27b")
+        let cleared = ControlAPI.JevUpdate(clearVerificationEscalation: true)
+        #expect(set.verificationEscalationModel == "node/studio/qwen3.8-27b")
+        #expect(set.clearVerificationEscalation == nil)
+        #expect(cleared.verificationEscalationModel == nil)
+        // Both survive the wire, which is the only way a control client can send them.
+        let roundTripped = try JSONDecoder().decode(
+            ControlAPI.JevUpdate.self, from: try JSONEncoder().encode(set)
+        )
+        #expect(roundTripped == set)
     }
 
     @Test func theEscalationTargetSurvivesTheSettingsFile() async throws {
@@ -808,5 +1017,251 @@ struct JevVerificationLiveTests {
         let ledger = await harness.service.ledger()
         #expect(ledger.month().features["verification"]?.calls == 2)
         #expect(ledger.inputTokens > 0)
+    }
+}
+
+// MARK: - Choosing a target
+
+/// The rule on its own, with no gateway, no swarm and no settings file behind it.
+@Suite("Verification escalation target")
+struct VerificationTargetTests {
+
+    private func model(_ id: String, serving: Bool = false) -> GatewayAPI.Model {
+        GatewayAPI.Model(
+            id: id, displayName: id, where_: "somewhere", contextWindow: nil, serving: serving
+        )
+    }
+
+    /// The one model an escalation must never be: the machine is busy being the thing
+    /// under test, and re-running here would unload it mid-request.
+    @Test func itIsNeverAModelOnThisMac() {
+        let library = [
+            model("local/qwen3-30b", serving: true),
+            model("local/llama-70b"),
+        ]
+        #expect(AppModel.escalationTarget(
+            chosen: nil, from: library, excluding: "local/qwen3-30b"
+        ) == nil)
+        // Not even when the settings file names one — a hand-edited file, or a pick left
+        // behind by a model since reinstalled, is ignored rather than carried out.
+        #expect(AppModel.escalationTarget(
+            chosen: "local/llama-70b", from: library, excluding: "local/qwen3-30b"
+        ) == nil)
+        // And the identity guard stands on its own, for a reply that came from elsewhere.
+        #expect(AppModel.escalationTarget(
+            chosen: "node/studio/qwen3.8-27b", from: [], excluding: "node/studio/qwen3.8-27b"
+        ) == nil)
+    }
+
+    /// Automatically: a node that is already serving, and nothing else.
+    @Test func theAutomaticChoiceIsAServingNodeAndNeverTheCloud() {
+        let world = [
+            model("local/qwen3-30b", serving: true),
+            model("cloud/open-router/gpt-5.5"),
+            model("node/studio/qwen3.8-27b", serving: true),
+        ]
+        #expect(AppModel.escalationTarget(chosen: nil, from: world, excluding: "local/qwen3-30b")
+            == "node/studio/qwen3.8-27b")
+
+        // A node that is installed but not serving is not a free second opinion — starting
+        // one is a load, and the automatic path does not go that far.
+        let idle = [
+            model("cloud/open-router/gpt-5.5"),
+            model("node/studio/qwen3.8-27b", serving: false),
+        ]
+        #expect(AppModel.escalationTarget(chosen: nil, from: idle, excluding: nil) == nil)
+
+        // With only a cloud model reachable, the automatic answer is still nothing:
+        // sending a whole conversation to someone else's hardware is the owner's call.
+        #expect(AppModel.escalationTarget(
+            chosen: nil, from: [model("cloud/open-router/gpt-5.5", serving: true)], excluding: nil
+        ) == nil)
+    }
+
+    /// Explicitly: whatever the owner named, seen or not.
+    @Test func anExplicitPickIsHonouredEvenWhenTheGatewayCannotSeeIt() {
+        #expect(AppModel.escalationTarget(
+            chosen: "cloud/open-router/gpt-5.5", from: [], excluding: nil
+        ) == "cloud/open-router/gpt-5.5")
+        // A pick wins over what the automatic rule would have found — including over a
+        // serving node, which is the point of picking.
+        #expect(AppModel.escalationTarget(
+            chosen: "cloud/open-router/gpt-5.5",
+            from: [model("node/studio/qwen3.8-27b", serving: true)], excluding: nil
+        ) == "cloud/open-router/gpt-5.5")
+        // Empty is not a pick; it is the "work it out" row.
+        #expect(AppModel.escalationTarget(
+            chosen: "", from: [model("node/studio/qwen3.8-27b", serving: true)], excluding: nil
+        ) == "node/studio/qwen3.8-27b")
+        // And nonsense is nothing, rather than a model id the gateway would 400 on.
+        #expect(AppModel.escalationTarget(chosen: "gpt-5.5", from: [], excluding: nil) == nil)
+    }
+}
+
+// MARK: - The streaming paths
+
+@Suite("Verification on the streaming paths", .redirectedConversationStore)
+@MainActor
+struct VerificationStreamTests {
+
+    private func isolatedModel() -> AppModel {
+        BuddyTestStore.redirect()
+        return AppModel(settings: .init())
+    }
+
+    /// `verifyWithoutEscalating` judges and resolves, and runs nothing.
+    @Test func judgingAStreamNamesATargetWithoutUsingIt() async throws {
+        let jev = try CapturingServer { _, _ in
+            .init(body: jevVerificationBody(.clean.with { $0.answersTheQuestion = 0.05 }))
+        }
+        defer { jev.stop() }
+        let gateway = try untouchedServer("a stream must never escalate")
+        defer { gateway.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(jev.port)")!)
+        try await harness.enableVerification()
+
+        let app = isolatedModel()
+        let counted = EscalationCount()
+        let verifier = testVerifier(
+            service: harness.service, target: "node/studio/qwen3.8-27b",
+            gateway: GatewayEscalation(
+                baseURL: URL(string: "http://127.0.0.1:\(gateway.port)")!, token: "t"
+            ),
+            escalations: counted
+        )
+
+        let judged = try #require(await app.verifyWithoutEscalating(
+            prompt: chatPrompt("Why is the sky blue?"), reply: "Ask someone else.",
+            truncated: false, using: verifier
+        ))
+        #expect(judged.verdict.name == "escalate")
+        // Resolved so the suggestion can name it — and not called.
+        #expect(judged.target == "node/studio/qwen3.8-27b")
+        #expect(await counted.calls == 0)
+        #expect(gateway.requests.isEmpty)
+
+        // An accept resolves nothing at all: there is nothing to suggest.
+        let clean = try CapturingServer { _, _ in .init(body: jevVerificationBody()) }
+        defer { clean.stop() }
+        let secondHarness = JevHarness()
+        defer { secondHarness.clean() }
+        await secondHarness.configure(baseURL: URL(string: "http://127.0.0.1:\(clean.port)")!)
+        try await secondHarness.enableVerification()
+        let fine = try #require(await app.verifyWithoutEscalating(
+            prompt: chatPrompt("What is 2 + 2?"), reply: "Four.", truncated: false,
+            using: testVerifier(
+                service: secondHarness.service, target: "node/studio/qwen3.8-27b", gateway: nil
+            )
+        ))
+        #expect(fine.verdict == .accept)
+        #expect(fine.target == nil)
+    }
+
+    /// The frame itself: keyed, never escalated, and silent on an accept.
+    @Test func theStreamFrameIsKeyedAndCarriesASuggestionNotAModel() async throws {
+        let jev = try CapturingServer { _, _ in
+            .init(body: jevVerificationBody(.clean.with { $0.isCutOff = 0.95 }))
+        }
+        defer { jev.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(jev.port)")!)
+        try await harness.enableVerification()
+
+        let app = isolatedModel()
+        let verifier = testVerifier(
+            service: harness.service, target: "node/studio/qwen3.8-27b", gateway: nil
+        )
+        let conversation = UUID().uuidString
+        let message = UUID().uuidString
+        let frame = try #require(await app.streamVerdict(
+            prompt: chatPrompt("Explain gradient descent."),
+            reply: "Gradient descent works by repeatedly taking a step in the dire",
+            // `finish_reason` from the runtime, not a guess by the model.
+            metrics: GenerationMetrics(generatedTokens: 64, finishReason: "length"),
+            budget: 64, conversationID: conversation, messageID: message,
+            using: verifier
+        ))
+        #expect(frame.verdict == "escalate")
+        #expect(frame.reasons == [
+            "The reply stops mid-thought and the token budget ran out.",
+        ])
+        // Never on a stream — the tokens are already on screen.
+        #expect(frame.escalatedTo == nil)
+        #expect(frame.suggestion?.contains("node/studio/qwen3.8-27b") == true)
+        // Keyed, so a verdict that arrives after the stream has closed knows its bubble.
+        #expect(frame.conversationID == conversation)
+        #expect(frame.messageID == message)
+
+        // An empty reply is not an answer to judge, and costs nothing.
+        let before = jev.requests.count
+        #expect(await app.streamVerdict(
+            prompt: chatPrompt("hi"), reply: "", metrics: GenerationMetrics(), budget: nil,
+            using: verifier
+        ) == nil)
+        #expect(jev.requests.count == before)
+    }
+
+    @Test func aCleanStreamSaysNothingAtAll() async throws {
+        let jev = try CapturingServer { _, _ in .init(body: jevVerificationBody()) }
+        defer { jev.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(jev.port)")!)
+        try await harness.enableVerification()
+
+        let app = isolatedModel()
+        // Silence is the accept: a frame saying "nothing is wrong" is noise on a phone.
+        #expect(await app.streamVerdict(
+            prompt: chatPrompt("What is 2 + 2?"), reply: "Four.",
+            metrics: GenerationMetrics(generatedTokens: 3, finishReason: "stop"), budget: 512,
+            using: testVerifier(service: harness.service, target: nil, gateway: nil)
+        ) == nil)
+    }
+
+    /// A verdict is written onto the message, so it outlives the stream that missed it.
+    @Test func aVerdictOnAMessageComesBackFromTheTranscript() async throws {
+        let app = isolatedModel()
+        let summary = await app.createConversation(title: "Lisbon")
+        let index = try #require(app.conversations.firstIndex { $0.id.uuidString == summary.id })
+        let reply = ChatMessage(role: .assistant, content: "Start in Alfama.")
+        app.conversations[index].messages = [
+            ChatMessage(role: .user, content: "Three days in Lisbon?"), reply,
+        ]
+        app.conversations[index].messages[1].verification = ControlAPI.ChatVerdict(
+            verdict: "annotate",
+            reasons: ["The reply is rated thin."],
+            conversationID: summary.id, messageID: reply.id.uuidString
+        )
+
+        let detail = try await app.conversation(id: summary.id)
+        let assistant = try #require(detail.messages.last)
+        #expect(assistant.id == reply.id.uuidString)
+        #expect(assistant.verification?.verdict == "annotate")
+        #expect(assistant.verification?.reasons == ["The reply is rated thin."])
+        // The user's own turn was never judged, so it carries nothing.
+        #expect(detail.messages.first?.verification == nil)
+    }
+
+    /// The bound on how long a stream waits, in both directions.
+    @Test func theStreamTakesAQuickVerdictAndGivesUpOnASlowOne() async throws {
+        let quick = Task<Int?, Never> { 7 }
+        #expect(await VerdictRelay.result(of: quick, within: .seconds(3)) == 7)
+
+        // Slower than the grace: the stream closes without it…
+        let slow = Task<Int?, Never> {
+            try? await Task.sleep(for: .milliseconds(400))
+            return 9
+        }
+        #expect(await VerdictRelay.result(of: slow, within: .milliseconds(50)) == nil)
+        // …and the work still finishes, which is what puts the verdict on the message and
+        // on /events. Giving up on the wait must never mean giving up on the verdict.
+        #expect(await slow.value == 9)
+
+        // Nothing to report is not the same as being late, and both read as nil here.
+        let empty = Task<Int?, Never> { nil }
+        #expect(await VerdictRelay.result(of: empty, within: .seconds(3)) == nil)
     }
 }
