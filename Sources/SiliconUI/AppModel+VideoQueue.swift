@@ -180,7 +180,7 @@ extension AppModel {
                   status: item.status.rawValue, nodeJobID: item.nodeJob?.id, file: item.file?.path,
                   outputDirectory: item.request.outputDirectory.path, error: item.error,
                   uncertainSubmission: item.uncertainSubmission, h3Steps: item.request.h3Steps,
-                  detail: item.detail)
+                  detail: item.detail, negativePrompt: item.request.negativePrompt)
         })
     }
 
@@ -207,7 +207,14 @@ extension AppModel {
             resolution: request.resolution ?? videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory,
             h3Turbo: routed?.h3Turbo ?? request.h3Turbo,
-            h3Steps: routed?.h3Steps ?? request.h3Steps
+            h3Steps: routed?.h3Steps ?? request.h3Steps,
+            // One line for the whole batch, and only where the chosen lane reads it: the
+            // batch picks one model for every clip, so what to keep out of frame is a
+            // property of the batch rather than of a shot.
+            negativePrompt: entry.supportsNegativePrompt
+                ? request.negativePrompt?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).nilWhenEmpty
+                : nil
         )
         // Every clip in a batch carries the same line, because one model and one length
         // were chosen for all of them — from the prompts together, not from this clip's.
@@ -256,7 +263,7 @@ extension AppModel {
                     try videoBatchQueue.exportManifest(batchID: batchID)
                 }
                 try videoBatchQueue.clearFinished()
-            default: throw ControlHostError.badRequest("Use pause, resume, retry, remove, stop_following, or clear_finished.")
+            default: throw ControlHostError.badRequest(ControlServer.unknownQueueAction)
             }
         } catch { throw ControlHostError.badRequest(error.localizedDescription) }
         videoQueueMessage = nil

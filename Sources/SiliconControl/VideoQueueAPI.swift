@@ -12,21 +12,27 @@ extension ControlAPI {
         public var seed: UInt32?
         public var h3Turbo: Bool?
         public var h3Steps: Int?
+        /// One negative prompt for the whole batch — the same model and the same settings
+        /// are chosen for all of it, and what to keep out of the shot belongs with those.
+        public var negativePrompt: String?
 
         enum CodingKeys: String, CodingKey {
             case prompts, title, variations, modelID, seconds, resolution, seed
+            case negativePrompt
             case h3Turbo = "h3_turbo"
             case h3Steps = "h3_steps"
         }
         public init(
             prompts: [String], title: String? = nil, variations: Int? = nil,
             modelID: String? = nil, seconds: Int? = nil, resolution: String? = nil,
-            seed: UInt32? = nil, h3Turbo: Bool? = nil, h3Steps: Int? = nil
+            seed: UInt32? = nil, h3Turbo: Bool? = nil, h3Steps: Int? = nil,
+            negativePrompt: String? = nil
         ) {
             self.prompts = prompts; self.title = title; self.variations = variations
             self.modelID = modelID; self.seconds = seconds; self.resolution = resolution
             self.seed = seed; self.h3Turbo = h3Turbo
             self.h3Steps = h3Steps
+            self.negativePrompt = negativePrompt
         }
     }
 
@@ -62,13 +68,25 @@ extension ControlAPI {
             /// How these settings were arrived at, when they were not typed: the media
             /// router's one line. Absent on everything queued by hand.
             public var detail: String?
+            /// What was asked to be kept out of the shot, when anything was.
+            public var negativePrompt: String?
+            /// The finished clip, fetchable at `GET /media/{mediaID}`. Set only once the
+            /// render has landed somewhere this Mac serves from — which is why it is the
+            /// honest test for "can this phone play it?", and `file` is not.
+            public var mediaID: String?
+            /// `/media/<id>`, relative to whatever address the client dialled.
+            public var mediaURL: String?
+            /// A JPEG poster frame, when one could be made from the clip.
+            public var thumbnailMediaID: String?
 
             public init(id: String, batchID: String, title: String, prompt: String,
                         scene: Int, variation: Int, seed: UInt32?, modelID: String,
                         seconds: Int, resolution: String, h3Turbo: Bool?, status: String,
                         nodeJobID: String?, file: String?, outputDirectory: String,
                         error: String?, uncertainSubmission: Bool, h3Steps: Int? = nil,
-                        detail: String? = nil) {
+                        detail: String? = nil, negativePrompt: String? = nil,
+                        mediaID: String? = nil, mediaURL: String? = nil,
+                        thumbnailMediaID: String? = nil) {
                 self.id = id; self.batchID = batchID; self.title = title; self.prompt = prompt
                 self.scene = scene; self.variation = variation; self.seed = seed
                 self.modelID = modelID; self.seconds = seconds; self.resolution = resolution
@@ -77,6 +95,10 @@ extension ControlAPI {
                 self.uncertainSubmission = uncertainSubmission
                 self.h3Steps = h3Steps
                 self.detail = detail
+                self.negativePrompt = negativePrompt
+                self.mediaID = mediaID
+                self.mediaURL = mediaURL
+                self.thumbnailMediaID = thumbnailMediaID
             }
         }
         public var paused: Bool

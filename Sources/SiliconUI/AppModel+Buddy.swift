@@ -326,25 +326,38 @@ extension AppModel {
     func buddyEventSnapshot() async -> BuddyEventPump.Snapshot {
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
+        let roots = await controlMediaRoots()
         for item in queue.items {
-            jobs[item.id] = ControlAPI.JobEvent(
-                id: item.id, kind: "video", status: item.status,
-                title: item.title,
-                fraction: item.id == activeVideoQueueID ? videoProgress : nil
+            let active = item.id == activeVideoQueueID
+            // Registered against the shared table the control server publishes from, so the
+            // id on the frame that says "done" is the id `GET /video/queue` was already
+            // handing out — one fetch, not a second poll to find out what to fetch.
+            var mediaID: String?
+            if let file = item.file {
+                mediaID = await MediaRegistry.shared.register(path: file, within: roots)
+            }
+            jobs[item.id] = Self.jobEvent(
+                for: item, active: active,
+                fraction: active ? videoProgress : nil,
+                stage: active ? videoStage : nil,
+                mediaID: mediaID
             )
         }
         if let image = currentImageJob {
             jobs["image"] = ControlAPI.JobEvent(
                 id: "image", kind: "image", status: "running", title: image.modelName,
-                fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil
+                fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil,
+                stage: imageState.stageLine
             )
         }
         if let mesh = currentMeshJob {
             jobs["mesh"] = ControlAPI.JobEvent(
                 id: "mesh", kind: "mesh", status: "running", title: mesh.modelName,
-                fraction: meshProgress
+                fraction: meshProgress,
+                stage: meshState.stageLine
             )
         }
+        await MediaRegistry.shared.persist()
 
         var downloads: [String: ControlAPI.DownloadEvent] = [:]
         for transfer in activeTransfers {
@@ -359,6 +372,30 @@ extension AppModel {
         }
         return BuddyEventPump.Snapshot(
             status: await status(), downloads: downloads, jobs: jobs
+        )
+    }
+
+    /// One queue item as a `job` frame.
+    ///
+    /// Its own function, and pure, because two of its three optional fields are rules
+    /// rather than copies and a rule that only exists inside a snapshot builder is a rule
+    /// nothing can check.
+    ///
+    /// `stage` belongs to the clip the app is actually following: one waiting its turn has
+    /// a status, and inventing a stage for it would be a sentence the renderer never said.
+    /// `reason` belongs to a clip the Mac has *given up on* — a transient failure that is
+    /// waiting to be retried carries an `error` too, and a phone announcing that beside a
+    /// pending status would be reporting a failure that has not happened.
+    nonisolated static func jobEvent(
+        for item: ControlAPI.VideoQueueView.Item, active: Bool,
+        fraction: Double?, stage: String?, mediaID: String?
+    ) -> ControlAPI.JobEvent {
+        ControlAPI.JobEvent(
+            id: item.id, kind: "video", status: item.status, title: item.title,
+            fraction: active ? fraction : nil,
+            stage: active ? stage : nil,
+            reason: item.status == VideoQueueStatus.failed.rawValue ? item.error : nil,
+            mediaID: mediaID
         )
     }
 

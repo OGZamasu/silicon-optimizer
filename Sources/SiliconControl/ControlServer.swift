@@ -32,6 +32,13 @@ public actor ControlServer {
     private let buddy: BuddyRegistry
     /// Where `/events` subscribers read from.
     private let events: BuddyEventHub
+    /// The id→path table behind `GET /media`, and the thing that turns the paths in a
+    /// render's answer into something a phone can fetch. Shared by default with the event
+    /// pump, so the `mediaID` on a finished `job` frame is the one the queue published.
+    private let media: MediaDecoration
+    /// Where a device's uploads land. Injected only so a test can keep them out of the
+    /// tester's own Application Support.
+    private let uploadsRoot: URL
     /// The one listener that is not loopback, on this Mac's tailscale address. Nil unless
     /// somebody has asked for it and this Mac is actually on a tailnet.
     private var tailnetListener: NWListener?
@@ -51,6 +58,9 @@ public actor ControlServer {
     /// Why the tailnet listener is not up, when it was asked for and could not be.
     public private(set) var tailnetError: String?
     private var activeEventStreams = 0
+    /// When expired uploads were last taken out. Nil until the first sweep.
+    private var lastUploadSweep: Date?
+    private let uploadSweepInterval: TimeInterval
     /// How long one SSE frame may take to leave, and how this Mac's tailnet address is
     /// found. Both are injected so the tests can drive them without a tailnet or a stall.
     private let eventWriteDeadline: Duration
@@ -62,6 +72,10 @@ public actor ControlServer {
 
     /// Streams open right now. Read by the tests that prove a dead client is reaped.
     public var openEventStreams: Int { activeEventStreams }
+
+    /// Connections open right now, of `maximumConnections`. Read by the test that proves a
+    /// reader which stops reading mid-file does not keep one of them for ever.
+    public var openConnections: Int { activeConnections }
 
     /// How long one SSE frame may take to leave before the connection is given up on.
     ///
@@ -101,6 +115,10 @@ public actor ControlServer {
     public init(
         host: any ControlHost, handshakeURL: URL = ControlAPI.handshakeURL,
         buddy: BuddyRegistry = .shared, events: BuddyEventHub = .shared,
+        media: MediaRegistry = .shared,
+        uploadsRoot: URL = BuddyUploads.root,
+        postersRoot: URL = BuddyPosters.root,
+        uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
         eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
             SwarmPairing.tailnetIPv4()
@@ -111,6 +129,12 @@ public actor ControlServer {
         self.handshakeURL = handshakeURL
         self.buddy = buddy
         self.events = events
+        self.uploadsRoot = uploadsRoot
+        self.uploadSweepInterval = uploadSweepInterval
+        self.media = MediaDecoration(
+            registry: media, host: host,
+            uploadsRoot: uploadsRoot, postersRoot: postersRoot
+        )
         self.eventWriteDeadline = eventWriteDeadline
         self.discoverTailnetAddress = discoverTailnetAddress
         self.tailnetBindObserver = tailnetBindObserver
@@ -523,8 +547,10 @@ public actor ControlServer {
         do {
             let request: HTTPRequest
             do {
-                request = try await HTTPRequest.read(from: connection) { headers in
-                    await self.bodyLimit(forHeaders: headers, from: origin)
+                request = try await HTTPRequest.read(from: connection) { method, path, headers in
+                    await self.bodyLimit(
+                        forMethod: method, path: path, headers: headers, from: origin
+                    )
                 }
             } catch HTTPRequest.ParseError.bodyTooLarge(let limit) {
                 await refuse(.error(
@@ -615,6 +641,13 @@ public actor ControlServer {
         /// administers other devices is the owner's own business.
         func mayReach(method: String, path: String) -> Bool {
             guard case .device(_, .chat) = self else { return true }
+            // `/media/{id}` is per-id rather than a fixed path, so it is matched by shape.
+            // A chat-only device may fetch a result for the same reason it may read
+            // `GET /video/queue`, which has told it about that result since the queue
+            // existed: looking at what the Mac already made spends nothing.
+            if method == "GET", path.hasPrefix("/media/"), path.count > "/media/".count {
+                return true
+            }
             return Self.chatOnlyRoutes.contains("\(method) \(path)")
                 || path == "/conversations" || path.hasPrefix("/conversations/")
         }
@@ -737,7 +770,16 @@ public actor ControlServer {
 
     /// How much body this caller may send. A phone sends prompts and photographs; the local
     /// bridge installs models and posts whole images, so it keeps the original ceiling.
-    private func bodyLimit(forHeaders headers: [String: String], from origin: Origin) async -> Int {
+    ///
+    /// The route matters for exactly one of them. `POST /uploads` exists so a phone can make
+    /// a mesh out of a picture it took, and a picture a phone took is bigger than any prompt
+    /// — so that one route gets 24 MiB and every other route a device can reach keeps the
+    /// 4 MiB it always had. Raised per route rather than across the board, because the cap
+    /// is what stops an authenticated phone from spending this Mac's memory a request at a
+    /// time, and a route that does not write files has no use for a larger one.
+    private func bodyLimit(
+        forMethod method: String, path: String, headers: [String: String], from origin: Origin
+    ) async -> Int {
         guard origin == .tailnet else { return HTTPRequest.maximumBody }
         guard let bearer = HTTPRequest.bearerToken(in: headers) else {
             // No bearer on the tailnet means `/buddy/pair`, the one route with nothing to
@@ -750,6 +792,16 @@ public actor ControlServer {
         if swarmToken.map({ !$0.isEmpty && bearer == $0 }) ?? false,
            honoursSwarmToken(from: origin) {
             return HTTPRequest.maximumBody
+        }
+        // The raised ceiling is a property of a *caller*, not of a path. Asked here rather
+        // than after the body, and asked of the registry rather than of the request: an
+        // unknown bearer, a revoked device and a chat-only one all get the ordinary 4 MiB,
+        // so pointing 24 MiB at this route with a guessed token buys nothing. It costs one
+        // token lookup on one route.
+        if method == "POST", path == "/uploads",
+           let device = await buddy.authorize(bearer: bearer),
+           BuddyScope(rawValue: device.scope) == .full {
+            return BuddyUploads.maximumBytes
         }
         return BuddyLimits.requestBodyBytes
     }
@@ -1044,6 +1096,24 @@ public actor ControlServer {
         guard let caller else { return unauthorized }
 
         let segments = request.path.split(separator: "/").map(String.init)
+        // The results themselves. Before everything else because it is the only route that
+        // answers bytes rather than JSON, and the only one whose path is an id.
+        if request.method == "GET", let id = Self.parameter(segments, matching: ["media", "*"]) {
+            return await serveMedia(id: id, headers: request.headers, as: caller)
+        }
+        if request.method == "POST", segments == ["uploads"] {
+            return await acceptUpload(request, as: caller)
+        }
+        if request.method == "GET",
+           let name = Self.parameter(segments, matching: ["swarm", "peers", "*", "status"]) {
+            do {
+                return try .encode(await host.controlPeerStatus(name: name))
+            } catch let error as any ControlStatusError {
+                return .error(error.status, error.localizedDescription)
+            } catch {
+                return .error(400, error.localizedDescription)
+            }
+        }
         if request.method == "GET", segments == ["buddy", "devices"] {
             guard caller == .control else {
                 return .error(403, "Only this Mac can list paired devices.")
@@ -1187,12 +1257,20 @@ public actor ControlServer {
             case ("GET", "/image/models"):
                 return try .encode(await host.imageModels())
             case ("POST", "/image/plan"):
+                // Through the same gate as the render it plans. Skipping it here let a
+                // device send an `initImagePath` that the planner then reported on — and
+                // "no image at that path" versus a plan is a yes/no oracle for any path on
+                // this Mac. Its `uploadID` and `mediaID` were being ignored, too.
                 return try .encode(await host.planImage(
-                    try request.decode(ControlAPI.ImageRequest.self)
+                    try await resolvedImage(request.decode(ControlAPI.ImageRequest.self),
+                                            as: caller)
                 ))
             case ("POST", "/image/generate"):
-                return try .encode(await host.generateImage(
-                    try request.decode(ControlAPI.ImageRequest.self)
+                return try .encode(await media.decorated(
+                    await host.generateImage(
+                        try await resolvedImage(request.decode(ControlAPI.ImageRequest.self),
+                                                as: caller)
+                    )
                 ))
             case ("GET", "/swarm"):
                 return try .encode(await host.swarm())
@@ -1203,31 +1281,42 @@ public actor ControlServer {
             case ("GET", "/video/models"):
                 return try .encode(await host.videoModels())
             case ("GET", "/video/queue"):
-                return try .encode(await host.videoQueue())
+                // The one thing a phone keeps doing, and so the right place to hang a
+                // sweep that would otherwise only ever run when something new arrives.
+                await sweepUploadsIfDue()
+                return try .encode(await media.decorated(await host.videoQueue()))
             case ("POST", "/video/queue"):
-                return try .encode(await host.enqueueVideos(
+                return try .encode(await media.decorated(await host.enqueueVideos(
                     try request.decode(ControlAPI.VideoQueueRequest.self)
-                ))
+                )))
             case ("POST", "/video/queue/control"):
-                return try .encode(await host.controlVideoQueue(
+                return try .encode(await media.decorated(await host.controlVideoQueue(
                     try request.decode(ControlAPI.VideoQueueControl.self)
-                ))
+                )))
             case ("POST", "/video/generate"):
                 guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
                     return .error(429, "Too many synchronous video requests. No clip was added. Use POST /video/queue to save work without holding a connection, then GET /video/queue to follow it.")
                 }
                 activeSynchronousVideos += 1
                 defer { activeSynchronousVideos -= 1 }
-                return try .encode(await host.generateVideo(
-                    try request.decode(ControlAPI.VideoGenerateRequest.self)
+                return try .encode(await media.decorated(
+                    await host.generateVideo(
+                        try await resolvedVideo(
+                            request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
+                        )
+                    )
                 ))
             case ("POST", "/mesh/plan"):
                 return try .encode(await host.planMesh(
-                    try request.decode(ControlAPI.MeshRequest.self)
+                    try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
+                                           as: caller)
                 ))
             case ("POST", "/mesh/generate"):
-                return try .encode(await host.generateMesh(
-                    try request.decode(ControlAPI.MeshRequest.self)
+                return try .encode(await media.decorated(
+                    await host.generateMesh(
+                        try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
+                                               as: caller)
+                    )
                 ))
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
@@ -1280,6 +1369,364 @@ public actor ControlServer {
         } catch {
             return .error(400, error.localizedDescription)
         }
+    }
+
+    // MARK: - Serving what this Mac made
+
+    /// `GET /media/{id}`.
+    ///
+    /// The id is looked up, never parsed. There is no path in this request and no way to
+    /// put one in it: an id that is not in the table is a 404 that says the same thing
+    /// whether the file never existed, was deleted, or belongs to a folder this Mac does
+    /// not serve from — a caller learns nothing from the difference, because there is
+    /// nothing it could do with it.
+    private func serveMedia(
+        id: String, headers: [String: String], as caller: Caller
+    ) async -> HTTPResponse {
+        // The roots are handed in so the registry can check them *now*, against the path
+        // re-resolved now — an id is a promise about a file, and this is where it is
+        // rechecked rather than remembered.
+        let roots = await media.roots()
+        guard let entry = await media.registry.entry(id: id, within: roots) else {
+            return .error(404, Self.noSuchMedia)
+        }
+        // A file under the uploads root belongs to the device that sent it. Answered 404
+        // rather than 403 for another device's id: "that is not yours" and "that does not
+        // exist" have to look the same, or the route is an oracle for what other phones
+        // have uploaded.
+        guard mayUse(path: entry.path, as: caller) else {
+            return .error(404, Self.noSuchMedia)
+        }
+        // Scope, per id rather than per route. A chat-only device may see what the Mac has
+        // made — a poster is a few kilobytes and is what a list is — but pulling the
+        // renders themselves down is a different permission, and it is the one the owner
+        // withheld when they paired this device for chat.
+        if case .device(_, .chat) = caller, !entry.isPoster {
+            return .error(403, Self.fullResultsNeedFullControl)
+        }
+
+        let url = URL(fileURLWithPath: entry.path)
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: entry.path))?[.size]
+            as? NSNumber
+        else { return .error(404, Self.noSuchMedia) }
+        let total = size.intValue
+        let tag = MediaRegistry.etag(for: entry.path)
+
+        // A poster or an image is fetched once per list and then again on every scroll;
+        // answering "you already have it" costs a header instead of a megabyte. That only
+        // works if the answer is cacheable at all, which is why these are the one family of
+        // responses this server does not mark `no-store`: they are a device's own results,
+        // addressed by an unguessable id, so `private` is the accurate word for them.
+        var extra = [
+            "Accept-Ranges": "bytes",
+            // The content type is read off the extension, inside folders this Mac writes.
+            // Saying so stops a browser deciding a .png is something more interesting.
+            "X-Content-Type-Options": "nosniff",
+        ]
+        if let tag { extra["ETag"] = tag }
+        // Pictures and clips are meant to be shown. A mesh, an OBJ or a sound file is not
+        // something a viewer should render in place, and the id is the only name it needs.
+        if !entry.contentType.hasPrefix("image/"), !entry.contentType.hasPrefix("video/") {
+            let suffix = URL(fileURLWithPath: entry.path).pathExtension
+            extra["Content-Disposition"] =
+                "attachment; filename=\"\(id)\(suffix.isEmpty ? "" : ".\(suffix)")\""
+        }
+
+        if let tag, let asked = headers["if-none-match"], asked == tag {
+            var unchanged = HTTPResponse(
+                status: 304, body: Data(), contentType: entry.contentType,
+                extraHeaders: extra
+            )
+            // A 304 has no body, and a framing header for a body that cannot exist is one
+            // more thing for a proxy to disagree with.
+            unchanged.omitsContentLength = true
+            unchanged.cacheControl = Self.mediaCacheControl
+            return unchanged
+        }
+
+        // Players probe with `bytes=0-1` before they will play anything, and seeking is
+        // ranges all the way down; a video endpoint without them plays nothing at all.
+        //
+        // One range only. A multi-range request wants `multipart/byteranges`, which this
+        // server does not write, and answering the first range as though it were the whole
+        // ask would hand a player bytes it did not request under a header saying otherwise.
+        // Ignoring the header and sending the file is the behaviour RFC 9110 allows.
+        if let asked = headers["range"], !asked.contains(",") {
+            guard let range = GatewayAPI.byteRange(header: asked, fileSize: total) else {
+                // With where the end actually is, so a player that guessed can correct
+                // itself instead of retrying the same range.
+                var refusal = HTTPResponse.error(416, Self.rangeOutsideFile)
+                extra["Content-Range"] = "bytes */\(total)"
+                refusal.extraHeaders = extra
+                return refusal
+            }
+            extra["Content-Range"] =
+                "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(total)"
+            var partial = HTTPResponse(
+                status: 206, file: url, range: range,
+                contentType: entry.contentType, extraHeaders: extra
+            )
+            partial.cacheControl = Self.mediaCacheControl
+            partial.writeDeadline = eventWriteDeadline
+            return partial
+        }
+        var whole = HTTPResponse(
+            status: 200, file: url, range: 0..<total,
+            contentType: entry.contentType, extraHeaders: extra
+        )
+        whole.cacheControl = Self.mediaCacheControl
+        whole.writeDeadline = eventWriteDeadline
+        return whole
+    }
+
+    /// The one family of responses this server lets a client keep.
+    ///
+    /// `private` because it is one device's own results and no shared cache has any
+    /// business with them; an hour because that is long enough for a list to scroll and
+    /// short enough that a revoked device's cached copy is not a standing grant. The
+    /// `ETag` is what makes it correct rather than merely cheap.
+    static let mediaCacheControl = "private, max-age=3600"
+
+    /// A file under the uploads root belongs to exactly one device. Everything else — a
+    /// render this Mac made — belongs to the owner, and any of their devices may have it.
+    private func mayUse(path: String, as caller: Caller) -> Bool {
+        guard let root = MediaRegistry.resolve(uploadsRoot.path),
+              MediaRegistry.isInside(path, roots: [root])
+        else { return true }
+        guard let mine = MediaRegistry.resolve(
+            BuddyUploads.deviceRoot(Self.bucket(for: caller), at: uploadsRoot).path
+        ) else { return false }
+        return MediaRegistry.isInside(path, roots: [mine])
+    }
+
+    /// The verbs `POST /video/queue/control` has, in the one sentence it refuses an
+    /// unknown one with. Here rather than beside the switch that implements them because
+    /// the contract export has to publish the same list, and two hand-written copies of a
+    /// six-item set drift the first time a seventh is added.
+    public static let unknownQueueAction =
+        "Use pause, resume, retry, remove, stop_following, or clear_finished."
+
+    /// What a chat-only device is told when it asks for a render rather than a poster.
+    /// Its own sentence, not the general chat-only one, because the route it is being
+    /// refused on is a route it may otherwise use.
+    public static let fullResultsNeedFullControl =
+        "This device is paired for chat only, so it may fetch preview images but not the "
+            + "renders themselves. Pair it again with full control from Settings → Silicon "
+            + "Buddy on the Mac."
+
+    /// What a `Range` outside the file is answered with, alongside a `Content-Range`
+    /// saying where the end is.
+    public static let rangeOutsideFile = "That byte range is not inside this file."
+
+    /// The one sentence `GET /media` refuses with. Exported so the fixture and the server
+    /// cannot promise different words.
+    public static let noSuchMedia =
+        "No file with that media id. Ids are issued by this Mac with each result and stop "
+            + "working when the file is deleted."
+
+    /// What `POST /uploads` refuses a body it will not keep.
+    public static let unreadableUpload =
+        "That upload is not an image or a short video this Mac will keep. Send a PNG, JPEG, "
+            + "GIF, WebP, MP4, MOV or WebM."
+
+    /// Deletes expired uploads, at most once an hour unless the caller insists.
+    ///
+    /// On arrival *and* on a queue poll. Arrival alone was wrong: a device that uploads a
+    /// picture, makes its mesh and never uploads again leaves that picture there for good,
+    /// and the one thing a phone does keep doing is polling the queue. A timer would be
+    /// the other answer, and a worse one — it would run in an app nobody is talking to.
+    private func sweepUploadsIfDue(force: Bool = false) async {
+        let now = Date()
+        if !force, let last = lastUploadSweep,
+           now.timeIntervalSince(last) < uploadSweepInterval {
+            return
+        }
+        lastUploadSweep = now
+        guard BuddyUploads.sweep(at: uploadsRoot, now: now) > 0 else { return }
+        await media.registry.forgetMissingFiles()
+    }
+
+    /// How often the sweep is worth running. An hour, because what it is looking for is a
+    /// week old: running it on every poll would be a directory walk a second for nothing.
+    /// Injected only so a test can compress the week into a moment.
+    public static let defaultUploadSweepInterval: TimeInterval = 3600
+
+    /// What a device is told when the bytes could not be written. Deliberately says
+    /// nothing about this Mac's disk.
+    public static let uploadNotSaved =
+        "This Mac could not save that upload. Check the Mac has free space, then try again."
+
+    /// Which folder a caller's uploads go in.
+    ///
+    /// A device's own id, so revoking a phone and deleting what it sent are one gesture.
+    /// The Mac's own token and the swarm secret are not devices and get their own buckets
+    /// rather than sharing one with whichever phone paired first.
+    private static func bucket(for caller: Caller) -> String {
+        switch caller {
+        case .control: "mac"
+        case .swarm: "swarm"
+        case .device(let id, _): id
+        }
+    }
+
+    /// `POST /uploads` — the only route on this server that takes bytes rather than JSON.
+    ///
+    /// What arrives is decided by what it *is*, never by what it says it is: the magic
+    /// bytes choose the type and the extension, and `X-Filename` and `Content-Type` are
+    /// read for nothing but the error message. A body that is not an image or a short
+    /// video is refused before anything is written.
+    private func acceptUpload(_ request: HTTPRequest, as caller: Caller) async -> HTTPResponse {
+        guard let payload = UploadBody.payload(
+            of: request.body, contentType: request.headers["content-type"]
+        ), !payload.isEmpty else {
+            return .error(400, "That upload has no body in it.")
+        }
+        guard let kind = MediaSniffer.kind(of: payload) else {
+            return .error(415, Self.unreadableUpload)
+        }
+        let uploadID = UUID().uuidString
+        let destination: URL
+        do {
+            destination = try BuddyUploads.destination(
+                forBucket: Self.bucket(for: caller), uploadID: uploadID,
+                fileExtension: kind.fileExtension, at: uploadsRoot
+            )
+            // User-only from the moment the bytes exist, not chmodded afterwards.
+            try MediaRegistry.writeUserOnly(payload, to: destination)
+        } catch {
+            // A full disk, a read-only volume, a folder the owner moved: all real, none of
+            // them a device's business. The reason goes to the log with the path in it;
+            // the device gets the one sentence it can act on, and no filesystem layout.
+            Self.log.error(
+                "Could not save an upload: \(error.localizedDescription, privacy: .public)"
+            )
+            return .error(500, Self.uploadNotSaved)
+        }
+        await sweepUploadsIfDue(force: true)
+
+        guard let mediaID = await media.registry.register(
+            path: destination.path, within: await media.roots()
+        ) else {
+            try? FileManager.default.removeItem(at: destination)
+            return .error(500, Self.uploadNotSaved)
+        }
+        await media.registry.persist()
+        return (try? .encode(ControlAPI.UploadResponse(
+            uploadID: uploadID, mediaID: mediaID, bytes: payload.count,
+            contentType: kind.contentType, mediaURL: MediaDecoration.url(for: mediaID),
+            expiresAt: ControlAPI.timestamp(Date().addingTimeInterval(BuddyUploads.lifetime))
+        ))) ?? .error(500, "Could not encode the upload.")
+    }
+
+    // MARK: - Naming a picture without naming a path
+
+    /// What a render says about an id that named nothing — nearly always an upload that
+    /// has been swept, which is why it says so rather than "no image given".
+    public static let expiredSubject =
+        "That uploadID or mediaID does not name a file on this Mac any more. Uploads are "
+            + "kept for seven days; send the picture again."
+
+    /// The sentence every request that needs a subject image refuses with.
+    public static let noSubjectImage =
+        "Name the image to work from: an uploadID from POST /uploads, a mediaID this Mac "
+            + "issued, or — from this Mac's own token — an absolute imagePath."
+
+    /// Turns an `uploadID` or a `mediaID` into a path on this Mac, for the caller that sent
+    /// it. Nil when neither names anything this caller may use.
+    ///
+    /// An upload is resolved inside the caller's own folder, so one device's id is not a
+    /// key to another's photographs even if it somehow learns one.
+    private func resolvedPath(
+        uploadID: String?, mediaID: String?, as caller: Caller
+    ) async -> String? {
+        // Both branches come back through the same normalization, so an upload named by
+        // its `uploadID` and the same file named by its `mediaID` are one string by the
+        // time a render sees them — and not two spellings of one path.
+        if let uploadID, !uploadID.isEmpty {
+            if let url = BuddyUploads.resolve(
+                uploadID: uploadID, bucket: Self.bucket(for: caller), at: uploadsRoot
+            ) { return MediaRegistry.resolve(url.path) }
+        }
+        if let mediaID, !mediaID.isEmpty {
+            if let path = await media.path(forID: mediaID, within: await media.roots()),
+               // The same rule `GET /media` applies: a file under the uploads root belongs
+               // to the device that sent it, whichever kind of id is used to name it.
+               mayUse(path: path, as: caller) {
+                return MediaRegistry.resolve(path)
+            }
+        }
+        return nil
+    }
+
+    /// Whether this caller may name a path on the Mac at all.
+    ///
+    /// A device may not, ever — that is the whole reason the ids exist. The Mac's own token
+    /// and the swarm secret may, because both already run on machines that can read the
+    /// file, and every script and MCP tool written against these routes passes paths.
+    private static func mayNamePaths(_ caller: Caller) -> Bool {
+        caller.deviceID == nil
+    }
+
+    private func resolvedMesh(
+        _ request: ControlAPI.MeshRequest, as caller: Caller
+    ) async throws -> ControlAPI.MeshRequest {
+        var copy = request
+        if let resolved = await resolvedPath(
+            uploadID: request.uploadID, mediaID: request.mediaID, as: caller
+        ) {
+            copy.imagePath = resolved
+            return copy
+        }
+        // An id that was sent and did not resolve is a mistake worth naming, rather than
+        // falling through to "no image given".
+        if request.uploadID != nil || request.mediaID != nil {
+            throw ControlAPI.UnreadableSubject()
+        }
+        guard let path = request.imagePath, !path.isEmpty,
+              Self.mayNamePaths(caller) else {
+            throw ControlAPI.MissingSubject()
+        }
+        return copy
+    }
+
+    private func resolvedImage(
+        _ request: ControlAPI.ImageRequest, as caller: Caller
+    ) async throws -> ControlAPI.ImageRequest {
+        var copy = request
+        if let resolved = await resolvedPath(
+            uploadID: request.uploadID, mediaID: request.mediaID, as: caller
+        ) {
+            copy.initImagePath = resolved
+            return copy
+        }
+        if request.uploadID != nil || request.mediaID != nil {
+            throw ControlAPI.UnreadableSubject()
+        }
+        // Unlike a mesh, an image does not need a subject at all — text to image is the
+        // ordinary case. Only a device naming a path is refused.
+        if request.initImagePath != nil, !Self.mayNamePaths(caller) {
+            throw ControlAPI.MissingSubject()
+        }
+        return copy
+    }
+
+    private func resolvedVideo(
+        _ request: ControlAPI.VideoGenerateRequest, as caller: Caller
+    ) async throws -> ControlAPI.VideoGenerateRequest {
+        var copy = request
+        if let resolved = await resolvedPath(
+            uploadID: request.uploadID, mediaID: request.mediaID, as: caller
+        ) {
+            copy.imagePath = resolved
+            return copy
+        }
+        if request.uploadID != nil || request.mediaID != nil {
+            throw ControlAPI.UnreadableSubject()
+        }
+        if request.imagePath != nil, !Self.mayNamePaths(caller) {
+            throw ControlAPI.MissingSubject()
+        }
+        return copy
     }
 }
 
@@ -1336,9 +1783,18 @@ struct HTTPRequest {
 
     /// Reads one request. Bodies are small JSON payloads, so a simple accumulate-until-complete
     /// loop is sufficient and avoids pulling in a whole HTTP stack.
+    /// `limit` is asked with the method and path as well as the headers, because one route
+    /// — `POST /uploads` — has a different ceiling from every other, and the decision has
+    /// to be made before a byte of body is read rather than after.
+    ///
+    /// What it answers is **the** limit. `maximumBody` is the default for a caller that
+    /// supplies no closure, not a ceiling clamped over one that does: a route whose whole
+    /// point is a larger body cannot have its own number quietly reduced to the general
+    /// one, least of all while the refusal it produces still quotes the larger figure.
     static func read(
         from connection: NWConnection,
-        maximumBody limit: @Sendable ([String: String]) async -> Int = { _ in maximumBody }
+        maximumBody limit: @Sendable (String, String, [String: String]) async -> Int
+            = { _, _, _ in maximumBody }
     ) async throws -> HTTPRequest {
         // Absolute request-header/body deadline. Canceling the connection unblocks any
         // pending Network.framework receive, so a byte-at-a-time client cannot retain a
@@ -1380,7 +1836,10 @@ struct HTTPRequest {
 
         var body = buffer[headerEnd.upperBound...]
         guard headers["transfer-encoding"] == nil else { throw ParseError.lengthRequired }
-        let allowed = min(await limit(headers), maximumBody)
+        // The path without its query, which is what a route is: `/uploads?x=1` must get the
+        // upload ceiling and `/uploads/../load` must not.
+        let requestPath = URLComponents(string: "http://localhost\(target)")?.path ?? target
+        let allowed = await limit(method, requestPath, headers)
         if let lengthValue = headers["content-length"] {
             guard let length = Int(lengthValue), length >= 0, body.count <= length else {
                 throw ParseError.malformed
@@ -1434,11 +1893,67 @@ struct HTTPRequest {
 }
 
 struct HTTPResponse {
+
+    /// Where the bytes come from.
+    ///
+    /// Almost everything this server answers is a small JSON buffer. A rendered clip is
+    /// not: it can be hundreds of megabytes, a phone asks for it in ranges, and reading the
+    /// whole thing into memory to send a two-byte probe would be absurd. So a file answers
+    /// as a file — opened, seeked, and sent in chunks — and nothing else changes.
+    enum Payload: Sendable {
+        case data(Data)
+        /// The file, and the byte range of it to send.
+        case file(URL, Range<Int>)
+
+        var count: Int {
+            switch self {
+            case .data(let data): data.count
+            case .file(_, let range): range.count
+            }
+        }
+    }
+
     var status: Int
-    var body: Data
+    var payload: Payload
     var contentType = "application/json"
     /// Additional headers, for the responses that need them (media ranges).
     var extraHeaders: [String: String] = [:]
+    /// `no-store` for everything this server says about itself, which is nearly all of it.
+    /// The media routes are the exception and say so themselves.
+    var cacheControl = "no-store"
+    /// A 304 carries no body, and a framing header for a body that cannot exist is one
+    /// more thing for a proxy to disagree with.
+    var omitsContentLength = false
+    /// How long one `send` may take before the connection is given up on. Nil is the old
+    /// behaviour — wait indefinitely — which is right for a JSON buffer that fits in the
+    /// socket's own send buffer and cannot stall. A file does not fit and can.
+    var writeDeadline: Duration?
+
+    /// What everything but the media routes uses, unchanged.
+    var body: Data {
+        guard case .data(let data) = payload else { return Data() }
+        return data
+    }
+
+    init(
+        status: Int, body: Data, contentType: String = "application/json",
+        extraHeaders: [String: String] = [:]
+    ) {
+        self.status = status
+        self.payload = .data(body)
+        self.contentType = contentType
+        self.extraHeaders = extraHeaders
+    }
+
+    init(
+        status: Int, file: URL, range: Range<Int>, contentType: String,
+        extraHeaders: [String: String] = [:]
+    ) {
+        self.status = status
+        self.payload = .file(file, range)
+        self.contentType = contentType
+        self.extraHeaders = extraHeaders
+    }
 
     static func encode(_ value: some Encodable) throws -> HTTPResponse {
         let encoder = JSONEncoder()
@@ -1460,29 +1975,94 @@ struct HTTPResponse {
         return HTTPResponse(status: status, body: data)
     }
 
+    /// How much of a file goes out in one `send`. Big enough that a 200 MB clip is not ten
+    /// thousand round trips, small enough that serving one does not cost 200 MB of memory.
+    static let fileChunkBytes = 512 * 1024
+
     func write(to connection: NWConnection) async throws {
         var headerLines = [
             "HTTP/1.1 \(status) \(Self.reason(status))",
             "Content-Type: \(contentType)",
-            "Cache-Control: no-store",
-            "Content-Length: \(body.count)",
-            "Connection: close",
+            "Cache-Control: \(cacheControl)",
         ]
+        if !omitsContentLength { headerLines.append("Content-Length: \(payload.count)") }
+        headerLines.append("Connection: close")
         for (name, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
             headerLines.append("\(name): \(value)")
         }
         let head = headerLines.joined(separator: "\r\n") + "\r\n\r\n"
-        var payload = Data(head.utf8)
-        payload.append(body)
+        let deadline = writeDeadline
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            connection.send(content: payload, completion: .contentProcessed { error in
+        switch payload {
+        case .data(let data):
+            var buffer = Data(head.utf8)
+            buffer.append(data)
+            try await Self.send(buffer, over: connection, within: deadline)
+        case .file(let url, let range):
+            try await Self.send(Data(head.utf8), over: connection, within: deadline)
+            guard range.count > 0 else { return }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(range.lowerBound))
+            var remaining = range.count
+            while remaining > 0 {
+                let wanted = min(remaining, Self.fileChunkBytes)
+                guard let chunk = try handle.read(upToCount: wanted), !chunk.isEmpty else {
+                    // The file shrank under us. The length is already promised, so there is
+                    // nothing honest left to do but stop and let the client see a short
+                    // body on a connection that closes.
+                    return
+                }
+                try await Self.send(chunk, over: connection, within: deadline)
+                remaining -= chunk.count
+            }
+        }
+    }
+
+    /// One `send`, with a deadline when the caller set one.
+    ///
+    /// A reader that stops reading is not a reader that disconnects: the socket stays open,
+    /// its window closes, and `send` neither completes nor errors. `Task.cancel` cannot
+    /// reach into Network.framework, so the only thing that ends it is cancelling the
+    /// connection — which is exactly what the SSE writer already does for the same reason,
+    /// and for the same stake: a connection slot, of which there are sixty-four.
+    private static func send(
+        _ bytes: Data, over connection: NWConnection, within deadline: Duration?
+    ) async throws {
+        guard let deadline else {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, any Error>) in
+                connection.send(content: bytes, completion: .contentProcessed { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                })
+            }
+            return
+        }
+        let timer = Task {
+            try? await Task.sleep(for: deadline)
+            guard !Task.isCancelled else { return }
+            connection.cancel()
+        }
+        defer { timer.cancel() }
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            connection.send(content: bytes, completion: .contentProcessed { error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
                     continuation.resume()
                 }
             })
+        }
+        // Cancelling a connection completes its outstanding send *successfully* on some
+        // paths, so the deadline having fired is what decides whether this went out —
+        // not the completion handler's error.
+        if timer.isCancelled == false, case .cancelled = connection.state {
+            throw EventStreamError.writeTimedOut
         }
     }
 
@@ -1494,9 +2074,12 @@ struct HTTPResponse {
         case 401: "Unauthorized"
         case 403: "Forbidden"
         case 404: "Not Found"
+        case 304: "Not Modified"
         case 409: "Conflict"
         case 411: "Length Required"
         case 413: "Payload Too Large"
+        case 415: "Unsupported Media Type"
+        case 416: "Range Not Satisfiable"
         case 429: "Too Many Requests"
         default: "Error"
         }
