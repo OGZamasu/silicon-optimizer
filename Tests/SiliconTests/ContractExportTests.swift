@@ -48,6 +48,8 @@ struct ContractExportTests {
             "POST /plan", "POST /install", "POST /load",
             "POST /unload", "POST /chat", "POST /decide", "POST /v1/systemone",
             "GET /jev", "POST /jev", "GET /jev/guardrails/recent",
+            "GET /jev", "POST /jev",
+            "GET /jev/calibration", "POST /jev/calibrate",
             "POST /benchmark", "GET /swarm", "GET /v1/node",
             "GET /image/models", "POST /image/plan", "POST /image/generate",
             "GET /mesh/models", "POST /mesh/plan", "POST /mesh/generate",
@@ -94,9 +96,37 @@ struct ContractExportTests {
         #expect(errors("GET", "/buddy/devices")[403]?.contains("list") == true)
         #expect(errors("DELETE", "/buddy/devices/{id}")[403]?.contains("revoke") == true)
         #expect(errors("POST", "/jev")[403] == ControlServer.jevWriteRefusal)
+        #expect(errors("POST", "/jev/calibrate")[403] == ControlServer.jevCalibrateRefusal)
+        // Two different refusals for two different things, so a client can tell "you may not
+        // change what this Mac spends" from "you may not start it spending".
+        #expect(ControlServer.jevCalibrateRefusal != ControlServer.jevWriteRefusal)
+        #expect(errors("GET", "/jev/calibration")[404] == ControlServer.noCalibrationYet)
+        // A generated client is taught the cascade shape by the route that produces it: two
+        // lanes in one answer, and the map that says which answered what.
+        let decide = Self.routes.first { $0.method == "POST" && $0.path == "/decide" }
+        let decideBody = String(
+            decoding: (try? decide?.response?.encode()) ?? Data(), as: UTF8.self
+        )
+        #expect(decideBody.contains("\"provider\":\"local+typesafe\""))
+        #expect(decideBody.contains("\"sources\""))
+        #expect(decideBody.contains("\"team\":\"typesafe\""))
+        #expect(decideBody.contains("\"refund\":\"local\""))
+        // And the single-lane shape is still in the fixtures, on TypeSafe's own path.
+        let systemOne = Self.routes.first { $0.path == "/v1/systemone" }
+        let systemOneBody = String(
+            decoding: (try? systemOne?.response?.encode()) ?? Data(), as: UTF8.self
+        )
+        #expect(!systemOneBody.contains("sources"))
         // A full-control phone may read what Jev costs; only the Mac may change it.
         #expect(Self.routes.first { $0.method == "GET" && $0.path == "/jev" }?.auth == "device")
         #expect(Self.routes.first { $0.method == "POST" && $0.path == "/jev" }?.auth == "control")
+        // The calibration pair follows the same split: reading is free, running is not.
+        #expect(Self.routes.first {
+            $0.method == "GET" && $0.path == "/jev/calibration"
+        }?.auth == "device")
+        #expect(Self.routes.first {
+            $0.method == "POST" && $0.path == "/jev/calibrate"
+        }?.auth == "control")
         // And the key is not in the shape at all — the one thing this contract must never
         // teach a generated client to expect.
         let jevFixture = String(
@@ -389,8 +419,10 @@ struct ContractExportTests {
             "unloading, benchmarking, rendering, queue control, the device list and the",
             "Jev settings — and `POST /recommend`, which ranks the catalogue against a",
             "described job by asking Jev and so spends the owner's money.",
-            "`POST /jev` goes further and takes the Mac's own control token:",
-            "it governs what this Mac spends, so a paired phone may read it but not set it.",
+            "`POST /jev` and `POST /jev/calibrate` go further and take the Mac's own control",
+            "token: they govern what this Mac spends, so a paired phone may read both, and",
+            "the matching `GET /jev` and `GET /jev/calibration`, without being able to",
+            "change either.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -664,13 +696,28 @@ struct ContractExportTests {
                 state: .string("Customer was charged twice and wants it fixed."),
                 questions: [
                     "refund": .init(type: "noul", instructions: .string("Asks for money back")),
+                    "team": .init(
+                        type: "choice", instructions: .string("Which team should take it"),
+                        criteria: .object(["billing": .null, "technical": .null])
+                    ),
                 ]
             )),
+            // The cascade, because that is what `provider: "auto"` does on a Mac with a
+            // model loaded and Jev turned on — and because `sources` is the field a
+            // generated client would otherwise never be taught to expect. The single-lane
+            // shape is next door on /v1/systemone.
             response: .of(ControlAPI.DecideResponse(
-                model: "Qwen3-Coder 30B A3B",
-                usage: .init(inputTokens: 120, outputTokens: 1),
-                answers: ["refund": .noul(0.94)],
-                provider: "local"
+                model: "Qwen3-Coder 30B A3B + jev-1.13.0",
+                usage: .init(inputTokens: 1_020, outputTokens: 2),
+                answers: [
+                    "refund": .noul(0.94),
+                    "team": .choice(
+                        choice: "billing", confidence: 0.91,
+                        probabilities: ["billing": 0.91, "technical": 0.09]
+                    ),
+                ],
+                provider: "local+typesafe",
+                sources: ["refund": "local", "team": "typesafe"]
             ))
         ),
         Route(
@@ -708,6 +755,18 @@ struct ContractExportTests {
             )),
             response: .of(exampleJevStatus),
             errors: [403: ControlServer.jevWriteRefusal]
+        ),
+        Route(
+            method: "GET", path: "/jev/calibration", auth: "device",
+            summary: "The last calibration of the local decision lane against Jev.",
+            response: .of(exampleJevCalibration),
+            errors: [404: ControlServer.noCalibrationYet]
+        ),
+        Route(
+            method: "POST", path: "/jev/calibrate", auth: "control",
+            summary: "Measure the local decision lane against Jev and retune the cascade.",
+            response: .of(exampleJevCalibration),
+            errors: [403: ControlServer.jevCalibrateRefusal]
         ),
         Route(
             method: "POST", path: "/benchmark", auth: "device",
@@ -935,6 +994,39 @@ struct ContractExportTests {
                     "harm": "fired",
                 ]
             ),
+        ]
+    )
+
+    /// A run that found a floor for one kind of answer and not the other, which is the
+    /// interesting shape for a generated client to have seen: both flags are in the fixture.
+    static let exampleJevCalibration = ControlAPI.JevCalibration(
+        modelID: "qwen3-coder-30b-q4_k_m",
+        modelName: "Qwen3-Coder 30B A3B",
+        jevModel: "jev-1.13.0",
+        date: "2026-09-18T09:41:00Z",
+        cases: 40, builtInCases: 40, userCases: 0, comparisons: 80,
+        agreement: [
+            .init(kind: "noul", compared: 26, agreed: 22, rate: 0.846),
+            .init(kind: "choice", compared: 30, agreed: 27, rate: 0.9),
+            .init(kind: "score", compared: 24, agreed: 19, rate: 0.792),
+        ],
+        overallAgreementRate: 0.85,
+        floors: .init(
+            choiceConfidence: 0.72, scoreConfidence: 0.81, noulLow: 0.25, noulHigh: 0.75
+        ),
+        escalationRate: 0.21,
+        choiceFloorMeasured: true,
+        scoreFloorMeasured: true,
+        noulBandMeasured: false,
+        bins: [
+            .init(lower: 0.4, upper: 0.5, count: 6, agreed: 3, meanConfidence: 0.45, agreementRate: 0.5),
+            .init(lower: 0.7, upper: 0.8, count: 18, agreed: 16, meanConfidence: 0.74, agreementRate: 0.889),
+            .init(lower: 0.9, upper: 1.0, count: 30, agreed: 29, meanConfidence: 0.96, agreementRate: 0.967),
+        ],
+        inputTokens: 31_204,
+        estimatedUSD: 0.0013,
+        notes: [
+            "Too few noul disagreements to place a middle band, so the cascade keeps the default one.",
         ]
     )
 

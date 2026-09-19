@@ -1,4 +1,5 @@
 import Foundation
+import SiliconCatalog
 import SiliconControl
 import SiliconRuntime
 
@@ -109,6 +110,156 @@ extension AppModel {
         await JevGuardrails.recent()
     }
 
+    // MARK: - Calibration
+
+    /// How the app describes the loaded model to a calibration: the id, and the weights
+    /// behind it. An id alone can be reused — removed and reinstalled at a different
+    /// quantization, or a local build overwritten — and floors would then be applied to
+    /// weights they were never measured against.
+    var calibrationModel: CalibrationQuestions.LoadedModel? {
+        guard let loaded = loadedModel else { return nil }
+        return .init(
+            id: loaded.id,
+            sizeBytes: loaded.sizeOnDisk.rawValue,
+            installedAt: ControlAPI.timestamp(loaded.installedAt)
+        )
+    }
+
+    /// The floors `provider: "auto"` escalates on: the last calibration's when it was
+    /// measured against the model loaded right now, and the settings' otherwise.
+    func cascadeFloors() async -> ControlAPI.JevCalibration.Floors {
+        await JevBootstrap.ready()
+        let settings = await JevService.shared.settings().cascadeFloors
+        let store = await JevService.shared.storeLocations()
+        let calibration = await LocalCalibrationStore.shared.result(at: store.calibration)
+        return CalibrationQuestions.floors(
+            for: calibrationModel, calibration: calibration, settings: settings
+        )
+    }
+
+    /// `GET /jev/calibration` — the last run, or nil if there has never been one.
+    ///
+    /// The stored result plus the three things only this Mac knows: whether those floors are
+    /// the ones actually running, which floors are, and what is loaded instead. A client
+    /// showing a calibration measured on a model nobody has loaded since would otherwise be
+    /// describing something that is not happening.
+    public func jevCalibration() async -> ControlAPI.JevCalibration? {
+        await JevBootstrap.ready()
+        let store = await JevService.shared.storeLocations()
+        guard var result = await LocalCalibrationStore.shared.result(at: store.calibration)
+        else { return nil }
+        let model = calibrationModel
+        let settings = await JevService.shared.settings().cascadeFloors
+        let applies = result.measured(
+            modelID: model?.id, sizeBytes: model?.sizeBytes, installedAt: model?.installedAt
+        )
+        result.appliesToLoadedModel = applies
+        result.floorsInEffect = applies
+            ? result.floors.normalized(default: settings)
+            : settings
+        result.loadedModelName = applies ? nil : loadedModel?.name
+        return result
+    }
+
+    /// `POST /jev/calibrate` — run every case through both lanes and write the result.
+    ///
+    /// Both halves have to be there: a calibration is a *comparison*, so without a loaded
+    /// model there is nothing to calibrate, and without Jev there is nothing to calibrate
+    /// against. Each refusal says which one is missing rather than "could not calibrate".
+    ///
+    /// One at a time. Two runs would interleave requests at one llama-server, double the
+    /// bill, and race each other to write the same file — so a second one is refused with a
+    /// 409 the caller can act on rather than queued behind the first.
+    public func calibrateJev() async throws -> ControlAPI.JevCalibration {
+        await JevBootstrap.ready()
+        guard case .ready(let endpoint) = runtimeState, let loaded = loadedModel else {
+            throw ControlHostError.badRequest(
+                "Calibration compares the model loaded here with Jev, so a model has to be "
+                + "loaded. Load one and try again."
+            )
+        }
+        guard await JevService.shared.isAvailable(.calibration) else {
+            throw ControlHostError.badRequest(
+                "Calibration asks Jev for the reference answers. Add a TypeSafe API key and "
+                + "turn on Use Jev and Decision calibration in Settings → TypeSafe (Jev)."
+            )
+        }
+        guard !CalibrationRun.isRunning else {
+            throw ControlHostError.busy(Self.calibrationAlreadyRunning)
+        }
+
+        let work = Task<ControlAPI.JevCalibration, any Error> { [self] in
+            try await runCalibration(endpoint: endpoint, loaded: loaded)
+        }
+        CalibrationRun.task = work
+        defer { CalibrationRun.task = nil }
+        return try await work.value
+    }
+
+    /// Why a finished run must not be written, or nil when it may be.
+    ///
+    /// A run where nothing could be compared is not a calibration, it is a failure with a
+    /// report attached. Writing it would replace a good calibration with floors derived from
+    /// no data at all — and because the floors fall back to the settings when a search finds
+    /// nothing, the file would look perfectly reasonable while meaning nothing. So it throws,
+    /// and the previous result and the cache holding it stay exactly where they were.
+    static func refusalForUnsavableRun(_ result: ControlAPI.JevCalibration) -> String? {
+        guard result.comparisons == 0 else { return nil }
+        return "No case could be answered by both lanes, so there is nothing to calibrate "
+            + "from and the previous result is unchanged."
+            + (result.notes.first.map { " First failure: \($0)" } ?? "")
+    }
+
+    public static let calibrationAlreadyRunning =
+        "A calibration is already running on this Mac. Wait for it to finish, or cancel it "
+            + "in Settings → TypeSafe (Jev)."
+
+    private func runCalibration(
+        endpoint: URL, loaded: InstalledModel
+    ) async throws -> ControlAPI.JevCalibration {
+        let settings = await JevService.shared.settings()
+        let store = await JevService.shared.storeLocations()
+        let set = CalibrationQuestions.allCases(userCasesAt: store.userCases)
+        let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
+
+        noteActivity()
+        let result = try await whileGenerating {
+            try await CalibrationQuestions.calibrate(
+                cases: set.cases,
+                context: .init(
+                    localModelID: loaded.id,
+                    localModelName: loaded.name,
+                    jevModel: settings.model,
+                    fallbackFloors: settings.cascadeFloors,
+                    localModelSizeBytes: loaded.sizeOnDisk.rawValue,
+                    localModelInstalledAt: ControlAPI.timestamp(loaded.installedAt),
+                    notes: set.notes
+                ),
+                local: { try await decider.decide($0) },
+                jev: { asked in
+                    try await JevService.shared.ask(
+                        .calibration, state: asked.state, questions: asked.questions
+                    )
+                }
+            )
+        }
+
+        if let refusal = Self.refusalForUnsavableRun(result) {
+            throw ControlHostError.badRequest(refusal)
+        }
+        do {
+            try await LocalCalibrationStore.shared.save(result, to: store.calibration)
+        } catch {
+            // Not swallowed. A run that cost real money and then vanished, leaving the old
+            // floors in place with no sign of it, is the one outcome nobody could debug.
+            throw ControlHostError.badRequest(
+                "The calibration ran but could not be saved (\(error.localizedDescription)), "
+                + "so the previous result is still in effect."
+            )
+        }
+        return result
+    }
+
     /// Built here rather than inside `JevService` because the key question — is one stored?
     /// — is the app's to answer, and the service is deliberately given no way to say.
     static func jevStatus(
@@ -163,4 +314,20 @@ extension AppModel {
             verificationEscalationModel: settings.verificationEscalationModel
         )
     }
+}
+
+/// The one calibration run allowed at a time, and the handle that can stop it.
+///
+/// A free function's worth of state, kept here rather than on `AppModel` because an extension
+/// cannot add a stored property — and because "is a calibration running?" is a fact about
+/// this Mac rather than about any one view.
+@MainActor
+enum CalibrationRun {
+    static var task: Task<ControlAPI.JevCalibration, any Error>?
+
+    static var isRunning: Bool { task != nil }
+
+    /// Cancelling throws out of the run between cases, so a half-measured set is never
+    /// written and the previous calibration keeps working.
+    static func cancel() { task?.cancel() }
 }

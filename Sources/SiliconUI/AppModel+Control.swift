@@ -400,22 +400,33 @@ extension AppModel: ControlHost {
         )
     }
 
-    /// Who answers a decision. `auto` prefers the model loaded here — nothing leaves the
-    /// Mac and there is nothing to pay — and falls back to TypeSafe when a key is set.
-    /// Naming a lane makes it a hard requirement instead.
+    /// Who answers a decision.
+    ///
+    /// `auto` is a **cascade**, not a fallback. The model loaded here answers first — nothing
+    /// leaves the Mac and there is nothing to pay — and then, per question, only the answers
+    /// it was not sure of are put to Jev. What counts as "not sure" is the calibration's
+    /// business: `POST /jev/calibrate` measures where this model's confidence stops
+    /// predicting Jev's verdict, and the cascade thresholds there. With no model loaded there
+    /// is nothing to cascade from and `auto` is the old fallback; with Jev unavailable there
+    /// is nothing to cascade to and it is the local lane, unchanged.
+    ///
+    /// Naming a lane makes it a hard requirement instead, and skips the cascade in both
+    /// directions: `local` never pays, `typesafe` never asks the model here.
     public func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         try request.validate()
         let provider = (request.provider ?? "auto").lowercased()
         var localEndpoint: URL?
         if case .ready(let endpoint) = runtimeState { localEndpoint = endpoint }
 
-        func local() async throws -> ControlAPI.DecideResponse {
+        func local(
+            _ asked: ControlAPI.DecideRequest = request
+        ) async throws -> ControlAPI.DecideResponse {
             guard let endpoint = localEndpoint, let loaded = loadedModel else {
                 throw ControlHostError.noModelLoaded
             }
             noteActivity()
             let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
-            return try await whileGenerating { try await decider.decide(request) }
+            return try await whileGenerating { try await decider.decide(asked) }
         }
         func typeSafe() async throws -> ControlAPI.DecideResponse {
             // Through the one door rather than straight at `SystemOneClient`: the decide
@@ -440,18 +451,67 @@ extension AppModel: ControlHost {
         case "local": return try await local()
         case "typesafe": return try await typeSafe()
         case "auto":
-            if localEndpoint != nil { return try await local() }
-            await JevBootstrap.ready()
-            if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
-            throw ControlHostError.badRequest(
-                "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
-                + "API key and turn on the decide tool in Settings → TypeSafe (Jev)."
+            guard localEndpoint != nil else {
+                await JevBootstrap.ready()
+                if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
+                throw ControlHostError.badRequest(
+                    "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
+                    + "API key and turn on the decide tool in Settings → TypeSafe (Jev)."
+                )
+            }
+            let floors = await cascadeFloors()
+            return try await DecisionCascade.run(
+                request,
+                floors: floors,
+                // Asked only once the local answers are in and at least one of them was
+                // uncertain, so a confident run never reads the settings file — and the
+                // Keychain is not touched until a request is actually about to be sent.
+                jevAvailable: {
+                    await JevBootstrap.ready()
+                    return await Self.cascadeMayEscalate()
+                },
+                local: { try await local($0) },
+                jev: { try await Self.escalate($0) }
             )
         default:
             throw ControlHostError.badRequest(
                 "Unknown provider \"\(request.provider ?? "")\". Use auto, local or typesafe."
             )
         }
+    }
+
+    /// Whether `auto` may pay Jev for an answer this machine was unsure of.
+    ///
+    /// Two switches, both of them the owner's, and the order matters.
+    ///
+    /// **Decide tool** is the switch that governs ongoing `/decide` spending. Turning it off
+    /// has to stop every penny of it — including a chat-scope phone's, which reaches this
+    /// same code through `POST /decide` — so it is checked first and it is what the
+    /// escalation is billed to. Its budget, its cache and its ledger line all apply.
+    ///
+    /// **Decision calibration** is what turns the old fallback into a cascade at all. With
+    /// it off, `auto` is the single lane it has always been, whatever the decide tool says.
+    ///
+    /// A free function rather than a closure inside `decide` so a test can hold the gate and
+    /// the ledger it writes to, which is the only way to prove that turning the first switch
+    /// off actually stops the spending.
+    static func cascadeMayEscalate(_ service: JevService = .shared) async -> Bool {
+        guard await service.isAvailable(.decideTool) else { return false }
+        return await service.settings().isOn(.calibration)
+    }
+
+    /// The escalation itself, billed to the decide tool.
+    ///
+    /// Not to `.calibration`: that line is for calibration runs, and an owner reading the
+    /// ledger to find out what `decide` costs should find it under the decide tool. Gating
+    /// on one feature and spending another's budget would also mean a decide-tool budget
+    /// that `/decide` could spend past.
+    static func escalate(
+        _ request: ControlAPI.DecideRequest, using service: JevService = .shared
+    ) async throws -> ControlAPI.DecideResponse {
+        try await service.ask(
+            .decideTool, state: request.state, questions: request.questions
+        )
     }
 
     public func benchmark() async throws -> ControlAPI.BenchmarkResult {
@@ -583,12 +643,14 @@ extension AppModel: ControlHost {
     }
 }
 
-public enum ControlHostError: Error, LocalizedError {
+public enum ControlHostError: Error, LocalizedError, ControlStatusError {
     case unknownModel(String)
     case notInstalled(String)
     case noModelLoaded
     case loadFailed(String)
     case badRequest(String)
+    /// The Mac is already doing this, and doing it twice would be worse than waiting.
+    case busy(String)
 
     public var errorDescription: String? {
         switch self {
@@ -602,6 +664,17 @@ public enum ControlHostError: Error, LocalizedError {
             "The model failed to load: \(reason)"
         case .badRequest(let reason):
             reason
+        case .busy(let reason):
+            reason
+        }
+    }
+
+    /// Everything here is "you asked wrong", which is a 400 — except being told to come back
+    /// later, which a caller can act on and a 400 gives it no way to recognise.
+    public var status: Int {
+        switch self {
+        case .busy: 409
+        default: 400
         }
     }
 }

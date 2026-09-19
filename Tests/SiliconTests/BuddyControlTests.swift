@@ -154,6 +154,7 @@ struct BuddyControlTests {
                 ("POST", "/video/queue"), ("POST", "/video/queue/control"),
                 ("GET", "/buddy/devices"), ("GET", "/jev"),
                 ("GET", "/jev/guardrails/recent"),
+                ("GET", "/jev/calibration"), ("POST", "/jev/calibrate"),
             ] {
                 let (code, body) = try await fixture.phone.call(
                     refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
@@ -183,6 +184,79 @@ struct BuddyControlTests {
     /// Reading what Jev costs is a full-control device's business; changing what this Mac
     /// will spend is the Mac's alone. A stolen phone token must not be able to lift the
     /// budget cap or switch a feature on.
+    /// The calibration pair splits the same way the settings pair does, and for the same
+    /// reason — a run spends Jev tokens and holds the loaded model for a minute — but says
+    /// so in its own words, because "you may not change a setting" is not what happened.
+    @Test func onlyTheMacMayStartACalibration() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            #expect(paired.scope == "full")
+
+            // Nothing has been run, so reading is a 404 with a sentence rather than an
+            // empty body a client has to guess at.
+            let (missing, missingBody) = try await fixture.phone.call(
+                "GET", "/jev/calibration", token: paired.token
+            )
+            #expect(missing == 404)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: missingBody
+            ).error == ControlServer.noCalibrationYet)
+
+            // A full-control phone may read a result once there is one.
+            await fixture.host.setCalibration(Self.exampleCalibration)
+            let (readStatus, readBody) = try await fixture.phone.call(
+                "GET", "/jev/calibration", token: paired.token
+            )
+            #expect(readStatus == 200)
+            let result = try JSONDecoder().decode(
+                ControlAPI.JevCalibration.self, from: readBody
+            )
+            #expect(result.floors.choiceConfidence == 0.72)
+
+            // But it may not start one.
+            let (writeStatus, writeBody) = try await fixture.phone.call(
+                "POST", "/jev/calibrate", token: paired.token
+            )
+            #expect(writeStatus == 403)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: writeBody
+            ).error == ControlServer.jevCalibrateRefusal)
+            // Refused before the host was ever asked, not after it had already spent.
+            #expect(await fixture.host.calibrationRuns == 0)
+
+            // The Mac's own token may.
+            let (accepted, _) = try await fixture.local.call(
+                "POST", "/jev/calibrate", token: fixture.local.token
+            )
+            #expect(accepted == 200)
+            #expect(await fixture.host.calibrationRuns == 1)
+
+            // A run already in progress is a 409, not a 400: "come back later" is something
+            // a client can act on, and every other host error is something it cannot.
+            await fixture.host.setCalibrationBusy(true)
+            let (busy, busyBody) = try await fixture.local.call(
+                "POST", "/jev/calibrate", token: fixture.local.token
+            )
+            #expect(busy == 409)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: busyBody
+            ).error.contains("already running"))
+        }
+    }
+
+
+    static let exampleCalibration = ControlAPI.JevCalibration(
+        modelID: "test-model", modelName: "Test 1B", jevModel: "jev-1.13.0",
+        date: "2026-09-18T09:41:00Z",
+        cases: 40, builtInCases: 40, userCases: 0, comparisons: 80,
+        agreement: [.init(kind: "choice", compared: 30, agreed: 27, rate: 0.9)],
+        overallAgreementRate: 0.85,
+        floors: .init(confidence: 0.72, noulLow: 0.25, noulHigh: 0.75),
+        escalationRate: 0.21,
+        choiceFloorMeasured: true, scoreFloorMeasured: true, noulBandMeasured: false,
+        bins: [], inputTokens: 31_204, estimatedUSD: 0.0013
+    )
+
     @Test func onlyTheMacMayChangeTheJevSettings() async throws {
         try await withServer { fixture in
             let paired = try await fixture.pair()
@@ -1232,6 +1306,27 @@ actor BuddyTestHost: ControlHost {
             )]
         )
     }
+    /// Set by the 403 test, so `GET /jev/calibration` has something to answer with when the
+    /// scope gate lets a caller through to it.
+    var calibration: ControlAPI.JevCalibration?
+    var calibrationRuns = 0
+
+    func setCalibration(_ value: ControlAPI.JevCalibration?) { calibration = value }
+
+    func jevCalibration() async -> ControlAPI.JevCalibration? { calibration }
+
+    /// Set by the single-flight test: what the second caller is told.
+    var calibrationIsBusy = false
+
+    func setCalibrationBusy(_ value: Bool) { calibrationIsBusy = value }
+
+    func calibrateJev() async throws -> ControlAPI.JevCalibration {
+        calibrationRuns += 1
+        if calibrationIsBusy { throw CalibrationBusy() }
+        guard let calibration else { throw BuddyTestError.unexpectedRoute }
+        return calibration
+    }
+
     func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus {
         if let enabled = update.enabled { jev.enabled = enabled }
         if let model = update.model { jev.model = model }
@@ -1265,4 +1360,14 @@ actor BuddyTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoQueueView {
         throw BuddyTestError.unexpectedRoute
     }
+}
+
+
+/// A host error that knows it is a 409, which is what a second calibration gets. At file
+/// scope because the host that throws it is, too.
+struct CalibrationBusy: Error, LocalizedError, ControlStatusError {
+    var errorDescription: String? {
+        "A calibration is already running on this Mac. Wait for it to finish."
+    }
+    var status: Int { 409 }
 }
