@@ -114,7 +114,8 @@ public actor BuddyEventHub {
 
     private var listeners: [UUID: AsyncStream<BuddyEvent.Frame>.Continuation] = [:]
     private var audiences: [UUID: Audience] = [:]
-    /// Frames dropped per subscriber since it was last told. See `ControlAPI.ResyncEvent`.
+    /// Frames dropped per subscriber since its reader last took the count — that is, since
+    /// the last `resync` it was actually sent. See `takeDropped`.
     private var dropped: [UUID: Int] = [:]
     /// Agent subscribers that have not been sent their opening frames yet. The agent
     /// watcher takes them on its next reading, so what a phone is opened with and what
@@ -142,8 +143,8 @@ public actor BuddyEventHub {
     ) -> (id: UUID, stream: AsyncStream<BuddyEvent.Frame>) {
         let id = UUID()
         // Buffering the newest few: a phone on a slow link should get the current state,
-        // not a queue of every percentage point it missed. A drop is announced, though —
-        // see `post`.
+        // not a queue of every percentage point it missed. A drop is counted, and the
+        // reader announces it — see `takeDropped`.
         let stream = AsyncStream<BuddyEvent.Frame>(
             bufferingPolicy: .bufferingNewest(Self.bufferedFrames)
         ) { continuation in
@@ -202,22 +203,22 @@ public actor BuddyEventHub {
                 if case .dropped = listener.yield(frame!) { dropped[id, default: 0] += 1 }
             }
         }
-        announceDrops()
     }
 
-    /// Tells each subscriber that just lost frames that it did. Yielded after the frames
-    /// that pushed the old ones out, so it is among the newest and survives the buffer.
-    private func announceDrops() {
-        for (id, count) in dropped where count > 0 {
-            guard let listener = listeners[id],
-                  let data = try? BuddyEvent.resync(.init(dropped: count)).encoded()
-            else { continue }
-            dropped[id] = 0
-            if case .dropped = listener.yield(.init(name: "resync", data: data)) {
-                // The announcement itself pushed one more out; it is owed in the next.
-                dropped[id] = 1
-            }
-        }
+    /// How many frames this subscriber has lost since the count was last taken, and
+    /// zero from now on.
+    ///
+    /// Taken by the subscriber's own reader, just before it sends the frame it has just
+    /// taken off the stream — and never announced from here. The buffer drops its
+    /// *oldest* frames, so everything lost is older than the frame about to go out: a
+    /// `resync` sent in front of that frame lands exactly where the gap is, before
+    /// anything newer, and the cursor the phone holds at that moment is the right one to
+    /// fetch from. Appended here instead, a `resync` would queue behind the survivors;
+    /// the phone would read past the gap first and then fetch from beyond it. And a
+    /// stalled reader would fill its buffer with announcements, each pushing out a real
+    /// frame to make room.
+    public func takeDropped(_ id: UUID) -> Int {
+        dropped.removeValue(forKey: id) ?? 0
     }
 
     // MARK: - Who is watching the agents

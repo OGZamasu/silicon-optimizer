@@ -291,12 +291,14 @@ extension ControlAPI {
     ///
     /// A subscriber that reads slower than the Mac writes keeps the newest frames and loses
     /// the oldest — a phone on a bad link wants now, not a queue of every percentage point
-    /// it missed. That trade is only honest if the phone is *told*, so this frame follows
-    /// any drop. What to do about it is the same for every kind of frame: fetch what you
-    /// show again — `GET /status`, `GET /video/queue`, and each agent session with the
-    /// `since`/`epoch` you last had, which answers exactly what the dropped frames carried.
+    /// it missed. That trade is only honest if the phone is *told*, so this frame arrives
+    /// **exactly where the gap is**: after the last frame read before it and before
+    /// anything newer, one per gap. What to do about it is the same for every kind of
+    /// frame: fetch what you show again — `GET /status`, `GET /video/queue`, and each agent
+    /// session with the `since`/`epoch` from the last frame you read before this one. That
+    /// cursor sits just before the gap, so the answer holds exactly what was dropped.
     public struct ResyncEvent: Codable, Sendable, Equatable {
-        /// How many frames were dropped since the last `resync`.
+        /// How many frames were dropped since the last `resync` this stream was sent.
         public var dropped: Int
 
         public init(dropped: Int) { self.dropped = dropped }

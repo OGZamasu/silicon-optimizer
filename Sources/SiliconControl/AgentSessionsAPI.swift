@@ -34,7 +34,9 @@ extension ControlAPI {
     ///
     /// - `screened` — the agent asks before it acts, and the Jev guardrail judges each ask
     ///   before a person sees it.
-    /// - `asked` — the agent asks, and a person decides; nothing screens it first.
+    /// - `asked` — the agent asks, and a person decides; nothing screens it first. That
+    ///   includes the guardrail switched on but unable to judge — no key on the Mac, or
+    ///   this month's budget spent — when every call reaches a person marked "not screened".
     /// - `unattended` — nothing asks. Codex under the "never ask" policy, and Pi whenever
     ///   the guardrail is off: Pi's own protocol has no permission request, so without the
     ///   guardrail's gate its tools simply run.

@@ -820,27 +820,35 @@ struct BuddyAgentSessionTests {
     /// on, for every combination that changes the answer.
     @Test func theSummarySaysWhetherAnythingAsksBeforeTheAgentActs() async throws {
         let model = Self.freshModel()
-        func summary(_ engine: String, guarded: Bool) async throws -> ControlAPI.AgentSessionSummary {
-            try await AgentSessionSeams.$guardrailsOn.withValue(guarded) {
+        func summary(
+            _ engine: String, _ guardrail: GuardrailPosture
+        ) async throws -> ControlAPI.AgentSessionSummary {
+            try await AgentSessionSeams.$guardrails.withValue(guardrail) {
                 try #require(await model.agentSessions().sessions.first { $0.engine == engine })
             }
         }
-        // Pi never asks on its own; the gate is the guardrail's.
-        #expect(try await summary("pi", guarded: true).approvals == "screened")
-        #expect(try await summary("pi", guarded: false).approvals == "unattended")
-        #expect(try await summary("pi", guarded: false).sandbox == "none")
+        // Pi never asks on its own; the gate is the guardrail's — and a gate that cannot
+        // judge hands every call to a person, which is asking, not screening.
+        #expect(try await summary("pi", .screening).approvals == "screened")
+        #expect(try await summary("pi", .unavailable).approvals == "asked")
+        #expect(try await summary("pi", .off).approvals == "unattended")
+        #expect(try await summary("pi", .off).sandbox == "none")
 
         // Codex asks under its default policy; the guardrail decides whether Jev looks first
         // and pins full access down to the working folder.
         model.settings.codexSandbox = "danger-full-access"
-        #expect(try await summary("codex", guarded: false).approvals == "asked")
-        #expect(try await summary("codex", guarded: false).sandbox == "danger-full-access")
-        #expect(try await summary("codex", guarded: true).approvals == "screened")
-        #expect(try await summary("codex", guarded: true).sandbox == "workspace-write")
+        #expect(try await summary("codex", .off).approvals == "asked")
+        #expect(try await summary("codex", .off).sandbox == "danger-full-access")
+        #expect(try await summary("codex", .screening).approvals == "screened")
+        #expect(try await summary("codex", .screening).sandbox == "workspace-write")
+        // Switched on without a key or a budget: still pinned, but nothing judges.
+        #expect(try await summary("codex", .unavailable).approvals == "asked")
+        #expect(try await summary("codex", .unavailable).sandbox == "workspace-write")
         // "Never ask" means nobody is asked — unless the guardrail pins it back.
         model.settings.codexApprovalPolicy = "never"
-        #expect(try await summary("codex", guarded: false).approvals == "unattended")
-        #expect(try await summary("codex", guarded: true).approvals == "screened")
+        #expect(try await summary("codex", .off).approvals == "unattended")
+        #expect(try await summary("codex", .screening).approvals == "screened")
+        #expect(try await summary("codex", .unavailable).approvals == "asked")
 
         // A running thread keeps what it started with, whatever the settings say now.
         model.codexThreadID = "th_never"
@@ -848,8 +856,8 @@ struct BuddyAgentSessionTests {
             owner: model.agentLedgerOwner, engine: "codex", threadID: "th_never",
             approval: "never", sandbox: "read-only"
         )
-        #expect(try await summary("codex", guarded: true).approvals == "unattended")
-        #expect(try await summary("codex", guarded: true).sandbox == "read-only")
+        #expect(try await summary("codex", .screening).approvals == "unattended")
+        #expect(try await summary("codex", .screening).sandbox == "read-only")
     }
 
     /// The rule a new Codex thread starts under, moved into one function so the thread and
@@ -1140,24 +1148,179 @@ struct BuddyAgentSessionTests {
         #expect(await names(peer.stream) == ["heartbeat"])
     }
 
-    /// A subscriber that falls behind is told, rather than left holding a stream with a
-    /// hole in it.
-    @Test func aSubscriberThatFallsBehindIsToldToResync() async throws {
+    /// A stalled reader's buffer holds real frames, not announcements. Drops are counted
+    /// where they happen and handed to the reader; nothing is appended to the stream to say
+    /// so, where each announcement would push out one more real frame to make room.
+    @Test func aStalledReaderIsNeverFloodedWithResyncs() async throws {
         let hub = BuddyEventHub()
         let slow = await hub.subscribe(as: .device(id: "phone", scope: .full))
-        let overflow = BuddyEventHub.bufferedFrames + 8
-        for index in 0..<overflow {
-            await hub.post(.heartbeat(.init(at: "2026-09-19T10:00:\(String(format: "%02d", index % 60))Z")))
+        // The buffer fills, then ten more posts — ten of the watcher's ticks.
+        for index in 0..<(BuddyEventHub.bufferedFrames + 10) {
+            await hub.post(.heartbeat(.init(at: "t\(index)")))
         }
+        #expect(await hub.takeDropped(slow.id) == 10)
+        // Taken is taken: the next gap starts counting from nothing.
+        #expect(await hub.takeDropped(slow.id) == 0)
         await hub.cancel(slow.id)
-        var frames: [BuddyEvent.Frame] = []
-        for await frame in slow.stream { frames.append(frame) }
-        #expect(frames.count == BuddyEventHub.bufferedFrames)
-        // The newest frame is the one that says so, and it says how many were lost.
-        let last = try #require(frames.last)
-        #expect(last.name == "resync")
-        let resync = try JSONDecoder().decode(ControlAPI.ResyncEvent.self, from: last.data)
-        #expect(resync.dropped >= 1)
+        var names: [String] = []
+        for await frame in slow.stream { names.append(frame.name) }
+        #expect(names.count == BuddyEventHub.bufferedFrames)
+        #expect(!names.contains("resync"))
+    }
+
+    /// R1 from the second review, pinned. The documented recovery — on `resync`, fetch with
+    /// the cursor you have — must lose nothing.
+    ///
+    /// The buffer drops its oldest frames, so the `resync` has to reach the phone *before*
+    /// the newer frames that survived, not after them: a phone that reads the survivors
+    /// first moves its cursor past the gap and then fetches from beyond it. Here a row
+    /// changes exactly once, inside the window that is dropped, and the phone recovers it
+    /// using only what it has read. Run through the server's own reader, because that is
+    /// where the `resync` is placed.
+    @Test func aResyncArrivesAtTheGapSoTheCursorYouHaveCatchesUp() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexItems = [
+            CodexChatItem(id: "A", kind: .assistant("a0")),
+            CodexChatItem(id: "B", kind: .assistant("b0")),
+        ]
+        // The phone fetched the transcript when it opened the screen.
+        let first = try await model.agentSession(engine: "codex", query: .init())
+        let hub = BuddyEventHub()
+        func tick() async {
+            let frames = Self.settle(model, engine: "codex")
+            if !frames.isEmpty { await hub.post(frames, excluding: []) }
+        }
+        await tick()                                         // the watcher's baseline
+        let subscription = await hub.subscribe(as: .device(id: "phone", scope: .full))
+        _ = await hub.takeNewAgentSubscribers()
+        let link = SlowLink()
+        let reading = Task {
+            await ControlServer.forward(subscription, from: hub) { await link.deliver($0) }
+        }
+
+        // The link is fine for a moment…
+        model.codexItems[1].kind = .assistant("b1")
+        await tick()
+        #expect(try await link.waitFor(count: 1))
+        // …then stalls, holding the next frame in flight.
+        await link.stall()
+        model.codexItems[1].kind = .assistant("b2")
+        await tick()
+        #expect(try await link.waitFor(count: 2))
+        // A changes exactly once, and B streams on until A's frame — the oldest in the
+        // buffer — is pushed out.
+        model.codexItems[0].kind = .assistant("a1")
+        await tick()
+        let streamed = 43
+        for index in 3..<(3 + streamed) {
+            model.codexItems[1].kind = .assistant("b\(index)")
+            await tick()
+        }
+        await link.release()
+        // b1, b2, one `resync`, and the buffer's worth of survivors.
+        #expect(try await link.waitFor(count: 3 + BuddyEventHub.bufferedFrames))
+
+        // A second, smaller gap: its own `resync`, counting only its own losses.
+        await link.stall()
+        model.codexItems[1].kind = .assistant("c0")
+        await tick()
+        #expect(try await link.waitFor(count: 4 + BuddyEventHub.bufferedFrames))
+        for index in 1...(BuddyEventHub.bufferedFrames + 3) {
+            model.codexItems[1].kind = .assistant("c\(index)")
+            await tick()
+        }
+        await link.release()
+        #expect(try await link.waitFor(count: 5 + 2 * BuddyEventHub.bufferedFrames))
+        await hub.cancel(subscription.id)
+        await reading.value
+
+        // The phone, reading in order and following the contract to the letter.
+        var cursor = first.seq
+        var epoch = first.epoch
+        var shownA = "a0"
+        var resyncs: [Int] = []
+        var readSinceResync = 0
+        for frame in await link.frames {
+            switch frame.name {
+            case "agent":
+                let event = try JSONDecoder().decode(ControlAPI.AgentEvent.self, from: frame.data)
+                cursor = max(cursor, event.seq)
+                epoch = event.epoch
+                if event.item?.id == "A", let text = event.item?.text { shownA = text }
+                readSinceResync += 1
+            case "resync":
+                let resync = try JSONDecoder().decode(ControlAPI.ResyncEvent.self, from: frame.data)
+                resyncs.append(resync.dropped)
+                // Exactly at the gap: never two in a row, never before anything was read.
+                #expect(readSinceResync > 0)
+                readSinceResync = 0
+                let caught = try await model.agentSession(
+                    engine: "codex", query: .init(since: cursor, epoch: epoch)
+                )
+                #expect(caught.complete == false)
+                if let row = caught.items.first(where: { $0.id == "A" }) { shownA = row.text }
+            default:
+                break
+            }
+        }
+        // One per gap, each counting what was lost since the one before: a1 and b3…b45
+        // queued behind the frame in flight, 32 kept; then c1…c35 behind c0, 32 kept.
+        #expect(resyncs == [1 + streamed - BuddyEventHub.bufferedFrames, 3])
+        #expect(shownA == "a1", "after resync + since=\(cursor), the phone shows A=\(shownA)")
+    }
+
+    /// The first review's ordering guarantee, across a route reconciling between readings:
+    /// resuming from the first frame of a reading still returns every row after it.
+    @Test func resumingFromAFrameAcrossReadingsLosesNothing() async throws {
+        let model = Self.freshModel()
+        Self.run(codex: model)
+        model.codexItems = [
+            CodexChatItem(id: "A", kind: .assistant("a0")),
+            CodexChatItem(id: "B", kind: .assistant("b0")),
+        ]
+        _ = Self.settle(model, engine: "codex")
+        model.codexItems[1].kind = .assistant("b1")
+        _ = try await model.agentSession(engine: "codex", query: .init())   // a route reconciles
+        model.codexItems[0].kind = .assistant("a1")
+        let tick = Self.events(Self.settle(model, engine: "codex"))
+        #expect(tick.map(\.seq) == tick.map(\.seq).sorted())
+        let firstFrame = try #require(tick.first)
+        let resumed = try await model.agentSession(
+            engine: "codex", query: .init(since: firstFrame.seq, epoch: firstFrame.epoch)
+        )
+        for id in tick.dropFirst().compactMap({ $0.item?.id }) {
+            #expect(resumed.items.contains { $0.id == id }, "row \(id) lost")
+        }
+    }
+
+    /// A phone that walks out of range stops answering rather than hanging up. The tailnet
+    /// listener gives up on such a connection within the minute; loopback's does not need
+    /// to, and is left as it was.
+    ///
+    /// The rule is checked on the parameters rather than by walking out of range, which a
+    /// loopback test cannot do: loopback always answers. Every tailnet test in this target
+    /// binds its listener with these same parameters, which is what shows they bind.
+    @Test func theTailnetListenerLetsGoOfAPeerThatStoppedAnswering() throws {
+        let parameters = ControlServer.tailnetParameters(
+            address: "127.0.0.1", port: NWEndpoint.Port(rawValue: 8788)!
+        )
+        let tcp = try #require(
+            parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
+        )
+        #expect(tcp.enableKeepalive)
+        // Silence, then three unanswered probes; or unanswered data for the drop time.
+        let silentPeer = tcp.keepaliveIdle + tcp.keepaliveInterval * tcp.keepaliveCount
+        #expect(silentPeer < 60)
+        #expect(tcp.connectionDropTime > 0)
+        // The worst case is a heartbeat written just as the phone left: up to one interval
+        // before it goes out, then the drop time.
+        let heartbeat = Int(ControlServer.heartbeatInterval.components.seconds)
+        #expect(heartbeat + tcp.connectionDropTime < 60)
+        #expect(parameters.allowLocalEndpointReuse)
+        #expect(parameters.requiredLocalEndpoint == .hostPort(
+            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: 8788)!
+        ))
     }
 
     /// Opening frames go to the phone that just arrived, and to nobody else — and a
@@ -1433,6 +1596,38 @@ struct BuddyAgentSessionTests {
     }
 }
 
+/// A phone on a link that can stall: whatever the reader sends arrives, and while stalled
+/// the reader is held inside the send — so the hub's buffer behind it fills and drops, the
+/// way a real slow socket makes it.
+actor SlowLink {
+    private(set) var frames: [BuddyEvent.Frame] = []
+    private var stalled = false
+    private var held: CheckedContinuation<Void, Never>?
+
+    func stall() { stalled = true }
+
+    func release() {
+        stalled = false
+        held?.resume()
+        held = nil
+    }
+
+    func deliver(_ frame: BuddyEvent.Frame) async {
+        frames.append(frame)
+        guard stalled else { return }
+        await withCheckedContinuation { held = $0 }
+    }
+
+    func waitFor(count: Int, within limit: Duration = .seconds(20)) async throws -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while frames.count < count {
+            guard ContinuousClock.now < deadline else { return false }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return true
+    }
+}
+
 /// The `agent` frames one hub subscription has received, collected off the test's task.
 final class AgentFrames: @unchecked Sendable {
     private let lock = NSLock()
@@ -1500,7 +1695,7 @@ struct HermeticAgentSeams: SuiteTrait, TestTrait, TestScoping {
         for test: Test, testCase: Test.Case?,
         performing function: @Sendable () async throws -> Void
     ) async throws {
-        try await AgentSessionSeams.$guardrailsOn.withValue(false) {
+        try await AgentSessionSeams.$guardrails.withValue(.off) {
             try await AgentSessionSeams.$saveSettings.withValue({ _ in }) {
                 try await function()
             }

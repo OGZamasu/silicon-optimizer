@@ -87,6 +87,42 @@ public actor ControlServer {
     /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
     public static let defaultEventWriteDeadline: Duration = .seconds(20)
 
+    /// How the tailnet listener's connections notice a peer that has gone.
+    ///
+    /// A phone that walks out of range does not close its socket; it simply stops
+    /// answering. `/events` writes a heartbeat every fifteen seconds, and left to the
+    /// kernel's defaults an unanswered one is retransmitted for many minutes before the
+    /// connection is given up — minutes in which the stream holds one of sixteen slots and
+    /// the Chat tab's badge says the phone is still watching. So retransmissions that go
+    /// unanswered for `droppedAfter` seconds end the connection, and a connection with
+    /// nothing in flight is probed after `keepaliveIdle` seconds of silence. Either way a
+    /// vanished phone is gone within the minute. A peer that is merely slow, or a swarm
+    /// node holding a long render request open, answers both and is left alone.
+    enum TailnetLiveness {
+        static let keepaliveIdle = 10
+        static let keepaliveInterval = 5
+        static let keepaliveCount = 3
+        static let droppedAfter = 30
+    }
+
+    /// The tailnet listener's parameters: this Mac's tailnet address and nothing else, and
+    /// the liveness rule above. Loopback's listener does not get it — a local process that
+    /// vanishes closes its socket with it.
+    static func tailnetParameters(address: String, port: NWEndpoint.Port) -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = TailnetLiveness.keepaliveIdle
+        tcp.keepaliveInterval = TailnetLiveness.keepaliveInterval
+        tcp.keepaliveCount = TailnetLiveness.keepaliveCount
+        tcp.connectionDropTime = TailnetLiveness.droppedAfter
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(address), port: port
+        )
+        return parameters
+    }
+
     /// Streams hold a connection for minutes or hours, so they get their own ceiling well
     /// under the connection limit — a phone that reconnects on every screen wake must not
     /// be able to starve the MCP bridge of sockets.
@@ -440,11 +476,7 @@ public actor ControlServer {
             closeTailnetListener()
         }
 
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(address), port: boundPort
-        )
+        let parameters = Self.tailnetParameters(address: address, port: boundPort)
         do {
             let listener = try NWListener(using: parameters)
             listener.newConnectionHandler = { [weak self] connection in
@@ -974,9 +1006,7 @@ public actor ControlServer {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
                 await withTaskCancellationHandler {
-                    for await frame in subscription.stream {
-                        guard (try? await writer.send(frame)) != nil else { return }
-                    }
+                    await Self.forward(subscription, from: hub) { try await writer.send($0) }
                 } onCancel: {
                     // Finishing the continuation is the only thing that breaks the reader
                     // above out of its `for await`.
@@ -998,6 +1028,34 @@ public actor ControlServer {
             group.cancelAll()
         }
         await hub.cancel(subscription.id)
+    }
+
+    /// Sends one subscription's frames down its stream, and says so at the gap when some
+    /// were dropped.
+    ///
+    /// The hub drops a slow subscriber's *oldest* frames, so whatever was lost is older
+    /// than the frame just taken off the stream. The `resync` therefore goes out in front
+    /// of that frame: exactly where the gap is, one per gap, before anything newer. The
+    /// cursor a phone holds when it reads the `resync` is the one from the last frame it
+    /// read before the gap — which is precisely where fetching again has to start.
+    ///
+    /// A drop that happens while this frame is being taken, just after it, is counted
+    /// here too. That errs in the safe direction: the phone fetches from an older cursor
+    /// than it strictly needed, and the fetch is authoritative.
+    static func forward(
+        _ subscription: (id: UUID, stream: AsyncStream<BuddyEvent.Frame>),
+        from hub: BuddyEventHub,
+        to send: @Sendable (BuddyEvent.Frame) async throws -> Void
+    ) async {
+        for await frame in subscription.stream {
+            let lost = await hub.takeDropped(subscription.id)
+            if lost > 0 {
+                guard let data = try? BuddyEvent.resync(.init(dropped: lost)).encoded(),
+                      (try? await send(.init(name: "resync", data: data))) != nil
+                else { return }
+            }
+            guard (try? await send(frame)) != nil else { return }
+        }
     }
 
     private var unauthorized: HTTPResponse {

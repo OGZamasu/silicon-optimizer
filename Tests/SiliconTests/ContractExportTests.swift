@@ -943,7 +943,8 @@ struct ContractExportTests {
             "Engines are listed even when stopped, so a phone can offer to start one. The",
             "summary says whether anything stands between the agent and the Mac: `approvals`",
             "is `screened` (it asks, and the Jev guardrail judges each ask first), `asked` (it",
-            "asks, a person decides) or `unattended` (nothing asks — Codex under \"never ask\",",
+            "asks, a person decides — including while the guardrail is on but cannot judge, with",
+            "no key or no budget left) or `unattended` (nothing asks — Codex under \"never ask\",",
             "or Pi with the guardrail off), and `sandbox` is Codex's mode or `none` for Pi.",
             "`cwd` is home-relative (`~/…`) and null for Codex until the owner has picked a",
             "folder on the Mac — the one thing a device may not choose.",
@@ -988,8 +989,10 @@ struct ContractExportTests {
             "a phone resuming from the last frame it read misses nothing. A phone that has",
             "just connected is sent each engine's `state`, `turn` and pending `approval`s",
             "first, at the current `seq`. A subscriber that falls more than 32 frames behind",
-            "loses the oldest and is sent a `resync` frame saying how many: fetch what you show",
-            "again, with the cursor you have.",
+            "loses the oldest, and a `resync` frame saying how many arrives exactly where they",
+            "were: after the last frame read before the gap and before anything newer, one per",
+            "gap. Fetch what you show again with the cursor from that last frame — it sits just",
+            "before the gap, so the answer holds exactly what was dropped.",
             "",
             "| Method | Path | Auth | What it does |",
             "|---|---|---|---|",
@@ -1129,7 +1132,8 @@ struct ContractExportTests {
                     threadID: exampleCodexSession.threadID, item: exampleAgentItems[3]
                 ))),
                 // This stream fell behind and frames were dropped: fetch again what you
-                // show. Follows any drop, for every kind of subscriber.
+                // show, from the cursor of the last frame before this one. Sent exactly at
+                // the gap, one per gap, to every kind of subscriber.
                 ("resync", .of(ControlAPI.ResyncEvent(dropped: 7))),
 
                 ("heartbeat", .of(ControlAPI.HeartbeatEvent(at: "2026-09-18T09:41:00Z"))),

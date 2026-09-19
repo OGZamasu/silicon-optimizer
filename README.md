@@ -412,7 +412,8 @@ cannot see a stopped engine cannot offer to start one — with the state, the th
 model and the models it could pick from, whether a turn is in flight, how many approvals are
 waiting and how many rows there are. It also says **whether anything stands between the
 agent and the Mac**: `approvals` is `screened` (the agent asks before it acts and the Jev
-guardrail judges each ask first), `asked` (it asks and a person decides) or `unattended`
+guardrail judges each ask first), `asked` (it asks and a person decides — including while the
+guardrail is on but cannot judge, with no key or this month's budget spent) or `unattended`
 (nothing asks — Codex under "never ask", or Pi whenever the guardrail is off), and
 `sandbox` is Codex's mode, the one its current thread started with, or `none` for Pi. The
 working folder, `cwd`, is shown relative to your home folder (`~/…`) and is absent for Codex
@@ -477,9 +478,11 @@ waiting. An `item` frame carries the row **whole rather than as a delta**, sampl
 a second per engine, so streamed prose does not become a hundred frames a second and a frame
 you miss costs you nothing. Frames arrive in `seq` order, so resuming from the last one you
 read misses nothing, and a phone that has just connected is sent each engine's state, turn
-and waiting cards first. A subscriber that falls more than 32 frames behind loses the oldest
-and is sent a `resync` frame saying how many — fetch what you show again, with the cursor you
-have. The Mac's own typing and the Mac's own approvals produce these frames too, which is
+and waiting cards first. A subscriber that falls more than 32 frames behind loses the oldest,
+and a `resync` frame saying how many arrives **exactly where they were** — after the last frame
+it read before the gap and before anything newer, one per gap. Fetch what you show again with
+the cursor from that last frame: it sits just before the gap, so the answer holds exactly what
+was dropped. The Mac's own typing and the Mac's own approvals produce these frames too, which is
 what keeps the two screens honest: the watcher reads the app's state rather than being told
 by the places that change it, so nothing can be forgotten into silence.
 

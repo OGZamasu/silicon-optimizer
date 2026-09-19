@@ -340,7 +340,7 @@ extension AppModel {
 
     /// What the summary adds to a reading. See `AgentSessionExtras`.
     func agentExtras(engine: String) async -> AgentSessionExtras {
-        let guarded = await agentGuardrailsOn()
+        let guardrail = await agentGuardrailPosture()
         let choices = Self.agentChoices(
             AgentSessionSeams.modelChoices ?? gatewayModelSnapshot()
         )
@@ -352,7 +352,7 @@ extension AppModel {
                 owner: agentLedgerOwner, engine: "codex", threadID: codexThreadID
             ) ?? Self.codexThreadPolicy(
                 storedApproval: settings.codexApprovalPolicy,
-                storedSandbox: settings.codexSandbox, guarded: guarded
+                storedSandbox: settings.codexSandbox, guarded: guardrail.isOn
             )
             return AgentSessionExtras(
                 model: codexSelectedModel,
@@ -360,7 +360,7 @@ extension AppModel {
                 cwd: hasExplicitCodexWorkingDirectory
                     ? Self.homeRelative(codexWorkingDirectory.path) : nil,
                 approvals: policy.approval == "never"
-                    ? "unattended" : (guarded ? "screened" : "asked"),
+                    ? "unattended" : (guardrail == .screening ? "screened" : "asked"),
                 sandbox: policy.sandbox
             )
         default:
@@ -369,16 +369,30 @@ extension AppModel {
                 modelChoices: choices,
                 cwd: Self.homeRelative(PiRuntime.workspaceDirectory.path),
                 // Pi's protocol never asks. The gate is the guardrail's; without it, Pi's
-                // tools simply run.
-                approvals: guarded ? "screened" : "unattended",
+                // tools simply run. With it on but unable to judge, every held call goes
+                // to a person unscreened — asked, not screened.
+                approvals: guardrail.piApprovalMode,
                 sandbox: "none"
             )
         }
     }
 
+    /// Where the guardrail stands, in the three states that change what a phone is told.
+    ///
+    /// "On" and "screening" are different answers. Switched on, it holds every call and
+    /// pins Codex to asking — but with no key, or this month's budget spent, it can judge
+    /// none of them, and each one reaches a person marked "not screened". Reporting that as
+    /// `screened` would tell a phone something is checking calls when nothing is.
+    func agentGuardrailPosture() async -> GuardrailPosture {
+        if let stubbed = AgentSessionSeams.guardrails { return stubbed }
+        guard await JevGuardrails.isTurnedOn() else { return .off }
+        return await JevService.shared.isAvailable(.guardrails) ? .screening : .unavailable
+    }
+
+    /// Whether the guardrail is switched on — what pins Codex's policy, and what makes Pi
+    /// hold a call at all, whether or not it can then judge it.
     func agentGuardrailsOn() async -> Bool {
-        if let stubbed = AgentSessionSeams.guardrailsOn { return stubbed }
-        return await JevGuardrails.isTurnedOn()
+        await agentGuardrailPosture().isOn
     }
 
     /// This app's half of the agent ledger's key. See `AgentSessionSnapshot.owner`.
@@ -708,8 +722,31 @@ extension AppModel {
 /// cannot see each other's. Nil — the app's own behaviour — everywhere else.
 enum AgentSessionSeams {
     @TaskLocal static var modelChoices: [GatewayAPI.Model]?
-    @TaskLocal static var guardrailsOn: Bool?
+    @TaskLocal static var guardrails: GuardrailPosture?
     @TaskLocal static var saveSettings: (@Sendable (Settings) -> Void)?
+}
+
+/// Where the Jev guardrail stands, as far as whether anything judges an agent's calls.
+enum GuardrailPosture: Sendable, Equatable {
+    /// Switched off. The engines behave as they did before it existed.
+    case off
+    /// Switched on, but unable to judge right now — no key on this Mac, or this month's
+    /// budget spent. Every call it holds goes to a person, marked "not screened".
+    case unavailable
+    /// Switched on and able to answer.
+    case screening
+
+    var isOn: Bool { self != .off }
+
+    /// What Pi's calls go through. Pi's own protocol never asks, so the guardrail's gate is
+    /// the only thing that can.
+    var piApprovalMode: String {
+        switch self {
+        case .off: "unattended"
+        case .unavailable: "asked"
+        case .screening: "screened"
+        }
+    }
 }
 
 // MARK: - The ledger
