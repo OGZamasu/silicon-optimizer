@@ -15,26 +15,33 @@ public enum GuardrailScreening: Sendable, Equatable {
     case screened(
         verdict: GuardrailVerdict,
         latencyMS: Double,
-        response: ControlAPI.DecideResponse
+        response: ControlAPI.DecideResponse,
+        facts: GuardrailFacts
     )
 
     /// Nothing was judged, and why. Fall back to the human.
     case unavailable(reason: String)
 
     public var verdict: GuardrailVerdict? {
-        if case .screened(let verdict, _, _) = self { return verdict }
+        if case .screened(let verdict, _, _, _) = self { return verdict }
         return nil
     }
 
     public var latencyMS: Double? {
-        if case .screened(_, let latency, _) = self { return latency }
+        if case .screened(_, let latency, _, _) = self { return latency }
         return nil
     }
 
     /// The response Jev sent, for a caller that wants a probability rather than a verdict.
     public var response: ControlAPI.DecideResponse? {
-        if case .screened(_, _, let response) = self { return response }
+        if case .screened(_, _, let response, _) = self { return response }
         return nil
+    }
+
+    /// What code worked out about the call before it was sent.
+    public var facts: GuardrailFacts {
+        if case .screened(_, _, _, let facts) = self { return facts }
+        return GuardrailFacts()
     }
 
     public var answers: [String: ControlAPI.SystemOneAnswer] { response?.answers ?? [:] }
@@ -44,13 +51,13 @@ public enum GuardrailScreening: Sendable, Equatable {
     /// Where each question landed. Empty when nothing was screened.
     public var signals: [String: GuardrailQuestions.Signal] {
         guard let response else { return [:] }
-        return GuardrailPolicy.signals(for: response)
+        return GuardrailPolicy.signals(for: response, facts: facts)
     }
 
     /// The line an approval card shows.
     public var summary: String {
         switch self {
-        case .screened(let verdict, _, _): verdict.summary
+        case .screened(let verdict, _, _, _): verdict.summary
         case .unavailable(let reason): "Jev: not screened — \(reason)"
         }
     }
@@ -59,18 +66,26 @@ public enum GuardrailScreening: Sendable, Equatable {
     /// "safe" are different things, and a caller that confuses them auto-approves an
     /// unavailable screening.
     public var isSafe: Bool {
-        if case .screened(.act, _, _) = self { return true }
+        if case .screened(.act, _, _, _) = self { return true }
         return false
     }
 
     public var isBlocked: Bool {
-        if case .screened(.block, _, _) = self { return true }
+        if case .screened(.block, _, _, _) = self { return true }
         return false
     }
 
     /// The screening as the control API and the phones carry it.
-    public var wire: ControlAPI.GuardrailScreening? {
-        guard case .screened(let verdict, let latency, _) = self else { return nil }
+    ///
+    /// An unavailable screening is carried too, as the verdict `unavailable` with no
+    /// reasons — not the reason text, which is a sentence for a person and the one place a
+    /// hostname or an error string could leak into a buffer a phone can read. A log that
+    /// silently omits the calls nobody screened would say the guardrail was working on a
+    /// day it was not.
+    public var wire: ControlAPI.GuardrailScreening {
+        guard case .screened(let verdict, let latency, _, _) = self else {
+            return ControlAPI.GuardrailScreening(verdict: "unavailable", reasons: [])
+        }
         return ControlAPI.GuardrailScreening(
             verdict: verdict.name, reasons: verdict.reasons, latencyMS: latency
         )
@@ -109,36 +124,52 @@ public enum JevGuardrails {
         arguments: String,
         workingDirectory: String,
         recentTranscript: [String] = [],
+        protecting: [String] = [],
+        autoApproveArmed: Bool = false,
         using service: JevService = .shared
     ) async -> GuardrailScreening {
         if let reason = await unavailableReason(from: service) {
+            // Not recorded: the feature being off is not a screening that went wrong, and
+            // a buffer full of "guardrails are off" tells nobody anything.
             return .unavailable(reason: reason)
         }
 
-        let state = GuardrailState.make(
-            request: request, userIntent: userIntent, tool: tool, arguments: arguments,
-            workingDirectory: workingDirectory, recentTranscript: recentTranscript
-        )
+        // Off the main actor: the builder resolves paths and runs the redaction patterns,
+        // which is real work on a big argument, and the caller is a view's event handler.
+        let prepared = await Task.detached(priority: .userInitiated) {
+            GuardrailState.prepare(
+                request: request, userIntent: userIntent, tool: tool, arguments: arguments,
+                workingDirectory: workingDirectory, recentTranscript: recentTranscript,
+                protecting: protecting
+            )
+        }.value
 
         let started = Date()
         do {
             // One request, nine questions, through the one governed door.
-            let response = try await GuardrailQuestions.ask(state: state, using: service)
+            let response = try await GuardrailQuestions.ask(
+                state: prepared.state, using: service
+            )
             // Wall clock rather than the response's own figure: what matters to a person
             // watching an approval card is how long the app made them wait, which includes
             // the queueing and the retries.
             let latency = Date().timeIntervalSince(started) * 1_000
             let screening = GuardrailScreening.screened(
-                verdict: GuardrailPolicy.verdict(for: response),
+                verdict: GuardrailPolicy.verdict(
+                    for: response, facts: prepared.facts, autoApproveArmed: autoApproveArmed
+                ),
                 latencyMS: latency,
-                response: response
+                response: response,
+                facts: prepared.facts
             )
             record(screening, engine: engine)
             return screening
         } catch {
             // Including a refusal this call raced: the settings can change between the
             // check above and the request.
-            return .unavailable(reason: error.localizedDescription)
+            let screening = GuardrailScreening.unavailable(reason: error.localizedDescription)
+            record(screening, engine: engine)
+            return screening
         }
     }
 
@@ -191,11 +222,10 @@ public enum JevGuardrails {
     /// Internal rather than private so a test can prove the cap without paying for fifty
     /// screenings to reach it.
     static func record(_ screening: GuardrailScreening, engine: Engine) {
-        guard let wire = screening.wire else { return }
         recentScreenings.append(ControlAPI.GuardrailScreeningRecord(
             at: ControlAPI.timestamp(Date()),
             engine: engine.rawValue,
-            screening: wire,
+            screening: screening.wire,
             bands: screening.signals.mapValues(\.rawValue)
         ))
         if recentScreenings.count > maximumRecent {

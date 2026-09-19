@@ -11,6 +11,10 @@ struct CodexChatView: View {
     @Environment(AppModel.self) private var model
 
     @State private var draft = ""
+    /// Whether the Jev guardrail is switched on, which decides whether the two safety rows
+    /// that would stop Codex asking are offered at all. Read once when the view appears;
+    /// the setting lives on an actor and changes in another window.
+    @State private var guardrailsOn = false
 
     var body: some View {
         Group {
@@ -50,7 +54,10 @@ struct CodexChatView: View {
                 .help("Restart the Codex process")
             }
         }
-        .task { model.startCodexIfNeeded() }
+        .task {
+            model.startCodexIfNeeded()
+            guardrailsOn = await JevGuardrails.isTurnedOn()
+        }
     }
 
     // MARK: - Conversation
@@ -145,7 +152,7 @@ struct CodexChatView: View {
             )) {
                 Text("Ask before commands").tag("on-request")
                 Text("Ask for anything unusual").tag("untrusted")
-                Text("Never ask").tag("never")
+                Text("Never ask").tag("never").disabled(guardrailsOn)
             }
             .pickerStyle(.inline)
             Picker("Sandbox", selection: Binding(
@@ -160,9 +167,12 @@ struct CodexChatView: View {
             )) {
                 Text("Read-only").tag("read-only")
                 Text("Edit the working folder").tag("workspace-write")
-                Text("Full access").tag("danger-full-access")
+                Text("Full access").tag("danger-full-access").disabled(guardrailsOn)
             }
             .pickerStyle(.inline)
+            if guardrailsOn {
+                Text("Jev guardrails run only when Codex asks.")
+            }
             Text("Applies from the next new thread.")
         } label: {
             Label("Safety", systemImage: "shield")
@@ -492,5 +502,4 @@ private struct CodexApprovalCard: View {
             RoundedRectangle(cornerRadius: 10).stroke(.orange.opacity(0.4), lineWidth: 1)
         }
     }
-
 }

@@ -190,17 +190,27 @@ extension AppModel {
         noteActivity()
 
         let cwd = codexWorkingDirectory.path
-        let approval = Self.codexPolicyValue(
+        let storedApproval = Self.codexPolicyValue(
             settings.codexApprovalPolicy, allowed: ["untrusted", "on-request", "never"],
             fallback: "on-request"
         )
-        let sandbox = Self.codexPolicyValue(
+        let storedSandbox = Self.codexPolicyValue(
             settings.codexSandbox,
             allowed: ["read-only", "workspace-write", "danger-full-access"],
             fallback: "read-only"
         )
 
         Task {
+            // The guardrail screens what Codex *asks* about. A thread started with "never
+            // ask" or full access never asks, so the guardrail would sit there with nothing
+            // to screen while the agent worked unattended — the setting that looks like
+            // more freedom silently turning the safety off. While guardrails are on, the
+            // policy is the one that keeps them in the loop; the picker says so and
+            // disables the other two rows.
+            let guarded = await JevGuardrails.isTurnedOn()
+            let approval = guarded ? Self.guardedApprovalPolicy : storedApproval
+            let sandbox = guarded && storedSandbox == "danger-full-access"
+                ? "workspace-write" : storedSandbox
             do {
                 let threadID: String
                 if let existing = codexThreadID {
@@ -237,6 +247,11 @@ extension AppModel {
             }
         }
     }
+
+    /// What Codex's approval policy is pinned to while the Jev guardrail is on: the one
+    /// value under which Codex asks before it runs a command, which is the moment the
+    /// guardrail gets to look at it.
+    public static let guardedApprovalPolicy = "on-request"
 
     /// Codex's policy enums are kebab-case on the wire ("on-request", "workspace-write");
     /// anything unrecognized — including values an older build may have stored — falls
@@ -295,13 +310,21 @@ extension AppModel {
     func screenCodexApproval(_ approvalID: UUID, using service: JevService = .shared) async {
         guard let pending = codexApprovals.first(where: { $0.id == approvalID }) else { return }
 
+        // Read before screening rather than after: whether a `.act` would be answered
+        // without a person changes what the policy does with a call aimed at the agent's
+        // own configuration, so the policy has to be told.
+        let autoApprove = await service.settings().autoApproveSafeToolCalls
+
         let screening = await JevGuardrails.screen(
             engine: .codex,
             request: lastCodexUserMessage(),
+            userIntent: lastSubstantiveCodexRequest(),
             tool: pending.kind.toolName,
             arguments: pending.kind.arguments,
             workingDirectory: codexWorkingDirectory.path,
             recentTranscript: recentCodexToolResults(),
+            protecting: [CodexRuntime.homeDirectory.path],
+            autoApproveArmed: autoApprove,
             using: service
         )
 
@@ -311,9 +334,7 @@ extension AppModel {
         codexApprovals[index].screening = screening
         let approval = codexApprovals[index]
 
-        guard await service.settings().autoApproveSafeToolCalls,
-              let verdict = screening.verdict
-        else { return }
+        guard autoApprove, let verdict = screening.verdict else { return }
 
         switch verdict {
         case .act:
@@ -336,12 +357,43 @@ extension AppModel {
         }
     }
 
-    /// The last thing the user typed, which is what the guardrail compares the call against.
+    /// The last thing the user typed.
     func lastCodexUserMessage() -> String {
         for item in codexItems.reversed() {
             if case .user(let text) = item.kind { return text }
         }
         return ""
+    }
+
+    /// The last thing the user actually *asked for*.
+    ///
+    /// Not the same message: "thanks, that worked" is the last thing typed and asks for
+    /// nothing, and `contradicts_request` compared against it would call every subsequent
+    /// call a contradiction. So acknowledgements are skipped and the request behind them
+    /// stands until a new one replaces it.
+    func lastSubstantiveCodexRequest() -> String {
+        for item in codexItems.reversed() {
+            guard case .user(let text) = item.kind else { continue }
+            if Self.isSubstantiveRequest(text) { return text }
+        }
+        return lastCodexUserMessage()
+    }
+
+    /// Whether a message asks for anything. Deliberately crude: the cost of calling a real
+    /// request an acknowledgement is one question answered against a slightly older goal,
+    /// and the list is only the words people actually send on their own.
+    nonisolated static func isSubstantiveRequest(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!…"))
+            .lowercased()
+        guard !trimmed.isEmpty else { return false }
+        let acknowledgements: Set<String> = [
+            "thanks", "thank you", "ta", "cheers", "ok", "okay", "k", "yes", "yep", "yeah",
+            "y", "no", "nope", "n", "sure", "great", "perfect", "nice", "good", "cool",
+            "continue", "go on", "go ahead", "carry on", "please continue", "next",
+            "that worked", "it worked", "done", "lgtm", "👍",
+        ]
+        return !acknowledgements.contains(trimmed)
     }
 
     /// The last few tool results, newest last — the material an injected instruction would

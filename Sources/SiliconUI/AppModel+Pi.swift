@@ -17,8 +17,8 @@ extension AppModel {
             case thinking
             case tool(name: String)
             case notice
-            /// A tool call held at the guardrail, waiting for the person. `requestID` is
-            /// the `extension_ui_request` id the answer has to quote.
+            /// A tool call held at the guardrail. `requestID` is the
+            /// `extension_ui_request` id the answer has to quote.
             case approval(requestID: String, tool: String)
         }
 
@@ -32,15 +32,22 @@ extension AppModel {
         /// Whether an approval card has been answered. The card stays in the transcript —
         /// a decision is part of the history — but its buttons go away.
         public var answered = false
+        /// What the answer was, once there is one. The card says which, because "answered"
+        /// leaves the reader to guess the one thing they came back to find out.
+        public var allowed: Bool?
+        /// Pi's own id for the tool call this entry is about. How a verdict finds its row
+        /// when two calls to the same tool are in flight at once.
+        public var callID: String?
 
         init(
             kind: Kind, text: String, running: Bool = false,
-            screening: GuardrailScreening? = nil
+            screening: GuardrailScreening? = nil, callID: String? = nil
         ) {
             self.kind = kind
             self.text = text
             self.running = running
             self.screening = screening
+            self.callID = callID
         }
     }
 
@@ -154,6 +161,7 @@ extension AppModel {
         for item in piItems where !item.answered {
             guard case .approval(let requestID, _) = item.kind else { continue }
             item.answered = true
+            item.allowed = false
             item.running = false
             piSend(["type": "extension_ui_response", "id": requestID, "cancelled": true])
         }
@@ -178,6 +186,8 @@ extension AppModel {
         var requestID: String
         var tool: String
         var arguments: String
+        /// Pi's own id for the call, so the verdict can find its transcript row.
+        var callID: String?
     }
 
     /// Routes one `extension_ui_request`.
@@ -202,30 +212,40 @@ extension AppModel {
         let call = Self.parsePiGuardrailRequest(event["message"] as? String ?? "")
         Task {
             await screenPiToolCall(PiGuardrailRequest(
-                requestID: id, tool: call.tool, arguments: call.arguments
+                requestID: id, tool: call.tool, arguments: call.arguments,
+                callID: call.callID
             ))
         }
     }
 
     /// The extension sends `{v, tool, toolCallId, arguments}` as the dialog's message.
     /// A payload that will not parse is screened as-is rather than waved through.
-    static func parsePiGuardrailRequest(_ payload: String) -> (tool: String, arguments: String) {
+    static func parsePiGuardrailRequest(
+        _ payload: String
+    ) -> (tool: String, arguments: String, callID: String?) {
         guard let data = payload.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return ("tool", payload) }
+        else { return ("tool", payload, nil) }
         let tool = object["tool"] as? String ?? "tool"
+        let callID = object["toolCallId"] as? String
         guard let raw = object["arguments"],
               let encoded = try? JSONSerialization.data(
                 withJSONObject: raw, options: [.sortedKeys, .fragmentsAllowed]
               )
-        else { return (tool, "") }
-        return (tool, String(decoding: encoded, as: UTF8.self))
+        else { return (tool, "", callID) }
+        return (tool, String(decoding: encoded, as: UTF8.self), callID)
     }
 
     /// Screens one held call and answers the extension.
     ///
-    /// The same three-way rule the Codex hook follows, and for the same reason: `.confirm`
-    /// is what a person is for, and a screening that could not happen is not a yes.
+    /// The card goes up *before* the screening starts, empty, and fills in when the verdict
+    /// lands. Two reasons, and they are the same two as on the Codex side: the person can
+    /// answer at once instead of waiting on a round trip, and a call that is being held
+    /// appears in the transcript as a call that is being held — the in-flight list is the
+    /// transcript, which is what lets `abortPi` answer every one of them.
+    ///
+    /// The three-way rule is the Codex hook's, for the same reason: `.confirm` is what a
+    /// person is for, and a screening that could not happen is not a yes.
     func screenPiToolCall(
         _ request: PiGuardrailRequest, using service: JevService = .shared
     ) async {
@@ -236,50 +256,65 @@ extension AppModel {
             return
         }
 
+        let card = PiItem(
+            kind: .approval(requestID: request.requestID, tool: request.tool),
+            text: request.arguments, running: true, callID: request.callID
+        )
+        piItems.append(card)
+
+        let autoApprove = await service.settings().autoApproveSafeToolCalls
         let screening = await JevGuardrails.screen(
             engine: .pi,
             request: lastPiUserMessage(),
+            userIntent: lastSubstantivePiRequest(),
             tool: request.tool,
             arguments: request.arguments,
             workingDirectory: PiRuntime.workspaceDirectory.path,
             recentTranscript: recentPiToolResults(),
+            protecting: [PiRuntime.configurationDirectory.path],
+            autoApproveArmed: autoApprove,
             using: service
         )
+        card.screening = screening
 
-        if await service.settings().autoApproveSafeToolCalls,
-           let verdict = screening.verdict {
+        // They may have answered while the request was in flight. Their decision stands.
+        guard !card.answered else { return }
+
+        if autoApprove, let verdict = screening.verdict {
             switch verdict {
             case .act:
-                markPiToolCall(named: request.tool, with: screening)
-                answerPiGuardrail(request.requestID, allow: true)
+                markPiToolCall(request.callID, with: screening)
+                answerPiApproval(card, allow: true, silently: true)
                 return
             case .block:
-                piItems.append(PiItem(
-                    kind: .notice,
-                    text: "Blocked automatically — \(screening.summary).",
-                    screening: screening
-                ))
-                answerPiGuardrail(request.requestID, allow: false)
+                answerPiApproval(card, allow: false, silently: true)
                 return
             case .confirm:
                 break
             }
         }
-
-        // Everything else waits: a `.confirm`, a screening that could not happen, and — while
-        // auto-approve is off — every verdict, including the safe ones.
-        piItems.append(PiItem(
-            kind: .approval(requestID: request.requestID, tool: request.tool),
-            text: request.arguments, running: true, screening: screening
-        ))
+        card.running = false
     }
 
-    /// The buttons on the approval card.
-    public func answerPiApproval(_ item: PiItem, allow: Bool) {
+    /// The buttons on the approval card, and the auto-answer path.
+    ///
+    /// - Parameter silently: true when the guardrail answered rather than the person. The
+    ///   card records which either way; `silently` only decides whether the transcript also
+    ///   gets a line saying so.
+    public func answerPiApproval(_ item: PiItem, allow: Bool, silently: Bool = false) {
         guard case .approval(let requestID, _) = item.kind, !item.answered else { return }
         item.answered = true
+        item.allowed = allow
         item.running = false
         answerPiGuardrail(requestID, allow: allow)
+        guard silently, let screening = item.screening else { return }
+        piItems.append(PiItem(
+            kind: .notice,
+            text: allow
+                ? "Allowed automatically — \(screening.summary)."
+                : "Blocked automatically — \(screening.summary).",
+            screening: screening
+        ))
     }
 
     private func answerPiGuardrail(_ requestID: String, allow: Bool) {
@@ -288,13 +323,24 @@ extension AppModel {
 
     /// Puts the verdict on the transcript entry for a call that was allowed without asking,
     /// so "it ran" and "it was screened" are visible in the same place.
-    private func markPiToolCall(named name: String, with screening: GuardrailScreening) {
-        let item = piItems.last { $0.kind == .tool(name: name) && $0.running }
-        item?.screening = screening
+    ///
+    /// Keyed on Pi's own call id rather than the tool's name: two `bash` calls can be in
+    /// flight from one assistant message, and "the last running one with this name" would
+    /// hang the second call's verdict on the first call's row.
+    private func markPiToolCall(_ callID: String?, with screening: GuardrailScreening) {
+        guard let callID else { return }
+        piItems.last { $0.callID == callID }?.screening = screening
     }
 
     func lastPiUserMessage() -> String {
         piItems.last { $0.kind == .user }?.text ?? ""
+    }
+
+    /// The last message that actually asked for something — see the Codex side for why
+    /// "thanks, that worked" must not become the goal every later call is judged against.
+    func lastSubstantivePiRequest() -> String {
+        piItems.last { $0.kind == .user && Self.isSubstantiveRequest($0.text) }?.text
+            ?? lastPiUserMessage()
     }
 
     /// The last few finished tool results — where an injected instruction would have
@@ -352,7 +398,8 @@ extension AppModel {
                     piItems.append(PiItem(
                         kind: .tool(name: name),
                         text: Self.piToolSummary(call["arguments"]),
-                        running: true
+                        running: true,
+                        callID: call["id"] as? String
                     ))
                 }
             default:

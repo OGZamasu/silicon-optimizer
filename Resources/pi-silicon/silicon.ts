@@ -45,9 +45,48 @@ type GatewayModel = {
 };
 
 export default async function (pi: ExtensionAPI) {
+  // ---- The app's guardrail, in front of every tool ----------------------------
+  //
+  // Registered first, before anything that can return early, because a session where this
+  // handler is missing is a session where every tool call runs unscreened.
+  //
+  // Fires after `tool_execution_start` and before the tool runs, and what it returns
+  // decides whether the tool runs at all. The app is asked through a confirm dialog
+  // because that is the one channel an RPC client can answer: `ctx.ui.confirm` emits
+  // `extension_ui_request` and blocks until an `extension_ui_response` with the same
+  // id comes back on stdin.
+  //
+  // The title is a marker rather than a sentence — the app matches on it, and no
+  // human ever reads it, because in RPC mode there is no terminal to read it in. The
+  // message is the whole request, as JSON, so the app screens the real arguments
+  // rather than a summary of them. The app answers `true` without asking anyone when
+  // the guardrail is switched off, which is what keeps this transparent for someone
+  // who never turned it on.
+  //
+  // If the app does not answer, the call waits. That is deliberate: a gate that times
+  // out into "allowed" is not a gate. Pi's own abort path still ends the turn.
+  pi.on("tool_call", async (event, ctx) => {
+    const question = JSON.stringify({
+      v: 1,
+      tool: event.toolName,
+      toolCallId: event.toolCallId,
+      arguments: event.input ?? {},
+    });
+    const allowed = await ctx.ui.confirm(GUARDRAIL_MARKER, question);
+    if (allowed) return;
+    return {
+      block: true,
+      reason:
+        "Silicon Optimizer's guardrail did not allow this call. The verdict and its " +
+        "reasons are on the card in the app's Chat tab.",
+    };
+  });
+
   const port = process.env.SILICON_GATEWAY_PORT;
   const gatewayToken = process.env.SILICON_GATEWAY_KEY;
   if (!port || !gatewayToken) {
+    // No gateway to register, but the gate above is already installed: a session that
+    // starts with the app's environment half-set must not be a session with no guardrail.
     return;
   }
   const baseUrl = `http://127.0.0.1:${port}/v1`;
@@ -81,40 +120,6 @@ export default async function (pi: ExtensionAPI) {
     apiKey: "$SILICON_GATEWAY_KEY",
     api: "openai-completions",
     models,
-  });
-
-  // ---- The app's guardrail, in front of every tool ----------------------------
-  //
-  // Fires after `tool_execution_start` and before the tool runs, and what it returns
-  // decides whether the tool runs at all. The app is asked through a confirm dialog
-  // because that is the one channel an RPC client can answer: `ctx.ui.confirm` emits
-  // `extension_ui_request` and blocks until an `extension_ui_response` with the same
-  // id comes back on stdin.
-  //
-  // The title is a marker rather than a sentence — the app matches on it, and no
-  // human ever reads it, because in RPC mode there is no terminal to read it in. The
-  // message is the whole request, as JSON, so the app screens the real arguments
-  // rather than a summary of them. The app answers `true` without asking anyone when
-  // the guardrail is switched off, which is what keeps this transparent for someone
-  // who never turned it on.
-  //
-  // If the app does not answer, the call waits. That is deliberate: a gate that times
-  // out into "allowed" is not a gate. Pi's own abort path still ends the turn.
-  pi.on("tool_call", async (event, ctx) => {
-    const question = JSON.stringify({
-      v: 1,
-      tool: event.toolName,
-      toolCallId: event.toolCallId,
-      arguments: event.input ?? {},
-    });
-    const allowed = await ctx.ui.confirm(GUARDRAIL_MARKER, question);
-    if (allowed) return;
-    return {
-      block: true,
-      reason:
-        "Silicon Optimizer's guardrail did not allow this call. The verdict and its " +
-        "reasons are on the card in the app's Chat tab.",
-    };
   });
 
   // ---- The app's MCP tools, mirrored -----------------------------------------

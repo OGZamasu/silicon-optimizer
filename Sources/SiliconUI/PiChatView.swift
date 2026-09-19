@@ -334,9 +334,19 @@ private struct PiApprovalCard: View {
                 GuardrailVerdictLine(screening: screening)
             }
             if item.answered {
-                Text("Answered.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Label(
+                    item.allowed == true ? "Allowed." : "Denied.",
+                    systemImage: item.allowed == true ? "play.circle" : "nosign"
+                )
+                .font(.caption)
+                .foregroundStyle(item.allowed == true ? Color.secondary : Color.red)
+            } else if item.running && item.screening == nil {
+                // The card is up before the verdict is, so the wait is visible rather than
+                // looking like a card that forgot to say anything.
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small).scaleEffect(0.6)
+                    Text("Screening…").font(.caption).foregroundStyle(.secondary)
+                }
             } else {
                 HStack(spacing: 8) {
                     Button("Allow") { model.answerPiApproval(item, allow: true) }
