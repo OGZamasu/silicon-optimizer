@@ -48,7 +48,8 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         case .skillSelection:
             "Chooses which tools and skills an agent should be offered for the task in hand."
         case .recommendation:
-            "Ranks catalogue models against what this Mac is actually used for."
+            "Reads your description of the job and ranks the models this Mac can run by "
+            + "what that job actually needs."
         case .verification:
             "Checks a finished answer against its evidence and flags the ones worth a second look."
         case .calibration:
@@ -61,10 +62,11 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
     /// rather than meeting eight new toggles at once later.
     public var isBuilt: Bool { Self.built.contains(self) }
 
-    /// One list rather than a chain of `==`, so each feature's own PR adds a line here and
-    /// nothing else.
+    /// One list rather than a chain of `==`, so each feature's own PR adds a member here
+    /// and nothing else — and a branch that lands beside another settles the conflict by
+    /// keeping both members rather than choosing between two rewritten expressions.
     private static let built: Set<JevFeature> = [
-        .decideTool, .routing, .mediaRouting, .guardrails,
+        .decideTool, .routing, .mediaRouting, .guardrails, .recommendation,
     ]
 }
 

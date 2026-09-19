@@ -42,7 +42,9 @@ let package = Package(
             "SiliconCore", "SiliconHardware", "SiliconPlanner", "SiliconCatalog", "SiliconRuntime",
             "SiliconControl", "SiliconUI",
         ]),
-        .testTarget(name: "SiliconMCPTests", dependencies: ["SiliconMCP"]),
+        // SiliconControl for the wire types the tools print; the MCP target already
+        // links it, and naming it here keeps the import from relying on that.
+        .testTarget(name: "SiliconMCPTests", dependencies: ["SiliconMCP", "SiliconControl"]),
     ],
     swiftLanguageModes: [.v6]
 )

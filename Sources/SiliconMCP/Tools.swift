@@ -105,13 +105,29 @@ enum Tools {
                 The single best model this Mac can run, with the quantization, context length \
                 and settings to use, plus estimated tokens/sec and a full memory breakdown. \
                 This is the right tool for "what should I run?" — it accounts for the machine's \
-                actual memory, bandwidth and current load.
+                actual memory, bandwidth and current load. Describe the work in `task` and it \
+                judges what that job needs — vision, tool calling, long context, speed — and \
+                returns the best three for it with a reason each, instead of the strongest \
+                model in general.
                 """,
             properties: [
                 "category": property(
                     "string",
                     "Optional filter: General, Coding, Reasoning, Vision, Small & Fast, Embeddings."
-                )
+                ),
+                "task": property(
+                    "string",
+                    """
+                    Optional. What the model will actually be used for, in the user's own \
+                    words — "reviewing Rust pull requests", "reading scanned invoices", \
+                    "a Japanese support bot". A sentence or two beats a keyword; anything \
+                    past about 4 KB is trimmed before it is judged. Asking Jev costs the \
+                    owner money per distinct description, so send a task when the job is \
+                    known and leave it out otherwise. Needs the model recommendation \
+                    feature enabled in Settings → TypeSafe (Jev); without it the answer is \
+                    the ordinary hardware-fit pick.
+                    """
+                ),
             ],
             required: []
         ),
@@ -503,14 +519,24 @@ enum Tools {
             return try await describe(await client.get("/status") as ControlAPI.Status)
 
         case "recommend_model":
+            let category = arguments["category"]?.stringValue
+            // A task is the paid, full-control half of this route and goes in a body: a job
+            // description is the user's prose about their own work, and a URL is the part
+            // of a request that survives in histories and logs.
+            if let task = arguments["task"]?.stringValue,
+               !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let ranked: ControlAPI.CatalogModel = try await client.post(
+                    "/recommend", ControlAPI.RecommendRequest(category: category, task: task)
+                )
+                return describeRecommendation(ranked)
+            }
             var path = "/recommend"
-            if let category = arguments["category"]?.stringValue,
-               let escaped = category.addingPercentEncoding(
-                   withAllowedCharacters: .urlQueryAllowed
-               ) {
+            if let category, let escaped = category.addingPercentEncoding(
+                withAllowedCharacters: Tools.queryValueCharacters
+            ) {
                 path += "?category=\(escaped)"
             }
-            return try await describe(await client.get(path) as ControlAPI.CatalogModel)
+            return describeRecommendation(try await client.get(path) as ControlAPI.CatalogModel)
 
         case "list_models":
             var path = "/catalog?onlyRunnable="
@@ -1168,6 +1194,38 @@ enum Tools {
                 lines.append("\(mark) \(finding.title): \(finding.detail)")
             }
         }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Everything a query-string value may carry unescaped.
+    ///
+    /// `.urlQueryAllowed` is the set legal in a whole query *string*, which includes `&`,
+    /// `+` and `=` — so a task description containing one would arrive at the Mac as two
+    /// parameters, or with its pluses read as spaces. Subtracted here rather than hoped
+    /// about, because the value being escaped is a sentence a person typed.
+    static let queryValueCharacters: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&+=?#")
+        return allowed
+    }()
+
+    /// The answer to `recommend_model`. With a task, the top three and why each one is
+    /// there, then the winner in full; without one, exactly what it printed before.
+    static func describeRecommendation(_ model: ControlAPI.CatalogModel) -> String {
+        guard let reason = model.reason else { return describe(model) }
+        var lines = ["Best for this job:", "1. \(model.name) [\(model.id)] — \(reason)"]
+        for (offset, alternative) in (model.alternatives ?? []).enumerated() {
+            lines.append(
+                "\(offset + 2). \(alternative.name) [\(alternative.id)]"
+                + (alternative.reason.map { " — \($0)" } ?? "")
+            )
+        }
+        // Why this list is this list, when that is not simply "Jev said so". An agent that
+        // reads "ranked by how well they run here" knows not to quote the order as a
+        // judgment about the models.
+        if let note = model.note { lines.append("Note: \(note)") }
+        lines.append("")
+        lines.append(describe(model))
         return lines.joined(separator: "\n")
     }
 
