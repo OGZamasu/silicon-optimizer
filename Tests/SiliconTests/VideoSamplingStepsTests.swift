@@ -4,7 +4,7 @@ import Testing
 @testable import SiliconRuntime
 @testable import SiliconUI
 
-@Suite("Per-clip H3 denoising depth") @MainActor
+@Suite("Per-clip H3 denoising depth", .redirectedConversationStore) @MainActor
 struct VideoSamplingStepsTests {
     private func fixture() -> (URL, VideoBatchQueue, VideoRequest) {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("h3-steps-test-\(UUID())")

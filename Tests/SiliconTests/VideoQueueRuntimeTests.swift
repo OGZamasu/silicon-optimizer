@@ -50,7 +50,7 @@ private final class QueueHTTPProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-@Suite("Video queue node recovery", .serialized)
+@Suite("Video queue node recovery", .serialized, .redirectedConversationStore)
 struct VideoQueueRuntimeTests {
     private func runtime() -> NodeVideoRuntime {
         let configuration = URLSessionConfiguration.ephemeral

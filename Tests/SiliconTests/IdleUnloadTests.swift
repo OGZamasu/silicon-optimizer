@@ -6,7 +6,7 @@ import Testing
 /// The bug these exist for: a chat driven through the MCP bridge sets no `generationTask`, so
 /// for the whole of a long answer the app believed nothing was running. The idle timer then
 /// unloaded the model, and nothing held macOS awake, out from under a request in flight.
-@Suite("Work in flight")
+@Suite("Work in flight", .redirectedConversationStore)
 @MainActor
 struct WorkInFlightTests {
 
@@ -46,7 +46,7 @@ struct WorkInFlightTests {
     }
 }
 
-@Suite("Sleep assertion")
+@Suite("Sleep assertion", .redirectedConversationStore)
 struct PowerAssertionTests {
 
     @Test func anAssertionIsHeldUntilReleased() {

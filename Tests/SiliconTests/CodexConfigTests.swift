@@ -4,7 +4,7 @@ import SiliconControl
 @testable import SiliconRuntime
 @testable import SiliconUI
 
-@Suite("Codex configuration")
+@Suite("Codex configuration", .redirectedConversationStore)
 struct CodexConfigTests {
 
     @Test @MainActor
@@ -66,7 +66,7 @@ struct CodexConfigTests {
     }
 }
 
-@Suite("Codex JSON-RPC plumbing")
+@Suite("Codex JSON-RPC plumbing", .redirectedConversationStore)
 struct CodexJSONTests {
 
     @Test func valuesRoundTripThroughCoding() throws {

@@ -247,6 +247,61 @@ entirely on your machine, then reason about the answer.
 
 ---
 
+## Silicon Buddy
+
+Your Mac, from your phone — over your own [Tailscale](https://tailscale.com) tailnet and
+nothing else. Nothing is published to the internet, no port is forwarded, and no relay sits
+in the middle. If a device is not on your tailnet it cannot see this Mac at all.
+
+**Settings → Silicon Buddy → "Allow Silicon Buddy devices on the tailnet"** is the whole
+switch, and it is off until you turn it on. With it off, the control API is what it has
+always been: bound to `127.0.0.1`, one token, local processes only. With it on, a *second*
+listener goes up on this Mac's tailscale address — the same port, the same routes — and the
+loopback one is untouched. It is never bound to `0.0.0.0`; the app parses the address and
+refuses anything that is not a tailnet or loopback literal, so a café Wi-Fi never sees it.
+
+A device token is a credential **only on that second listener**. Presented to the loopback
+listener it is not a credential at all — which is what keeps a phone that has left the house,
+or been lost with its token on it, from authenticating over some other network the Mac
+happens to be on. For the same reason, Silicon Buddy stays off while the swarm's "Let other
+Silicon nodes reach this Mac" is on: that binds every interface, and the app will not serve
+devices through a socket it cannot vouch for. The Settings line tells you which of the two is
+in your way.
+
+**Pairing** is a QR code. "Pair a device" asks how much of the Mac this one gets — **Full
+control** or **Chat only** — then shows a six-digit code and a QR encoding
+`siliconbuddy://pair?host=…&port=…&code=…`. The code works once and expires after five
+minutes. The phone posts it to `POST /buddy/pair` — the one unauthenticated route — and gets
+back a 32-byte token of its own. Five attempts a minute per address, ten wrong guesses from
+anywhere at all burns the code, and ten failures from one address shut it out for a quarter of
+an hour: that is what makes six digits enough.
+
+A **chat-only** device can see what the Mac is, ask it what would fit, and talk to the model
+it has loaded: status, metrics, the catalogue, `/recommend`, `/plan`, `/swarm`, `/v1/node`,
+the model lists, `/chat`, `/chat/stream`, `/decide` and the conversations. Reading and
+advising spend nothing. It cannot install, load or unload a model, benchmark, start a render,
+touch the queue, or see the device list — all of that is a 403. Full control is the default,
+because you are standing over the device approving it by hand.
+
+The Mac keeps only a SHA-256 of each device token, in
+`~/Library/Application Support/SiliconOptimizer/buddy.json`, alongside the device's name,
+platform, scope, when it paired and when it was last seen. A copy of that file cannot be
+replayed against the server.
+
+**Revoking** is immediate and reaches work already in flight: Revoke beside a row in Settings
+ends that device's open `/events` subscription and any answer it has streaming, then and
+there, rather than at its next request. Turning the toggle off does the same for every paired
+device at once — it **suspends** them, it does not delete them, so the list is still there
+when you turn it back on.
+
+Paired devices get the local API plus the routes built for them: streaming chat
+(`POST /chat/stream`), a live side channel for what the Mac is doing (`GET /events` — loaded
+model, downloads, render jobs, with a heartbeat every 15 seconds), and the Mac's own
+conversations, so a thread started on the phone is on screen in the app and the other way
+round. Only this Mac's own token can list or revoke devices.
+
+---
+
 ## The math, for the curious
 
 Everything below is how the predictions work under the hood. You don't need any of it to use
@@ -390,8 +445,12 @@ model fails the build rather than silently shipping bad advice.
 
 The app's local control API binds to `127.0.0.1` only and requires a token that's
 regenerated on every launch — otherwise any process on your machine could quietly drive your
-model. The app is not sandboxed, because it launches engine binaries you may keep anywhere
-and reads model files from arbitrary paths; neither works under App Sandbox.
+model. It reaches beyond loopback in exactly two cases, both opt-in and both bound to a
+specific interface rather than to everything: the swarm, which needs a shared token before it
+will bind at all, and [Silicon Buddy](#silicon-buddy), which binds only your tailscale address
+and honours a device token only on that listener. The app is not sandboxed, because it launches engine
+binaries you may keep anywhere and reads model files from arbitrary paths; neither works under
+App Sandbox.
 
 ## Licence
 

@@ -60,10 +60,28 @@ public enum SwarmPairing {
     }
 
     /// 100.64.0.0/10 membership — 100.64.x.x through 100.127.x.x.
+    ///
+    /// Parsed rather than split on dots. Taking the numeric labels out of a string and
+    /// ignoring the rest says yes to `100.64.0.1.evil.example.com`, which is not an address
+    /// at all but is a perfectly good DNS name for something to resolve later.
     public static func isTailnetIPv4(_ ip: String) -> Bool {
-        let parts = ip.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, parts[0] == 100 else { return false }
-        return (64...127).contains(parts[1])
+        guard let bytes = ipv4Bytes(ip) else { return false }
+        return bytes[0] == 100 && (64...127).contains(bytes[1])
+    }
+
+    /// The four octets of a literal IPv4 address, or nil for anything else — a hostname, an
+    /// address with a port or an interface suffix, IPv6, or a wildcard spelled some other way.
+    public static func ipv4Bytes(_ address: String) -> [UInt8]? {
+        let trimmed = address.trimmingCharacters(in: .whitespaces)
+        // `IPv4Address` accepts a %interface suffix; a bind target must be the address alone.
+        guard !trimmed.contains("%"), let parsed = IPv4Address(trimmed) else { return nil }
+        let bytes = Array(parsed.rawValue)
+        guard bytes.count == 4 else { return nil }
+        // Canonical spelling only. "0100.64.0.1" happens to parse to 100.64.0.1 here and to
+        // 64.64.0.1 in a stack that reads the leading zero as octal, and a rule that depends
+        // on whose parser you ask is not a rule.
+        guard bytes.map(String.init).joined(separator: ".") == trimmed else { return nil }
+        return bytes
     }
 
     /// Names become opaque path components when an administrator mints or revokes a

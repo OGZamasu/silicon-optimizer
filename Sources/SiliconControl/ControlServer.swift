@@ -26,6 +26,48 @@ public actor ControlServer {
     /// Whether the listener is actually reachable beyond loopback.
     public private(set) var isExposedOnLAN = false
 
+    /// The owner's paired phones and tablets, and the one open pairing code.
+    private let buddy: BuddyRegistry
+    /// Where `/events` subscribers read from.
+    private let events: BuddyEventHub
+    /// The second listener, on this Mac's tailscale address. Nil unless the owner has
+    /// turned Silicon Buddy on and this Mac is actually on a tailnet.
+    private var buddyListener: NWListener?
+    private var buddyAddress: String?
+    private var buddyPortOverride: Int?
+    /// What the live tailnet listener is actually bound to, so a changed address or port
+    /// rebinds instead of being quietly ignored.
+    private var boundEndpoint: (address: String, port: Int)?
+    /// Why the tailnet listener is not up, when it was asked for and could not be.
+    public private(set) var tailnetError: String?
+    private var activeEventStreams = 0
+    /// How long one SSE frame may take to leave, and how this Mac's tailnet address is
+    /// found. Both are injected so the tests can drive them without a tailnet or a stall.
+    private let eventWriteDeadline: Duration
+    private let discoverTailnetAddress: @Sendable () -> String?
+
+    /// Streams open right now. Read by the tests that prove a dead client is reaped.
+    public var openEventStreams: Int { activeEventStreams }
+
+    /// How long one SSE frame may take to leave before the connection is given up on.
+    ///
+    /// Twenty seconds is chosen against the heartbeat, not against a model: a reader that
+    /// has not taken one frame in that long is gone, whatever it was sent. It is a
+    /// per-frame budget, and frames are not coalesced — a token is written the moment the
+    /// runtime yields it. That keeps latency honest and means a slow reader is detected by
+    /// the first frame it fails to take rather than by a backlog; if the token rate ever
+    /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
+    public static let defaultEventWriteDeadline: Duration = .seconds(20)
+
+    /// Streams hold a connection for minutes or hours, so they get their own ceiling well
+    /// under the connection limit — a phone that reconnects on every screen wake must not
+    /// be able to starve the MCP bridge of sockets.
+    public static let maximumEventStreams = 16
+
+    /// How often an idle `/events` stream says it is still there. One goes out as soon as
+    /// the stream opens, so a client knows immediately that it is connected.
+    static let heartbeatInterval: Duration = .seconds(15)
+
     /// The port peers dial when the server is on the LAN. Fixed rather than ephemeral,
     /// because the registry lists explicit base URLs.
     public static let lanPort = 8788
@@ -37,9 +79,20 @@ public actor ControlServer {
         return URL(string: "http://127.0.0.1:\(port)/overlay?token=\(token)")
     }
 
-    public init(host: any ControlHost, handshakeURL: URL = ControlAPI.handshakeURL) {
+    public init(
+        host: any ControlHost, handshakeURL: URL = ControlAPI.handshakeURL,
+        buddy: BuddyRegistry = .shared, events: BuddyEventHub = .shared,
+        eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
+        discoverTailnetAddress: @escaping @Sendable () -> String? = {
+            SwarmPairing.tailnetIPv4()
+        }
+    ) {
         self.host = host
         self.handshakeURL = handshakeURL
+        self.buddy = buddy
+        self.events = events
+        self.eventWriteDeadline = eventWriteDeadline
+        self.discoverTailnetAddress = discoverTailnetAddress
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
         self.token = UUID().uuidString
     }
@@ -49,7 +102,7 @@ public actor ControlServer {
     /// unauthenticated jobs API is an unauthenticated remote-execution service.
     public func start(
         preferredPort: Int = 0, exposeOnLAN: Bool = false, swarmToken: String? = nil
-    ) throws {
+    ) async throws {
         let lan = exposeOnLAN && !(swarmToken ?? "").isEmpty
         self.swarmToken = swarmToken
         self.isExposedOnLAN = lan
@@ -69,18 +122,25 @@ public actor ControlServer {
         self.listener = listener
 
         listener.newConnectionHandler = { [weak self] connection in
-            Task { await self?.accept(connection) }
+            Task { await self?.accept(connection, from: .primary) }
         }
         listener.stateUpdateHandler = { [weak self] state in
             guard case .ready = state else { return }
             Task { await self?.publishHandshake() }
         }
         listener.start(queue: .global(qos: .userInitiated))
+
+        // The control server is restarted whenever swarm settings change, so this is also
+        // what brings the tailnet listener back afterwards. Awaited rather than detached:
+        // a caller that turns Silicon Buddy on straight after starting the server must not
+        // race a refresh that is still deciding the listener should be down.
+        await refreshTailnetAccess()
     }
 
     public func stop() {
         listener?.cancel()
         listener = nil
+        closeTailnetListener()
         try? FileManager.default.removeItem(at: handshakeURL)
     }
 
@@ -108,41 +168,230 @@ public actor ControlServer {
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: url.path
         )
+        // The tailnet listener needs this port, so a request that arrived before the bind
+        // was possible is applied here instead of being dropped.
+        syncTailnetListener()
+    }
+
+    // MARK: - The tailnet listener
+
+    /// The address the companion apps reach this Mac on, or nil when they cannot.
+    public var tailnetListenerAddress: String? {
+        buddyListener == nil ? nil : buddyAddress
+    }
+
+    /// The port both listeners answer on. Zero until the primary listener is ready — which
+    /// is also why a pairing QR cannot be drawn before then.
+    public var listeningPort: Int { port }
+
+    /// Brings the second listener into line with `buddy.json`: up on this Mac's tailscale
+    /// address when the owner has allowed their own devices, down otherwise.
+    ///
+    /// Discovery shells out to the tailscale CLI, so it runs off the actor — a `Process`
+    /// round trip on the executor would stall every request in flight.
+    public nonisolated func refreshTailnetAccess() async {
+        let discover = await discovery()
+        let allowed = await buddy.allowsTailnetDevices
+        guard allowed else {
+            try? await setTailnetAccess(address: nil)
+            return
+        }
+        let address = await Task.detached(priority: .userInitiated) { discover() }.value
+        guard let address else {
+            await noteTailnetError(
+                "This Mac has no tailscale address. Join the tailnet first — "
+                    + "Silicon Buddy rides on it."
+            )
+            return
+        }
+        try? await setTailnetAccess(address: address)
+    }
+
+    private func discovery() -> @Sendable () -> String? { discoverTailnetAddress }
+
+    /// Asks for (or withdraws) the tailnet listener. The port parameter exists for tests,
+    /// which reach the second listener over loopback rather than over a tailnet.
+    public func setTailnetAccess(address: String?, port overridePort: Int? = nil) throws {
+        guard let address else {
+            buddyAddress = nil
+            buddyPortOverride = nil
+            tailnetError = nil
+            closeTailnetListener()
+            return
+        }
+        guard Self.isBindableTailnetAddress(address) else {
+            throw TailnetBindError.unacceptableAddress(address)
+        }
+        buddyAddress = address
+        buddyPortOverride = overridePort
+        tailnetError = nil
+        syncTailnetListener()
+    }
+
+    /// The only addresses this second listener may take: a tailnet IPv4 (100.64/10), or
+    /// loopback, which is where the tests reach it. Anything else — a LAN address, a
+    /// wildcard, an IPv6 any — is refused here, because binding one of those is exactly how
+    /// a private API becomes a public one.
+    public static func isBindableTailnetAddress(_ address: String) -> Bool {
+        // Parsed as an address, never scanned for numbers. `NWEndpoint.Host` will happily
+        // take a name, so "100.64.0.1.evil.example.com" getting this far would turn a bind
+        // rule into a DNS lookup someone else controls.
+        guard let bytes = SwarmPairing.ipv4Bytes(address) else { return false }
+        if bytes[0] == 127 { return true }
+        return bytes[0] == 100 && (64...127).contains(bytes[1])
+    }
+
+    public enum TailnetBindError: Error, LocalizedError, Equatable {
+        case unacceptableAddress(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .unacceptableAddress(let address):
+                "\(address) is not a tailnet address. Silicon Buddy binds the tailnet "
+                    + "interface only, never the whole network."
+            }
+        }
+    }
+
+    private func syncTailnetListener() {
+        guard let address = buddyAddress else { return closeTailnetListener() }
+        // Swarm exposure binds every interface on the fixed LAN port, so a second listener
+        // there would be shadowed by the first — and a device token is only a credential on
+        // the tailnet listener, so without one paired devices are not served at all. That is
+        // the safe way round, and the window says so rather than leaving it to be discovered.
+        guard !isExposedOnLAN else {
+            tailnetError = "Swarm LAN access is on, which binds the control API to every "
+                + "network this Mac is on. Silicon Buddy needs a tailnet-only listener, so "
+                + "it stays off until you turn swarm LAN access off in Settings → Swarm."
+            closeTailnetListener()
+            return
+        }
+        let wanted = buddyPortOverride ?? port
+        guard (1...65_535).contains(wanted),
+              let boundPort = NWEndpoint.Port(rawValue: UInt16(wanted))
+        else { return }
+        // A tailscale address can change under the app — a re-auth, a different tailnet. A
+        // listener still bound to yesterday's endpoint is a feature that silently stopped.
+        if let bound = boundEndpoint {
+            guard bound != (address, wanted) else { return }
+            closeTailnetListener()
+        }
+
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(address), port: boundPort
+        )
+        do {
+            let listener = try NWListener(using: parameters)
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { await self?.accept(connection, from: .tailnet) }
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                guard case .failed(let error) = state else { return }
+                Task { await self?.noteTailnetError(error.localizedDescription) }
+            }
+            listener.start(queue: .global(qos: .userInitiated))
+            buddyListener = listener
+            boundEndpoint = (address, wanted)
+        } catch {
+            tailnetError = error.localizedDescription
+        }
+    }
+
+    /// Records why the listener is down and leaves it down. Clearing the address matters:
+    /// without it the next handshake would retry a bind that has already failed once, in a
+    /// loop, for as long as the app runs.
+    private func noteTailnetError(_ message: String) {
+        tailnetError = message
+        buddyAddress = nil
+        closeTailnetListener()
+    }
+
+    public func closeTailnetListener() {
+        buddyListener?.cancel()
+        buddyListener = nil
+        boundEndpoint = nil
     }
 
     // MARK: - Connection handling
 
-    private func accept(_ connection: NWConnection) {
+    /// Which listener a connection came in on.
+    ///
+    /// This is a security boundary, not bookkeeping. The primary listener is loopback — or,
+    /// with swarm exposure on, every interface on the LAN port. A device token must never be
+    /// honoured there: a phone that leaves the house, or is lost with its token on it, would
+    /// otherwise authenticate from any café Wi-Fi the Mac happens to share.
+    enum Origin: Sendable, Equatable {
+        case primary
+        case tailnet
+    }
+
+    private func accept(_ connection: NWConnection, from origin: Origin) {
         guard activeConnections < Self.maximumConnections else {
             connection.cancel()
             return
         }
         activeConnections += 1
         connection.start(queue: .global(qos: .userInitiated))
-        Task { await serve(connection) }
+        Task { await serve(connection, from: origin) }
     }
 
-    private func serve(_ connection: NWConnection) async {
+    private func serve(_ connection: NWConnection, from origin: Origin) async {
         defer {
             connection.cancel()
             activeConnections -= 1
         }
         do {
-            let request = try await HTTPRequest.read(from: connection)
+            let request: HTTPRequest
+            do {
+                request = try await HTTPRequest.read(from: connection) { headers in
+                    await self.bodyLimit(forHeaders: headers, from: origin)
+                }
+            } catch HTTPRequest.ParseError.bodyTooLarge(let limit) {
+                await refuse(.error(
+                    413, "That request body is larger than this device may send (\(limit) bytes)."
+                ), on: connection)
+                return
+            } catch HTTPRequest.ParseError.lengthRequired {
+                await refuse(.error(
+                    411, "This server needs a Content-Length. Chunked bodies are not read."
+                ), on: connection)
+                return
+            }
+
+            let caller = await identify(request, from: origin)
+            if let refusal = Self.scopeRefusal(for: request, as: caller) {
+                try await refusal.write(to: connection)
+                return
+            }
+
+            switch streamRoute(request, as: caller) {
+            case .stream(let events):
+                await deliver(events, as: caller, over: connection)
+                return
+            case .refused(let response):
+                try await response.write(to: connection)
+                return
+            case .notStreaming:
+                break
+            }
+
+            let source = Self.remoteAddress(of: connection)
             let response: HTTPResponse
             if request.method == "POST", request.path == "/video/generate" {
                 // One request per connection: after its body, EOF/error means
                 // this client no longer wants the synchronous response. Keep a
                 // receive outstanding so Network.framework notices a FIN/RST
                 // while the route is waiting, not only at response.write().
-                let waiting = Task { await route(request) }
+                let waiting = Task { await route(request, as: caller, from: source) }
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
                     if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
                 }
                 response = await waiting.value
                 guard !waiting.isCancelled else { return }
             } else {
-                response = await route(request)
+                response = await route(request, as: caller, from: source)
             }
             try await response.write(to: connection)
         } catch {
@@ -150,7 +399,318 @@ public actor ControlServer {
         }
     }
 
-    private func route(_ request: HTTPRequest) async -> HTTPResponse {
+    /// Answers a request that was refused before its body arrived.
+    ///
+    /// Closing the socket on a client that is still uploading hands it a connection reset
+    /// instead of the status we just wrote, which is how "your request is too large" becomes
+    /// "the network went away". Reading and dropping what is still coming, briefly, is what
+    /// lets the status get read.
+    private func refuse(_ response: HTTPResponse, on connection: NWConnection) async {
+        try? await response.write(to: connection)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline {
+            guard let more = try? await HTTPRequest.receive(from: connection),
+                  !more.isEmpty
+            else { return }
+        }
+    }
+
+    // MARK: - Who is asking
+
+    /// The three credentials this server accepts, and what each one is worth. They are not
+    /// equals: revoking a phone is the Mac's own business, so only the control token reaches
+    /// `/buddy/devices` — and a phone the owner paired for chat gets less again.
+    enum Caller: Sendable, Equatable {
+        case control
+        case swarm
+        case device(id: String, scope: BuddyScope)
+
+        var deviceID: String? {
+            guard case .device(let id, _) = self else { return nil }
+            return id
+        }
+
+        /// A chat-only device may read what the Mac is and talk to the model it has loaded.
+        /// Anything that spends the machine — a download, a load, a render — or that
+        /// administers other devices is the owner's own business.
+        func mayReach(method: String, path: String) -> Bool {
+            guard case .device(_, .chat) = self else { return true }
+            return Self.chatOnlyRoutes.contains("\(method) \(path)")
+                || path == "/conversations" || path.hasPrefix("/conversations/")
+        }
+
+        /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
+        /// nothing and costs the machine minutes — so the set is written out, and a route
+        /// added later is closed to chat-only devices until someone decides otherwise.
+        ///
+        /// `/recommend`, `/v1/node` and `/plan` are in it for the opposite reason: they read
+        /// and advise and spend nothing, and a phone that cannot ask "would this fit here?"
+        /// is blinkered for no gain.
+        static let chatOnlyRoutes: Set<String> = [
+            "GET /health", "GET /status", "GET /profile", "GET /metrics", "GET /catalog",
+            "GET /installed", "GET /swarm", "GET /video/models", "GET /image/models",
+            "GET /mesh/models", "GET /video/queue", "GET /events", "GET /recommend",
+            "GET /v1/node", "POST /plan",
+            "POST /chat", "POST /chat/stream", "POST /decide", "POST /v1/systemone",
+        ]
+    }
+
+    /// The one place scope is enforced, before anything looks at the path — streaming and
+    /// buffered routes alike, so there is exactly one message and no dead branch behind it.
+    ///
+    /// Pairing is exempt: it is unauthenticated, and a device re-pairing to be given more
+    /// than chat would otherwise be refused by the very token it is replacing.
+    static func scopeRefusal(for request: HTTPRequest, as caller: Caller?) -> HTTPResponse? {
+        guard let caller else { return nil }
+        guard !(request.method == "POST" && request.path == "/buddy/pair") else { return nil }
+        guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
+        return .error(403, chatOnlyRefusal)
+    }
+
+    /// Exported in the contract fixtures, so it is written once and read from there.
+    public static let chatOnlyRefusal =
+        "This device is paired for chat only. Pair it again with full control from "
+            + "Settings → Silicon Buddy on the Mac."
+
+    private func identify(_ request: HTTPRequest, from origin: Origin) async -> Caller? {
+        guard let bearer = request.bearerToken else { return nil }
+        if bearer == token { return .control }
+        if let swarmToken, !swarmToken.isEmpty, bearer == swarmToken { return .swarm }
+        // The one door a device token opens. On the primary listener it is not a credential
+        // at all, whatever it says.
+        guard origin == .tailnet else { return nil }
+        // Stamps last-seen as a side effect, which is the only place it could come from:
+        // a device is "seen" exactly when it uses its token. Returns nil while the owner
+        // has the toggle off, so suspending devices suspends the tokens too.
+        guard let device = await buddy.authorize(bearer: bearer) else { return nil }
+        return .device(
+            id: device.id, scope: BuddyScope(rawValue: device.scope) ?? .full
+        )
+    }
+
+    /// How much body this caller may send. A phone sends prompts and photographs; the local
+    /// bridge installs models and posts whole images, so it keeps the original ceiling.
+    private func bodyLimit(forHeaders headers: [String: String], from origin: Origin) async -> Int {
+        guard origin == .tailnet else { return HTTPRequest.maximumBody }
+        guard let bearer = HTTPRequest.bearerToken(in: headers) else {
+            // No bearer on the tailnet means `/buddy/pair`, the one route with nothing to
+            // check before the body is read — so the throttle cannot run until the upload
+            // is over. A pairing request is a hundred bytes.
+            return BuddyLimits.unauthenticatedBodyBytes
+        }
+        if bearer == token { return HTTPRequest.maximumBody }
+        if swarmToken.map({ !$0.isEmpty && bearer == $0 }) ?? false {
+            return HTTPRequest.maximumBody
+        }
+        return BuddyLimits.requestBodyBytes
+    }
+
+    /// The peer's address, for rate-limiting pairing attempts. Shapes we cannot read collapse
+    /// into one bucket rather than each escaping the limit as its own source.
+    static func remoteAddress(of connection: NWConnection) -> String {
+        guard case .hostPort(let host, _) = connection.endpoint else { return "unknown" }
+        switch host {
+        case .ipv4(let address):
+            return "\(address)".split(separator: "%").first.map(String.init) ?? "unknown"
+        case .ipv6(let address):
+            return "\(address)".split(separator: "%").first.map(String.init) ?? "unknown"
+        case .name(let name, _):
+            return name
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    // MARK: - Streaming routes
+
+    private enum StreamRouting {
+        case notStreaming
+        case refused(HTTPResponse)
+        case stream(EventSource)
+    }
+
+    /// Separated from `route` because the reply is not one buffer but a conversation. The
+    /// slot taken here is released in `deliver`, once the stream is actually over.
+    private func streamRoute(_ request: HTTPRequest, as caller: Caller?) -> StreamRouting {
+        let segments = request.path.split(separator: "/").map(String.init)
+        let host = self.host
+        let hub = self.events
+
+        let body: EventSource
+        if request.method == "POST", segments == ["chat", "stream"] {
+            guard caller != nil else { return .refused(unauthorized) }
+            guard let chat = try? request.decode(ControlAPI.ChatRequest.self) else {
+                return .refused(.error(400, "Could not read the chat request."))
+            }
+            body = EventSource { writer in
+                await Self.pumpChat(writer) { try await host.chatStream(chat) }
+            }
+        } else if request.method == "POST",
+                  let id = Self.parameter(segments, matching: ["conversations", "*", "messages"]) {
+            guard caller != nil else { return .refused(unauthorized) }
+            guard let message = try? request.decode(ControlAPI.NewMessageRequest.self) else {
+                return .refused(.error(400, "Could not read the message."))
+            }
+            body = EventSource { writer in
+                await Self.pumpChat(writer) {
+                    try await host.replyInConversation(id: id, to: message)
+                }
+            }
+        } else if request.method == "GET", segments == ["events"] {
+            guard let caller else { return .refused(unauthorized) }
+            let buddy = self.buddy
+            // A stream opened this morning must not outlive the credential that opened it,
+            // so the heartbeat asks again every time round rather than trusting the token
+            // it was handed once.
+            let stillAuthorized: @Sendable () async -> Bool = {
+                guard let id = caller.deviceID else { return true }
+                return await buddy.isKnown(deviceID: id)
+            }
+            body = EventSource { writer in
+                await Self.pumpEvents(
+                    writer, hub: hub, host: host, stillAuthorized: stillAuthorized
+                )
+            }
+        } else {
+            return .notStreaming
+        }
+
+        guard activeEventStreams < Self.maximumEventStreams else {
+            return .refused(.error(
+                429,
+                "Too many open streams. Close one before opening another."
+            ))
+        }
+        activeEventStreams += 1
+        return .stream(body)
+    }
+
+    private func deliver(
+        _ source: EventSource, as caller: Caller?, over connection: NWConnection
+    ) async {
+        defer { activeEventStreams -= 1 }
+        let writer = EventStreamWriter(connection: connection, deadline: eventWriteDeadline)
+        let work = Task { await source.run(writer) }
+        // A phone that walks out of range never sends anything we would notice while we are
+        // only writing. Keeping a receive outstanding turns its FIN into a cancellation, so
+        // the model stops generating into a dead socket instead of finishing the answer.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) {
+            data, _, complete, error in
+            if complete || error != nil || !(data?.isEmpty ?? true) { work.cancel() }
+        }
+        // Revoking a device, or turning the whole feature off, ends what it is holding now.
+        // Waiting for the next request would leave an answer streaming to a phone whose
+        // access the owner has just taken away.
+        var ticket: UUID?
+        if let id = caller?.deviceID {
+            ticket = await buddy.registerStream(deviceID: id) { work.cancel() }
+            // Nil means the device stopped being one between `identify` and here. Chat
+            // streams have no heartbeat to re-check them, so this is their only backstop.
+            if ticket == nil { work.cancel() }
+        }
+        await work.value
+        if let id = caller?.deviceID, let ticket {
+            await buddy.releaseStream(deviceID: id, ticket: ticket)
+        }
+    }
+
+    /// Turns a chat stream into SSE frames. A failure becomes a final `error` event rather
+    /// than a dropped connection, so a phone can show the sentence instead of guessing.
+    private static func pumpChat(
+        _ writer: EventStreamWriter,
+        _ open: @Sendable () async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error>
+    ) async {
+        do {
+            // Nothing is written until the host agrees to start. A conversation that does
+            // not exist, or is mid-answer, is then a 404 or a 409 the phone can act on
+            // rather than a 200 whose first frame says otherwise.
+            let stream = try await open()
+            try await writer.open()
+            for try await event in stream {
+                try Task.checkCancellation()
+                switch event {
+                case .token(let text):
+                    try await writer.send(event: "token", json: ControlAPI.StreamToken(text: text))
+                case .reasoning(let text):
+                    try await writer.send(event: "reasoning", json: ControlAPI.StreamToken(text: text))
+                case .finished(let metrics):
+                    try await writer.send(event: "finished", json: metrics)
+                }
+            }
+        } catch is CancellationError {
+            // The client hung up. There is nobody left to tell.
+        } catch let error as BuddyHostError {
+            await writer.refuse(
+                status: error.status, message: error.localizedDescription
+            )
+        } catch {
+            await writer.refuse(status: 400, message: error.localizedDescription)
+        }
+    }
+
+    private static func pumpEvents(
+        _ writer: EventStreamWriter, hub: BuddyEventHub, host: any ControlHost,
+        stillAuthorized: @escaping @Sendable () async -> Bool = { true }
+    ) async {
+        guard (try? await writer.open()) != nil else { return }
+        let subscription = await hub.subscribe()
+        // Strictly after subscribing: a host that starts watching its own state and finds
+        // no subscribers would stop again before this reader ever registered.
+        await host.beginEventUpdates(postingTo: hub)
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await withTaskCancellationHandler {
+                    for await event in subscription.stream {
+                        guard (try? await writer.send(event)) != nil else { return }
+                    }
+                } onCancel: {
+                    // Finishing the continuation is the only thing that breaks the reader
+                    // above out of its `for await`.
+                    Task { await hub.cancel(subscription.id) }
+                }
+            }
+            group.addTask {
+                var beat = ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
+                while !Task.isCancelled {
+                    guard await stillAuthorized() else { return }
+                    guard (try? await writer.send(.heartbeat(beat))) != nil else { return }
+                    guard (try? await Task.sleep(for: heartbeatInterval)) != nil else { return }
+                    beat = ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
+                }
+            }
+            // Whichever half ends first ends the response: a broken write means the socket
+            // is gone, and a finished hub means there is nothing left to forward.
+            await group.next()
+            group.cancelAll()
+        }
+        await hub.cancel(subscription.id)
+    }
+
+    private var unauthorized: HTTPResponse {
+        .error(401, "Invalid or missing control token.")
+    }
+
+    /// Matches a path shape with one wildcard — `["conversations", "*"]` — and hands back
+    /// what the wildcard caught. Swift cannot pattern-match array literals with bindings,
+    /// and a routing framework for four routes would be worse than this.
+    static func parameter(_ segments: [String], matching shape: [String]) -> String? {
+        guard segments.count == shape.count else { return nil }
+        var captured: String?
+        for (segment, expected) in zip(segments, shape) {
+            if expected == "*" {
+                guard !segment.isEmpty else { return nil }
+                captured = segment
+            } else if segment != expected {
+                return nil
+            }
+        }
+        return captured
+    }
+
+    private func route(
+        _ request: HTTPRequest, as caller: Caller?, from source: String
+    ) async -> HTTPResponse {
         // /health is unauthenticated so a client can tell "app not running" from "bad token".
         if request.path == "/health" {
             return .json(["status": "ok", "version": "0.1.0"])
@@ -188,14 +748,65 @@ public actor ControlServer {
             }
         }
 
-        let authorized = request.bearerToken == token
-            || (swarmToken.map { !$0.isEmpty && request.bearerToken == $0 } ?? false)
-        guard authorized else {
-            return .error(401, "Invalid or missing control token.")
+        // Pairing is the one unauthenticated POST: a device that has nothing yet cannot
+        // present anything. What stands in for a credential is the six-digit code the owner
+        // is looking at, plus the rate limit that makes guessing it pointless.
+        if request.method == "POST", request.path == "/buddy/pair" {
+            guard let pairing = try? request.decode(ControlAPI.BuddyPairRequest.self) else {
+                return .error(400, "Could not read the pairing request.")
+            }
+            let macName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+            // The port a device should keep dialling is the one it just reached us on —
+            // the tailnet listener's. In the app that is the control port; the tests split
+            // them so they can tell the two listeners apart.
+            let reachablePort = boundEndpoint?.port ?? port
+            switch await buddy.pair(
+                pairing, from: source, macName: macName, port: reachablePort
+            ) {
+            case .paired(let response):
+                return (try? .encode(response)) ?? .error(500, "Could not encode the pairing.")
+            case .refused(let status, let message):
+                return .error(status, message)
+            }
+        }
+
+        guard let caller else { return unauthorized }
+
+        let segments = request.path.split(separator: "/").map(String.init)
+        if request.method == "GET", segments == ["buddy", "devices"] {
+            guard caller == .control else {
+                return .error(403, "Only this Mac can list paired devices.")
+            }
+            return (try? .encode(await buddy.devices()))
+                ?? .error(500, "Could not encode the device list.")
+        }
+        if request.method == "DELETE",
+           let id = Self.parameter(segments, matching: ["buddy", "devices", "*"]) {
+            guard caller == .control else {
+                return .error(403, "Only this Mac can revoke a paired device.")
+            }
+            guard await buddy.revoke(deviceID: id) else {
+                return .error(404, "No paired device with id \(id).")
+            }
+            return .json(["status": "revoked"])
+        }
+        if request.method == "GET",
+           let id = Self.parameter(segments, matching: ["conversations", "*"]) {
+            do {
+                return try .encode(await host.conversation(id: id))
+            } catch {
+                return .error(404, error.localizedDescription)
+            }
         }
 
         do {
             switch (request.method, request.path) {
+            case ("GET", "/conversations"):
+                return try .encode(await host.conversationList())
+            case ("POST", "/conversations"):
+                let body = (try? request.decode(ControlAPI.NewConversationRequest.self))
+                    ?? ControlAPI.NewConversationRequest()
+                return try .encode(await host.createConversation(title: body.title))
             case ("GET", "/profile"):
                 return try .encode(await host.profile())
             case ("GET", "/metrics"):
@@ -295,7 +906,13 @@ struct HTTPRequest {
     var headers: [String: String]
     var body: Data
 
-    var bearerToken: String? {
+    /// The ceiling for a local caller. A device's is much lower — see `BuddyLimits`.
+    static let maximumBody = 16_777_216
+
+    var bearerToken: String? { Self.bearerToken(in: headers) }
+
+    /// Also read before the body, to decide how much body this caller may send.
+    static func bearerToken(in headers: [String: String]) -> String? {
         guard let value = headers["authorization"] else { return nil }
         let parts = value.split(
             maxSplits: 1, omittingEmptySubsequences: true,
@@ -315,18 +932,28 @@ struct HTTPRequest {
     enum ParseError: Error, LocalizedError {
         case malformed
         case closed
+        /// Declared or delivered more body than this caller is allowed.
+        case bodyTooLarge(Int)
+        /// A framing this server does not read — chunked, above all. Answered rather than
+        /// dropped, because a client that gets nothing back cannot tell that from a crash.
+        case lengthRequired
 
         var errorDescription: String? {
             switch self {
             case .malformed: "Malformed HTTP request."
             case .closed: "Connection closed."
+            case .bodyTooLarge(let limit): "Request body over \(limit) bytes."
+            case .lengthRequired: "A Content-Length is required."
             }
         }
     }
 
     /// Reads one request. Bodies are small JSON payloads, so a simple accumulate-until-complete
     /// loop is sufficient and avoids pulling in a whole HTTP stack.
-    static func read(from connection: NWConnection) async throws -> HTTPRequest {
+    static func read(
+        from connection: NWConnection,
+        maximumBody limit: @Sendable ([String: String]) async -> Int = { _ in maximumBody }
+    ) async throws -> HTTPRequest {
         // Absolute request-header/body deadline. Canceling the connection unblocks any
         // pending Network.framework receive, so a byte-at-a-time client cannot retain a
         // listener slot forever.
@@ -366,14 +993,18 @@ struct HTTPRequest {
         }
 
         var body = buffer[headerEnd.upperBound...]
-        guard headers["transfer-encoding"] == nil else { throw ParseError.malformed }
+        guard headers["transfer-encoding"] == nil else { throw ParseError.lengthRequired }
+        let allowed = min(await limit(headers), maximumBody)
         if let lengthValue = headers["content-length"] {
-            guard let length = Int(lengthValue), (0...16_777_216).contains(length),
-                  body.count <= length
-            else { throw ParseError.malformed }
+            guard let length = Int(lengthValue), length >= 0, body.count <= length else {
+                throw ParseError.malformed
+            }
+            // Refused on the declared length, before a byte of it is read: the point of a
+            // cap is not to receive the thing and then disapprove of it.
+            guard length <= allowed else { throw ParseError.bodyTooLarge(allowed) }
             while body.count < length {
                 body.append(try await receive(from: connection))
-                if body.count > 16_777_216 { throw ParseError.malformed }
+                if body.count > allowed { throw ParseError.bodyTooLarge(allowed) }
             }
         } else if !body.isEmpty {
             // This minimal server intentionally does not infer body framing from a socket
@@ -396,7 +1027,7 @@ struct HTTPRequest {
         )
     }
 
-    private static func receive(from connection: NWConnection) async throws -> Data {
+    static func receive(from connection: NWConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
                 data, _, isComplete, error in
@@ -477,6 +1108,9 @@ struct HTTPResponse {
         case 401: "Unauthorized"
         case 403: "Forbidden"
         case 404: "Not Found"
+        case 409: "Conflict"
+        case 411: "Length Required"
+        case 413: "Payload Too Large"
         case 429: "Too Many Requests"
         default: "Error"
         }

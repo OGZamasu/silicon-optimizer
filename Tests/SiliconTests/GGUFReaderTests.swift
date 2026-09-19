@@ -105,7 +105,7 @@ private extension Data {
     }
 }
 
-@Suite("GGUF header parsing")
+@Suite("GGUF header parsing", .redirectedConversationStore)
 struct GGUFReaderTests {
 
     private func temporaryURL() -> URL {
@@ -396,7 +396,7 @@ private final class GGUFRangeProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-@Suite("Remote GGUF parser security", .serialized)
+@Suite("Remote GGUF parser security", .serialized, .redirectedConversationStore)
 struct RemoteGGUFParserSecurityTests {
     @Test func retriesWhenTheTensorTableFallsBeyondTheInitialRange() async throws {
         let payload = GGUFBuilder(
@@ -425,7 +425,7 @@ struct RemoteGGUFParserSecurityTests {
     }
 }
 
-@Suite("Active parameter derivation")
+@Suite("Active parameter derivation", .redirectedConversationStore)
 struct ActiveParameterTests {
 
     /// Regression: an imported MoE GGUF has no catalog entry, so `activeParameters` was zero.
@@ -472,7 +472,7 @@ struct ActiveParameterTests {
     }
 }
 
-@Suite("Vision projector selection")
+@Suite("Vision projector selection", .redirectedConversationStore)
 struct ProjectorSelectionTests {
 
     /// The real file list from unsloth/Qwen2.5-VL-7B-Instruct-GGUF.
@@ -523,7 +523,7 @@ struct ProjectorSelectionTests {
     }
 }
 
-@Suite("Companion file exclusion")
+@Suite("Companion file exclusion", .redirectedConversationStore)
 struct CompanionFileTests {
 
     /// Real filenames from ggml-org/gpt-oss-20b-GGUF and unsloth vision repos.
@@ -553,7 +553,7 @@ struct CompanionFileTests {
     }
 }
 
-@Suite("Conversation folders")
+@Suite("Conversation folders", .redirectedConversationStore)
 @MainActor
 struct ConversationFolderTests {
 

@@ -7,7 +7,7 @@ import Testing
 /// busy?" exactly once, at the moment it fired — and an agent turn is many requests with tool
 /// calls and reading time between them, so that question landed in a gap and the model was
 /// unloaded mid-conversation. Nothing held the Mac awake through one of those turns either.
-@Suite("Server activity")
+@Suite("Server activity", .redirectedConversationStore)
 @MainActor
 struct ServerActivityTests {
 

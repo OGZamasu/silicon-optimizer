@@ -2773,6 +2773,11 @@ public final class AppModel {
     // MARK: - Conversation persistence
 
     private static var conversationsURL: URL {
+        // Overridable so a test run cannot overwrite the owner's own chat history: an
+        // `AppModel` built in a test schedules the same debounced save as the real one.
+        if let override = ProcessInfo.processInfo.environment["SILICON_CONVERSATIONS_PATH"] {
+            return URL(fileURLWithPath: override)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("SiliconOptimizer/conversations.json")
     }
@@ -3776,8 +3781,18 @@ public final class AppModel {
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
 
+        // Registered so the buddy routes can tell a busy thread from a free one: a phone
+        // posting into the conversation this is answering would carry a half-written reply
+        // as context. See `AppModel+Buddy`.
+        let answering = conversations[index].id
+        BuddyGenerations.shared.begin(answering)
         generationTask = Task { [weak self] in
-            defer { Task { @MainActor in self?.generationTask = nil } }
+            defer {
+                Task { @MainActor in
+                    self?.generationTask = nil
+                    BuddyGenerations.shared.end(answering)
+                }
+            }
             do {
                 let stream = try await runtime.chat(request)
                 for try await event in stream {

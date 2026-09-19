@@ -526,6 +526,8 @@ struct SettingsView: View {
                 }
             }
 
+            BuddySettingsSection()
+
             CloudProvidersSection()
 
             if model.settings.showAdvancedControls {
