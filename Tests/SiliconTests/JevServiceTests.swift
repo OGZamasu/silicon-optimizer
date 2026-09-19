@@ -39,8 +39,11 @@ struct JevHarness {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
-    var configURL: URL { directory.appendingPathComponent("jev.json") }
-    var ledgerURL: URL { directory.appendingPathComponent("jev-ledger.json") }
+    /// One level down, so the permissions test is checking a directory `save` created
+    /// rather than one the harness made itself.
+    var fileDirectory: URL { directory.appendingPathComponent("store", isDirectory: true) }
+    var configURL: URL { fileDirectory.appendingPathComponent("jev.json") }
+    var ledgerURL: URL { fileDirectory.appendingPathComponent("jev-ledger.json") }
 
     func clean() { try? FileManager.default.removeItem(at: directory) }
 
@@ -108,7 +111,7 @@ struct JevSettingsTests {
         #expect(settings.model == "jev-1.13.0")
         #expect(settings.cacheMinutes == 10)
         #expect(settings.monthlyBudgetUSD == nil)
-        #expect(settings.maxStateBytes == 120 * 1024)
+        #expect(settings.maxStateBytes == 64 * 1024)
         #expect(settings.isOn(.decideTool))
         for feature in JevFeature.allCases where feature != .decideTool {
             #expect(!settings.isOn(feature), "\(feature.rawValue) should ship off")
@@ -175,16 +178,35 @@ struct JevSettingsTests {
         #expect(JevSettings.load(from: nowhere) == JevSettings())
     }
 
-    /// The documented override, which is how the app is pointed somewhere else without a
-    /// code change. Set and cleared here; every other test passes the URL directly.
-    @Test func theEnvironmentOverridePointsBothFilesAtTheSameFolder() {
-        let path = "/tmp/jev-env-\(UUID().uuidString)/jev.json"
-        setenv("SILICON_JEV_CONFIG", path, 1)
-        defer { unsetenv("SILICON_JEV_CONFIG") }
-        #expect(JevSettings.configURL.path == path)
-        #expect(JevSettings.ledgerURL.lastPathComponent == "jev-ledger.json")
-        #expect(JevSettings.ledgerURL.deletingLastPathComponent()
-            == JevSettings.configURL.deletingLastPathComponent())
+    /// Wherever the settings are pointed — by `SILICON_JEV_CONFIG` in the app, by
+    /// `configure(configURL:)` here — the ledger follows them into the same folder. Checked
+    /// as the pure rule rather than by setting a process-wide variable other tests can see.
+    @Test func theLedgerFollowsTheSettingsWhereverTheyGo() {
+        let config = URL(fileURLWithPath: "/tmp/jev-somewhere/jev.json")
+        let ledger = JevSettings.ledgerURL(besideConfigAt: config)
+        #expect(ledger.lastPathComponent == "jev-ledger.json")
+        #expect(ledger.deletingLastPathComponent() == config.deletingLastPathComponent())
+        // And the app's own default pair obeys the same rule.
+        #expect(JevSettings.ledgerURL == JevSettings.ledgerURL(besideConfigAt: JevSettings.configURL))
+    }
+
+    @Test func bothFilesAndTheirDirectoryAreOwnerOnly() async throws {
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure()
+        try await harness.enable()
+        var ledger = JevLedger()
+        ledger.record(feature: .decideTool, inputTokens: 1, outputTokens: 0,
+                      latencyMS: 1, model: "jev-1.13.0")
+        try ledger.save(to: harness.ledgerURL)
+
+        func permissions(_ url: URL) throws -> Int {
+            try #require(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+        }
+        #expect(try permissions(harness.configURL) == 0o600)
+        #expect(try permissions(harness.ledgerURL) == 0o600)
+        // The directory too: 0600 inside a readable folder still leaks that the file exists.
+        #expect(try permissions(harness.fileDirectory) == 0o700)
     }
 }
 
@@ -272,6 +294,20 @@ struct JevBandTests {
         #expect(JevService.confidenceBand(0.5, low: 0.5, high: 0.9) == .confirm)
         #expect(JevService.confidenceBand(0.49, low: 0.5, high: 0.9) == .escalate)
         #expect(JevService.confidenceBand(0, low: 0.5, high: 0.9) == .escalate)
+    }
+
+    /// A noul is the other shape: the number is the answer, so the certain readings are at
+    /// both ends and the useless ones are in the middle. A confidence gate would read 0.02
+    /// — a confident no — as no confidence at all.
+    @Test func aNoulIsGatedFromBothEndsRatherThanFromAbove() {
+        #expect(JevThresholds.noulBand(0.97, yes: 0.9, no: 0.1) == .act)
+        #expect(JevThresholds.noulBand(0.9, yes: 0.9, no: 0.1) == .act)
+        #expect(JevThresholds.noulBand(0.02, yes: 0.9, no: 0.1) == .act)
+        #expect(JevThresholds.noulBand(0.1, yes: 0.9, no: 0.1) == .act)
+        #expect(JevThresholds.noulBand(0.5, yes: 0.9, no: 0.1) == .escalate)
+        #expect(JevThresholds.noulBand(0.6, yes: 0.9, no: 0.1) == .escalate)
+        // Which is exactly where a confidence gate gets it wrong.
+        #expect(JevService.confidenceBand(0.02, low: 0.1, high: 0.9) == .escalate)
     }
 
     @Test func thresholdsCarryTheirOwnNumbers() {
@@ -401,6 +437,37 @@ struct JevServiceTests {
             try JevService.checkLimits(["short": .init(type: "score", criteria: .array([.string("a")]))])
         }
         try JevService.checkLimits(jevQuestions)
+
+        // And reached through `ask`, not only called directly — a 256-option choice passes
+        // `validate()` and would otherwise leave here as a 422.
+        await #expect(throws: ControlAPI.SystemOneValidationError.self) {
+            try await harness.service.ask(
+                .decideTool, state: .string("s"),
+                questions: [
+                    "big": .init(
+                        type: "choice", instructions: .string("Which one?"),
+                        criteria: .object(options)
+                    ),
+                ]
+            )
+        }
+        await #expect(throws: ControlAPI.SystemOneValidationError.self) {
+            try await harness.service.ask(
+                .decideTool, state: .string("s"),
+                questions: [
+                    "long": .init(
+                        type: "score", instructions: .string("How much?"),
+                        criteria: .array((0..<11).map { .string("level \($0)") })
+                    ),
+                ]
+            )
+        }
+        // As is a question with no instruction at all.
+        await #expect(throws: ControlAPI.SystemOneValidationError.self) {
+            try await harness.service.ask(
+                .decideTool, state: .string("s"), questions: ["mute": .init(type: "noul")]
+            )
+        }
         #expect(server.requests.isEmpty)
     }
 
@@ -582,14 +649,33 @@ struct JevServiceTests {
         #expect(await sleeps.seconds.isEmpty)
     }
 
-    @Test func aRetryAfterFurtherOutThanWeWillWaitIsCapped() {
-        let response = HTTPURLResponse(
-            url: URL(string: "https://api.typesafe.ai/v1/systemone")!, statusCode: 429,
-            httpVersion: nil, headerFields: ["Retry-After": "3600"]
+    /// A server asking for an hour is asking for more than a UI feature can give it. The
+    /// wait is what actually happened, not what the header said — remove the cap in `send`
+    /// and this fails.
+    @Test func aRetryAfterFurtherOutThanWeWillWaitIsCapped() async throws {
+        let sleeps = Sleeps()
+        let server = try CapturingServer { _, served in
+            served == 0
+                ? .init(status: 429, headers: ["Retry-After": "3600"], body: #"{"detail":"later"}"#)
+                : .init(body: jevAnswer)
+        }
+        defer { server.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, sleeps: sleeps
         )
-        #expect(SystemOneClient.retryAfter(in: response) == 3_600)
-        #expect(min(3_600, JevService.maximumBackoffSeconds) == 30)
-        #expect(SystemOneClient.retryAfter(in: nil) == nil)
+        try await harness.enable()
+
+        _ = try await harness.service.ask(
+            .decideTool, state: .string("s"), questions: jevQuestions
+        )
+        #expect(await sleeps.seconds == [JevService.maximumBackoffSeconds])
+        #expect(await sleeps.seconds == [30])
+        #expect(server.requests.count == 2)
+    }
+
+    @Test func theDoublingBackoffIsTheFallback() {
         #expect(JevService.backoffSeconds(1) == 1)
         #expect(JevService.backoffSeconds(2) == 2)
         #expect(JevService.backoffSeconds(3) == 4)
@@ -626,9 +712,85 @@ struct JevServiceTests {
         defer { harness.clean() }
         await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
 
-        await #expect(throws: SystemOneError.http(401, "Invalid API key")) {
+        await #expect(throws: SystemOneError.http(401, SystemOneClient.rejectedKey)) {
             try await harness.service.testConnection()
         }
+        do {
+            _ = try await harness.service.testConnection()
+        } catch {
+            #expect(!"\(error)".contains("sk-fixture"))
+        }
+    }
+
+    /// Two features asking the same question about the same file at the same moment is the
+    /// ordinary case. The cache cannot help until the first lands, so the second joins it.
+    @Test func concurrentIdenticalAsksBecomeOneRequestAndOneCharge() async throws {
+        let server = try CapturingServer { _, _ in .init(body: jevAnswer) }
+        defer { server.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        try await harness.enable()
+
+        let state = JSONContent.object(["file": .string("/a/b.swift")])
+        async let first = harness.service.ask(.decideTool, state: state, questions: jevQuestions)
+        async let second = harness.service.ask(.decideTool, state: state, questions: jevQuestions)
+        let answers = try await [first, second]
+
+        #expect(answers[0] == answers[1])
+        #expect(server.requests.count == 1, "the second ask paid for the same bytes again")
+        // One request, one entry: billing the joined caller too would be a lie the budget
+        // then acts on.
+        #expect(await harness.service.ledger().calls == 1)
+    }
+
+    /// A ledger that cannot be written is a budget that stops counting, which is the one
+    /// thing a spending cap must not do quietly.
+    @Test func aLedgerThatCannotBeWrittenIsReportedRatherThanSwallowed() async throws {
+        let server = try CapturingServer { _, _ in .init(body: jevAnswer) }
+        defer { server.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        try await harness.enable()
+        #expect(await harness.service.ledgerWriteFailed == false)
+
+        // A directory where the file should be: the write fails, the answer still arrives.
+        try FileManager.default.createDirectory(
+            at: harness.ledgerURL, withIntermediateDirectories: true
+        )
+        let response = try await harness.service.ask(
+            .decideTool, state: .string("s"), questions: jevQuestions
+        )
+        #expect(response.answers["refund"] == .noul(0.93))
+        #expect(await harness.service.ledgerWriteFailed)
+        #expect(await harness.service.ledgerWriteError != nil)
+        // The in-memory count still moved, so the budget holds for this session at least.
+        #expect(await harness.service.ledger().calls == 1)
+    }
+
+    /// The convenience a feature actually calls, with a service of its own rather than the
+    /// shared one — which is the only way a feature's tests can run without a real key.
+    @Test func aQuestionSetCanBeAskedAgainstAnInjectedService() async throws {
+        let server = try CapturingServer { _, _ in .init(body: jevAnswer) }
+        defer { server.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        try await harness.enable()
+
+        let response = try await SampleQuestions.ask(
+            state: .string("Charged twice."), using: harness.service
+        )
+        let refund = try response.noul("refund")
+        #expect(refund == 0.93)
+        // The half of the convention the protocol cannot hold: the thresholds that read the
+        // answer live in the same file as the question that produced it.
+        #expect(JevThresholds.noulBand(
+            refund, yes: SampleQuestions.refund.yes, no: SampleQuestions.refund.no
+        ) == .act)
+        #expect(server.requests.count == 1)
+        #expect(await harness.service.ledger().month().features["decideTool"]?.calls == 1)
     }
 
     /// `isAvailable` is called while Settings is drawing, so it must not read the secret —
@@ -654,6 +816,16 @@ struct JevServiceTests {
 actor Counter {
     private(set) var count = 0
     func bump() { count += 1 }
+}
+
+
+/// A question set in the shape every feature will use: the questions and the thresholds
+/// that read them, in one place.
+enum SampleQuestions: JevQuestionSet {
+    static let feature = JevFeature.decideTool
+    static let questions: [String: ControlAPI.SystemOneQuestion] = jevQuestions
+    /// Refunds are money, so the bar is high and the middle escalates.
+    static let refund = (yes: 0.9, no: 0.1)
 }
 
 // MARK: - Live

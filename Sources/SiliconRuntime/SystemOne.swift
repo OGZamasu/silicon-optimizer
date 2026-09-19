@@ -90,7 +90,7 @@ public struct SystemOneClient: Sendable {
         let http = response as? HTTPURLResponse
         let status = http?.statusCode ?? 0
         guard (200..<300).contains(status) else {
-            throw Self.failure(status: status, headers: http, data: data)
+            throw failure(status: status, headers: http, data: data)
         }
         var decoded = try JSONDecoder().decode(ControlAPI.DecideResponse.self, from: data)
         decoded.provider = baseURL == Self.typeSafeBaseURL ? "typesafe" : baseURL.host ?? "remote"
@@ -112,7 +112,7 @@ public struct SystemOneClient: Sendable {
         let http = response as? HTTPURLResponse
         let status = http?.statusCode ?? 0
         guard (200..<300).contains(status) else {
-            throw Self.failure(status: status, headers: http, data: data)
+            throw failure(status: status, headers: http, data: data)
         }
         struct Listing: Decodable {
             struct Model: Decodable { var name: String }
@@ -121,24 +121,55 @@ public struct SystemOneClient: Sendable {
         return try JSONDecoder().decode(Listing.self, from: data).models.map(\.name)
     }
 
-    /// Splits "try again" from "you asked wrong", and carries the server's `retry-after`
-    /// across so a caller's backoff can honour it rather than guess.
-    static func failure(
+    /// Splits "try again" from "you asked wrong", carries the server's `retry-after` across
+    /// so a caller's backoff can honour it rather than guess — and, before any of that,
+    /// keeps the key out of the sentence.
+    ///
+    /// An instance method on purpose: this is the one place that holds both the credential
+    /// and the bytes the server sent back, so it is the only place that can tell whether the
+    /// body is quoting our own `Authorization` header at us. It is, sometimes: services echo
+    /// the offending request into a 401. That sentence then travels into `SystemOneError`,
+    /// out of `POST /decide` as a 400 body a paired phone or a swarm node can read, and onto
+    /// the Settings screen as selectable text. So 401 and 403 lose their body entirely — the
+    /// useful sentence is the same either way — and every other status is scrubbed.
+    func failure(
         status: Int, headers: HTTPURLResponse?, data: Data
     ) -> SystemOneError {
-        let detail = detail(in: data)
+        guard status != 401, status != 403 else { return .http(status, Self.rejectedKey) }
+        let detail = Self.redacting(apiKey, in: Self.detail(in: data))
         guard status == 429 || status == 529 else { return .http(status, detail) }
         return .overloaded(
-            status: status, retryAfter: retryAfter(in: headers), detail: detail
+            status: status, retryAfter: Self.retryAfter(in: headers), detail: detail
         )
     }
 
-    /// `Retry-After` is either a count of seconds or an HTTP date; both are read, and
-    /// anything else is nil so the caller falls back to its own backoff.
+    /// What a rejected key is told, in place of whatever the server said. Deliberately
+    /// fixed text: there is nothing in a 401 body worth the risk of forwarding it.
+    public static let rejectedKey = "TypeSafe rejected this key."
+
+    static func redacting(_ key: String, in text: String) -> String {
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A short "key" would redact ordinary words; a real one is nowhere near this.
+        guard key.count >= 8 else { return text }
+        return text
+            .replacingOccurrences(of: "Bearer \(key)", with: "[redacted]")
+            .replacingOccurrences(of: key, with: "[redacted]")
+    }
+
+    /// How long to wait, in the order the answer is most precise: TypeSafe's own
+    /// `retry-after-ms`, then the standard `Retry-After` as seconds, then as an HTTP date.
+    /// Nil when there is none of the three, and the caller falls back to its own backoff.
     static func retryAfter(in response: HTTPURLResponse?) -> TimeInterval? {
-        guard let raw = (response?.value(forHTTPHeaderField: "Retry-After"))?
-            .trimmingCharacters(in: .whitespaces), !raw.isEmpty
-        else { return nil }
+        guard let response else { return nil }
+        func header(_ name: String) -> String? {
+            let value = response.value(forHTTPHeaderField: name)?
+                .trimmingCharacters(in: .whitespaces)
+            return (value?.isEmpty ?? true) ? nil : value
+        }
+        if let raw = header("retry-after-ms"), let milliseconds = TimeInterval(raw) {
+            return max(0, milliseconds / 1000)
+        }
+        guard let raw = header("Retry-After") else { return nil }
         if let seconds = TimeInterval(raw) { return max(0, seconds) }
         guard let date = httpDateFormatter.date(from: raw) else { return nil }
         return max(0, date.timeIntervalSinceNow)

@@ -317,20 +317,30 @@ distribution and a confidence), or a **score** (a position on an ordered rubric 
 probability-weighted). There is no prose in the answer and nothing to parse. Every question
 is evaluated against the state in parallel, so asking six costs one request.
 
-**Bring your own key.** This is off until you add one. Get a key from
-[console.typesafe.ai](https://console.typesafe.ai/settings/keys), paste it into
-**Settings → TypeSafe (Jev)**, and it goes into this Mac's Keychain in an item of its own.
-It is never written to `settings.json`, `jev.json`, the ledger, a log, a crash report or a
-contract fixture; it is never sent anywhere but `api.typesafe.ai`; and no route of the
-control API will return it. Phones and swarm nodes never receive it — a phone that wants a
-decision calls this Mac's `/decide`, and the Mac is what holds the credential. "Test
-connection" checks the key against `GET /v1/models`, which spends no tokens.
+**Bring your own key, then turn it on.** Two steps, not one. Get a key from
+[console.typesafe.ai](https://console.typesafe.ai/settings/keys) and paste it into
+**Settings → TypeSafe (Jev)**; it goes into this Mac's Keychain in an item of its own.
+Then **Use Jev** has to be on, and so does the switch for the feature you want — a stored key
+is not consent to spend it. Pasting a key into an empty slot turns **Use Jev** on for you and
+says so; you can turn it straight back off. A key alone, with the master switch off, changes
+nothing.
+
+The key is never written to `settings.json`, `jev.json`, the ledger, a log or a contract
+fixture; it is never sent anywhere but `api.typesafe.ai`; no route of the control API will
+return it; and a TypeSafe error that quotes our own request back at us is scrubbed before it
+reaches an error message or the screen. Phones and swarm nodes never receive it — a phone
+that wants a decision calls this Mac's `/decide`, and the Mac is what holds the credential.
+"Test connection" checks the key against `GET /v1/models`, which spends no tokens.
 
 **What is sent.** Only the state the feature in question needs, and its questions. Not your
 files, not your conversations, not your model library, not what else is running. Each feature
 keeps its questions and its thresholds together in one file so you can read the whole policy
-in one place, and the app refuses a state over 120 KB rather than sending it — past about
-that size the model loses accuracy to irrelevant detail anyway. If nothing is enabled or no
+in one place, and the app refuses a state over 64 KB rather than sending it. `jev-1.13`
+allows 32k tokens for the state plus the longest question, and 64k for the state plus all of
+them; bytes are a deliberately pessimistic proxy for tokens, since JSON keys, punctuation and
+non-English text run far closer to one byte per token than to four. 64 KB stays inside both
+budgets with room for a dozen questions — and past that size the model loses accuracy to
+irrelevant detail anyway. If nothing is enabled or no
 key is stored, nothing leaves the Mac and the same questions are answered by the model you
 have loaded, one forward pass each.
 
@@ -359,13 +369,22 @@ input tokens, latency and the answering model version, broken down by feature an
 Settings shows the running line ("This month: 312 calls · 3,104,882 input tokens · about
 $0.13"), and a **monthly budget** stops every feature asking once the month's estimated spend
 reaches it. A new month is a new entry rather than a reset, so last month is still there. A
-cache collapses an identical question asked twice inside ten minutes into one call, and a
-429 or 529 is retried with backoff that honours TypeSafe's `retry-after`.
+cache collapses an identical question asked twice inside ten minutes into one call, two
+identical questions asked at the same moment become one request that both callers share, and
+a 429 or 529 is retried with backoff that honours TypeSafe's `retry-after-ms` or
+`retry-after` (capped at 30 seconds). If the ledger file cannot be written, Settings and
+`GET /jev` say so rather than letting the budget quietly stop counting.
 
 `GET /jev` returns all of it — settings, per-feature availability, the ledger, never the key
 — and the `jev_status` MCP tool prints the same thing. `POST /jev` changes the settings and
 takes this Mac's own control token: a paired phone may read what Jev costs but not decide
 what it spends.
+
+> **If you were already using the `decide` tool with a TypeSafe key:** a stored key used to
+> be enough. It is not any more. `provider: "typesafe"`, and the `auto` fallback when no
+> model is loaded, now need **Use Jev** and the **Decide tool** switch on in
+> Settings → TypeSafe (Jev). The refusal says which one is missing, and `jev_status` shows
+> the lot. The local lane is unchanged.
 
 ---
 

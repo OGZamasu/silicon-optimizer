@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var templateStatus = ""
     @State private var fetchingTemplate = false
     @State private var showingSwarmInvite = false
+    @State private var jevRevision = 0
     @State private var showingSwarmJoin = false
 
     var body: some View {
@@ -307,7 +308,7 @@ struct SettingsView: View {
             }
 
             Section("TypeSafe (Jev)") {
-                TypeSafeKeyRow()
+                TypeSafeKeyRow(onKeyChanged: { jevRevision += 1 })
                 Text(
                     "Optional. Lets the decide tool and POST /decide ask TypeSafe's Jev for typed "
                     + "decisions ($0.042 per million input tokens, output free). Without a key the "
@@ -318,7 +319,9 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 Link("Get a key at console.typesafe.ai", destination: URL(string: "https://console.typesafe.ai/settings/keys")!)
                     .font(.caption)
-                JevSection()
+                // Rebuilt when the key row changes the stored key, so the master toggle
+                // it may just have flipped is on screen rather than one launch behind.
+                JevSection().id(jevRevision)
             }
 
             Section("Model library") {
@@ -1024,25 +1027,50 @@ struct SettingsView: View {
 /// reason to show a credential it already holds — so the row says whether one is stored and
 /// takes a replacement or a removal.
 private struct TypeSafeKeyRow: View {
+    var onKeyChanged: () -> Void = {}
+
     @State private var draft = ""
     @State private var stored = TypeSafeCredential.isSet
     @State private var failed = false
+    @State private var switchedOn = false
 
     var body: some View {
         HStack {
             SecureField(stored ? "Key stored — paste a new one to replace it" : "API key (sk-…)", text: $draft)
                 .textFieldStyle(.roundedBorder)
-            Button(stored && draft.isEmpty ? "Remove" : "Save") {
-                failed = !TypeSafeCredential.write(draft)
-                stored = TypeSafeCredential.isSet
-                draft = ""
-            }
-            .disabled(!stored && draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button(stored && draft.isEmpty ? "Remove" : "Save") { save() }
+                .disabled(!stored && draft.trimmingCharacters(in: .whitespaces).isEmpty)
         }
         if failed {
             Text("The Keychain refused to store the key.")
                 .font(.caption)
                 .foregroundStyle(.red)
+        }
+        if switchedOn {
+            Text("Jev is now on for the decide tool. Turn it off below if you would rather "
+                 + "keep decisions local.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func save() {
+        let hadNoKey = !stored
+        let wantsAKey = !draft.trimmingCharacters(in: .whitespaces).isEmpty
+        failed = !TypeSafeCredential.write(draft)
+        stored = TypeSafeCredential.isSet
+        draft = ""
+        // Pasting a key into an empty slot is somebody saying yes to this, and leaving them
+        // with a stored key and a feature still switched off reads as "it did not work".
+        // Replacing an existing key is not: they may have turned it off on purpose.
+        let turningOn = hadNoKey && wantsAKey && !failed
+        Task {
+            if turningOn {
+                switchedOn = (try? await JevService.shared.update { $0.enabled = true }) != nil
+            } else if !stored {
+                switchedOn = false
+            }
+            onKeyChanged()
         }
     }
 }
@@ -1063,6 +1091,7 @@ private struct JevSection: View {
     @State private var testing = false
     @State private var budgetText = ""
     @State private var saveError: String?
+    @State private var ledgerProblem: String?
 
     var body: some View {
         Group {
@@ -1141,6 +1170,17 @@ private struct JevSection: View {
                 .font(.callout)
                 .monospacedDigit()
 
+            if let ledgerProblem {
+                Label(
+                    "The spend above is this session only — the ledger file could not be "
+                    + "written (\(ledgerProblem)). The monthly budget will not carry across "
+                    + "a restart until that is fixed.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
             if let saveError {
                 Text(saveError)
                     .font(.caption)
@@ -1170,6 +1210,7 @@ private struct JevSection: View {
         month = JevLedger.monthKey()
         totals = await JevService.shared.ledger().month(month)
         keySet = TypeSafeCredential.isSet
+        ledgerProblem = await JevService.shared.ledgerWriteError
         budgetText = settings.monthlyBudgetUSD.map { String(format: "%.2f", $0) } ?? ""
     }
 

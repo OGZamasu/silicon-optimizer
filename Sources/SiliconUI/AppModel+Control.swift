@@ -302,7 +302,11 @@ extension AppModel: ControlHost {
             // `request.model` is deliberately dropped: the version is the owner's choice,
             // pinned in Settings, and a tool call should not be able to move this Mac onto
             // an alias whose answers the thresholds were never tuned against.
-            try await JevService.shared.ask(
+            //
+            // Waited on rather than assumed: a request arriving in the first milliseconds of
+            // launch must not be told there is no key on a Mac that has one.
+            await JevBootstrap.ready()
+            return try await JevService.shared.ask(
                 .decideTool, state: request.state, questions: request.questions
             )
         }
@@ -312,6 +316,7 @@ extension AppModel: ControlHost {
         case "typesafe": return try await typeSafe()
         case "auto":
             if localEndpoint != nil { return try await local() }
+            await JevBootstrap.ready()
             if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
             throw ControlHostError.badRequest(
                 "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "

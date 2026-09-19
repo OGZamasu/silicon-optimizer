@@ -91,10 +91,31 @@ public struct JevThresholds: Codable, Sendable, Equatable {
     public func band(_ confidence: Double) -> JevBand {
         JevService.confidenceBand(confidence, low: confirm, high: act)
     }
+
+    /// The gate for a **noul**, which is a different shape from the one above.
+    ///
+    /// A noul has no `confidence`: the number it returns *is* the answer, the probability
+    /// that the statement holds. 0.5 does not mean "medium intensity", it means the model
+    /// finds yes and no about equally likely — so the certain answers are at *both* ends
+    /// and the useless ones are in the middle. Putting a Choice/Score confidence gate on a
+    /// noul reads 0.05 — a confident no — as no confidence at all.
+    ///
+    /// So: act at `yes` and above (a confident yes) or at `no` and below (a confident no),
+    /// escalate in between. There is no `.confirm` band here; a noul that has landed in the
+    /// middle has nothing to confirm. See TypeSafe's Confidence page and the `jev-1.13`
+    /// jaggedness note on numeric reading.
+    public static func noulBand(_ p: Double, yes: Double, no: Double) -> JevBand {
+        (p >= yes || p <= no) ? .act : .escalate
+    }
 }
 
-/// The convention every feature follows: its questions and its thresholds live together in
-/// one file, `Sources/SiliconUI/Jev/<Feature>Questions.swift`.
+/// What a feature implements to ask Jev something.
+///
+/// The protocol requires only the feature and its questions. The **convention** — which the
+/// protocol cannot enforce and which every feature is nonetheless expected to follow — is
+/// that a feature's questions and its thresholds live together in one file,
+/// `Sources/SiliconUI/Jev/<Feature>Questions.swift`. That directory because the hooks that
+/// call them are in `SiliconUI`; one file because of review.
 ///
 /// This is TypeSafe's own advice, and the reason is review. A question's wording *is* the
 /// behaviour — `jev-1.13` answers what you wrote rather than what you meant — and a
@@ -108,10 +129,14 @@ public protocol JevQuestionSet {
 extension JevQuestionSet {
     /// Asks this set's questions through the one door, so the feature toggle, the budget,
     /// the cache and the ledger all apply without the caller remembering them.
+    ///
+    /// - Parameter service: the app leaves this alone. A feature's own tests pass a
+    ///   `JevService` pointed at a loopback server, so a question set can be exercised
+    ///   end to end without the shared instance or a real key.
     public static func ask(
-        state: JSONContent, cacheKey: String? = nil
+        state: JSONContent, cacheKey: String? = nil, using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await JevService.shared.ask(
+        try await service.ask(
             feature, state: state, questions: questions, cacheKey: cacheKey
         )
     }
@@ -147,9 +172,14 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// How long an identical question keeps its answer. Zero turns the cache off.
     public var cacheMinutes: Int = 10
 
-    /// The largest `state` this app will send. Refused here rather than at TypeSafe: a
-    /// 422 for an oversized body costs a round trip and tells the user nothing, and past
-    /// about this size `jev-1.13` loses accuracy to irrelevant detail anyway.
+    /// The largest `state` this app will send, in bytes — a deliberately pessimistic proxy
+    /// for tokens. `jev-1.13` allows 32k tokens for the state plus the longest question and
+    /// 64k for the state plus *all* the questions, and a byte is not a token: dense prose
+    /// runs near four bytes to a token, but JSON keys, punctuation and non-English text run
+    /// far closer to one. 64 KB stays inside both budgets even at the bad end of that range
+    /// with room left for a dozen questions. Refused here rather than at TypeSafe, because a
+    /// 422 costs a round trip and says nothing useful — and because past this size the model
+    /// loses accuracy to irrelevant detail anyway.
     public var maxStateBytes: Int = JevService.defaultMaxStateBytes
 
     public init() {}
@@ -214,8 +244,11 @@ public struct JevSettings: Codable, Sendable, Equatable {
     }
 
     /// The ledger sits next to the settings, so an override relocates both.
-    public static var ledgerURL: URL {
-        configURL.deletingLastPathComponent().appendingPathComponent("jev-ledger.json")
+    public static var ledgerURL: URL { ledgerURL(besideConfigAt: configURL) }
+
+    /// The pairing rule on its own, so it can be checked without a process-wide variable.
+    public static func ledgerURL(besideConfigAt config: URL) -> URL {
+        config.deletingLastPathComponent().appendingPathComponent("jev-ledger.json")
     }
 
     /// A missing or unreadable file reads as the defaults — off, nothing spent — which is
@@ -230,9 +263,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
 
     public func save(to url: URL = configURL) throws {
         let data = try JevService.encoder.encode(self)
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
+        try JevService.prepareDirectory(for: url)
         try data.write(to: url, options: .atomic)
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: url.path
@@ -356,9 +387,7 @@ public struct JevLedger: Codable, Sendable, Equatable {
 
     public func save(to url: URL = JevSettings.ledgerURL) throws {
         let data = try JevService.encoder.encode(self)
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
+        try JevService.prepareDirectory(for: url)
         try data.write(to: url, options: .atomic)
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: url.path
@@ -388,7 +417,10 @@ public enum JevError: Error, LocalizedError, Equatable {
                 spent, budget
             )
         case .tooLarge(let bytes, let limit):
-            "That state is \(bytes / 1024) KB; Jev is sent at most \(limit / 1024) KB. Filter it down to what the question needs."
+            String(
+                format: "That state is %.1f KB; Jev is sent at most %.1f KB. Filter it down to what the question needs.",
+                Double(bytes) / 1024, Double(limit) / 1024
+            )
         }
     }
 }
@@ -416,17 +448,28 @@ public actor JevService {
     /// but not the default — see `JevSettings.model`.
     public static let allowedModels = [pinnedModel, "jev-latest", "jev-preview"]
 
-    public static let defaultMaxStateBytes = 120 * 1024
-    /// `jev-1.13` allows 32k tokens for the state plus the longest question. This is the
-    /// ceiling a setting may be raised to, well under that, because accuracy falls off with
-    /// irrelevant detail long before the context does.
-    public static let hardMaxStateBytes = 512 * 1024
+    public static let defaultMaxStateBytes = 64 * 1024
+    /// The ceiling the setting may be raised to. `jev-1.13` allows 32k tokens for the state
+    /// plus the longest question, and bytes are a pessimistic proxy for tokens — at one byte
+    /// per token, which is where JSON and non-English text land, 96 KB is already past that
+    /// budget. Nobody should need it, and nothing above it can be asked for.
+    public static let hardMaxStateBytes = 96 * 1024
 
     /// Total attempts, not retries: one call, then at most two more on 429/529.
     public static let maximumAttempts = 3
     /// However long a `retry-after` asks for, this app waits at most this long before
     /// giving the caller its error back. A UI feature cannot sit on a request for an hour.
     public static let maximumBackoffSeconds: TimeInterval = 30
+
+    /// Both files are user-only, and so is the directory holding them. 0600 on a file
+    /// inside a world-readable directory still leaks the fact of the file and its size.
+    static func prepareDirectory(for url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+    }
 
     static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
@@ -450,9 +493,26 @@ public actor JevService {
     private var loadedLedger: JevLedger?
     private var cache: [String: CacheEntry] = [:]
 
-    /// What the last `ask` actually waited between attempts. Exposed so a test can prove
-    /// the backoff honoured a `retry-after` instead of timing it.
+    /// What the last completed `ask` waited between attempts. The authority is the value
+    /// `send` returns; this is a mirror for the Settings debug line and for tests, and with
+    /// two asks in flight it is whichever finished last.
     public private(set) var lastRetryDelays: [TimeInterval] = []
+
+    /// Why the ledger could not be written, if it could not. A silent failure here would
+    /// mean the budget quietly stopped counting — the one thing a spending cap must not do
+    /// — so it is surfaced in `GET /jev` and on the Settings screen.
+    public private(set) var ledgerWriteError: String?
+
+    public var ledgerWriteFailed: Bool { ledgerWriteError != nil }
+
+    /// Requests on the wire right now, keyed the same way the cache is. A second identical
+    /// ask joins the first rather than paying for it again.
+    private var inFlight: [String: Task<ControlAPI.DecideResponse, any Error>] = [:]
+
+    /// What those in-flight requests might still add to the month, estimated from the bytes
+    /// going out. Without it a burst of concurrent asks all read the same spent figure and
+    /// all pass a cap they collectively break.
+    private var reservedUSD: Double = 0
 
     private struct CacheEntry {
         var response: ControlAPI.DecideResponse
@@ -493,10 +553,10 @@ public actor JevService {
         // Re-read the files: a caller that repoints the store must not inherit the previous
         // location's settings from this actor's cache.
         self.configURL = configURL ?? JevSettings.configURL
-        ledgerURL = self.configURL.deletingLastPathComponent()
-            .appendingPathComponent("jev-ledger.json")
+        ledgerURL = JevSettings.ledgerURL(besideConfigAt: self.configURL)
         loadedSettings = nil
         loadedLedger = nil
+        ledgerWriteError = nil
         cache.removeAll()
         lastRetryDelays = []
     }
@@ -537,7 +597,7 @@ public actor JevService {
     public func isAvailable(_ feature: JevFeature) -> Bool {
         let settings = settings()
         guard settings.enabled, settings.isOn(feature), hasKey() else { return false }
-        return remainingBudgetUSD(settings) ?? .infinity > 0
+        return (remainingBudgetUSD(settings) ?? .infinity) > 0
     }
 
     private func hasKey() -> Bool {
@@ -545,10 +605,11 @@ public actor JevService {
         return keyProvider() != nil
     }
 
-    /// Nil means no cap was set. Otherwise what is left of it this month.
+    /// Nil means no cap was set. Otherwise what is left of it this month, counting what is
+    /// already on the wire as if it had landed.
     private func remainingBudgetUSD(_ settings: JevSettings) -> Double? {
         guard let budget = settings.monthlyBudgetUSD else { return nil }
-        return budget - ledger().spentUSD()
+        return budget - ledger().spentUSD() - reservedUSD
     }
 
     // MARK: The gate
@@ -586,7 +647,7 @@ public actor JevService {
         let settings = settings()
         guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
 
-        var request = ControlAPI.DecideRequest(
+        let request = ControlAPI.DecideRequest(
             state: state, questions: questions, model: settings.model, provider: "typesafe"
         )
         try request.validate()
@@ -599,8 +660,10 @@ public actor JevService {
 
         if let budget = settings.monthlyBudgetUSD {
             let spent = ledger().spentUSD()
-            guard spent < budget else {
-                throw JevError.budgetExhausted(spentUSD: spent, budgetUSD: budget)
+            // Counting the calls already on the wire is what stops ten concurrent asks all
+            // reading the same figure and all deciding there is room.
+            guard spent + reservedUSD < budget else {
+                throw JevError.budgetExhausted(spentUSD: spent + reservedUSD, budgetUSD: budget)
             }
         }
         guard hasKey() else { throw JevError.noKey }
@@ -613,27 +676,71 @@ public actor JevService {
             return hit.response
         }
 
-        guard let apiKey = keyProvider() else { throw JevError.noKey }
-        request.model = settings.model
+        // Already on the wire: join it rather than send the same bytes twice. Two features
+        // asking the same question about the same file at the same moment is the ordinary
+        // case, not the exotic one, and the cache cannot help until the first lands.
+        if let existing = inFlight[key] {
+            debug("\(feature.rawValue) joined a call already in flight")
+            return try await existing.value
+        }
 
-        let response = try await send(request, apiKey: apiKey, feature: feature)
+        guard let apiKey = keyProvider() else { throw JevError.noKey }
+
+        // The ledger's location is captured here rather than read at the end: a `configure`
+        // that lands mid-flight must not write this call's cost to a different file.
+        let ledgerURL = self.ledgerURL
+        let reservation = JevLedger.cost(inputTokens: Self.estimatedTokens(bytes: bytes))
+        reservedUSD += reservation
+        let work = Task<ControlAPI.DecideResponse, any Error> { [request, apiKey, feature] in
+            try await self.send(request, apiKey: apiKey, feature: feature)
+        }
+        inFlight[key] = work
+
+        let response: ControlAPI.DecideResponse
+        do {
+            response = try await work.value
+        } catch {
+            inFlight.removeValue(forKey: key)
+            reservedUSD = max(0, reservedUSD - reservation)
+            throw error
+        }
+        inFlight.removeValue(forKey: key)
+        reservedUSD = max(0, reservedUSD - reservation)
 
         if settings.cacheMinutes > 0 {
             cache[key] = CacheEntry(response: response, storedAt: Date())
             pruneCache(window: Double(settings.cacheMinutes) * 60)
         }
-        record(feature: feature, response: response)
+        // Only the originator records: a joined caller shares the answer and the cost, and
+        // billing it twice would be a lie the budget then acts on.
+        record(feature: feature, response: response, to: ledgerURL)
         return response
     }
+
+    /// Bytes to tokens for the budget reservation only. One token per byte is the worst
+    /// realistic ratio (JSON keys, punctuation, CJK), and over-reserving is the safe way to
+    /// be wrong about a spending cap.
+    static func estimatedTokens(bytes: Int) -> Int { bytes }
 
     /// The request, plus the backoff. 429 and 529 mean "later", so this waits — honouring
     /// `retry-after` when TypeSafe sends one — and tries again, at most twice. Every other
     /// status is the caller's problem and comes straight back.
+    ///
+    /// The delays are returned rather than accumulated in a property, so two asks in flight
+    /// cannot interleave into one list.
     private func send(
         _ request: ControlAPI.DecideRequest, apiKey: String, feature: JevFeature
     ) async throws -> ControlAPI.DecideResponse {
+        let (response, delays) = try await attempt(request, apiKey: apiKey, feature: feature)
+        lastRetryDelays = delays
+        return response
+    }
+
+    private func attempt(
+        _ request: ControlAPI.DecideRequest, apiKey: String, feature: JevFeature
+    ) async throws -> (ControlAPI.DecideResponse, [TimeInterval]) {
         let client = SystemOneClient(baseURL: baseURL, apiKey: apiKey, session: session)
-        lastRetryDelays = []
+        var delays: [TimeInterval] = []
         var attempt = 1
         while true {
             do {
@@ -643,15 +750,17 @@ public actor JevService {
                     + " · \(response.usage.inputTokens) input tokens"
                     + " · \(Int(response.latencyMS ?? 0)) ms · \(response.model)"
                 )
-                return response
+                return (response, delays)
             } catch let error as SystemOneError {
                 guard case .overloaded(let status, let retryAfter, _) = error,
                       attempt < Self.maximumAttempts
                 else { throw error }
+                // Capped: a server asking for an hour is asking for more than a UI feature
+                // can give it, and the caller is better off with the error.
                 let delay = min(
                     retryAfter ?? Self.backoffSeconds(attempt), Self.maximumBackoffSeconds
                 )
-                lastRetryDelays.append(delay)
+                delays.append(delay)
                 debug("\(feature.rawValue) HTTP \(status), retrying in \(delay)s (attempt \(attempt))")
                 await sleeper(delay)
                 attempt += 1
@@ -664,7 +773,9 @@ public actor JevService {
         pow(2, Double(max(0, attempt - 1)))
     }
 
-    private func record(feature: JevFeature, response: ControlAPI.DecideResponse) {
+    private func record(
+        feature: JevFeature, response: ControlAPI.DecideResponse, to url: URL
+    ) {
         var ledger = ledger()
         ledger.record(
             feature: feature, inputTokens: response.usage.inputTokens,
@@ -672,7 +783,15 @@ public actor JevService {
             latencyMS: response.latencyMS ?? 0, model: response.model
         )
         loadedLedger = ledger
-        try? ledger.save(to: ledgerURL)
+        do {
+            try ledger.save(to: url)
+            ledgerWriteError = nil
+        } catch {
+            // Not swallowed: an unwritable ledger means the budget stops counting between
+            // launches, and a spending cap that quietly stops counting is worse than none.
+            ledgerWriteError = error.localizedDescription
+            debug("ledger write failed: \(error.localizedDescription)")
+        }
     }
 
     /// The model names this key can send. Used by the Settings "Test connection" button,

@@ -17,8 +17,9 @@ struct SystemOneWireTests {
                     type: "choice", instructions: .string("Which team"),
                     criteria: .object(["billing": .string("Payment issues"), "technical": .null])
                 ),
-                "urgent": .init(type: "noul"),
-                "anger": .init(type: "score", criteria: .array([.string("Calm"), .string("Angry")])),
+                "urgent": .init(type: "noul", instructions: .string("Is this urgent?")),
+                "anger": .init(type: "score", instructions: .string("How angry?"),
+                               criteria: .array([.string("Calm"), .string("Angry")])),
             ],
             provider: "typesafe"
         )
@@ -26,7 +27,9 @@ struct SystemOneWireTests {
         #expect(Set(body.keys) == ["state", "model", "questions"])
         #expect(body["model"] as? String == "jev-latest")
         let questions = body["questions"] as! [String: [String: Any]]
-        #expect(questions["urgent"]! as NSDictionary == ["type": "noul"] as NSDictionary)
+        #expect(questions["urgent"]?["type"] as? String == "noul")
+        #expect(questions["urgent"]?["instructions"] as? String == "Is this urgent?")
+        #expect(questions["urgent"]?["criteria"] == nil)
         let department = questions["department"]!
         #expect(department["type"] as? String == "choice")
         #expect((department["criteria"] as! [String: Any])["technical"] is NSNull)
@@ -65,15 +68,63 @@ struct SystemOneWireTests {
     @Test func malformedQuestionsAreNamed() {
         let bad = ControlAPI.DecideRequest(
             state: .string("x"),
-            questions: ["mood": .init(type: "choice")]
+            questions: ["mood": .init(type: "choice", instructions: .string("Which mood?"))]
         )
         #expect(throws: ControlAPI.SystemOneValidationError.self) { try bad.validate() }
         let empty = ControlAPI.DecideRequest(state: .string("x"), questions: [:])
         #expect(throws: ControlAPI.SystemOneValidationError.self) { try empty.validate() }
         let score = ControlAPI.DecideRequest(
-            state: .string("x"), questions: ["s": .init(type: "score", criteria: .array([]))]
+            state: .string("x"),
+            questions: ["s": .init(type: "score", instructions: .string("How bad?"),
+                                   criteria: .array([]))]
         )
         #expect(throws: ControlAPI.SystemOneValidationError.self) { try score.validate() }
+
+        // And the instruction itself is required, on all three kinds. A rubric with no
+        // question attached is not a question: `jev-1.13` answers what was written.
+        for kind in [
+            ControlAPI.SystemOneQuestion(type: "noul"),
+            .init(type: "choice", criteria: .object(["a": .null])),
+            .init(type: "score", criteria: .array([.string("low"), .string("high")])),
+            .init(type: "noul", instructions: .string("   ")),
+            .init(type: "noul", instructions: .null),
+        ] {
+            #expect(throws: ControlAPI.SystemOneValidationError.self) {
+                try kind.validate(name: "q")
+            }
+        }
+    }
+
+    /// The accessors a feature reads answers with, including what they do when the id is
+    /// wrong — which is the whole reason they exist.
+    @Test func typedAccessorsReadAnswersOrSayWhyNot() throws {
+        let response = ControlAPI.DecideResponse(
+            model: "jev-1.13.0", usage: .init(inputTokens: 10, outputTokens: 1),
+            answers: [
+                "refund": .noul(0.93),
+                "team": .choice(choice: "billing", confidence: 0.82,
+                                probabilities: ["billing": 0.82, "tech": 0.18]),
+                "urgency": .score(score: 1.7, confidence: 0.78,
+                                  legend: ["0": .string("Can wait"), "1": .string("Today")],
+                                  probabilities: ["0": 0.3, "1": 0.7]),
+            ]
+        )
+        #expect(try response.noul("refund") == 0.93)
+        let team = try response.choice("team")
+        #expect(team.choice == "billing" && team.confidence == 0.82)
+        #expect(team.probabilities["tech"] == 0.18)
+        let urgency = try response.score("urgency")
+        #expect(urgency.score == 1.7 && urgency.legend["1"] == .string("Today"))
+        #expect(urgency.probabilities["1"] == 0.7)
+
+        // A misspelled id is an error, not a silently skipped branch.
+        #expect(throws: ControlAPI.SystemOneAnswerError.missing("refunds", "noul")) {
+            try response.noul("refunds")
+        }
+        #expect(throws: ControlAPI.SystemOneAnswerError.wrongKind(
+            "refund", expected: "choice", found: "noul"
+        )) { try response.choice("refund") }
+        #expect(throws: ControlAPI.SystemOneAnswerError.self) { try response.score("team") }
     }
 
     @Test func promptTextIsStableForObjects() {
@@ -107,7 +158,8 @@ struct LocalDeciderTests {
     @Test func scoreAndNoulPlans() throws {
         let score = try LocalDecider.plan(
             name: "urgency",
-            question: .init(type: "score", criteria: .array([.string("Can wait"), .string("Today")])),
+            question: .init(type: "score", instructions: .string("How urgent?"),
+                            criteria: .array([.string("Can wait"), .string("Today")])),
             state: state
         )
         #expect(score.keys == ["0", "1"])
@@ -128,7 +180,10 @@ struct LocalDeciderTests {
         let labels = Dictionary(uniqueKeysWithValues: (0..<27).map { ("label\($0)", JSONContent.null) })
         #expect(throws: SystemOneError.self) {
             try LocalDecider.plan(
-                name: "big", question: .init(type: "choice", criteria: .object(labels)), state: state
+                name: "big",
+                question: .init(type: "choice", instructions: .string("Which label?"),
+                                criteria: .object(labels)),
+                state: state
             )
         }
     }
@@ -148,20 +203,29 @@ struct LocalDeciderTests {
 
     @Test func answersFollowTheDistribution() throws {
         let choice = try LocalDecider.plan(
-            name: "c", question: .init(type: "choice", criteria: .object(["no": .null, "yes": .null])), state: state
+            name: "c",
+            question: .init(type: "choice", instructions: .string("Yes or no?"),
+                            criteria: .object(["no": .null, "yes": .null])),
+            state: state
         )
         #expect(LocalDecider.answer(for: choice, probabilities: [0.3, 0.7])
             == .choice(choice: "yes", confidence: 0.7, probabilities: ["no": 0.3, "yes": 0.7]))
 
         let score = try LocalDecider.plan(
-            name: "s", question: .init(type: "score", criteria: .array([.string("0"), .string("1"), .string("2")])), state: state
+            name: "s",
+            question: .init(type: "score", instructions: .string("How much?"),
+                            criteria: .array([.string("0"), .string("1"), .string("2")])),
+            state: state
         )
         guard case .score(let expected, let confidence, _, _) = LocalDecider.answer(for: score, probabilities: [0.1, 0.1, 0.8]) else {
             Issue.record("expected a score"); return
         }
         #expect(abs(expected - 1.7) < 1e-9 && confidence == 0.8)
 
-        let noul = try LocalDecider.plan(name: "n", question: .init(type: "noul"), state: state)
+        let noul = try LocalDecider.plan(
+            name: "n", question: .init(type: "noul", instructions: .string("Is it so?")),
+            state: state
+        )
         #expect(LocalDecider.answer(for: noul, probabilities: [0.9, 0.1]) == .noul(0.9))
     }
 
@@ -182,8 +246,9 @@ struct LocalDeciderTests {
         let response = try await decider.decide(.init(
             state: state,
             questions: [
-                "refund": .init(type: "noul"),
-                "team": .init(type: "choice", criteria: .object(["billing": .null, "tech": .null])),
+                "refund": .init(type: "noul", instructions: .string("Asks for a refund?")),
+                "team": .init(type: "choice", instructions: .string("Which team?"),
+                              criteria: .object(["billing": .null, "tech": .null])),
             ]
         ))
         #expect(response.provider == "local" && response.model == "Test 1B")
@@ -209,7 +274,10 @@ struct SystemOneClientTests {
         let client = SystemOneClient(
             baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: "sk-test"
         )
-        let response = try await client.decide(.init(state: .string("s"), questions: ["ok": .init(type: "noul")]))
+        let response = try await client.decide(.init(
+            state: .string("s"),
+            questions: ["ok": .init(type: "noul", instructions: .string("Is it ok?"))]
+        ))
         #expect(response.answers["ok"] == .noul(0.42))
         #expect(response.provider == "127.0.0.1")
         #expect(response.latencyMS ?? 0 > 0)
@@ -227,15 +295,110 @@ struct SystemOneClientTests {
         defer { server.stop() }
         let client = SystemOneClient(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: "k")
         await #expect(throws: SystemOneError.http(422, "body.questions.x.criteria: Field required")) {
-            try await client.decide(.init(state: .string("s"), questions: ["x": .init(type: "noul")]))
+            try await client.decide(.init(
+                state: .string("s"),
+                questions: ["x": .init(type: "noul", instructions: .string("Is it x?"))]
+            ))
         }
     }
 
     @Test func refusesWithoutAKey() async {
         let client = SystemOneClient(apiKey: "  ")
         await #expect(throws: SystemOneError.noAPIKey) {
-            try await client.decide(.init(state: .string("s"), questions: ["x": .init(type: "noul")]))
+            try await client.decide(.init(
+                state: .string("s"),
+                questions: ["x": .init(type: "noul", instructions: .string("Is it x?"))]
+            ))
         }
+    }
+
+    /// Services echo the offending request into a 401, `Authorization` header and all. That
+    /// body used to travel straight into the error, out of `POST /decide` as a 400 a paired
+    /// phone could read, and onto the Settings screen as selectable text.
+    @Test func aServerThatEchoesTheKeyBackDoesNotGetToPublishIt() async throws {
+        let key = "sk-live-0123456789abcdefghijklmnop"
+        for status in [401, 403] {
+            let server = try CapturingServer { request, _ in
+                .init(
+                    status: status,
+                    body: #"{"detail":"Bad credentials on \#(request.headers["authorization"] ?? "")"}"#
+                )
+            }
+            defer { server.stop() }
+            let client = SystemOneClient(
+                baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: key
+            )
+            for attempt in [
+                { try await client.decide(.init(
+                    state: .string("s"),
+                    questions: ["x": .init(type: "noul", instructions: .string("Is it x?"))]
+                )) as Any },
+                { try await client.models() as Any },
+            ] {
+                await #expect(throws: (any Error).self) { try await attempt() }
+                do {
+                    _ = try await attempt()
+                } catch {
+                    let text = "\(error) \(error.localizedDescription)"
+                    #expect(!text.contains(key), "HTTP \(status) leaked the key")
+                    #expect(!text.contains("Bearer"), "HTTP \(status) leaked the header")
+                    #expect(text.contains(SystemOneClient.rejectedKey))
+                }
+            }
+        }
+    }
+
+    /// Any other status keeps its detail, because it is useful — but scrubbed, because the
+    /// body is the server's and the key is ours.
+    @Test func otherStatusesKeepTheirDetailWithTheKeyScrubbedOut() async throws {
+        let key = "sk-live-0123456789abcdefghijklmnop"
+        let server = try CapturingServer { request, _ in
+            .init(
+                status: 422,
+                body: #"{"detail":"rejected \#(request.headers["authorization"] ?? "") for questions.x"}"#
+            )
+        }
+        defer { server.stop() }
+        let client = SystemOneClient(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: key
+        )
+        do {
+            _ = try await client.decide(.init(
+                state: .string("s"),
+                questions: ["x": .init(type: "noul", instructions: .string("Is it x?"))]
+            ))
+            Issue.record("a 422 should have thrown")
+        } catch {
+            let text = "\(error) \(error.localizedDescription)"
+            #expect(!text.contains(key) && !text.contains("Bearer"))
+            #expect(text.contains("[redacted]"))
+            #expect(text.contains("for questions.x"))
+        }
+        // A short string is not redacted — otherwise an ordinary word in a body would be.
+        #expect(SystemOneClient.redacting("ab", in: "a body about ab") == "a body about ab")
+    }
+
+    /// Three ways to say "come back later", in order of precision.
+    @Test func retryAfterReadsMillisecondsThenSecondsThenADate() {
+        func response(_ headers: [String: String]) -> HTTPURLResponse? {
+            HTTPURLResponse(
+                url: URL(string: "https://api.typesafe.ai/v1/systemone")!, statusCode: 429,
+                httpVersion: nil, headerFields: headers
+            )
+        }
+        #expect(SystemOneClient.retryAfter(in: response(["retry-after-ms": "250"])) == 0.25)
+        // Milliseconds win when both are sent: they are the more precise answer.
+        #expect(SystemOneClient.retryAfter(
+            in: response(["retry-after-ms": "250", "Retry-After": "9"])
+        ) == 0.25)
+        #expect(SystemOneClient.retryAfter(in: response(["Retry-After": "9"])) == 9)
+        let soon = SystemOneClient.retryAfter(
+            in: response(["Retry-After": "Fri, 18 Sep 2099 09:41:00 GMT"])
+        )
+        #expect((soon ?? 0) > 0)
+        #expect(SystemOneClient.retryAfter(in: response(["Retry-After": "whenever"])) == nil)
+        #expect(SystemOneClient.retryAfter(in: response([:])) == nil)
+        #expect(SystemOneClient.retryAfter(in: nil) == nil)
     }
 }
 

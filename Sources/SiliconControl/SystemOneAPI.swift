@@ -101,6 +101,21 @@ extension ControlAPI {
             guard Self.kinds.contains(type) else {
                 throw SystemOneValidationError(name: name, reason: "type must be noul, choice or score, not \"\(type)\".")
             }
+            // Required on all three kinds. A question with nothing in `instructions` is a
+            // rubric with no question attached: Jev answers what was written, so there has
+            // to be something written, and the local lane would otherwise fall back to a
+            // generic sentence that means whatever the reader hopes it means.
+            guard let instructions, !instructions.isNull else {
+                throw SystemOneValidationError(
+                    name: name, reason: "instructions are required: say what is being judged."
+                )
+            }
+            if let text = instructions.stringValue,
+               text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw SystemOneValidationError(
+                    name: name, reason: "instructions are empty: say what is being judged."
+                )
+            }
             switch type {
             case "choice":
                 guard let labels = criteria?.objectValue, !labels.isEmpty else {
@@ -214,7 +229,10 @@ extension ControlAPI {
     public struct DecideRequest: Codable, Sendable {
         public var state: JSONContent
         public var questions: [String: SystemOneQuestion]
-        /// TypeSafe model alias; ignored by the local lane. Defaults to `jev-latest`.
+        /// Which TypeSafe model answers. Set by this app on the way out, not read on the
+        /// way in: the local lane has no aliases, and the Jev lane uses the version pinned
+        /// in Settings → TypeSafe (Jev) so a tool call cannot move this Mac onto an alias
+        /// the thresholds were never tuned against. Absent means `jev-latest` on the wire.
         public var model: String?
         /// `auto` (the model loaded here, else TypeSafe when a key is set), `local`, or
         /// `typesafe`.
@@ -261,6 +279,68 @@ extension ControlAPI {
         private enum CodingKeys: String, CodingKey {
             case model, usage, answers, provider
             case latencyMS = "latency_ms"
+        }
+
+        // MARK: Reading answers
+
+        /// The probability that a noul question's statement holds, 0 to 1.
+        ///
+        /// These three exist so a feature is not written against
+        /// `if case .noul(let p) = response.answers["x"]`, which silently does nothing when
+        /// the id is misspelled or the question kind changed. A mismatch throws, by name.
+        public func noul(_ id: String) throws -> Double {
+            guard let answer = answers[id] else { throw SystemOneAnswerError.missing(id, "noul") }
+            guard case .noul(let value) = answer else {
+                throw SystemOneAnswerError.wrongKind(id, expected: "noul", found: answer.type)
+            }
+            return value
+        }
+
+        public func choice(
+            _ id: String
+        ) throws -> (choice: String, confidence: Double, probabilities: [String: Double]) {
+            guard let answer = answers[id] else { throw SystemOneAnswerError.missing(id, "choice") }
+            guard case .choice(let choice, let confidence, let probabilities) = answer else {
+                throw SystemOneAnswerError.wrongKind(id, expected: "choice", found: answer.type)
+            }
+            return (choice, confidence, probabilities)
+        }
+
+        public func score(
+            _ id: String
+        ) throws -> (
+            score: Double, confidence: Double,
+            probabilities: [String: Double], legend: [String: JSONContent]
+        ) {
+            guard let answer = answers[id] else { throw SystemOneAnswerError.missing(id, "score") }
+            guard case .score(let score, let confidence, let legend, let probabilities) = answer
+            else {
+                throw SystemOneAnswerError.wrongKind(id, expected: "score", found: answer.type)
+            }
+            return (score, confidence, probabilities, legend)
+        }
+    }
+
+    /// What the typed accessors throw: the answer was not there, or was not that kind.
+    public struct SystemOneAnswerError: Error, LocalizedError, Equatable {
+        public var name: String
+        public var expected: String
+        /// The kind that was actually returned, or nil when there was no answer at all.
+        public var found: String?
+
+        public static func missing(_ name: String, _ expected: String) -> Self {
+            Self(name: name, expected: expected, found: nil)
+        }
+
+        public static func wrongKind(_ name: String, expected: String, found: String) -> Self {
+            Self(name: name, expected: expected, found: found)
+        }
+
+        public var errorDescription: String? {
+            guard let found else {
+                return "No answer came back for question \"\(name)\"; a \(expected) was expected."
+            }
+            return "Question \"\(name)\" answered with a \(found), not a \(expected)."
         }
     }
 }

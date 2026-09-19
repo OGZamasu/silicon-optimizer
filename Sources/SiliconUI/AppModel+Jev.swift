@@ -10,11 +10,23 @@ import SiliconRuntime
 /// so it is given as a closure called at the moment a request is about to be sent;
 /// `TypeSafeCredential.isSet` answers "is there one?" from item attributes alone and never
 /// prompts, which is what Settings and `isAvailable` use while drawing.
-extension AppModel {
+/// Hands `JevService` its key provider, once, and gives everything that depends on it
+/// something to wait for.
+///
+/// The configuration crosses onto an actor, so it cannot be finished synchronously from
+/// `AppModel.start()`. Without a handle to wait on, a `/decide` arriving in the first
+/// milliseconds of launch could be answered "no key" on a Mac that has one — the control
+/// server's own start is a `Task` too, and nothing orders the two. So the work is kept as a
+/// task and every entry point that needs a configured service awaits it first. `start()` is
+/// called before the control server, so in practice this has already finished by the time
+/// anyone asks.
+@MainActor
+enum JevBootstrap {
+    private static var task: Task<Void, Never>?
 
-    /// Called once at start. Costs nothing — no Keychain read, no file read, no network.
-    func configureJev() {
-        Task {
+    static func begin() {
+        guard task == nil else { return }
+        task = Task {
             await JevService.shared.configure(
                 keyProvider: { TypeSafeCredential.read() },
                 keyIsSet: { TypeSafeCredential.isSet }
@@ -22,13 +34,25 @@ extension AppModel {
         }
     }
 
+    /// Returns once the shared service has its key provider. Cheap after the first call,
+    /// and a no-op in a test that never started the app.
+    static func ready() async { await task?.value }
+}
+
+extension AppModel {
+
+    /// Called once at start. Costs nothing — no Keychain read, no file read, no network.
+    func configureJev() { JevBootstrap.begin() }
+
     // MARK: - Control routes
 
     public func jevStatus() async -> ControlAPI.JevStatus {
-        await Self.jevStatus(from: JevService.shared)
+        await JevBootstrap.ready()
+        return await Self.jevStatus(from: JevService.shared)
     }
 
     public func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus {
+        await JevBootstrap.ready()
         // Checked before the edit rather than inside it. `normalized()` would quietly fall
         // back to the pin, and silently storing something other than what was asked for is
         // worse than refusing: an unknown model name is a 422 on every later call.
@@ -99,7 +123,8 @@ extension AppModel {
             inputTokens: totals.total.inputTokens,
             estimatedUSD: totals.total.estimatedUSD,
             models: totals.models,
-            monthlyUSD: ledger.months.mapValues(\.total.estimatedUSD)
+            monthlyUSD: ledger.months.mapValues(\.total.estimatedUSD),
+            ledgerWriteFailed: await service.ledgerWriteFailed
         )
     }
 }

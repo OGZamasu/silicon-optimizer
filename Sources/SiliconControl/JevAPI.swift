@@ -69,13 +69,17 @@ extension ControlAPI {
         /// Every month the ledger has, as month key → estimated dollars. The detail is kept
         /// for the current month; this is what a client needs to draw a history.
         public var monthlyUSD: [String: Double]
+        /// True when the last call could not be written to the ledger file. The numbers
+        /// above are then only as good as this session, and the budget stops counting at
+        /// the next launch — which is why it is reported rather than swallowed.
+        public var ledgerWriteFailed: Bool
 
         public init(
             enabled: Bool, model: String, availableModels: [String], keySet: Bool,
             monthlyBudgetUSD: Double?, budgetRemainingUSD: Double?, cacheMinutes: Int,
             maxStateBytes: Int, features: [Feature], month: String, calls: Int,
             inputTokens: Int, estimatedUSD: Double, models: [String: Int],
-            monthlyUSD: [String: Double] = [:]
+            monthlyUSD: [String: Double] = [:], ledgerWriteFailed: Bool = false
         ) {
             self.enabled = enabled
             self.model = model
@@ -92,6 +96,7 @@ extension ControlAPI {
             self.estimatedUSD = estimatedUSD
             self.models = models
             self.monthlyUSD = monthlyUSD
+            self.ledgerWriteFailed = ledgerWriteFailed
         }
     }
 

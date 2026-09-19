@@ -233,12 +233,13 @@ enum Tools {
                 {"type":"choice","instructions":"…","criteria":{"label":"when it applies",…}} \
                 picks a label; {"type":"score","instructions":"…","criteria":["level 0","level \
                 1",…]} rates on an ordered rubric and returns the expected level. Ask several \
-                questions in one call. By default the model loaded on this Mac answers (one \
-                forward pass per question, nothing leaves the machine, uncalibrated \
-                probabilities); provider "typesafe" asks Jev instead (calibrated, ~$0.0003 \
-                per call). The Jev lane is governed by Settings → TypeSafe (Jev) on the Mac: \
-                the master switch, the decide-tool switch, the pinned model version, the \
-                state size limit and the monthly budget all apply, and every call is recorded \
+                questions in one call. Every question needs instructions saying what is being \
+                judged. By default the model loaded on this Mac answers (one forward pass per \
+                question, nothing leaves the machine, uncalibrated probabilities); provider \
+                "typesafe" asks Jev instead (calibrated, ~$0.0003 per call). The Jev lane is \
+                governed by Settings → TypeSafe (Jev) on the Mac: the master switch, the \
+                decide-tool switch, the pinned model version, the state size limit and the \
+                monthly budget all apply, and every call is recorded \
                 in that ledger. If it refuses, call jev_status to see which of those said no. \
                 Use it for routing, gating, scoring and classification inside a loop, not for \
                 anything that needs generated text.
@@ -258,9 +259,6 @@ enum Tools {
                     ),
                 ]),
                 "provider": property("string", "auto (default), local, or typesafe."),
-                "model": property("string",
-                    "Ignored. The local lane uses the loaded model and the Jev lane uses the "
-                    + "version pinned in Settings → TypeSafe (Jev)."),
             ],
             required: ["state", "questions"]
         ),
@@ -814,7 +812,9 @@ enum Tools {
             // going through bytes once; a malformed question fails right here, by name.
             var envelope: [String: JSONValue] = ["state": state, "questions": .object(questions)]
             if let provider = arguments["provider"]?.stringValue { envelope["provider"] = .string(provider) }
-            if let model = arguments["model"]?.stringValue { envelope["model"] = .string(model) }
+            // No `model`: the local lane uses what is loaded and the Jev lane uses the
+            // version pinned in Settings, so accepting one here would be a promise this
+            // tool cannot keep.
             let request: ControlAPI.DecideRequest
             do {
                 request = try JSONDecoder().decode(
