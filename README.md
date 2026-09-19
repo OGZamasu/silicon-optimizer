@@ -1223,6 +1223,23 @@ Scripts/build-app.sh            # assemble Silicon Optimizer.app into build/
 Scripts/build-app.sh --install  # ...and replace the copy in ~/Applications
 ```
 
+Local builds are signed ad hoc, and macOS files an ad-hoc app under a hash of that exact build.
+The Keychain does too, so after every rebuild the app has to ask for your login password again
+before it can read the saved Hugging Face token or TypeSafe key, and "Always Allow" only lasts
+until the next build. Sign with an Apple-issued identity and the app is filed under your Team ID
+instead: the first build signed that way asks once more, and later builds don't ask at all. A
+free Apple Development certificate is enough (Xcode → Settings → Accounts → your Apple ID →
+Manage Certificates → + → Apple Development):
+
+```bash
+security find-identity -v -p codesigning   # copy the "Apple Development: …" name
+Scripts/build-app.sh --release --dev-sign "Apple Development: Your Name (TEAMID)" --install
+```
+
+`--dev-sign` changes the signature and nothing else. `SILICON_DEV_SIGN_IDENTITY` does the same
+for scripts that call `build-app.sh`, and `--sign` (distribution) ignores it. A self-signed
+certificate doesn't help: it has no Team ID either, so the Keychain still sees a new app.
+
 The tests pin the planner to published benchmark numbers, so a regression in the memory
 model fails the build rather than silently shipping bad advice.
 
