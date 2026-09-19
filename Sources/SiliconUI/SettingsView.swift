@@ -296,8 +296,7 @@ struct SettingsView: View {
             }
 
             Section("Hugging Face") {
-                SecureField("Access token", text: $model.settings.huggingFaceToken)
-                    .textFieldStyle(.roundedBorder)
+                HuggingFaceTokenRow()
                 Text(
                     "Optional. Raises the anonymous download rate limit and is required for "
                     + "gated repositories such as Llama."
