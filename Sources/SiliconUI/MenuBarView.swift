@@ -364,37 +364,14 @@ struct MenuBarView: View {
 
     private var actions: some View {
         VStack(spacing: 0) {
-            menuButton("Open Chat", systemImage: "bubble.left.and.bubble.right") {
-                model.selectedTab = .chat
-                openMainWindow()
-            }
-            menuButton("Dashboard", systemImage: "gauge.with.dots.needle.67percent") {
-                model.selectedTab = .dashboard
-                openMainWindow()
-            }
-            menuButton("Models", systemImage: "square.stack.3d.up") {
-                model.selectedTab = .models
-                openMainWindow()
-            }
-            menuButton("Images", systemImage: "photo.on.rectangle.angled") {
-                model.selectedTab = .images
-                openMainWindow()
-            }
-            menuButton("3D", systemImage: "cube.transparent") {
-                model.selectedTab = .threeD
-                openMainWindow()
-            }
-            menuButton("Audio", systemImage: "waveform") {
-                model.selectedTab = .audio
-                openMainWindow()
-            }
-            menuButton("Video", systemImage: "film") {
-                model.selectedTab = .video
-                openMainWindow()
-            }
-            menuButton("Swarm", systemImage: "point.3.connected.trianglepath.dotted") {
-                model.selectedTab = .swarm
-                openMainWindow()
+            // Driven by `Tab.menuOrder` rather than written out: the list this replaced
+            // had drifted, and Cloud had been unreachable from the menu bar for a while.
+            ForEach(AppModel.Tab.menuOrder) { tab in
+                menuButton(tab == .chat ? "Open Chat" : tab.rawValue,
+                           systemImage: tab.systemImage) {
+                    model.selectedTab = tab
+                    openMainWindow()
+                }
             }
             Divider().padding(.vertical, 4)
             menuButton("Settings…", systemImage: "gearshape") {

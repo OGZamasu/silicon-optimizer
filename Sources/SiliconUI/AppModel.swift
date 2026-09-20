@@ -231,9 +231,20 @@ public final class AppModel {
         case video = "Video"
         case swarm = "Swarm"
         case cloud = "Cloud"
+        case decisions = "Decisions"
         case settings = "Settings"
 
         public var id: String { rawValue }
+
+        /// The order the menu bar offers these in: chat first, because that is what the
+        /// menu is usually opened for, then the rest as the sidebar lists them. Settings is
+        /// left out — it sits below the divider with Quit.
+        ///
+        /// Built from `allCases` rather than written out, because the hand-written version
+        /// of this list was already missing Cloud by the time anyone looked.
+        public static var menuOrder: [Tab] {
+            [.chat] + allCases.filter { $0 != .chat && $0 != .settings }
+        }
 
         public var systemImage: String {
             switch self {
@@ -246,6 +257,7 @@ public final class AppModel {
             case .video: "film"
             case .swarm: "point.3.connected.trianglepath.dotted"
             case .cloud: "cloud"
+            case .decisions: "arrow.triangle.branch"
             case .settings: "gearshape"
             }
         }
