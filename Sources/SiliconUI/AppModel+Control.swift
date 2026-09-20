@@ -50,8 +50,27 @@ extension AppModel: ControlHost {
             contextLength: activeConfiguration?.contextLength,
             expertStreaming: activeConfiguration?.expertStreaming != nil,
             lastGenerationTokensPerSecond: lastGeneration?.generationTokensPerSecond,
-            activity: activeGenerationSummary
+            activity: activeGenerationSummary,
+            failure: failedLoadDetail()
         )
+    }
+
+    /// The structured account of the load that produced the current `state`, or nothing.
+    ///
+    /// Two conditions, both necessary. The app has to be *in* a failed state — a recorded
+    /// failure beside a model that is loading happily is a lie about the present. And the
+    /// recorded failure has to be the one the state line came from: the app's own catch sets
+    /// the state to the error's description, which is the failure's summary, so equal
+    /// sentences mean the detail belongs to the line a client is showing. A load that failed
+    /// somewhere the runtime never reached — no such model, a plan the selector refused —
+    /// has a state line and no detail, which is the honest answer rather than the previous
+    /// failure's log.
+    private func failedLoadDetail() -> ControlAPI.LoadFailure? {
+        guard case .failed = runtimeState else { return nil }
+        guard let failure = LoadFailureRecorder.shared.last,
+              failure.summary == runtimeState.label
+        else { return nil }
+        return failure.wire
     }
 
     public func installed() async -> [ControlAPI.InstalledModel] {

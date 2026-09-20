@@ -278,6 +278,10 @@ public enum ControlAPI {
     }
 
     public struct Status: Codable, Sendable {
+        /// One line, for a person. Never more than a sentence: a client is expected to show
+        /// this verbatim, and it was once whatever the last eight lines of a runtime log
+        /// happened to be, which is how a phone came to display a wall of text cut off
+        /// mid-word. The long version lives on `failure`.
         public var state: String
         public var loadedModelID: String?
         public var loadedModelName: String?
@@ -287,12 +291,21 @@ public enum ControlAPI {
         /// A non-language model at work right now — an image render or a 3D generation.
         /// Those are models too, and "nothing loaded" while one is running would be false.
         public var activity: String?
+        /// Why the last load failed, when it failed and the app knows. Absent — not null,
+        /// absent — whenever a model is loading, loaded, or was never asked for, so a
+        /// client written before this existed reads exactly the bytes it always did.
+        ///
+        /// `state` remains the whole human answer; this is for a client that wants to show
+        /// one line and keep the log behind a tap, or to tell "the system reclaimed the
+        /// memory" from "you started another load" without parsing English.
+        public var failure: LoadFailure?
 
         public init(
             state: String, loadedModelID: String?, loadedModelName: String?,
             contextLength: Int?, expertStreaming: Bool,
             lastGenerationTokensPerSecond: Double?,
-            activity: String? = nil
+            activity: String? = nil,
+            failure: LoadFailure? = nil
         ) {
             self.state = state
             self.loadedModelID = loadedModelID
@@ -301,6 +314,48 @@ public enum ControlAPI {
             self.expertStreaming = expertStreaming
             self.lastGenerationTokensPerSecond = lastGenerationTokensPerSecond
             self.activity = activity
+            self.failure = failure
+        }
+    }
+
+    /// The structured half of a failed load.
+    ///
+    /// Everything here is a fact the Mac already had and used to throw away: a 27B model
+    /// whose server was gone eight seconds later produced a status line of raw log and no
+    /// record that a process had ended at all.
+    public struct LoadFailure: Codable, Sendable, Equatable {
+        /// One of `exited`, `killed`, `replaced`, `cancelled`, `timedOut`, `launchFailed`,
+        /// `notInstalled`. New values may be added; treat an unknown one as `exited` and
+        /// show `state`.
+        public var reason: String
+        /// The runtime's own last words — the tail of its log, at most 20 lines. This is
+        /// the "show me the log" text, never the line to put in front of someone first.
+        public var detail: String?
+        /// Which runtime it was: `llama.cpp`, `MLX`, `llama.cpp (PrismML)`.
+        public var runtime: String?
+        /// The status the runtime exited with, when it exited on its own.
+        public var exitStatus: Int?
+        /// The signal that ended it, when one did. 9 on this platform is nearly always the
+        /// system reclaiming the model's memory.
+        public var signal: Int?
+        /// True only when another load is what ended this one — the difference between "it
+        /// failed" and "you asked for something else".
+        public var wasReplaced: Bool
+        /// ISO 8601, in the Mac's own offset.
+        public var at: String
+
+        public init(
+            reason: String, detail: String? = nil, runtime: String? = nil,
+            exitStatus: Int? = nil, signal: Int? = nil, wasReplaced: Bool = false,
+            at: String
+        ) {
+            self.reason = reason
+            self.detail = detail
+            self.runtime = runtime
+            self.exitStatus = exitStatus
+            self.signal = signal
+            self.wasReplaced = wasReplaced
+            self.at = at
         }
     }
 
@@ -1241,5 +1296,30 @@ extension ControlAPI {
         public init() {}
         public var status: Int { 404 }
         public var errorDescription: String? { ControlServer.expiredSubject }
+    }
+
+    /// A second `POST /load` while the first is still running.
+    ///
+    /// Refused rather than obeyed, which is the whole decision: obeying it means killing a
+    /// load the owner asked for — possibly minutes into reading a 30 GB file — and the
+    /// first load then fails, for reasons that look like the model's fault rather than like
+    /// a second tap. Saying no costs one request; saying yes costs the load.
+    public struct LoadAlreadyRunning: Error, LocalizedError, ControlStatusError {
+        public var modelID: String
+        /// How long the load that is already running has been running.
+        public var secondsAgo: Int
+
+        public init(modelID: String, secondsAgo: Int) {
+            self.modelID = modelID
+            self.secondsAgo = secondsAgo
+        }
+
+        public var status: Int { 409 }
+
+        public var errorDescription: String? {
+            "This Mac is already loading \(modelID) (started \(secondsAgo)s ago), and one "
+                + "load at a time is all it can do. Nothing was changed. Follow it with "
+                + "GET /status, or POST /unload to stop it and then load again."
+        }
     }
 }
