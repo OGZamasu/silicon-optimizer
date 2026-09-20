@@ -65,6 +65,11 @@ public actor ControlServer {
     /// found. Both are injected so the tests can drive them without a tailnet or a stall.
     private let eventWriteDeadline: Duration
     private let discoverTailnetAddress: @Sendable () -> String?
+    /// Runs `POST /load` detached from the request that asked for it, and refuses a second
+    /// load rather than throwing away the first. Injected only in the sense that its
+    /// patience is: a test cannot wait 25 seconds to see what a slow load answers.
+    private let loads = LoadDispatcher()
+    private let loadPatience: Duration
     /// Called with the endpoint every time a tailnet listener becomes ready, and with nil
     /// every time one is closed. Nil in the app; the tests count these to prove that two
     /// features asking for the listener produce one socket and not two.
@@ -89,6 +94,15 @@ public actor ControlServer {
     /// the first frame it fails to take rather than by a backlog; if the token rate ever
     /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
     public static let defaultEventWriteDeadline: Duration = .seconds(20)
+
+    /// How long `POST /load` holds the connection before answering with the load still in
+    /// flight.
+    ///
+    /// Longer than any load worth blocking on — a small model is up in a few seconds — and
+    /// shorter than the request timeout of every HTTP client likely to call this, which is
+    /// the actual constraint: an answer nobody is still listening for is not an answer. The
+    /// load is unaffected either way; this only decides when the caller stops watching.
+    public static let defaultLoadPatience: Duration = .seconds(25)
 
     /// How the tailnet listener's connections notice a peer that has gone.
     ///
@@ -159,6 +173,7 @@ public actor ControlServer {
         postersRoot: URL = BuddyPosters.root,
         uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
         eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
+        loadPatience: Duration = ControlServer.defaultLoadPatience,
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
             SwarmPairing.tailnetIPv4()
         },
@@ -177,6 +192,7 @@ public actor ControlServer {
             uploadsRoot: uploadsRoot, postersRoot: postersRoot
         )
         self.eventWriteDeadline = eventWriteDeadline
+        self.loadPatience = loadPatience
         self.discoverTailnetAddress = discoverTailnetAddress
         self.tailnetBindObserver = tailnetBindObserver
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
@@ -689,6 +705,23 @@ public actor ControlServer {
                 || path == "/conversations" || path.hasPrefix("/conversations/")
         }
 
+        /// Whether this caller may be shown a runtime's own log.
+        ///
+        /// `GET /status` is open to every credential this server honours, and it now carries
+        /// the tail of a failed runtime's output. That text is the runtime's raw log — it
+        /// names files, and on a Mac a file name is a path through somebody's folders. A
+        /// device paired for chat was deliberately given less than full control, and the
+        /// swarm secret is a node's credential rather than a person's; both are answered the
+        /// whole failure *except* its log, which is the part that describes the owner's disk
+        /// rather than what happened.
+        var seesRuntimeLogs: Bool {
+            switch self {
+            case .control: true
+            case .swarm: false
+            case .device(_, let scope): scope == .full
+            }
+        }
+
         /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
         /// nothing and costs the machine minutes — so the set is written out, and a route
         /// added later is closed to chat-only devices until someone decides otherwise.
@@ -720,6 +753,14 @@ public actor ControlServer {
         guard !(request.method == "POST" && request.path == "/buddy/pair") else { return nil }
         guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
         return .error(403, chatOnlyRefusal)
+    }
+
+    /// A status as this caller may see it. Nil — a caller we could not identify — is given
+    /// the narrow one, because the only safe reading of "who is this?" with no answer is
+    /// "not somebody with full control".
+    static func narrowed(_ status: ControlAPI.Status, for caller: Caller?) -> ControlAPI.Status {
+        guard caller?.seesRuntimeLogs == true else { return status.withoutPrivilegedDetail }
+        return status
     }
 
     /// Why a task in the query string is refused. Exported so the contract fixture and the
@@ -1295,7 +1336,7 @@ public actor ControlServer {
             case ("GET", "/metrics"):
                 return try .encode(await host.metrics())
             case ("GET", "/status"):
-                return try .encode(await host.status())
+                return try .encode(Self.narrowed(await host.status(), for: caller))
             case ("GET", "/installed"):
                 return try .encode(await host.installed())
             case ("GET", "/catalog"):
@@ -1333,7 +1374,20 @@ public actor ControlServer {
                 let message = try await host.install(request.decode(ControlAPI.LoadRequest.self))
                 return .json(["status": message])
             case ("POST", "/load"):
-                return try .encode(await host.load(try request.decode(ControlAPI.LoadRequest.self)))
+                // The load is detached from this request: a phone that locks its screen
+                // must not abort a load the Mac was told to do. Either answer is a
+                // `Status`, because "still loading" is a status — the same one `GET /status`
+                // would give, and the same one this route gave while a load was in progress
+                // before any of this existed.
+                switch try await loads.load(
+                    try request.decode(ControlAPI.LoadRequest.self),
+                    on: host, patience: loadPatience
+                ) {
+                case .finished(let status):
+                    return try .encode(Self.narrowed(status, for: caller))
+                case .stillLoading:
+                    return try .encode(Self.narrowed(await host.status(), for: caller))
+                }
             case ("POST", "/unload"):
                 await host.unload()
                 return .json(["status": "unloaded"])

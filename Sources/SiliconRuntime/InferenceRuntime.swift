@@ -186,10 +186,24 @@ public struct GenerationMetrics: Sendable, Equatable {
 public enum RuntimeError: Error, LocalizedError {
     case notInstalled(RuntimeKind)
     case launchFailed(String)
-    case didNotBecomeReady(log: String)
+    /// A load that ended without a model in memory, carrying the whole account of itself:
+    /// the sentence, the log, and how the runtime process ended.
+    case didNotBecomeReady(LoadFailure)
     case notRunning
     case expertStreamingUnsupported
     case prismTernaryUnsupported
+
+    /// Whether this is the load being taken away rather than the model failing.
+    ///
+    /// A load that was replaced belongs to the load that replaced it: its screen, its
+    /// progress line, its alert if it fails. And an unload part-way through a load is the
+    /// owner getting exactly what they asked for. Neither is a failure to put in front of
+    /// anybody, and reporting them as one is how pressing Unload came to raise an error
+    /// dialog.
+    public var wasInterrupted: Bool {
+        guard case .didNotBecomeReady(let failure) = self else { return false }
+        return failure.wasReplaced || failure.reason == .cancelled
+    }
 
     public var errorDescription: String? {
         switch self {
@@ -197,8 +211,13 @@ public enum RuntimeError: Error, LocalizedError {
             "\(kind.rawValue) is not installed. Install it from Settings."
         case .launchFailed(let message):
             "Could not start the runtime: \(message)"
-        case .didNotBecomeReady(let log):
-            "The model did not finish loading.\n\n\(log)"
+        case .didNotBecomeReady(let failure):
+            // One sentence, and only one. This used to be "The model did not finish
+            // loading." followed by whatever the last eight lines of the server log
+            // happened to be — which is what a phone rendered, verbatim, mid-sentence.
+            // The log is still there, on `failure.detail`, where a client can put it
+            // behind a tap.
+            failure.summary
         case .notRunning:
             "No model is loaded."
         case .expertStreamingUnsupported:

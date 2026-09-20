@@ -764,6 +764,80 @@ struct ContractExportTests {
         ).id.hasPrefix(ControlAPI.PhoneModel.downloadEventPrefix))
     }
 
+    /// The shape a phone has to be able to rely on for a failed load.
+    ///
+    /// Every assertion here is the contract, not a restatement of the code: `state` stays a
+    /// single line, the facts live beside it under `failure`, and the key is absent rather
+    /// than null when nothing has failed — which is what makes this additive for a client
+    /// written before it existed.
+    @Test func aFailedLoadIsCarriedAsOneLinePlusItsFacts() throws {
+        let healthy = try JSONSerialization.jsonObject(
+            with: try Self.encoder.encode(Self.exampleStatus)
+        ) as? [String: Any]
+        #expect(try #require(healthy)["failure"] == nil)
+
+        let failed = try #require(try JSONSerialization.jsonObject(
+            with: try Self.encoder.encode(Self.exampleFailedStatus)
+        ) as? [String: Any])
+        let state = try #require(failed["state"] as? String)
+        #expect(state.split(separator: "\n").count == 1)
+        #expect(state.contains("signal 9"))
+
+        let failure = try #require(failed["failure"] as? [String: Any])
+        #expect(Set(failure.keys) == ["reason", "detail", "runtime", "signal", "wasReplaced", "at"])
+        #expect(failure["reason"] as? String == "killed")
+        #expect(failure["signal"] as? Int == 9)
+        #expect(failure["wasReplaced"] as? Bool == false)
+        #expect(failure["runtime"] as? String == "llama.cpp")
+        #expect(ControlAPI.date(fromTimestamp: try #require(failure["at"] as? String)) != nil)
+        // The detail is the log, and it is not the sentence.
+        #expect((failure["detail"] as? String)?.contains("load_tensors") == true)
+        #expect(failure["detail"] as? String != state)
+
+        // Every reason the runtimes can produce is one the contract names.
+        #expect(Set(LoadFailure.Reason.allCases.map(\.rawValue)) == [
+            "exited", "killed", "replaced", "cancelled", "timedOut",
+            "launchFailed", "notInstalled",
+        ])
+
+        // And the slow-load answer is a `Status` like any other: nothing loaded yet, and
+        // nothing claimed to have failed.
+        #expect(Self.exampleLoadingStatus.loadedModelID == nil)
+        #expect(Self.exampleLoadingStatus.failure == nil)
+
+        // Every ending a client may meet has an example, not only the one the bug was
+        // about: a generated client that has seen `killed` and nothing else has no reason
+        // to expect `wasReplaced`, which is the one that is not a fault at all.
+        let variants = try #require(
+            Self.routes.first { $0.method == "GET" && $0.path == "/status" }
+        ).responseVariants
+        let reasons = try variants.map { label, example -> String in
+            try #require(try JSONDecoder().decode(
+                ControlAPI.Status.self, from: try example.encode()
+            ).failure?.reason)
+        }
+        #expect(Set(reasons) == ["killed", "replaced", "cancelled", "timedOut"])
+        #expect(Self.exampleReplacedStatus.failure?.wasReplaced == true)
+
+        // And the shape a chat-scope device or a peer is answered: the whole failure except
+        // the runtime's log, which names files on this Mac.
+        let withheld = try #require(Self.exampleWithheldStatus.failure)
+        #expect(withheld.detail == nil)
+        #expect(withheld.reason == "killed" && withheld.signal == 9)
+        #expect(Self.exampleWithheldStatus.state == Self.exampleFailedStatus.state)
+
+        // The refusal a second load gets says what is running and that nothing changed.
+        let refusal = try #require(
+            Self.routes.first { $0.method == "POST" && $0.path == "/load" }?.errors[409]
+        )
+        #expect(refusal.contains("bonsai-2-27b"))
+        #expect(refusal.contains("Nothing was changed"))
+        #expect(refusal.contains("GET /status"))
+        // Scoped to the route, because it is: the Mac's own window can still start a load,
+        // and the one it displaces says so rather than being refused.
+        #expect(refusal.contains("this route runs one load at a time"))
+    }
+
     @Test func exportsWhenAskedTo() throws {
         guard let directory = ProcessInfo.processInfo.environment["SILICON_EXPORT_CONTRACT"],
               !directory.trimmingCharacters(in: .whitespaces).isEmpty
@@ -828,6 +902,11 @@ struct ContractExportTests {
         /// need an `id` and what `confirmNewRender` is for.
         var requests: [(String, Example)] = []
         var response: Example?
+        /// More answer shapes than one, for a route that can answer in more than one state
+        /// without failing. `POST /load` has two: the load finished inside the request, or
+        /// it is still running and the answer is the live status. A generated client that
+        /// has only ever seen the first would read the second as a load that succeeded.
+        var responseVariants: [(String, Example)] = []
         /// SSE event name to payload example, for the routes that answer a stream.
         var events: [(String, Example)] = []
         /// More shapes of an event already in `events`: its name, a label for the shape,
@@ -854,6 +933,7 @@ struct ContractExportTests {
             if let request { all.append(("request", request)) }
             all.append(contentsOf: requests.map { ("request \($0.0)", $0.1) })
             if let response { all.append(("response", response)) }
+            all.append(contentsOf: responseVariants.map { ("response \($0.0)", $0.1) })
             all.append(contentsOf: events.map { ("event \($0.0)", $0.1) })
             all.append(contentsOf: eventVariants.map { ("event \($0.0) \($0.1)", $0.2) })
             all.append(contentsOf: errors.sorted { $0.key < $1.key }.map {
@@ -918,6 +998,11 @@ struct ContractExportTests {
                 body["requests"] = named
             }
             body["response"] = try response.map { try json($0) } ?? NSNull()
+            if !responseVariants.isEmpty {
+                var named: [String: Any] = [:]
+                for (label, example) in responseVariants { named[label] = try json(example) }
+                body["responseVariants"] = named
+            }
             if !events.isEmpty {
                 var frames: [String: Any] = [:]
                 for (name, example) in events { frames[name] = try json(example) }
@@ -1086,6 +1171,44 @@ struct ContractExportTests {
             "`supportedSeconds`, `supportedResolutions` and `supportsNegativePrompt` per",
             "lane, so a picker never has to offer a size or a field the renderer would",
             "quietly ignore.",
+            "",
+            "## Loading a model, and what a failed load says",
+            "",
+            "`POST /load` is not a request the Mac abandons when the caller goes away. The",
+            "load is started, detached from the request, and runs to its end whatever",
+            "happens to the connection — a phone that locks its screen, a client that times",
+            "out, a tab that closes. The request only *watches* it: if it finishes within 25",
+            "seconds the answer is the load's own status, exactly as before; if it is still",
+            "going, the answer is the live status instead — the same shape, with `state`",
+            "carrying the stage line and `loadedModelID` still null. Follow it with",
+            "`GET /status`, or on `/events`.",
+            "",
+            "**One load at a time on this route.** A second `POST /load` while one is",
+            "running is a 409 naming the model already loading and how long it has been",
+            "going, and nothing is changed: obeying it would mean killing a load the owner",
+            "asked for, possibly minutes into reading a 30 GB file, and the first load would",
+            "then fail in a way that looked like the model's fault. `POST /unload` stops the",
+            "load in flight if that is really what is wanted. The Mac's own window is not",
+            "held by this route and can still start a load that replaces one; the load that",
+            "loses says so (`failure.wasReplaced`) rather than reporting a fault.",
+            "",
+            "**A failed load.** `state` is one sentence — \"llama-server stopped on its own",
+            "after 8 seconds (exit 1)\", \"…was killed (signal 9), which usually means the",
+            "system reclaimed its memory\", \"…was replaced by another load\", \"…never",
+            "answered in 10 minutes\" — and it is meant to be shown as it is. Beside it,",
+            "`failure` carries the same failure's facts: `reason` (`exited`, `killed`,",
+            "`replaced`, `cancelled`, `timedOut`, `launchFailed`, `notInstalled` — treat an",
+            "unknown one as `exited`), `detail` (the tail of the runtime's log, at most 20",
+            "lines: put it behind a tap, never in the line a person reads first), `runtime`,",
+            "`exitStatus`, `signal`, `wasReplaced` and `at`. The key is **absent** unless a",
+            "load has failed, so a client written before it existed reads what it always",
+            "did.",
+            "",
+            "`detail` is the only part of this that is scoped. It is the runtime's raw log,",
+            "and on a Mac that log names files — so a device paired for **chat**, and the",
+            "swarm, are answered the whole failure *without* it, on `GET /status` and in the",
+            "`status` frame on `/events` alike. Absolute paths inside it are reduced to the",
+            "file's own name before it leaves the Mac at all, for everyone.",
             "",
             "## Agent sessions",
             "",
@@ -1510,8 +1633,17 @@ struct ContractExportTests {
         ),
         Route(
             method: "GET", path: "/status", auth: "device",
-            summary: "What is loaded, at what settings, how fast it last ran.",
-            response: .of(exampleStatus)
+            summary: "What is loaded, at what settings, how fast it last ran. `state` is "
+                + "one line for a person; when a load has failed, `failure` carries the "
+                + "same failure's facts — show `state`, keep `failure.detail` behind a tap.",
+            response: .of(exampleStatus),
+            responseVariants: [
+                ("after a failed load", .of(exampleFailedStatus)),
+                ("after a load that was replaced", .of(exampleReplacedStatus)),
+                ("after a load that was cancelled", .of(exampleCancelledStatus)),
+                ("after a load that never answered", .of(exampleTimedOutStatus)),
+                ("as a chat-scope device or a peer sees it", .of(exampleWithheldStatus)),
+            ]
         ),
         Route(
             method: "GET", path: "/installed", auth: "device",
@@ -1561,11 +1693,20 @@ struct ContractExportTests {
         ),
         Route(
             method: "POST", path: "/load", auth: "device",
-            summary: "Load a model into memory.",
+            summary: "Load a model into memory. The load belongs to the Mac once it has "
+                + "been asked for: it is not cancelled if this request goes away. A load "
+                + "still running after 25 seconds answers with the live status instead of "
+                + "holding the connection — follow it with GET /status.",
             request: .of(ControlAPI.LoadRequest(
                 modelID: "qwen3-coder-30b", quantization: "Q4_K_M", contextLength: 16_384
             )),
-            response: .of(exampleStatus)
+            response: .of(exampleStatus),
+            responseVariants: [("still loading", .of(exampleLoadingStatus))],
+            errors: [
+                409: ControlAPI.LoadAlreadyRunning(
+                    modelID: "bonsai-2-27b", secondsAgo: 12
+                ).localizedDescription,
+            ]
         ),
         Route(
             method: "POST", path: "/unload", auth: "device",
@@ -2410,6 +2551,67 @@ struct ContractExportTests {
         loadedModelName: "Qwen3-Coder 30B A3B", contextLength: 16_384,
         expertStreaming: false, lastGenerationTokensPerSecond: 89.4
     )
+
+    /// What `POST /load` answers when the load is slower than the request's patience: the
+    /// live status, the same shape, and the load still running behind it.
+    static let exampleLoadingStatus = ControlAPI.Status(
+        state: "Loading weights… 42%", loadedModelID: nil, loadedModelName: nil,
+        contextLength: nil, expertStreaming: false, lastGenerationTokensPerSecond: nil
+    )
+
+    /// A load that failed, as a phone meets it: one line to show, and the facts behind it
+    /// for the screen underneath. This is the shape the whole change exists for — `state`
+    /// used to be the last eight lines of a runtime log.
+    static let exampleFailedStatus = ControlAPI.Status(
+        state: "llama-server was killed (signal 9) after 8 seconds, which usually means "
+            + "the system reclaimed its memory.",
+        loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+        expertStreaming: false, lastGenerationTokensPerSecond: nil,
+        failure: ControlAPI.LoadFailure(
+            reason: "killed",
+            detail: "load_tensors: loading model tensors\n"
+                + "loaded multimodal model, 'mmproj-Q8_0.gguf'",
+            runtime: "llama.cpp", exitStatus: nil, signal: 9, wasReplaced: false,
+            at: "2026-09-19T11:04:38Z"
+        )
+    )
+
+    /// The other three endings a client has to be able to tell apart. `wasReplaced` is the
+    /// one that is not a fault at all — somebody asked for something else.
+    static let exampleReplacedStatus = ControlAPI.Status(
+        state: "llama-server was replaced by another load (Qwen3-Coder 30B).",
+        loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+        expertStreaming: false, lastGenerationTokensPerSecond: nil,
+        failure: ControlAPI.LoadFailure(
+            reason: "replaced", detail: nil, runtime: "llama.cpp",
+            exitStatus: nil, signal: 15, wasReplaced: true, at: "2026-09-19T11:04:38Z"
+        )
+    )
+
+    static let exampleCancelledStatus = ControlAPI.Status(
+        state: "llama-server was stopped by an unload before it finished loading.",
+        loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+        expertStreaming: false, lastGenerationTokensPerSecond: nil,
+        failure: ControlAPI.LoadFailure(
+            reason: "cancelled", detail: nil, runtime: "llama.cpp",
+            exitStatus: nil, signal: 15, wasReplaced: false, at: "2026-09-19T11:04:38Z"
+        )
+    )
+
+    static let exampleTimedOutStatus = ControlAPI.Status(
+        state: "llama-server never answered in 10 minutes.",
+        loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+        expertStreaming: false, lastGenerationTokensPerSecond: nil,
+        failure: ControlAPI.LoadFailure(
+            reason: "timedOut", detail: "llama_context: constructing llama_context",
+            runtime: "llama.cpp", exitStatus: nil, signal: nil, wasReplaced: false,
+            at: "2026-09-19T11:04:38Z"
+        )
+    )
+
+    /// The same failure as a device paired for chat — or a peer node — is answered: what
+    /// happened, without the runtime's own log.
+    static let exampleWithheldStatus = exampleFailedStatus.withoutPrivilegedDetail
 
     static let exampleMetrics = ControlAPI.ChatMetrics(
         promptTokens: 412, generatedTokens: 96, tokensPerSecond: 89.4, timeToFirstToken: 0.31

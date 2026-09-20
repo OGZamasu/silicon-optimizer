@@ -85,6 +85,13 @@ public enum BuddyEvent: Sendable {
 
     /// Sent only to this Mac's own token and full-control devices.
     var needsFullScope: Bool { describesAgentSession || describesPhoneModel }
+
+    /// The same frame with what only a full-control audience may see taken out, or nil when
+    /// there is nothing to take out — which is every frame but a failed load's `status`.
+    var withoutPrivilegedDetail: BuddyEvent? {
+        guard case .status(let status) = self, status.failure?.detail != nil else { return nil }
+        return .status(status.withoutPrivilegedDetail)
+    }
 }
 
 /// Where the app posts what changed, and where every subscribed device reads it.
@@ -113,14 +120,23 @@ public actor BuddyEventHub {
         /// The swarm secret.
         case peer
 
-        /// Whether `agent` frames may be sent to this audience — the same rule the agent
-        /// routes enforce, so the side channel cannot tell anyone more than the front door.
-        public var seesAgentSessions: Bool {
+        /// Whether this audience has the Mac's full confidence: its own token, or a device
+        /// paired for full control. A phone paired for chat, and a peer node, have less.
+        public var hasFullControl: Bool {
             switch self {
             case .thisMac, .device(_, .full): true
             case .device(_, .chat), .peer: false
             }
         }
+
+        /// Whether `agent` frames may be sent to this audience — the same rule the agent
+        /// routes enforce, so the side channel cannot tell anyone more than the front door.
+        public var seesAgentSessions: Bool { hasFullControl }
+
+        /// Whether a frame may carry a runtime's own log. Same rule, different question:
+        /// `GET /status` withholds `failure.detail` from these two, and a `status` frame is
+        /// the same payload on a socket they are already holding.
+        public var seesRuntimeLogs: Bool { hasFullControl }
     }
 
     private var listeners: [UUID: AsyncStream<BuddyEvent.Frame>.Continuation] = [:]
@@ -199,13 +215,29 @@ public actor BuddyEventHub {
     private func deliver(_ events: [BuddyEvent], to chosen: (UUID) -> Bool) {
         guard !listeners.isEmpty else { return }
         for event in events {
-            // Encoded at most once, and only if somebody is going to receive it.
+            // Encoded at most once each, and only if somebody is going to receive it. Two,
+            // because one frame can have two legitimate shapes: a `status` carrying a failed
+            // load carries the runtime's log with it, and the audiences that are refused
+            // that log on `GET /status` must not be handed it here instead.
             var frame: BuddyEvent.Frame?
+            var narrowedFrame: BuddyEvent.Frame?
+            let narrowed = event.withoutPrivilegedDetail
             for (id, listener) in listeners where chosen(id) {
                 // The filter that keeps a transcript — and what the Mac is fetching for the
                 // owner's phone — away from a chat-only phone and from the swarm. Everything
                 // else goes to everyone, as it always has.
-                if event.needsFullScope, audiences[id]?.seesAgentSessions != true {
+                let audience = audiences[id]
+                if event.needsFullScope, audience?.seesAgentSessions != true { continue }
+
+                let full = audience?.seesRuntimeLogs ?? false
+                if let narrowed, !full {
+                    if narrowedFrame == nil {
+                        guard let data = try? narrowed.encoded() else { break }
+                        narrowedFrame = BuddyEvent.Frame(name: narrowed.name, data: data)
+                    }
+                    if case .dropped = listener.yield(narrowedFrame!) {
+                        dropped[id, default: 0] += 1
+                    }
                     continue
                 }
                 if frame == nil {
