@@ -895,7 +895,7 @@ public enum RoutingQuestions: JevQuestionSet {
         request: RoutingRequest, candidates: [RoutingCandidate],
         using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await DecisionRouter.router(for: service).decide(
             feature,
             state: state(request: request, candidates: candidates),
             questions: questions(for: candidates),

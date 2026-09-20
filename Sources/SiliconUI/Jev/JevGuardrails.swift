@@ -191,7 +191,7 @@ public enum JevGuardrails {
     /// Asked before building the state so a disabled guardrail costs nothing, and phrased
     /// for a person: these strings end up on an approval card.
     static func unavailableReason(from service: JevService) async -> String? {
-        if await service.isAvailable(.guardrails) { return nil }
+        if await DecisionRouter.router(for: service).canAnswer(.guardrails) { return nil }
         let settings = await service.settings()
         if !settings.enabled { return "Jev is off in Settings → TypeSafe (Jev)." }
         if !settings.isOn(.guardrails) {
@@ -241,7 +241,7 @@ public enum JevGuardrails {
         using service: JevService = .shared
     ) async -> ControlAPI.GuardrailScreenings {
         ControlAPI.GuardrailScreenings(
-            available: await service.isAvailable(.guardrails),
+            available: await DecisionRouter.router(for: service).canAnswer(.guardrails),
             questions: GuardrailQuestions.ID.allCases.map(\.rawValue),
             screenings: recentScreenings
         )

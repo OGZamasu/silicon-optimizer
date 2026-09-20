@@ -1275,6 +1275,34 @@ public protocol ControlHost: AnyObject, Sendable {
     /// empty list. A requirement rather than only an extension method for the reason the
     /// agent routes give above: the server holds an `any ControlHost`.
     func phoneModelProvider() async -> (any PhoneModelProvider)?
+
+    // MARK: Decisions
+
+    // Requirements rather than only extension methods, for the reason the agent routes
+    // above give: the server holds an `any ControlHost`, and a method that existed only in
+    // an extension would be dispatched statically — every host would answer the default
+    // even when it has a real implementation. The defaults below are what the MCP bridge's
+    // doubles and the test fixtures get.
+
+    /// `GET /decisions` — every lane, every ability, and what each has cost.
+    func decisionsStatus() async -> ControlAPI.DecisionsStatus
+    /// `POST /decisions/lanes` — which lane answers what. Control token only: this decides
+    /// whether the Mac pays for decisions and whether its state leaves the machine.
+    func updateDecisionLanes(
+        _ update: ControlAPI.DecisionLanesUpdate
+    ) async throws -> ControlAPI.DecisionsStatus
+    /// `POST /decisions/install` — fetch laya-mlx and a checkpoint into the model library.
+    func installDecisionLane(
+        _ request: ControlAPI.DecisionInstallRequest
+    ) async throws -> ControlAPI.DecisionInstallAccepted
+    /// `POST /decisions/test` — ask one named lane one question set and show the working.
+    func runDecisionTest(
+        _ request: ControlAPI.DecisionTestRequest
+    ) async throws -> ControlAPI.DecisionTestResult
+    /// `POST /decisions/calibrate`, and `POST /jev/calibrate` with a lane.
+    func calibrateDecisionLane(_ lane: String?) async throws -> ControlAPI.JevCalibration
+    /// `GET /jev/calibration?lane=…` — one lane's last run.
+    func decisionCalibration(lane: String?) async -> ControlAPI.JevCalibration?
 }
 
 /// Defaults for the hosts that are not the Mac app — the MCP bridge's doubles and the
@@ -1282,6 +1310,63 @@ public protocol ControlHost: AnyObject, Sendable {
 /// poster means no thumbnails, and no swarm means the proxy route is a 404 with a sentence.
 extension ControlHost {
     public func controlMediaRoots() async -> [String] { [] }
+
+    /// A host with no lanes of its own: no lanes, no abilities, nothing spent. The same
+    /// conservative shape the rest of these defaults take — it answers the route without
+    /// claiming anything is available.
+    public func decisionsStatus() async -> ControlAPI.DecisionsStatus {
+        .init(
+            lanes: [], abilities: [],
+            recent: .init(available: false, questions: [], screenings: []),
+            month: "", totalCalls: 0, totalEstimatedUSD: 0
+        )
+    }
+
+    public func updateDecisionLanes(
+        _ update: ControlAPI.DecisionLanesUpdate
+    ) async throws -> ControlAPI.DecisionsStatus {
+        throw ControlAPI.DecisionsUnsupported()
+    }
+
+    public func installDecisionLane(
+        _ request: ControlAPI.DecisionInstallRequest
+    ) async throws -> ControlAPI.DecisionInstallAccepted {
+        throw ControlAPI.DecisionsUnsupported()
+    }
+
+    public func runDecisionTest(
+        _ request: ControlAPI.DecisionTestRequest
+    ) async throws -> ControlAPI.DecisionTestResult {
+        throw ControlAPI.DecisionsUnsupported()
+    }
+
+    /// Without a lane — or with `local` — this is the route that already existed, so it
+    /// forwards to the implementation that has always answered it.
+    public func calibrateDecisionLane(_ lane: String?) async throws -> ControlAPI.JevCalibration {
+        guard lane == nil || lane == "local" else { throw ControlAPI.DecisionsUnsupported() }
+        return try await calibrateJev()
+    }
+
+    public func decisionCalibration(lane: String?) async -> ControlAPI.JevCalibration? {
+        guard lane == nil || lane == "local" else { return nil }
+        return await jevCalibration()
+    }
+}
+
+extension ControlAPI {
+    /// What a host that has no decision lanes answers with. A 501 rather than a 400: the
+    /// request was fine, this host simply is not a Mac running the app.
+    public struct DecisionsUnsupported: Error, LocalizedError, ControlStatusError {
+        public init() {}
+        public var status: Int { 501 }
+        public var errorDescription: String? {
+            "This host does not have decision lanes. They live on the Mac running "
+            + "Silicon Optimizer."
+        }
+    }
+}
+
+extension ControlHost {
 
     public func controlMakeVideoPoster(from source: URL, to destination: URL) async -> Bool {
         false

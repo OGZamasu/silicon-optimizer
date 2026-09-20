@@ -426,6 +426,19 @@ extension ControlAPI {
             public var noulBandWidth: Double { noulHigh - noulLow }
         }
 
+        /// Which lane these floors belong to: `local`, `laya` or `node`.
+        ///
+        /// Absent in a file written before there was more than one lane, and read as
+        /// `local` — which is what those files measured, because it was the only lane a
+        /// calibration could have been run on.
+        ///
+        /// The floors are per lane **and** per kind for the same reason they were already
+        /// per kind: a confidence number means whatever the thing that produced it means by
+        /// it. Laya's 0.7 on a choice is a decision model's calibrated-ish 0.7; the loaded
+        /// chat model's 0.7 is a renormalised softmax over two letters. Sharing a floor
+        /// between them would be the jaggedness mistake one level up.
+        public var lane: String?
+
         /// The installed model id the local lane used. The cascade takes these floors only
         /// while this is what is loaded: a threshold measured on a 30B MoE is not a promise
         /// about a 4B dense one.
@@ -485,6 +498,7 @@ extension ControlAPI {
         public var loadedModelName: String?
 
         public init(
+            lane: String? = nil,
             modelID: String, modelName: String, jevModel: String, date: String,
             cases: Int, builtInCases: Int, userCases: Int, comparisons: Int,
             agreement: [Agreement], overallAgreementRate: Double, floors: Floors,
@@ -495,6 +509,7 @@ extension ControlAPI {
             appliesToLoadedModel: Bool? = nil, floorsInEffect: Floors? = nil,
             loadedModelName: String? = nil
         ) {
+            self.lane = lane
             self.modelID = modelID
             self.modelName = modelName
             self.modelSizeBytes = modelSizeBytes
@@ -539,9 +554,10 @@ extension ControlAPI {
             let percent = Int((overallAgreementRate * 100).rounded())
             let escalated = Int((escalationRate * 100).rounded())
             return String(
-                format: "%@ · %@ · %d cases · %d%% agreement · escalates %d%% · "
+                format: "%@ · %@ · %@ · %d cases · %d%% agreement · escalates %d%% · "
                 + "choice %.2f · score %.2f · noul %.2f–%.2f",
-                modelName, date.prefix(10).description, cases, percent, escalated,
+                lane ?? "local", modelName, date.prefix(10).description, cases, percent,
+                escalated,
                 floors.choiceConfidence, floors.scoreConfidence,
                 floors.noulLow, floors.noulHigh
             )

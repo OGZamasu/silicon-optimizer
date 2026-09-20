@@ -804,6 +804,23 @@ public actor ControlServer {
         "Only this Mac can start a calibration run. It spends Jev tokens and holds the "
             + "loaded model, so it is started from Settings → TypeSafe (Jev) on the Mac."
 
+    /// The three sentences the decision routes refuse with. Each says what the thing being
+    /// refused actually is, rather than one shared "only the Mac may": a phone told it
+    /// cannot change lanes and a phone told it cannot start a download are in different
+    /// situations and their owner's next move is different.
+    public static let decisionLanesRefusal =
+        "Only this Mac can change which lane answers a decision. It decides what the Mac "
+        + "spends and whether what it is reasoning about leaves the machine, so it is set "
+        + "in Settings → Decisions on the Mac."
+
+    public static let decisionInstallRefusal =
+        "Only this Mac can install a decision lane. It downloads about a gigabyte into the "
+        + "Mac's model library, so it is started from Settings → Decisions on the Mac."
+
+    public static let decisionTestRefusal =
+        "Only this Mac can run the decision test bench. It can be pointed at Jev, which "
+        + "costs money, so it is run from Settings → Decisions on the Mac."
+
     /// What `GET /jev/calibration` says before there has ever been a run. A 404 with a
     /// sentence, rather than an empty body a client has to guess at.
     public static let noCalibrationYet =
@@ -1483,18 +1500,61 @@ public actor ControlServer {
                     try request.decode(ControlAPI.JevUpdate.self)
                 ))
             case ("GET", "/jev/calibration"):
-                guard let result = await host.jevCalibration() else {
+                // `?lane=` is additive: without it this is the route it has always been,
+                // answering for the lane that used to be the only one there was.
+                guard let result = await host.decisionCalibration(
+                    lane: request.query["lane"]
+                ) else {
                     return .error(404, Self.noCalibrationYet)
                 }
                 return try .encode(result)
-            case ("POST", "/jev/calibrate"):
-                // Spends Jev tokens and holds the loaded model for a minute. Same rule as
-                // POST /jev, for the same reason: a phone may read what this Mac spends but
-                // not start it spending.
+            case ("POST", "/jev/calibrate"), ("POST", "/decisions/calibrate"):
+                // Spends Jev tokens and holds a model for a minute. Same rule as POST /jev,
+                // for the same reason: a phone may read what this Mac spends but not start
+                // it spending.
                 guard caller == .control else {
                     return .error(403, Self.jevCalibrateRefusal)
                 }
-                return try .encode(await host.calibrateJev())
+                // The lane may come from the query or from a body, and an empty body is
+                // still the old route — which is what keeps every existing caller working.
+                return try .encode(await host.calibrateDecisionLane(
+                    request.query["lane"]
+                        ?? (try? request.decode(ControlAPI.DecisionCalibrateRequest.self))?.lane
+                ))
+            case ("GET", "/decisions"):
+                // Readable by the Mac and by a full-control device, like `GET /jev`: it
+                // carries no key, no state and no question text — lane names, switches,
+                // thresholds and totals. A chat-only device is refused before it gets here,
+                // because the path is not in `chatOnlyRoutes`.
+                return try .encode(await host.decisionsStatus())
+            case ("POST", "/decisions/lanes"):
+                // Control token only, and this is the route that most needs it: it decides
+                // whether this Mac pays for its decisions and whether the state it reasons
+                // about leaves the machine. Neither is a paired phone's to decide.
+                guard caller == .control else {
+                    return .error(403, Self.decisionLanesRefusal)
+                }
+                return try .encode(await host.updateDecisionLanes(
+                    try request.decode(ControlAPI.DecisionLanesUpdate.self)
+                ))
+            case ("POST", "/decisions/install"):
+                // Downloads about a gigabyte onto this Mac's model library. The owner's
+                // disk, the owner's decision.
+                guard caller == .control else {
+                    return .error(403, Self.decisionInstallRefusal)
+                }
+                return try .encode(await host.installDecisionLane(
+                    (try? request.decode(ControlAPI.DecisionInstallRequest.self)) ?? .init()
+                ))
+            case ("POST", "/decisions/test"):
+                // Can be pointed at Jev, so it can spend money — same rule as everything
+                // else here that can.
+                guard caller == .control else {
+                    return .error(403, Self.decisionTestRefusal)
+                }
+                return try .encode(await host.runDecisionTest(
+                    try request.decode(ControlAPI.DecisionTestRequest.self)
+                ))
             default:
                 return .error(404, "Unknown endpoint \(request.method) \(request.path)")
             }

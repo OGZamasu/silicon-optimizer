@@ -74,7 +74,7 @@ extension AppModel: GatewayHost {
         // to choose between real models, and a virtual id in its own candidate list would
         // be one of them.
         await Self.listingAuto(
-            gatewayServableModels(), routingAvailable: JevService.shared.isAvailable(.routing)
+            gatewayServableModels(), routingAvailable: DecisionRouter.shared.canAnswer(.routing)
         )
     }
 

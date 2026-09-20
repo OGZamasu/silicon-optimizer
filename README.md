@@ -712,6 +712,140 @@ for it.
 
 ---
 
+## Decisions
+
+Some of what this app does is not generation, it is judgment: which node should take this
+render, is this tool call about to delete something, which of twelve models suits the work
+you actually do. Eight features ask questions like that, and they all ask them the same way
+— a **state** and a map of **questions**, each one a **noul** (yes/no, as a probability), a
+**choice** (one label from a set you define, with the whole distribution) or a **score** (a
+position on an ordered rubric). The answer is typed. There is nothing to parse.
+
+**Settings → Decisions** is where all of that lives: every ability, which lane answers it,
+its thresholds, what it has cost, and a bench for trying a question set against a lane by
+hand.
+
+### The lanes
+
+Three kinds of thing can answer, and they differ in two ways worth keeping separate — does
+it cost money, and does it leave the Mac.
+
+| Lane | Costs | Leaves the Mac | Roughly |
+|---|---|---|---|
+| **Jev** (TypeSafe, cloud) | $0.042 per million input tokens | yes | calibrated, and the reference the others are measured against |
+| **Laya on this Mac** | nothing | no | ~20–25 ms a question, ~0.9–1.2 GB resident while loaded |
+| **Laya on a swarm node** | nothing | yes, to your own machine over the tailnet | whatever the node advertises |
+| **The loaded model** | nothing | no | one forward pass per question, uncalibrated |
+
+**What stays on the Mac.** Everything, unless you turn on a lane that does not. Laya runs
+here, in a process this app starts, talking to it over a pipe — there is no port, no socket
+and no listener, so there is nothing for anything else on the machine to connect to, and
+nothing goes to the network at question time. The node lane is free but sends the state to
+another machine of yours over your tailnet; it is off by default and says so on its row. Jev
+is off by default and needs both a key and the master switch.
+
+**What a cloud call costs.** TypeSafe bills input tokens only, at $0.042 per million; output
+is free. A typical guardrail screening is a few hundred tokens, so on the order of a
+hundredth of a cent. The ledger in `jev-ledger.json` counts every one, per month and per
+feature, and **Settings → Decisions** shows the running total beside each ability. A monthly
+cap is optional; past it the features fail closed rather than quietly costing more.
+
+### Routing
+
+By default: **Jev when you have turned it on and it has a key; otherwise Laya if it is
+installed; otherwise a node if you have allowed one; otherwise the loaded model; otherwise
+the feature behaves exactly as it did before any of this existed** — the router falls back to
+its default, the guardrail leaves the engine alone, and nothing is asked of anybody.
+
+Each of the eight abilities can override that:
+
+- **Automatic** — the rule above.
+- **Always local** — never the cloud, whatever the master switch says. A feature set to this
+  cannot spend a penny, and the rule is enforced in one place with a test that walks every
+  combination of switch and installed lane.
+- **Always Jev** — only Jev. When Jev cannot answer, the feature gets nothing rather than a
+  free substitute: pinning something to the calibrated lane is not a request for the
+  uncalibrated one.
+- **Off** — nothing answers it.
+
+A lane that *fails* mid-question falls through to the next free one, never upwards into Jev:
+a sidecar dying is not a decision to start paying.
+
+`POST /decide` and `POST /v1/systemone` are unchanged. `provider` still takes `auto`, `local`
+and `typesafe`, and now also `laya` and `node`; the response's `provider` says which lane
+answered, with the peer's name when a node did (`node:studio`). `auto` is still a cascade
+where there is something to cascade from — the free lane answers everything and only the
+answers it was unsure of are put to Jev — except that the free lane is now Laya when Laya is
+installed.
+
+### Thresholds are per lane
+
+A confidence number means whatever the thing that produced it means by it. Laya's 0.7 on a
+choice is a decision model's 0.7; the loaded chat model's 0.7 is a renormalised softmax over
+two letters. So `POST /jev/calibrate` takes a lane — `{"lane": "laya"}`, or none for the one
+it always meant — measures that lane against Jev on the shipped set of cases, and writes its
+own floors to its own file beside `jev.json`. The floors are per lane **and** per kind, and
+the cascade uses the ones belonging to whichever lane is about to answer.
+
+### Installing Laya
+
+[laya-mlx](https://github.com/mizorewww/laya-mlx) is a native MLX runtime for
+[Laya](https://github.com/NandhaKishorM/laya), Convai Innovations' typed decision models.
+Both are Apache-2.0, with **different rightsholders**: the weights are Convai Innovations',
+the MLX conversion is the porter's, and each ships its own `NOTICE`. Both attributions are
+shown on the lane's row.
+
+Press **Install Laya** in **Settings → Decisions**, or `POST /decisions/install`. It needs a
+**model library folder** configured first, and it will refuse rather than proceed without
+one — the environment and the weights are about 1.1 GB together and they must not land on
+your startup disk. Both go inside the library: the Python environment in
+`<library>/Engine Cache/laya-env`, and the weights in `<library>/Engine Cache`, the same
+Hugging Face cache every other Python engine here uses, with `HF_HOME` pointed at it.
+
+Everything is pinned:
+
+- `laya-mlx==0.1.0` (there are no upstream git tags; the wheel's sha256 is the only pin
+  there is), which brings `mlx>=0.32.2,<0.33`. Python 3.11 or newer — macOS ships 3.9, so
+  the installer looks for a Homebrew 3.11+ and says so if it finds none.
+- Checkpoints, by **full commit sha** rather than a branch: `aac6fef/laya-mlx` (English,
+  ModernBERT-large, 421M, 512 tokens of context, the default), `aac6fef/laya-multilingual-mlx`
+  (mmBERT-base, 322M, 1024 tokens, the fastest and smallest) and
+  `aac6fef/laya-typed-decisions-mlx` (421M, 1024 tokens).
+
+The checkpoint is loaded once and stays resident, and is released after twenty minutes idle
+— loading it takes around half a minute from an external drive, so the unload has to be
+worth the silence next time.
+
+Measured on the Mac this was built on, English 421M, through the app's own sidecar:
+
+| | median |
+|---|---|
+| one noul | 24.6 ms |
+| one choice | 23.0 ms |
+| one score | 24.0 ms |
+| all three in one request | 62.0 ms — 20.7 ms a question |
+
+Peak memory 0.92–1.21 GB. The published figures are 13.4 ms for a single short question on
+an M3 Max; ten full-context questions in the same benchmark take about a second and peak
+near 1.8 GB, so size for the range rather than the headline.
+
+### The control API
+
+| Route | Scope | What it does |
+|---|---|---|
+| `GET /decisions` | full control | Every lane, every ability, the calibrations and the recent screenings, in one request. Carries no key, no state and no question text. |
+| `POST /decisions/lanes` | **this Mac only** | Switch a lane on or off, choose a checkpoint, pin an ability to a lane, unload. |
+| `POST /decisions/install` | **this Mac only** | Fetch the pinned package and a checkpoint into the model library. Answers as soon as it starts; watch `laya.installing`. |
+| `POST /decisions/test` | **this Mac only** | Ask one named lane one question set and get the probabilities back, with no thresholds applied. |
+| `POST /decisions/calibrate` | **this Mac only** | The same as `POST /jev/calibrate` with a lane. |
+
+The three write routes take this Mac's own control token and nothing else — not a paired
+phone's, not the swarm secret. They decide what the Mac spends and whether what it is
+reasoning about leaves the machine, and neither is a paired device's to decide. `GET /jev`,
+`POST /jev`, `GET /jev/guardrails/recent`, `GET /jev/calibration` and `POST /jev/calibrate`
+all still work exactly as they did; `GET /jev/calibration` takes an optional `?lane=`, and
+`POST /jev/calibrate` an optional `{"lane": …}` body.
+
 ## TypeSafe (Jev)
 
 Some of what this app does is not generation, it is judgment: which node should take this

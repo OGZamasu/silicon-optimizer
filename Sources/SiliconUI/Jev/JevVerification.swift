@@ -414,7 +414,7 @@ extension AppModel {
                 // Waited on rather than assumed: a request in the first milliseconds of
                 // launch must not read as "no key" on a Mac that has one.
                 await JevBootstrap.ready()
-                return await JevService.shared.isAvailable(.verification)
+                return await DecisionRouter.shared.canAnswer(.verification)
             },
             ask: { state in try await VerificationQuestions.ask(state: state) },
             escalationTarget: { [weak self] answeredBy in
