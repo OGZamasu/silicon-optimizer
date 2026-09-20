@@ -236,6 +236,16 @@ public final class AppModel {
 
         public var id: String { rawValue }
 
+        /// The order the menu bar offers these in: chat first, because that is what the
+        /// menu is usually opened for, then the rest as the sidebar lists them. Settings is
+        /// left out — it sits below the divider with Quit.
+        ///
+        /// Built from `allCases` rather than written out, because the hand-written version
+        /// of this list was already missing Cloud by the time anyone looked.
+        public static var menuOrder: [Tab] {
+            [.chat] + allCases.filter { $0 != .chat && $0 != .settings }
+        }
+
         public var systemImage: String {
             switch self {
             case .dashboard: "gauge.with.dots.needle.67percent"

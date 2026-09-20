@@ -61,6 +61,17 @@ struct SettingsPaneTests {
         #expect(AppModel.Tab.decisions.rawValue == "Decisions")
     }
 
+    /// The menu bar is the app's real home, and its list of places had quietly stopped
+    /// matching the sidebar's — Cloud was not on it. Building it from `allCases` means a new
+    /// tab appears in both, and this is what says so.
+    @Test func theMenuBarOffersEveryPlaceExceptSettings() {
+        let menu = AppModel.Tab.menuOrder
+        #expect(menu.first == .chat)
+        #expect(!menu.contains(.settings))
+        #expect(Set(menu) == Set(AppModel.Tab.allCases).subtracting([.settings]))
+        #expect(Set(menu).count == menu.count)
+    }
+
     /// Every sidebar row is an icon and a word. Two rows sharing an icon is the kind of
     /// thing a copied `case` leaves behind and nobody notices.
     @Test func everySidebarRowHasItsOwnIcon() {
