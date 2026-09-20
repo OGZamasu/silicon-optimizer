@@ -16,8 +16,12 @@ struct CloudProvidersSection: View {
 
     /// In-progress key text, never persisted here. A saved key is not read back into the
     /// field — the app has no reason to show a credential it already holds.
-    @State private var drafts: [String: String] = [:]
-    @State private var search = ""
+    ///
+    /// Owned by whoever shows this section rather than by the section itself: Settings puts
+    /// its panes behind a `switch`, and a half-typed key must not be thrown away by a trip
+    /// to another pane and back.
+    @Binding var drafts: [String: String]
+    @Binding var search: String
 
     /// Enough to browse a small catalogue, few enough that a provider with hundreds of models
     /// pushes you towards the search field instead of scrolling a Form forever.

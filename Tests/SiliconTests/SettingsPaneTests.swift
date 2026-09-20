@@ -57,8 +57,13 @@ struct SettingsPaneTests {
     /// Settings. The sidebar is built from `Tab.allCases`, so being a case is what puts it
     /// on screen at all.
     @Test func decisionsIsItsOwnPlaceInTheSidebar() {
-        #expect(AppModel.Tab.allCases.contains(.decisions))
+        let order = AppModel.Tab.allCases
+        let decisions = try? #require(order.firstIndex(of: .decisions))
+        let settings = try? #require(order.firstIndex(of: .settings))
         #expect(AppModel.Tab.decisions.rawValue == "Decisions")
+        // Below the places you make things, above Settings: it is a control panel, not a
+        // workspace, and the sidebar should read that way.
+        #expect(decisions ?? 0 < settings ?? 0)
     }
 
     /// The menu bar is the app's real home, and its list of places had quietly stopped

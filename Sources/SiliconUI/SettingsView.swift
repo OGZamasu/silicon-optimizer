@@ -22,6 +22,11 @@ struct SettingsView: View {
     @State private var fetchingTemplate = false
     @State private var showingSwarmInvite = false
     @State private var showingSwarmJoin = false
+    /// Held here, not inside `CloudProvidersSection`, so that switching panes does not throw
+    /// away a key somebody has typed but not saved. Panes are a `switch`: leaving one takes
+    /// its views down with it.
+    @State private var cloudKeyDrafts: [String: String] = [:]
+    @State private var cloudModelSearch = ""
 
     /// One group of settings, in the order the segmented control shows them.
     enum Pane: String, CaseIterable, Identifiable {
@@ -55,7 +60,8 @@ struct SettingsView: View {
 
     /// Remembered across launches: settings are usually reopened to change the same thing
     /// again, and landing back on General every time is its own small tax.
-    @AppStorage("settings.pane") private var storedPane = Pane.general.rawValue
+    @AppStorage("dev.siliconoptimizer.settings.pane")
+    private var storedPane = Pane.general.rawValue
 
     /// The panes the segmented control offers right now.
     private var panes: [Pane] {
@@ -135,7 +141,7 @@ struct SettingsView: View {
         chatSection
         generationSection
         otherAIsSection
-        CloudProvidersSection()
+        CloudProvidersSection(drafts: $cloudKeyDrafts, search: $cloudModelSearch)
     }
 
     @ViewBuilder
