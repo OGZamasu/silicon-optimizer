@@ -164,7 +164,10 @@ public struct PhoneModelEntry: Sendable, Hashable, Identifiable {
 /// models, never reach a runtime here, and never land in the Mac's model library.
 public enum PhoneModelCatalog {
 
-    public static let all: [PhoneModelEntry] = [qwen35_2B, gemma4E2B]
+    /// The default first, then the rest by size: a phone reading this list in order sees
+    /// the one to use, then the one to fall back to when there is no room for it, then the
+    /// one to take when there is room to spare.
+    public static let all: [PhoneModelEntry] = [qwen35_2B, qwen35_08B, gemma4E2B]
 
     public static func entry(id: String) -> PhoneModelEntry? {
         all.first { $0.id == id }
@@ -243,6 +246,72 @@ public enum PhoneModelCatalog {
 
     /// VmHWM of llama-bench on the phone: 2,467 MiB.
     static let qwenPeak: Int64 = 2_467 * 1_048_576
+
+    /// A peak for a model nobody has run on a phone, from the one thing that can be known
+    /// about it without running it: how big the file is.
+    ///
+    /// Everything the runtime holds beside the memory-mapped weights — llama.cpp's repacked
+    /// copy of them, the recurrent state, the KV cache, the scratch and the graph — came to
+    /// 0.99 times the weights when the S24 Ultra ran Qwen3.5 2B: the same architecture, the
+    /// same build, the same phone. Taking it as a whole one times the weights is that
+    /// measurement rounded the only safe way, and the round trip is pinned by a test — this
+    /// applied to the 2B's own weights lands within a percent of its measured peak, and
+    /// above it rather than below.
+    ///
+    /// It is an estimate and it is used for one thing: the free-memory gate, which is
+    /// advice. Nothing derived from it is published to a phone as a measurement — an entry
+    /// with no benchmark behind it carries `measured: nil`, and that is how the catalogue
+    /// says nobody has run it.
+    static func estimatedPeak(weights: Int64) -> Int64 { weights * 2 }
+
+    /// The fallback for a phone with no room for the default, and nothing more than that.
+    ///
+    /// 0.56 GB against the default's 1.30, and a gate of 1.4 GB against its 3.1, so a phone
+    /// with about 2.5 GB free — an ordinary evening on a Galaxy S24 Ultra — has something it
+    /// can actually load. **Qwen3.5 2B stays the default and stays the better answer.** This
+    /// is what a phone offers when the default will not fit, not a second recommendation:
+    /// `isDefault` is false here and true there, and there is exactly one of those.
+    ///
+    /// llama.cpp's own conversion of the instruction-tuned release, Apache-2.0 and ungated,
+    /// with the same chat template as the 2B — thinking off renders as an empty think block,
+    /// so `thinking: false` is a thing the template can actually do. Uniformly Q4_0 apart
+    /// from the 248,320-token embedding table, which it keeps at Q8_0: that table is nearly
+    /// half the file, and it is the part a 0.8B model can least afford to lose. It carries no
+    /// multi-token-prediction block, so the 24 layers in the file are the 24 the phone runs.
+    public static let qwen35_08B = PhoneModelEntry(
+        id: "qwen3.5-0.8b-q4_0",
+        label: "Qwen3.5 0.8B",
+        isDefault: false,
+        repository: "ggml-org/Qwen3.5-0.8B-GGUF",
+        commit: "8fea620810c4afa23dd6443f999a48574c1611a3",
+        file: "Qwen3.5-0.8B-Q4_0.gguf",
+        sizeBytes: 563_036_064,
+        sha256: "57d1997790d1744fba5b40a7317df71ea5e2acee28c47e78f0cce39c0703f8cf",
+        licence: "Apache-2.0",
+        recommended: .init(
+            // The threads are the 2B's, because the sweep that chose them was run on this
+            // architecture, this build and this phone, and nobody has swept this model.
+            threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
+            // 1,074 MiB estimated rather than measured — see `estimatedPeak`. The cache is
+            // the header's own: `full_attention_interval` 4 over 24 layers is six layers
+            // that attend over the whole context, each with 2 KV heads of 256 key and 256
+            // value, at f16; the other eighteen are a fixed-size recurrent state that does
+            // not grow. Eight attention heads, as the 2B has.
+            minFreeMemoryBytes: minimumFreeMemory(
+                peak: estimatedPeak(weights: 563_036_064), weights: 563_036_064,
+                cacheBytesPerToken: 6 * 2 * (256 + 256) * 2, attentionHeads: 8, context: 4096
+            ),
+            thinking: false
+        ),
+        // Nobody has run this one on a phone, so there is nothing to report and nothing is
+        // reported: nil, which the wire carries as no `measured` at all. Estimated speeds in
+        // a field called `measured`, beside a device and a runtime that were never used,
+        // would be an invention rather than a number.
+        measured: nil,
+        // Smaller and quicker than the default, not slower: the flag marks the model that
+        // costs a phone something, and this one is what a phone falls back *to*.
+        slowerOnPhone: false
+    )
 
     /// Larger and slower on the phone: Google's quantization-aware Q4_0 of Gemma 4 E2B.
     /// Offered, never the default.

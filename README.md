@@ -527,31 +527,58 @@ deliberate. The phone stays tailnet-only and never talks to Hugging Face, or to 
 on the internet. The Mac downloads the pinned file, checks it, and hands it to the phone over
 your tailnet.
 
-Two models are on offer, each pinned to an exact file — repository, commit, size and SHA-256
-— so what reaches the phone is precisely what was chosen. The speeds are one llama-bench run
-on a Galaxy S24 Ultra (llama.cpp b11053, CPU, the phone hot and charging):
+Three models are on offer, each pinned to an exact file — repository, commit, size and
+SHA-256 — so what reaches the phone is precisely what was chosen. The speeds are one
+llama-bench run on a Galaxy S24 Ultra (llama.cpp b11053, CPU, the phone hot and charging):
 
 | Model | File | Size | Licence | Writing speed | First word (300-token question) | Long answers |
 | --- | --- | --- | --- | --- | --- | --- |
 | **Qwen3.5 2B** — the default | `bartowski/Qwen_Qwen3.5-2B-GGUF` @ `7d26695`, `Qwen_Qwen3.5-2B-Q4_0.gguf` | 1.30 GB | Apache-2.0 | 19.2 tokens/s at 4 threads (17.2 at 6) | ≈ 2.5 s, estimated | not measured |
+| **Qwen3.5 0.8B** — the fallback when memory is short | `ggml-org/Qwen3.5-0.8B-GGUF` @ `8fea620`, `Qwen3.5-0.8B-Q4_0.gguf` | 0.56 GB | Apache-2.0 | not measured | not measured | not measured |
 | **Gemma 4 E2B** — larger, slower | `google/gemma-4-E2B-it-qat-q4_0-gguf` @ `675cff4`, `gemma-4-E2B_q4_0-it.gguf` | 3.35 GB | Apache-2.0 | 15.1 tokens/s at 6 threads (14.1 at 4) | ≈ 3.3 s, estimated | settles to 7.5 tokens/s |
 
 The first word is an estimate, not a measurement: 300 tokens divided by the prompt speed
 measured at the recommended prompt threads (122.9 and 92.6 tokens/s), rounded *up* to a tenth
 of a second for both. Each entry also tells the phone how to run it — threads for reading the
-prompt and for writing (6/4 for Qwen, 4/6 for Gemma), a 4,096-token context, thinking off in
-the chat template — and how much free memory to see before loading, as a gate: 3.1 GB and
-4.7 GB. That is the weights (1.30 and 3.35 GB) as they are, plus the rest of the measured
-peak — 2,467 MiB and 4,136 MiB in all, taken at no more than a 640-token context — grown by
-what the KV cache and attention scratch need at 4,096 tokens, with a quarter again on top of
-that part. The weights get no margin because they are memory-mapped from the file: on a busy
-phone Android drops those pages and reads them back, so padding them would refuse a model
-that runs.
+prompt and for writing (6/4 for both Qwens, 4/6 for Gemma), a 4,096-token context, thinking
+off in the chat template — and how much free memory to see before loading, as a gate: 3.1 GB,
+1.4 GB and 4.7 GB. That is the weights (1.30, 0.56 and 3.35 GB) as they are, plus the rest of
+the peak — 2,467 MiB and 4,136 MiB for the two that were measured, taken at no more than a
+640-token context — grown by what the KV cache and attention scratch need at 4,096 tokens,
+with a quarter again on top of that part. The weights get no margin because they are
+memory-mapped from the file: on a busy phone Android drops those pages and reads them back,
+so padding them would refuse a model that runs.
 
-**Getting one onto the phone.** `GET /ondevice/models` lists both, pinned, with the state of
-the Mac's copy: `absent`, `downloading`, `ready` or `failed`. While it is downloading, `stage`
-says what the Mac is doing — `fetching` it, `checking` it (hashing what it has) or `moving` it
-with the model library — and `fraction` how far along; a failure carries a `reason` to show
+**Qwen3.5 2B stays the default.** The 0.8B is not a second recommendation — it is there for a
+phone that has nowhere to put the default. A Galaxy S24 Ultra with a day's worth of apps open
+reports about 2.5 GB free, and the default asks for 3.1 GB before it will load; the 0.8B is
+the only one of the three that fits in that, which is what turns "use a smaller model
+instead" into an offer rather than a dead end. It is smaller and quicker, not better. It is
+llama.cpp's own conversion of the instruction-tuned release — Apache-2.0 and ungated,
+uniformly Q4_0 except for the 248,320-token embedding table it keeps at Q8_0, which is nearly
+half the file and the part a 0.8B model can least afford to lose — with the same chat
+template as the 2B, thinking off in it, and no multi-token-prediction block, so the 24 layers
+in the file are the 24 the phone runs.
+
+**Nobody has run the 0.8B on a phone**, and it says so rather than implying otherwise: it
+carries no measurements at all, instead of estimates in a field called "measured" beside a
+device and a runtime that were never used. `GET /ondevice/models` simply leaves `measured`
+out for it. Its free-memory gate is the one figure worked out anyway, because a gate is
+advice rather than a measurement: 1.4 GB, by the same arithmetic as the other two but from an
+**estimated** peak of 1,074 MiB. That estimate is the 2B's own measurement carried across —
+on that phone, that build and that architecture, everything the runtime held beside the
+memory-mapped weights came to 0.99 times the weights — so the 0.8B is gated at twice its
+weights, plus the cache and scratch grown to 4,096 tokens, plus the quarter on that part.
+Applied back to the 2B, the estimate lands 0.3% above the peak that phone really reached,
+which is the direction a gate should err in. The cache figure is the file's own header, not a
+guess: one layer in four attends over the whole context, six of the 24, each with two KV
+heads of 256 key and 256 value at f16.
+
+**Getting one onto the phone.** `GET /ondevice/models` lists all three, pinned, with the
+state of the Mac's copy: `absent`, `downloading`, `ready` or `failed`. While it is
+downloading, `stage` says what the Mac is doing — `fetching` it, `checking` it (hashing what
+it has) or `moving` it with the model library — and `fraction` how far along; a failure
+carries a `reason` to show
 and a `failure` to act on — `diskFull`, `checksumMismatch`, `network`, `server`,
 `interrupted`, `driveMissing` or `other`. `POST /ondevice/models/{id}/prepare` has the Mac
 fetch it: **202** while it is on its way, **200** once it is ready, and asking again never

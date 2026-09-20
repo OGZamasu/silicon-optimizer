@@ -664,7 +664,8 @@ struct ContractExportTests {
             ControlAPI.PhoneModelList.self,
             from: try #require(try route("GET", "/ondevice/models").response).encode()
         )
-        #expect(list.models.map(\.id) == ["qwen3.5-2b-q4_0", "gemma-4-e2b-q4_0"])
+        #expect(list.models.map(\.id)
+            == ["qwen3.5-2b-q4_0", "qwen3.5-0.8b-q4_0", "gemma-4-e2b-q4_0"])
         let qwen = try #require(list.models.first)
         #expect(qwen.isDefault)
         #expect(qwen.sizeBytes == 1_296_764_000)
@@ -679,6 +680,40 @@ struct ContractExportTests {
         #expect(qwen.measured?.firstWordEstimated == true)
         #expect(qwen.measured?.sustainedMeasured == false)
         #expect(qwen.measured?.sustainedTokensPerSecond == nil)
+        // The fallback a phone is offered when the default will not fit: pinned the same
+        // way, never the default, and the one entry in the export that shows a generated
+        // client what "nobody has run this on a phone" looks like.
+        let small = list.models[1]
+        #expect(small.id == "qwen3.5-0.8b-q4_0")
+        #expect(!small.isDefault)
+        #expect(!small.slowerOnPhone)
+        #expect(small.sizeBytes == 563_036_064)
+        #expect(small.sha256
+            == "57d1997790d1744fba5b40a7317df71ea5e2acee28c47e78f0cce39c0703f8cf")
+        #expect(small.source == .init(
+            repo: "ggml-org/Qwen3.5-0.8B-GGUF",
+            commit: "8fea620810c4afa23dd6443f999a48574c1611a3",
+            file: "Qwen3.5-0.8B-Q4_0.gguf"
+        ))
+        #expect(small.measured == nil)
+        #expect(small.onMac == .init(state: "absent"))
+        // The smallest gate of the three, which is the whole reason the entry exists.
+        #expect(small.recommended.minFreeMemoryBytes == 1_400_000_000)
+        #expect(small.recommended.minFreeMemoryBytes
+            == list.models.map(\.recommended.minFreeMemoryBytes).min())
+
+        // And in the bytes a generator actually reads, "not measured" is the key simply
+        // not being there — the same way every unset optional is carried here.
+        let listRoute = try route("GET", "/ondevice/models")
+        let listBytes = try #require(listRoute.response).encode()
+        let listObject = try #require(
+            JSONSerialization.jsonObject(with: listBytes) as? [String: Any]
+        )
+        let rows = try #require(listObject["models"] as? [[String: Any]])
+        #expect(rows.map { $0["id"] as? String } == list.models.map(\.id))
+        #expect(rows.filter { $0["measured"] == nil }.map { $0["id"] as? String }
+            == ["qwen3.5-0.8b-q4_0"])
+
         let gemma = try #require(list.models.last)
         #expect(gemma.sizeBytes == 3_349_516_256)
         #expect(gemma.sha256 == "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634")
@@ -1895,10 +1930,13 @@ struct ContractExportTests {
         (403, "swarm", ControlServer.phoneModelsAreNotForPeers),
     ]
 
-    /// The default fetched and verified; the larger one stopped partway, so the list shows
-    /// a failure's `reason`, `failure` and `fraction` populated.
+    /// The default fetched and verified; the fallback for a phone short on memory not
+    /// fetched at all, and with no benchmark behind it, so the list shows what an entry
+    /// nobody has measured looks like; the larger one stopped partway, so it shows a
+    /// failure's `reason`, `failure` and `fraction` populated.
     static let examplePhoneModels = ControlAPI.PhoneModelList(models: [
         PhoneModelService.wire(PhoneModelCatalog.qwen35_2B, state: .ready),
+        PhoneModelService.wire(PhoneModelCatalog.qwen35_08B, state: .absent),
         PhoneModelService.wire(PhoneModelCatalog.gemma4E2B, state: .failed(
             PhoneModelStore.failure(
                 for: URLError(.networkConnectionLost), entry: PhoneModelCatalog.gemma4E2B,

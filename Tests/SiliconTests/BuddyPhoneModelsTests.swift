@@ -27,7 +27,8 @@ struct BuddyPhoneModelsTests {
     /// Every byte-identifying field, exactly as the owner chose it. A pin that drifts is a
     /// phone that downloads 3.35 GB and then fails its own checksum.
     @Test func thePinsAreExactlyTheOnesTheOwnerChose() throws {
-        #expect(PhoneModelCatalog.all.map(\.id) == ["qwen3.5-2b-q4_0", "gemma-4-e2b-q4_0"])
+        #expect(PhoneModelCatalog.all.map(\.id)
+            == ["qwen3.5-2b-q4_0", "qwen3.5-0.8b-q4_0", "gemma-4-e2b-q4_0"])
 
         let qwen = try #require(PhoneModelCatalog.entry(id: "qwen3.5-2b-q4_0"))
         #expect(qwen.label == "Qwen3.5 2B")
@@ -43,6 +44,25 @@ struct BuddyPhoneModelsTests {
         #expect(qwen.recommended.contextLength == 4096)
         #expect(!qwen.recommended.thinking)
         #expect(!qwen.slowerOnPhone)
+
+        // The fallback for a phone short on memory. Not a second recommendation: smaller,
+        // and offered only when the default will not fit.
+        let small = try #require(PhoneModelCatalog.entry(id: "qwen3.5-0.8b-q4_0"))
+        #expect(small.label == "Qwen3.5 0.8B")
+        #expect(!small.isDefault)
+        #expect(small.repository == "ggml-org/Qwen3.5-0.8B-GGUF")
+        #expect(small.commit == "8fea620810c4afa23dd6443f999a48574c1611a3")
+        #expect(small.file == "Qwen3.5-0.8B-Q4_0.gguf")
+        #expect(small.sizeBytes == 563_036_064)
+        #expect(small.sha256 == "57d1997790d1744fba5b40a7317df71ea5e2acee28c47e78f0cce39c0703f8cf")
+        #expect(small.licence == "Apache-2.0")
+        #expect(small.recommended.threadsPrompt == 6)
+        #expect(small.recommended.threadsGenerate == 4)
+        #expect(small.recommended.contextLength == 4096)
+        #expect(!small.recommended.thinking)
+        #expect(!small.slowerOnPhone)
+        // Smaller than the default is the only reason it is here.
+        #expect(small.sizeBytes < qwen.sizeBytes)
 
         let gemma = try #require(PhoneModelCatalog.entry(id: "gemma-4-e2b-q4_0"))
         #expect(gemma.label == "Gemma 4 E2B")
@@ -101,8 +121,15 @@ struct BuddyPhoneModelsTests {
         #expect(gemma.sustainedTokensPerSecond == 7.5)
         #expect(gemma.peakMemoryBytes == 4_136 * 1_048_576)
 
+        // Which entries have been run on a phone at all, said once rather than assumed: the
+        // small one has not, and says so by carrying no `measured` — not by carrying
+        // estimates dressed as one.
+        #expect(PhoneModelCatalog.all.filter { $0.measured != nil }.map(\.id)
+            == ["qwen3.5-2b-q4_0", "gemma-4-e2b-q4_0"])
+        #expect(PhoneModelCatalog.qwen35_08B.measured == nil)
+
         for entry in PhoneModelCatalog.all {
-            let measured = try #require(entry.measured)
+            guard let measured = entry.measured else { continue }
             // The headline speed is the one at the threads the phone is told to write with.
             let atRecommended = measured.threadSweep.first {
                 $0.threads == entry.recommended.threadsGenerate
@@ -135,6 +162,50 @@ struct BuddyPhoneModelsTests {
             peak: 4_336_910_336, weights: 3_349_516_256, cacheBytesPerToken: 6_144,
             attentionHeads: 8, context: 4096
         ) == 4_700_000_000)
+    }
+
+    /// The small one, which nobody has run on a phone. Its gate is worked out by the same
+    /// arithmetic from an *estimated* peak — and the estimate is the 2B's own measurement,
+    /// checked here rather than asserted in a comment.
+    @Test func theUnmeasuredModelSaysSoAndItsGateIsStillDerived() throws {
+        let small = PhoneModelCatalog.qwen35_08B
+        // Nothing invented: no device, no runtime, no speeds, no peak.
+        #expect(small.measured == nil)
+
+        // The estimator is the 2B's measurement rounded the safe way. Applied to the 2B's
+        // own weights it lands above the peak that phone actually reached, and within a
+        // percent of it — so it is a calibration, not a guess.
+        let two = PhoneModelCatalog.qwen35_2B
+        let measuredPeak = try #require(two.measured).peakMemoryBytes
+        let estimatedPeak = PhoneModelCatalog.estimatedPeak(weights: two.sizeBytes)
+        #expect(estimatedPeak >= measuredPeak)
+        #expect(Double(estimatedPeak) < Double(measuredPeak) * 1.01)
+
+        // 1,074 MiB estimated for 563,036,064 bytes of weights, and the same cache the 2B
+        // has: six full-attention layers of 2 KV heads × (256 + 256) at f16 = 12,288 bytes
+        // a token, eight heads of attention scores over a 512-token batch at f32, both
+        // grown from the 640-token benchmark to 4,096.
+        #expect(PhoneModelCatalog.estimatedPeak(weights: small.sizeBytes) == 1_126_072_128)
+        #expect(PhoneModelCatalog.minimumFreeMemory(
+            peak: 1_126_072_128, weights: 563_036_064, cacheBytesPerToken: 12_288,
+            attentionHeads: 8, context: 4096
+        ) == 1_400_000_000)
+        #expect(small.recommended.minFreeMemoryBytes == 1_400_000_000)
+        // No margin on the weights here either: they are memory-mapped like the others'.
+        #expect(Double(small.recommended.minFreeMemoryBytes)
+            < Double(PhoneModelCatalog.estimatedPeak(weights: small.sizeBytes)) * 1.25)
+
+        // Why this entry exists at all. A Galaxy S24 Ultra reporting about 2.58 GB free is
+        // refused the default, and this is the one — the only one — it can load, so "use a
+        // smaller model instead" has exactly one thing to point at.
+        let freeOnABusyPhone: Int64 = 2_580_000_000
+        #expect(two.recommended.minFreeMemoryBytes > freeOnABusyPhone)
+        #expect(PhoneModelCatalog.all.filter {
+            $0.recommended.minFreeMemoryBytes <= freeOnABusyPhone
+        }.map(\.id) == ["qwen3.5-0.8b-q4_0"])
+        // And it is genuinely the smallest gate of the three, not merely a smaller file.
+        #expect(PhoneModelCatalog.all.map(\.recommended.minFreeMemoryBytes).min()
+            == small.recommended.minFreeMemoryBytes)
     }
 
     /// These are fetched for the phone and passed along. They must never become something
@@ -278,6 +349,34 @@ struct BuddyPhoneModelsTests {
         #expect(gemma.slowerOnPhone)
         #expect(gemma.measured?.sustainedTokensPerSecond == 7.5)
         #expect(gemma.measured?.sustainedMeasured == true)
+
+        // The one nobody has run reaches the phone with no `measured` at all — which on the
+        // wire is the key left out, the way every unset optional in this contract is
+        // carried. A phone shows what it has, and claims nothing it does not.
+        let small = PhoneModelService.wire(PhoneModelCatalog.qwen35_08B, state: .absent)
+        #expect(small.measured == nil)
+        #expect(!small.isDefault)
+        #expect(!small.slowerOnPhone)
+        #expect(small.sizeBytes == 563_036_064)
+        #expect(small.sha256
+            == "57d1997790d1744fba5b40a7317df71ea5e2acee28c47e78f0cce39c0703f8cf")
+        #expect(small.source == .init(
+            repo: "ggml-org/Qwen3.5-0.8B-GGUF",
+            commit: "8fea620810c4afa23dd6443f999a48574c1611a3",
+            file: "Qwen3.5-0.8B-Q4_0.gguf"
+        ))
+        #expect(small.recommended == .init(
+            threadsPrompt: 6, threadsGenerate: 4, contextLength: 4096,
+            minFreeMemoryBytes: 1_400_000_000, thinking: false
+        ))
+        #expect(small.downloadEventID == "ondevice:qwen3.5-0.8b-q4_0")
+        let withoutMeasured = try #require(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(small)
+        ) as? [String: Any])
+        #expect(Set(withoutMeasured.keys) == [
+            "id", "label", "isDefault", "sizeBytes", "sha256", "licence", "source", "onMac",
+            "recommended", "slowerOnPhone",
+        ])
     }
 
     /// Every failure a phone can be told about has a kind it can act on and a fixed
@@ -349,6 +448,12 @@ struct BuddyPhoneModelsTests {
             revision: PhoneModelCatalog.gemma4E2B.commit
         ).absoluteString == "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/"
             + "675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B_q4_0-it.gguf?download=true")
+        #expect(HuggingFaceClient.downloadURL(
+            repository: PhoneModelCatalog.qwen35_08B.repository,
+            file: PhoneModelCatalog.qwen35_08B.file,
+            revision: PhoneModelCatalog.qwen35_08B.commit
+        ).absoluteString == "https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF/resolve/"
+            + "8fea620810c4afa23dd6443f999a48574c1611a3/Qwen3.5-0.8B-Q4_0.gguf?download=true")
         // The stand-in gets the same path, so what the fetch tests see is what the Hub is
         // asked for.
         let local = HuggingFaceClient.downloadURL(
@@ -2152,6 +2257,10 @@ struct BuddyPhoneModelsTests {
             == "1.3 GB · Apache-2.0 · on this Mac, verified")
         #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(qwen, state: .absent))
             == "1.3 GB · Apache-2.0 · not on this Mac")
+        // The fallback reads as what it is — small — and carries no "slower" tag.
+        #expect(BuddyPhoneModelsRow.describe(
+            PhoneModelService.wire(PhoneModelCatalog.qwen35_08B, state: .absent)
+        ) == "563 MB · Apache-2.0 · not on this Mac")
         #expect(BuddyPhoneModelsRow.describe(PhoneModelService.wire(
             gemma, state: .downloading(
                 bytesReceived: gemma.sizeBytes / 4, bytesPerSecond: 1, stage: .fetching
