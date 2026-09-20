@@ -120,22 +120,45 @@ struct OpenAIChatClient: Sendable {
     }
 
     /// Polls `/health` until the model has finished loading.
-    func waitUntilReady(timeout: TimeInterval, isCancelled: @Sendable () -> Bool) async -> Bool {
+    /// Why a wait for readiness ended.
+    ///
+    /// A bool could not tell "the server died" from "the server is fine and slow", and the
+    /// caller has to say which one happened — so the wait answers with the reason it
+    /// stopped waiting rather than leaving the caller to guess from what is left behind.
+    enum Readiness: Sendable, Equatable {
+        case ready
+        /// The process is gone. Nothing further is coming, so the wait ends immediately
+        /// rather than at the timeout.
+        case processEnded
+        case cancelled
+        case timedOut
+    }
+
+    func waitUntilReady(
+        timeout: TimeInterval,
+        isCancelled: @Sendable () -> Bool,
+        hasEnded: @Sendable () -> Bool = { false }
+    ) async -> Readiness {
         let deadline = Date().addingTimeInterval(timeout)
         let healthURL = endpoint.appendingPathComponent("health")
 
         while Date() < deadline {
-            if isCancelled() { return false }
+            if isCancelled() { return .cancelled }
+            // Before the request, not only after: a server that exited while we slept has
+            // nothing to answer with, and two more seconds of connection timeout add
+            // nothing to what we already know.
+            if hasEnded() { return .processEnded }
             var request = URLRequest(url: healthURL)
             request.timeoutInterval = 2
             if let (_, response) = try? await session.data(for: request),
                let http = response as? HTTPURLResponse {
                 // 200 means loaded and ready. 503 means still loading, which is expected while
                 // a 40 GB model is being read off disk.
-                if http.statusCode == 200 { return true }
+                if http.statusCode == 200 { return .ready }
             }
+            if hasEnded() { return .processEnded }
             try? await Task.sleep(for: .milliseconds(250))
         }
-        return false
+        return hasEnded() ? .processEnded : .timedOut
     }
 }

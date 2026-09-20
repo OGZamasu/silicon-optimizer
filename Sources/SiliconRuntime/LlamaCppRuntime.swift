@@ -20,10 +20,47 @@ public actor LlamaCppRuntime: InferenceRuntime {
     private var client: OpenAIChatClient?
     private var installation: RuntimeInstallation?
     private var stateObserver: (@Sendable (RuntimeState) -> Void)?
+    /// Set while `start` is between "the process is up" and "the model answered", which is
+    /// the only window in which being stopped means being interrupted rather than unloaded.
+    private var loadInFlight = false
 
-    public init(installation: RuntimeInstallation? = nil) {
+    /// Who owns the machine, so a load that is displaced by another one is told so.
+    private let arbiter: LoadArbiter
+    /// Where a failed load leaves its account of itself, for `/status` to answer with after
+    /// the app has dropped this object.
+    private let recorder: LoadFailureRecorder
+    /// How long a load may take before the app gives up on it.
+    ///
+    /// Large models legitimately take minutes to load from disk on first run, before the
+    /// file cache is warm. Ten minutes is generous rather than optimistic — and since a
+    /// server that dies now ends the wait immediately, this is only ever spent on a server
+    /// that is genuinely still working.
+    private let readinessTimeout: TimeInterval
+
+    /// What went wrong with the last load, if the last load went wrong.
+    public private(set) var lastFailure: LoadFailure?
+    /// The log of the server that is no longer here.
+    ///
+    /// A failed load drops its `ServerProcess`, and the app's own log pane — the one a
+    /// person opens *because* a load failed — was reading the log off that object, so it
+    /// showed nothing at exactly the moment it had something to show.
+    private var lastServerLog = ""
+
+    public init(
+        installation: RuntimeInstallation? = nil,
+        arbiter: LoadArbiter = .shared,
+        recorder: LoadFailureRecorder = .shared,
+        readinessTimeout: TimeInterval = 600
+    ) {
         self.installation = installation
+        self.arbiter = arbiter
+        self.recorder = recorder
+        self.readinessTimeout = readinessTimeout
     }
+
+    /// The name of the binary, which is what a person sees in Activity Monitor and what
+    /// every sentence about a failed load names.
+    static let processName = "llama-server"
 
     public nonisolated static func locate() -> RuntimeInstallation? {
         RuntimeLocator.locateLlamaServer()
@@ -42,10 +79,14 @@ public actor LlamaCppRuntime: InferenceRuntime {
     // MARK: - Lifecycle
 
     public func start(_ request: LoadRequest) async throws {
-        await stop()
+        // A second load on a runtime that is already loading replaces the first, and the
+        // first is told which of those two things happened to it.
+        await stop(because: loadInFlight ? .replaced : .unload)
 
         let installation = self.installation ?? Self.locate()
-        guard let installation else { throw RuntimeError.notInstalled(.llamaCpp) }
+        guard let installation else {
+            throw record(RuntimeError.notInstalled(.llamaCpp), reason: .notInstalled)
+        }
         self.installation = installation
 
         let port = request.port > 0 ? request.port : PortAllocator.free()
@@ -59,57 +100,112 @@ public actor LlamaCppRuntime: InferenceRuntime {
         let problems = arguments.validate()
         if let blocking = problems.first, request.configuration.expertStreaming != nil,
            installation.hasExpertStreaming == false {
-            throw RuntimeError.launchFailed(blocking)
+            throw record(RuntimeError.launchFailed(blocking), reason: .launchFailed)
         }
 
         transition(to: .starting(stage: "Starting llama.cpp…"))
         loadProgress = 0
 
+        let claim = await arbiter.begin(model: request.model.name, runtime: kind)
+        loadInFlight = true
+        defer { loadInFlight = false }
+
         let server = ServerProcess()
         self.server = server
 
-        try await server.start(
-            executable: installation.executable,
-            arguments: arguments.build(),
-            environment: [:],
-            onLogLine: { [weak self] line in
-                Task { await self?.consume(logLine: line) }
-            }
-        )
+        do {
+            try await server.start(
+                executable: installation.executable,
+                arguments: arguments.build(),
+                environment: [:],
+                onLogLine: { [weak self] line in
+                    Task { await self?.consume(logLine: line) }
+                }
+            )
+        } catch {
+            await arbiter.finish(claim)
+            self.server = nil
+            throw record(error, reason: .launchFailed)
+        }
 
         let endpoint = URL(string: "http://127.0.0.1:\(port)")!
         let client = OpenAIChatClient(endpoint: endpoint)
         self.client = client
 
-        // Large models legitimately take minutes to load from disk on first run, before the
-        // file cache is warm. Ten minutes is generous rather than optimistic.
-        let ready = await client.waitUntilReady(timeout: 600) { Task.isCancelled }
+        let readiness = await client.waitUntilReady(
+            timeout: readinessTimeout,
+            isCancelled: { Task.isCancelled },
+            hasEnded: { server.hasEnded }
+        )
 
-        guard ready, await server.isRunning else {
+        guard readiness == .ready, await server.isRunning else {
             let log = await server.log
+            let outcome = await LoadDiagnosis.ending(
+                of: server, readiness: readiness, claim: claim,
+                arbiter: arbiter, timeout: readinessTimeout
+            )
             await server.terminate()
+            await arbiter.finish(claim)
             self.server = nil
             self.client = nil
-            let message = Self.diagnose(log: log)
-            transition(to: .failed(message: message))
-            throw RuntimeError.didNotBecomeReady(log: message)
+
+            lastServerLog = log
+            let failure = LoadDiagnosis.failure(
+                ending: outcome.ending,
+                summary: Self.diagnose(
+                    log: log, ending: outcome.ending, replacedBy: outcome.replacedBy
+                ),
+                log: log, runtime: kind
+            )
+            recorder.record(failure)
+            lastFailure = failure
+            // A load that was replaced is no longer the state anyone is looking at: the load
+            // that displaced it is, and stamping `.failed` over its progress would replace a
+            // true line with a stale one. The error still carries the sentence, so the
+            // caller — and the alert the app raises from it — still says what happened.
+            if !failure.wasReplaced { transition(to: .failed(message: failure.summary)) }
+            throw RuntimeError.didNotBecomeReady(failure)
         }
 
         loadProgress = 1
+        lastFailure = nil
+        recorder.clear()
+        await arbiter.finish(claim)
         transition(to: .ready(endpoint: endpoint))
     }
 
     public func stop() async {
+        await stop(because: .unload)
+    }
+
+    /// Stops the server, saying why — which is what lets a load that was interrupted report
+    /// an unload as an unload and a replacement as a replacement.
+    public func stop(because request: StopRequest) async {
         guard server != nil else {
             if case .idle = state {} else { transition(to: .idle) }
             return
         }
         transition(to: .stopping)
-        await server?.terminate()
+        lastServerLog = await server?.log ?? lastServerLog
+        await server?.terminate(because: request)
         server = nil
         client = nil
         loadProgress = 0
         transition(to: .idle)
+    }
+
+    // MARK: - Why a load ended
+
+    /// Records a failure that happened before there was ever a process, and hands the error
+    /// back so a call site can `throw record(…)`.
+    @discardableResult
+    private func record(_ error: any Error, reason: LoadFailure.Reason) -> any Error {
+        let failure = LoadFailure(
+            reason: reason, summary: error.localizedDescription, runtime: kind
+        )
+        recorder.record(failure)
+        lastFailure = failure
+        return error
     }
 
     // MARK: - Inference
@@ -142,8 +238,14 @@ public actor LlamaCppRuntime: InferenceRuntime {
         lastMetrics = metrics
     }
 
+    /// Whether the server process is up. Internal rather than public: the tests that stop a
+    /// load in flight have to know the thing they are stopping is really there.
+    var serverIsRunning: Bool {
+        get async { await server?.isRunning ?? false }
+    }
+
     public func serverLog() async -> String {
-        await server?.log ?? ""
+        await server?.log ?? lastServerLog
     }
 
     // MARK: - Log interpretation
@@ -193,8 +295,26 @@ public actor LlamaCppRuntime: InferenceRuntime {
         ("model loaded", "Starting server…", 0.95),
     ]
 
-    /// Turns the tail of a failed server log into something a user can act on.
-    static func diagnose(log: String) -> String {
+    /// Turns a failed load into one sentence a user can act on.
+    ///
+    /// The log is read first, because a runtime that said why it failed has said something
+    /// better than anything this code could infer: "reduce the context length" beats "exit
+    /// 1" every time. Only when the log says nothing recognisable does the sentence fall
+    /// back to *how the load ended* — which is the fix for the bug this method used to
+    /// have, where the fallback printed the last eight lines of a log and left the reader
+    /// to work out that the process had died at all.
+    static func diagnose(
+        log: String, ending: LoadEnding? = nil, replacedBy: String? = nil
+    ) -> String {
+        if let advice = advice(for: log) { return advice }
+        if let ending {
+            return ending.sentence(process: processName, replacedBy: replacedBy)
+        }
+        return "\(processName) stopped without saying why."
+    }
+
+    /// The failures llama.cpp announces in words, and what to do about each.
+    private static func advice(for log: String) -> String? {
         let lowercased = log.lowercased()
 
         if lowercased.contains("unrecognized argument") || lowercased.contains("invalid argument") {
@@ -221,9 +341,6 @@ public actor LlamaCppRuntime: InferenceRuntime {
         if lowercased.contains("address already in use") {
             return "The chosen port was taken. Try loading again."
         }
-
-        // Fall back to the last few lines, which is where the real error almost always is.
-        let tail = log.split(separator: "\n").suffix(8).joined(separator: "\n")
-        return tail.isEmpty ? "The runtime exited without reporting a reason." : tail
+        return nil
     }
 }

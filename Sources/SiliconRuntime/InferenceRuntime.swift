@@ -186,7 +186,9 @@ public struct GenerationMetrics: Sendable, Equatable {
 public enum RuntimeError: Error, LocalizedError {
     case notInstalled(RuntimeKind)
     case launchFailed(String)
-    case didNotBecomeReady(log: String)
+    /// A load that ended without a model in memory, carrying the whole account of itself:
+    /// the sentence, the log, and how the runtime process ended.
+    case didNotBecomeReady(LoadFailure)
     case notRunning
     case expertStreamingUnsupported
     case prismTernaryUnsupported
@@ -197,8 +199,13 @@ public enum RuntimeError: Error, LocalizedError {
             "\(kind.rawValue) is not installed. Install it from Settings."
         case .launchFailed(let message):
             "Could not start the runtime: \(message)"
-        case .didNotBecomeReady(let log):
-            "The model did not finish loading.\n\n\(log)"
+        case .didNotBecomeReady(let failure):
+            // One sentence, and only one. This used to be "The model did not finish
+            // loading." followed by whatever the last eight lines of the server log
+            // happened to be — which is what a phone rendered, verbatim, mid-sentence.
+            // The log is still there, on `failure.detail`, where a client can put it
+            // behind a tap.
+            failure.summary
         case .notRunning:
             "No model is loaded."
         case .expertStreamingUnsupported:
