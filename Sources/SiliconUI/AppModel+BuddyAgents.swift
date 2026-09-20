@@ -386,7 +386,7 @@ extension AppModel {
     func agentGuardrailPosture() async -> GuardrailPosture {
         if let stubbed = AgentSessionSeams.guardrails { return stubbed }
         guard await JevGuardrails.isTurnedOn() else { return .off }
-        return await JevService.shared.isAvailable(.guardrails) ? .screening : .unavailable
+        return await DecisionRouter.shared.canAnswer(.guardrails) ? .screening : .unavailable
     }
 
     /// Whether the guardrail is switched on — what pins Codex's policy, and what makes Pi

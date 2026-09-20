@@ -149,7 +149,7 @@ extension AppModel: ControlHost {
             return describe(pick.entry, recommendation: pick)
         }
         await JevBootstrap.ready()
-        guard await JevService.shared.isAvailable(.recommendation) else {
+        guard await DecisionRouter.shared.canAnswer(.recommendation) else {
             return describe(pick.entry, recommendation: pick)
         }
         guard let answer = await taskRanking(job, over: ranked) else {
@@ -455,7 +455,7 @@ extension AppModel: ControlHost {
         var localEndpoint: URL?
         if case .ready(let endpoint) = runtimeState { localEndpoint = endpoint }
 
-        func local(
+        func oneToken(
             _ asked: ControlAPI.DecideRequest = request
         ) async throws -> ControlAPI.DecideResponse {
             guard let endpoint = localEndpoint, let loaded = loadedModel else {
@@ -464,6 +464,37 @@ extension AppModel: ControlHost {
             noteActivity()
             let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
             return try await whileGenerating { try await decider.decide(asked) }
+        }
+
+        /// The free half of the cascade, and of `provider: "local"`.
+        ///
+        /// "Local" used to have exactly one meaning — the loaded chat model, read one token
+        /// deep — and now has three. The best of them answers: Laya if it is installed,
+        /// because it is a decision model where the one-token reading is an approximation
+        /// of one; then a swarm node, which costs nothing either; then the loaded model,
+        /// which is what this always was and still is on a Mac with nothing installed.
+        ///
+        /// Nothing about the *shape* changes: the response is the same type, `provider`
+        /// says which of the three answered, and a caller that only ever looked at
+        /// `answers` cannot tell the difference.
+        func local(
+            _ asked: ControlAPI.DecideRequest = request
+        ) async throws -> ControlAPI.DecideResponse {
+            guard let lane = await DecisionRouter.shared.localLane(for: .decideTool),
+                  lane != .oneToken
+            else { return try await oneToken(asked) }
+            do {
+                return try await DecisionRouter.shared.ask(
+                    lane: lane, feature: .decideTool,
+                    state: asked.state, questions: asked.questions
+                )
+            } catch {
+                // A lane that was ready a moment ago and is not now — a sidecar that died,
+                // a node that went to sleep. The loaded model is still here, and an answer
+                // from it beats a failed decision.
+                guard localEndpoint != nil else { throw error }
+                return try await oneToken(asked)
+            }
         }
         func typeSafe() async throws -> ControlAPI.DecideResponse {
             // Through the one door rather than straight at `SystemOneClient`: the decide
@@ -487,16 +518,34 @@ extension AppModel: ControlHost {
         switch provider {
         case "local": return try await local()
         case "typesafe": return try await typeSafe()
+        // Named outright, which skips the policy: "answer with Laya" rather than "answer
+        // with whatever is best", which is what a test bench and a comparison need.
+        case "laya", "node":
+            guard let lane = DecisionLaneID.named(provider) else {
+                throw ControlHostError.badRequest(
+                    ControlAPI.DecisionLaneVocabulary.unknownLane(provider)
+                )
+            }
+            return try await DecisionRouter.shared.ask(
+                lane: lane, feature: .decideTool,
+                state: request.state, questions: request.questions
+            )
         case "auto":
-            guard localEndpoint != nil else {
+            // With nothing free to cascade *from*, `auto` is a single lane and the policy
+            // picks it: Jev when the owner has turned it on and keyed it, otherwise Laya,
+            // otherwise a node. Only when none of those exists is there nothing to say.
+            let free = await DecisionRouter.shared.localLane(for: .decideTool)
+            guard localEndpoint != nil || free != nil else {
                 await JevBootstrap.ready()
                 if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
                 throw ControlHostError.badRequest(
-                    "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
-                    + "API key and turn on the decide tool in Settings → TypeSafe (Jev)."
+                    "Nothing can decide yet: install Laya in Settings → Decisions, load a "
+                    + "model, or add a TypeSafe API key and turn on the decide tool."
                 )
             }
-            let floors = await cascadeFloors()
+            // The floors belonging to the lane that is about to answer the free pass,
+            // not to "the local lane" as if there were only one of them.
+            let floors = await cascadeFloors(for: free ?? .oneToken)
             return try await DecisionCascade.run(
                 request,
                 floors: floors,
@@ -512,7 +561,8 @@ extension AppModel: ControlHost {
             )
         default:
             throw ControlHostError.badRequest(
-                "Unknown provider \"\(request.provider ?? "")\". Use auto, local or typesafe."
+                "Unknown provider \"\(request.provider ?? "")\". "
+                + "Use auto, local, laya, node or typesafe."
             )
         }
     }

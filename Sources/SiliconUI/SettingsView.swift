@@ -307,6 +307,12 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
 
+            // The home for every decision this app makes: the lanes, the eight abilities,
+            // the bench. The section below keeps what is about the TypeSafe *account* —
+            // the key, the budget, the model pin — so nothing that was reachable before
+            // has stopped being reachable.
+            DecisionsSection()
+
             Section("TypeSafe (Jev)") {
                 TypeSafeKeyRow(onKeyChanged: { jevRevision += 1 })
                 Text(

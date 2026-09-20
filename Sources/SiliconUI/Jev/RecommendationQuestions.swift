@@ -535,7 +535,7 @@ public enum RecommendationQuestions: JevQuestionSet {
         task: String, candidates: [RecommendationCandidate],
         using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await DecisionRouter.router(for: service).decide(
             feature,
             state: state(task: task, candidates: candidates),
             questions: questions(over: candidates)

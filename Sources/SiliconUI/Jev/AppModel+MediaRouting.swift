@@ -33,7 +33,7 @@ extension AppModel {
     public var mediaRoutingIsAvailable: Bool {
         get async {
             await JevBootstrap.ready()
-            return await MediaRouter.service.isAvailable(.mediaRouting)
+            return await DecisionRouter.router(for: MediaRouter.service).canAnswer(.mediaRouting)
         }
     }
 

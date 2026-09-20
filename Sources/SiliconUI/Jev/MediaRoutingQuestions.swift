@@ -581,7 +581,7 @@ public enum MediaRoutingQuestions: JevQuestionSet {
         prompt: String, kind: MediaKind, candidates: [MediaCandidate],
         using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await DecisionRouter.router(for: service).decide(
             feature,
             state: state(prompt: prompt, kind: kind, candidates: candidates),
             questions: questions(over: candidates)

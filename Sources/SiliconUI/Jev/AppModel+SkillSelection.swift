@@ -50,7 +50,7 @@ public enum SkillSelector {
             return Outcome(suggestion: nil, calls: 0, shortlist: [])
         }
         // Off, no key, or the month's budget is spent. Not an error: the owner decided this.
-        guard await service.isAvailable(.skillSelection) else {
+        guard await DecisionRouter.router(for: service).canAnswer(.skillSelection) else {
             return Outcome(suggestion: nil, calls: 0, shortlist: [])
         }
 
@@ -114,7 +114,7 @@ public enum ContextPruner {
         // be answered on the system prompt — the one piece of text most likely to be the
         // same every turn and to contain somebody's private preamble.
         guard let turn = ContextPruning.latestUserTurn(inBody: body) else { return nil }
-        guard await service.isAvailable(.skillSelection) else { return nil }
+        guard await DecisionRouter.router(for: service).canAnswer(.skillSelection) else { return nil }
 
         let response: ControlAPI.DecideResponse
         do {

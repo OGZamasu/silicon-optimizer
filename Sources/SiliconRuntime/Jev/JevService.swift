@@ -256,6 +256,35 @@ public struct JevSettings: Codable, Sendable, Equatable {
     /// reads it, but it lives here because this is the file the owner's Jev decisions are
     /// kept in and a control client may rewrite.
     public var verificationEscalationModel: String?
+    // MARK: Lanes
+
+    /// Which lane answers each feature, when the owner has said rather than left it to the
+    /// policy.
+    ///
+    /// Beside the per-feature switches rather than in a file of its own, because it is the
+    /// same kind of decision: this file is already where "what may this feature do, and
+    /// what may it spend" is written down, and a second file would mean two places to look
+    /// and two things to keep in step.
+    ///
+    /// Absent means `.automatic`, which is what the owner asked for: Jev when it is on and
+    /// keyed, otherwise a local lane.
+    public var laneOverrides: [JevFeature: DecisionLaneOverride] = [:]
+
+    /// Whether the local Laya lane may answer at all. On by default — it costs nothing and
+    /// sends nothing anywhere — but it only *does* anything once Laya is installed.
+    public var layaEnabled: Bool = true
+
+    /// Which Laya checkpoint the local lane loads.
+    public var layaCheckpoint: LayaCheckpoint = .default
+
+    /// Whether a swarm node may answer decisions.
+    ///
+    /// Off by default, and deliberately not "on if a node offers it". Nothing is billed,
+    /// but the state crosses the tailnet to another machine, and that is the owner's
+    /// decision to make once rather than one this app makes for them because a peer
+    /// advertised a capability.
+    public var nodeLaneEnabled: Bool = false
+
     /// The cascade's floors, when no calibration has been run for the loaded model.
     ///
     /// `POST /jev/calibrate` measures better ones and writes them to `local-calibration.json`
@@ -290,6 +319,11 @@ public struct JevSettings: Codable, Sendable, Equatable {
 
     public func isOn(_ feature: JevFeature) -> Bool { features[feature] ?? false }
 
+    /// What the owner has said about this feature's lane. Absent means automatic.
+    public func laneOverride(_ feature: JevFeature) -> DecisionLaneOverride {
+        laneOverrides[feature] ?? .automatic
+    }
+
     /// Whether an adult prompt is routed automatically, resolved against what is installed
     /// right now. Nil follows the lane; a stored answer overrides it.
     public func automaticUncensoredLane(uncensoredLaneInstalled: Bool) -> Bool {
@@ -309,6 +343,7 @@ public struct JevSettings: Codable, Sendable, Equatable {
         case verificationEscalationModel
         case cascadeFloor, cascadeNoulLow, cascadeNoulHigh
         case pruneToolHistory, pruneAboveFraction
+        case laneOverrides, layaEnabled, layaCheckpoint, nodeLaneEnabled
     }
 
     public init(from decoder: any Decoder) throws {
@@ -343,6 +378,29 @@ public struct JevSettings: Codable, Sendable, Equatable {
         pruneAboveFraction = try container.decodeIfPresent(
             Double.self, forKey: .pruneAboveFraction
         ) ?? pruneAboveFraction
+        layaEnabled = try container.decodeIfPresent(
+            Bool.self, forKey: .layaEnabled
+        ) ?? layaEnabled
+        nodeLaneEnabled = try container.decodeIfPresent(
+            Bool.self, forKey: .nodeLaneEnabled
+        ) ?? nodeLaneEnabled
+        // An unknown checkpoint name is a file from a newer build, or a typo. Either way
+        // the default is the safe reading: it is the one that is always offered.
+        if let name = try container.decodeIfPresent(String.self, forKey: .layaCheckpoint) {
+            layaCheckpoint = LayaCheckpoint(rawValue: name) ?? .default
+        }
+        if let raw = try container.decodeIfPresent(
+            [String: String].self, forKey: .laneOverrides
+        ) {
+            for (name, choice) in raw {
+                // Same rule as the feature switches above: a feature or a lane word this
+                // build does not know is ignored rather than refused.
+                guard let feature = JevFeature(rawValue: name),
+                      let override = DecisionLaneOverride(rawValue: choice)
+                else { continue }
+                laneOverrides[feature] = override
+            }
+        }
         if let raw = try container.decodeIfPresent([String: Bool].self, forKey: .features) {
             for (name, on) in raw {
                 // An unknown name is a feature from a newer build. Ignoring it is right:
@@ -374,6 +432,19 @@ public struct JevSettings: Codable, Sendable, Equatable {
         try container.encode(cascadeNoulHigh, forKey: .cascadeNoulHigh)
         try container.encode(pruneToolHistory, forKey: .pruneToolHistory)
         try container.encode(pruneAboveFraction, forKey: .pruneAboveFraction)
+        try container.encode(layaEnabled, forKey: .layaEnabled)
+        try container.encode(nodeLaneEnabled, forKey: .nodeLaneEnabled)
+        try container.encode(layaCheckpoint.rawValue, forKey: .layaCheckpoint)
+        // Only the ones the owner has actually pinned. Unlike the feature switches below —
+        // which are written out in full so the file names every ability — an override that
+        // is `.automatic` is the *absence* of a decision, and writing eight of them would
+        // mean a settings object could not survive its own file unchanged.
+        try container.encode(
+            laneOverrides
+                .filter { $0.value != .automatic }
+                .reduce(into: [String: String]()) { $0[$1.key.rawValue] = $1.value.rawValue },
+            forKey: .laneOverrides
+        )
         // Every case, every time: a file that lists all eight is one a person can edit.
         try container.encode(
             Dictionary(uniqueKeysWithValues: JevFeature.allCases.map { ($0.rawValue, isOn($0)) }),
@@ -405,7 +476,20 @@ public struct JevSettings: Codable, Sendable, Equatable {
     public static var calibrationURL: URL { calibrationURL(besideConfigAt: configURL) }
 
     public static func calibrationURL(besideConfigAt config: URL) -> URL {
-        config.deletingLastPathComponent().appendingPathComponent("local-calibration.json")
+        calibrationURL(besideConfigAt: config, lane: .oneToken)
+    }
+
+    /// Where one lane's calibration is kept.
+    ///
+    /// The one-token lane keeps `local-calibration.json`, the name it has always had, so a
+    /// Mac that calibrated before Laya existed keeps its floors across the upgrade with no
+    /// migration step. Every other lane gets a file of its own rather than a key inside
+    /// that one: a calibration is a whole report, they are written at different times, and
+    /// one run failing to save must not be able to take another lane's result with it.
+    public static func calibrationURL(besideConfigAt config: URL, lane: DecisionLaneID) -> URL {
+        let name = lane == .oneToken ? "local" : lane.wireName
+        return config.deletingLastPathComponent()
+            .appendingPathComponent("\(name)-calibration.json")
     }
 
     /// Cases the owner added by hand, which the run appends to the built-in set.
@@ -482,6 +566,10 @@ public struct JevSettings: Codable, Sendable, Equatable {
         for feature in JevFeature.allCases where copy.features[feature] == nil {
             copy.features[feature] = Self.defaultFeatures[feature] ?? false
         }
+        // Deliberately *not* filled in with `.automatic`: absent already means automatic,
+        // and materialising the defaults would make a settings object that has been
+        // through the file unequal to the one it was written from.
+        copy.laneOverrides = copy.laneOverrides.filter { $0.value != .automatic }
         return copy
     }
 
@@ -815,6 +903,11 @@ public actor JevService {
     /// Asked of the actor rather than derived from `JevSettings.configURL` by the caller,
     /// because a test points `configure(configURL:)` somewhere private and everything that
     /// writes beside the settings has to follow it there.
+    /// Where one lane's calibration lives, following a test's relocated config.
+    public func calibrationURL(for lane: DecisionLaneID) -> URL {
+        JevSettings.calibrationURL(besideConfigAt: configURL, lane: lane)
+    }
+
     public func storeLocations() -> (config: URL, calibration: URL, userCases: URL) {
         (
             configURL,

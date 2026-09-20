@@ -43,7 +43,13 @@ enum JevBootstrap {
 extension AppModel {
 
     /// Called once at start. Costs nothing — no Keychain read, no file read, no network.
-    func configureJev() { JevBootstrap.begin() }
+    func configureJev() {
+        JevBootstrap.begin()
+        // The lanes start here rather than from `start()` because this is the Jev-owned
+        // file and `start()` is not: one line in the file that already owns this wiring,
+        // instead of an edit to the model another session is holding.
+        configureDecisionLanes()
+    }
 
     // MARK: - Control routes
 
@@ -125,16 +131,48 @@ extension AppModel {
         )
     }
 
-    /// The floors `provider: "auto"` escalates on: the last calibration's when it was
-    /// measured against the model loaded right now, and the settings' otherwise.
-    func cascadeFloors() async -> ControlAPI.JevCalibration.Floors {
+    /// The floors `provider: "auto"` escalates on.
+    ///
+    /// Per lane now, because a confidence number means whatever produced it means by it:
+    /// the floors measured against the loaded chat model read one token deep say nothing
+    /// about Laya's, which is a decision model with a distribution of its own. So the
+    /// cascade asks for the floors belonging to whichever lane is about to answer its free
+    /// pass, and falls back to the settings when that lane has never been calibrated.
+    func cascadeFloors(
+        for lane: DecisionLaneID = .oneToken
+    ) async -> ControlAPI.JevCalibration.Floors {
         await JevBootstrap.ready()
         let settings = await JevService.shared.settings().cascadeFloors
-        let store = await JevService.shared.storeLocations()
-        let calibration = await LocalCalibrationStore.shared.result(at: store.calibration)
+        let url = await JevService.shared.calibrationURL(for: lane)
+        let calibration = await LocalCalibrationStore.shared.result(at: url)
         return CalibrationQuestions.floors(
-            for: calibrationModel, calibration: calibration, settings: settings
+            for: await calibrationModel(for: lane), calibration: calibration,
+            settings: settings
         )
+    }
+
+    /// How a lane describes the thing its floors were measured against.
+    ///
+    /// For the one-token lane that is the loaded model — an id, its bytes and when it was
+    /// installed, because an id alone can be reused. For Laya it is the checkpoint *and its
+    /// pinned revision*, for exactly the same reason: "aac6fef/laya-mlx" at one commit is
+    /// not a promise about the next, and floors measured against one must not be applied to
+    /// the other.
+    func calibrationModel(for lane: DecisionLaneID) async -> CalibrationQuestions.LoadedModel? {
+        switch lane {
+        case .oneToken:
+            return calibrationModel
+        case .laya:
+            let checkpoint = await JevService.shared.settings().layaCheckpoint
+            return .init(
+                id: "\(checkpoint.repository)@\(checkpoint.revision)",
+                sizeBytes: checkpoint.downloadBytes, installedAt: nil
+            )
+        case .node, .jev:
+            // A node's weights are not this Mac's to identify, and Jev is the reference
+            // rather than a thing being calibrated.
+            return nil
+        }
     }
 
     /// `GET /jev/calibration` — the last run, or nil if there has never been one.
@@ -144,21 +182,39 @@ extension AppModel {
     /// showing a calibration measured on a model nobody has loaded since would otherwise be
     /// describing something that is not happening.
     public func jevCalibration() async -> ControlAPI.JevCalibration? {
+        await calibration(for: .oneToken)
+    }
+
+    /// One lane's last calibration, with the context only this Mac can fill in.
+    public func calibration(for lane: DecisionLaneID) async -> ControlAPI.JevCalibration? {
         await JevBootstrap.ready()
-        let store = await JevService.shared.storeLocations()
-        guard var result = await LocalCalibrationStore.shared.result(at: store.calibration)
+        let url = await JevService.shared.calibrationURL(for: lane)
+        guard var result = await LocalCalibrationStore.shared.result(at: url)
         else { return nil }
-        let model = calibrationModel
+        let model = await calibrationModel(for: lane)
         let settings = await JevService.shared.settings().cascadeFloors
         let applies = result.measured(
             modelID: model?.id, sizeBytes: model?.sizeBytes, installedAt: model?.installedAt
         )
+        result.lane = result.lane ?? lane.wireName
         result.appliesToLoadedModel = applies
         result.floorsInEffect = applies
             ? result.floors.normalized(default: settings)
             : settings
-        result.loadedModelName = applies ? nil : loadedModel?.name
+        result.loadedModelName = applies
+            ? nil
+            : (lane == .oneToken ? loadedModel?.name : model?.id)
         return result
+    }
+
+    /// Every lane that has ever been calibrated on this Mac, for the Decisions panel.
+    public func allCalibrations() async -> [String: ControlAPI.JevCalibration] {
+        var results: [String: ControlAPI.JevCalibration] = [:]
+        for lane in [DecisionLaneID.oneToken, .laya, .node] {
+            guard let result = await calibration(for: lane) else { continue }
+            results[lane.wireName] = result
+        }
+        return results
     }
 
     /// `POST /jev/calibrate` — run every case through both lanes and write the result.

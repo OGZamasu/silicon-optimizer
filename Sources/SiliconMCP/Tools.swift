@@ -250,14 +250,17 @@ enum Tools {
                 picks a label; {"type":"score","instructions":"…","criteria":["level 0","level \
                 1",…]} rates on an ordered rubric and returns the expected level. Ask several \
                 questions in one call. Every question needs instructions saying what is being \
-                judged. By default ("auto") the model loaded on this Mac answers first — one \
-                forward pass per question, nothing leaves the machine, uncalibrated \
-                probabilities — and then only the answers it was unsure of are put to Jev, \
-                which returns `provider: "local+typesafe"` and a `sources` map saying which \
-                lane answered each question. Where "unsure" sits is set by \
-                calibrate_decisions; with no model loaded, or Decision calibration off, \
-                "auto" is a single lane as before. provider "local" never pays and never \
-                escalates; "typesafe" asks Jev alone (calibrated, ~$0.0003 per call). The Jev lane is \
+                judged. By default ("auto") the best free local lane answers first — Laya on \
+                this Mac if it is installed, then a swarm node, then the model loaded here, \
+                one forward pass per question, nothing leaves the machine for that half, \
+                uncalibrated probabilities — and then only the answers it was unsure of are \
+                put to Jev, which returns `provider: "local+typesafe"` and a `sources` map \
+                saying which lane answered each question. Where "unsure" sits is set by \
+                calibrate_decisions; with nothing free installed, or Decision calibration \
+                off, "auto" is a single lane as before. provider "local" never pays and never \
+                escalates, choosing from that same free order; "laya" or "node" names one of \
+                those lanes outright, skipping the order; "typesafe" asks Jev alone \
+                (calibrated, ~$0.0003 per call). The Jev lane is \
                 governed by Settings → TypeSafe (Jev) on the Mac: the master switch, the \
                 decide-tool switch, the pinned model version, the state size limit and the \
                 monthly budget all apply, and every call is recorded \
@@ -279,7 +282,9 @@ enum Tools {
                         + "instructions?, criteria?} as described above."
                     ),
                 ]),
-                "provider": property("string", "auto (default), local, or typesafe."),
+                "provider": property(
+                    "string", "auto (default), local, laya, node, or typesafe."
+                ),
             ],
             required: ["state", "questions"]
         ),
@@ -298,22 +303,35 @@ enum Tools {
         Tool(
             name: "calibrate_decisions",
             description: """
-                Measure how often the model loaded on this Mac decides the way Jev does, and \
-                retune when `decide` with provider "auto" escalates to Jev. Runs a fixed set \
-                of about \(ControlAPI.JevCalibration.builtInCaseCount) short cases — routing, \
-                support triage, safety, sentiment — through both lanes, then reports agreement \
-                per question kind, a reliability table of local confidence against agreement, \
-                and the two floors "auto" will use from now on: the confidence below which a \
-                choice or score is sent to Jev, and the middle band in which a noul is. \
+                Measure how often a local decision lane decides the way Jev does, and retune \
+                when `decide` with provider "auto" escalates to Jev. Runs a fixed set of about \
+                \(ControlAPI.JevCalibration.builtInCaseCount) short cases — routing, support \
+                triage, safety, sentiment — through both lanes, then reports agreement per \
+                question kind, a reliability table of local confidence against agreement, and \
+                the two floors "auto" will use from now on: the confidence below which a \
+                choice or score is sent to Jev, and the middle band in which a noul is. Takes \
+                an optional lane: "local" (the model loaded here, one token deep — the \
+                default), "laya" (Laya on this Mac), or "node" (Laya on a swarm node); never \
+                "typesafe", which is the reference a calibration measures against, not a lane \
+                it can measure. \
                 COSTS MONEY: about \(ControlAPI.JevCalibration.estimatedCents()) cent(s) of \
-                Jev tokens, plus a minute or two of the loaded model, so ask the user before \
-                running it. Needs a model loaded and Decision calibration switched on in \
-                Settings → TypeSafe (Jev). The result is kept and reused only while that same \
-                model is loaded — a threshold found on one model says nothing about another. \
+                Jev tokens, plus a minute or two of whichever lane is being measured, so ask \
+                the user before running it. Needs that lane ready — a model loaded for \
+                "local", Laya installed for "laya", a reachable node for "node" — and \
+                Decision calibration switched on in Settings → TypeSafe (Jev). The result is \
+                kept and reused only while that same lane is the one running — a threshold \
+                found on one says nothing about another. \
                 Jev is the reference here, not ground truth: agreement means the two lanes \
                 landed in the same place, which they can do while both being wrong.
                 """,
-            properties: [:], required: []
+            properties: [
+                "lane": property(
+                    "string",
+                    "Which lane to calibrate: \"local\" (default), \"laya\", or \"node\". "
+                    + "Never \"typesafe\"."
+                ),
+            ],
+            required: []
         ),
         Tool(
             name: "run_benchmark",
@@ -941,7 +959,12 @@ enum Tools {
             return describe(try await client.get("/jev") as ControlAPI.JevStatus)
 
         case "calibrate_decisions":
-            let result: ControlAPI.JevCalibration = try await client.postEmpty("/jev/calibrate")
+            // No `lane` is still the old route, unchanged: `POST /decisions/calibrate` with
+            // an absent lane is `POST /jev/calibrate` in every respect but the path.
+            let lane = arguments["lane"]?.stringValue
+            let result: ControlAPI.JevCalibration = try await client.post(
+                "/decisions/calibrate", ControlAPI.DecisionCalibrateRequest(lane: lane)
+            )
             // What get_status is holding is now last week's answer.
             await CalibrationCache.shared.forget()
             return describe(result)

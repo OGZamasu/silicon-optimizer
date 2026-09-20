@@ -224,6 +224,16 @@ if [[ -f Resources/tracker.py ]]; then
     cp Resources/tracker.py "$BUNDLE/Contents/Resources/"
 fi
 
+# The Laya decision sidecar: one long-lived Python process the local decision lane talks to
+# over a pipe. Here rather than generated at runtime for the same reason facecam.py is — it
+# can be read, diffed and fixed like any other source file — and because a script the app
+# writes out itself is a script nobody reviews.
+if [[ -f Resources/laya/laya_sidecar.py ]]; then
+    echo "==> Embedding the Laya decision sidecar"
+    mkdir -p "$BUNDLE/Contents/Resources/laya"
+    cp Resources/laya/laya_sidecar.py "$BUNDLE/Contents/Resources/laya/"
+fi
+
 # The licences travel with the binaries they cover.
 if [[ -f THIRD_PARTY_LICENSES.md ]]; then
     cp THIRD_PARTY_LICENSES.md "$BUNDLE/Contents/Resources/"

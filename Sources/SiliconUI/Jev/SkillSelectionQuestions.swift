@@ -577,7 +577,7 @@ public enum SkillSelectionQuestions: JevQuestionSet {
         _ turn: SkillSelectionTurn, roster: [SkillCandidate],
         using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await DecisionRouter.router(for: service).decide(
             feature,
             state: state(turn, roster: roster),
             questions: wideQuestions(for: roster),
@@ -593,7 +593,7 @@ public enum SkillSelectionQuestions: JevQuestionSet {
         _ turn: SkillSelectionTurn, shortlist: [SkillCandidate],
         using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await DecisionRouter.router(for: service).decide(
             feature,
             state: state(turn, roster: shortlist, detailed: true),
             questions: shortlistQuestions(for: shortlist),
@@ -1121,7 +1121,7 @@ public enum ContextPruning {
     public static func ask(
         latestTurn: String, candidates: [Candidate], using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await DecisionRouter.router(for: service).decide(
             SkillSelectionQuestions.feature,
             state: state(latestTurn: latestTurn, candidates: candidates),
             questions: questions(for: candidates),

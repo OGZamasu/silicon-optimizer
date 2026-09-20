@@ -150,7 +150,7 @@ public enum ModelRouter {
 
         // Off, no key, or the month's budget is spent. Not an error: the owner decided this,
         // and Auto still has to answer.
-        guard await service.isAvailable(.routing) else {
+        guard await DecisionRouter.router(for: service).canAnswer(.routing) else {
             return using(defaultModel, "Jev is not answering routing right now; used the default")
         }
 
