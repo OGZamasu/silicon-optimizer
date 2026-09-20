@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Where everything lives
@@ -65,6 +66,10 @@ public enum LayaInstallError: Error, LocalizedError, Equatable {
     case libraryUnreachable(String)
     case noPython(tried: [String])
     case stepFailed(step: String, detail: String)
+    /// The wheel pip fetched does not hash to the pinned `LayaPackage.wheelSHA256`. Thrown
+    /// before that file is ever handed to `pip install`, so nothing is half-installed —
+    /// the venv exists, but `laya_mlx` is not in it.
+    case wheelHashMismatch(expected: String, got: String)
     case cancelled
 
     public var errorDescription: String? {
@@ -80,6 +85,11 @@ public enum LayaInstallError: Error, LocalizedError, Equatable {
             + "or newer was found. laya-mlx needs one. Tried: \(tried.joined(separator: ", "))."
         case .stepFailed(let step, let detail):
             "\(step) failed: \(detail)"
+        case .wheelHashMismatch(let expected, let got):
+            "The downloaded \(LayaPackage.requirement) wheel does not match the pinned "
+            + "checksum (expected \(expected.prefix(12))\u{2026}, got \(got.prefix(12))\u{2026}"
+            + "). Nothing was installed. This usually means PyPI served something other than "
+            + "the pinned release — try again, and if it keeps happening do not proceed."
         case .cancelled:
             "The Laya install was cancelled."
         }
@@ -386,13 +396,20 @@ public actor LayaRuntime {
             ) { _ in }
         }
 
+        let pip = environment.appendingPathComponent("bin/pip")
+        let wheel = try await downloadAndVerifyWheel(pip: pip, hubCache: hubCache, progress: progress)
+        defer { try? FileManager.default.removeItem(at: wheel) }
+
         progress(.init(
             step: "Installing \(LayaPackage.requirement)",
-            detail: "about 300 MB, mostly MLX", fraction: 0.15
+            detail: "about 300 MB, mostly MLX", fraction: 0.2
         ))
         try await run(
-            environment.appendingPathComponent("bin/pip"),
-            ["install", "--disable-pip-version-check", "--no-input", LayaPackage.requirement],
+            pip,
+            // The wheel on disk, not the requirement string: pip has already fetched and
+            // this has already verified it, so this step never touches the network for the
+            // package itself — only for its dependencies, which are not pinned by a hash.
+            ["install", "--disable-pip-version-check", "--no-input", wheel.path],
             step: "Installing \(LayaPackage.requirement)",
             environment: Self.childEnvironment(hubCache: hubCache)
         ) { line in
@@ -404,6 +421,71 @@ public actor LayaRuntime {
 
         try await fetch(checkpoint, python: python, hubCache: hubCache, progress: progress)
         progress(.init(step: "Ready", detail: checkpoint.displayName, fraction: 1))
+    }
+
+    /// Fetches the pinned wheel by itself — `pip download --no-deps`, never `install` — and
+    /// checks its sha256 against `LayaPackage.wheelSHA256` before anything is handed to
+    /// `pip install`.
+    ///
+    /// Only the top-level package is verified this way, deliberately: `--require-hashes`
+    /// would need a pinned hash for every transitive dependency too (MLX, huggingface_hub,
+    /// numpy, and whatever they pull in), which is a much larger reproducibility promise
+    /// than this pin is making. What matters most — that the code laya-mlx itself runs is
+    /// the exact release this was reviewed against — is what this checks.
+    ///
+    /// A mismatch throws before `pip install` ever runs, so a bad wheel never reaches
+    /// site-packages: the venv exists, `laya_mlx` does not, and the next attempt starts
+    /// clean rather than atop a partial install.
+    private func downloadAndVerifyWheel(
+        pip: URL, hubCache: URL, progress: @escaping @Sendable (LayaInstallProgress) -> Void
+    ) async throws -> URL {
+        let step = "Downloading \(LayaPackage.requirement)"
+        progress(.init(step: step, detail: "verifying the pinned sha256 before install", fraction: 0.15))
+        let downloadDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("laya-wheel-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: downloadDirectory, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: downloadDirectory) }
+
+        try await run(
+            pip,
+            [
+                "download", "--no-deps", "--disable-pip-version-check", "--no-input",
+                "--dest", downloadDirectory.path, LayaPackage.requirement,
+            ],
+            step: step, environment: Self.childEnvironment(hubCache: hubCache)
+        ) { _ in }
+
+        let downloaded = (try? FileManager.default.contentsOfDirectory(
+            at: downloadDirectory, includingPropertiesForKeys: nil
+        )) ?? []
+        guard let wheel = downloaded.first(where: { $0.pathExtension == "whl" }) else {
+            throw LayaInstallError.stepFailed(
+                step: step, detail: "pip did not produce a wheel file"
+            )
+        }
+
+        let digest = try Self.sha256Hex(ofFileAt: wheel)
+        guard digest.caseInsensitiveCompare(LayaPackage.wheelSHA256) == .orderedSame else {
+            throw LayaInstallError.wheelHashMismatch(expected: LayaPackage.wheelSHA256, got: digest)
+        }
+
+        // Moved out of the directory this function is about to delete, so the caller still
+        // has a file to hand `pip install`.
+        let verified = FileManager.default.temporaryDirectory
+            .appendingPathComponent(wheel.lastPathComponent)
+        try? FileManager.default.removeItem(at: verified)
+        try FileManager.default.copyItem(at: wheel, to: verified)
+        return verified
+    }
+
+    /// sha256 of a file on disk, lowercase hex. A pure, testable seam: the install path
+    /// calls it on a real download, and a test calls it on a fixture it wrote itself.
+    static func sha256Hex(ofFileAt url: URL) throws -> String {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Fetches one checkpoint at its pinned revision, through `huggingface_hub` — which is
@@ -454,6 +536,12 @@ public actor LayaRuntime {
     /// `~/.cache/huggingface` on the startup disk and ignores the library setting entirely.
     /// `HF_HUB_DISABLE_TELEMETRY` because a decision lane that phones home about what it
     /// loaded is not what "nothing leaves the Mac" means.
+    ///
+    /// `PIP_CACHE_DIR` is the same rule applied to pip: left unset, pip's own cache lands at
+    /// `~/Library/Caches/pip` on the startup disk regardless of where the venv or `HF_HOME`
+    /// point, and it does not shrink itself. Pointed at the library instead, beside
+    /// `Engine Cache`, so a wheel downloaded once during install and any later `pip`
+    /// invocation share a cache that lives where every other byte of this feature does.
     public static func childEnvironment(
         hubCache: URL, token: String? = nil
     ) -> [String: String] {
@@ -461,6 +549,7 @@ public actor LayaRuntime {
             "PYTHONUNBUFFERED": "1",
             "HF_HOME": hubCache.path,
             "HF_HUB_DISABLE_TELEMETRY": "1",
+            "PIP_CACHE_DIR": hubCache.appendingPathComponent("pip-cache", isDirectory: true).path,
         ]
         if let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
             environment["HF_TOKEN"] = token

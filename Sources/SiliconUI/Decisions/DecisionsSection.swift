@@ -23,6 +23,10 @@ struct DecisionsSection: View {
     @State private var problem: String?
     @State private var showingBench = false
     @State private var busy = false
+    /// The lane a calibration run is in flight for, or nil. Its own flag rather than
+    /// `busy`: a calibration takes a minute or two of Jev and the loaded model, and a lane
+    /// toggle elsewhere on the panel should not be blocked by it.
+    @State private var calibratingLane: String?
     private let installs = LayaInstallCenter.shared
 
     var body: some View {
@@ -115,8 +119,57 @@ struct DecisionsSection: View {
             }
             if let laya = lane.laya { layaControls(laya) }
             if let node = lane.node { nodeControls(node) }
+            // Jev is the reference a calibration measures the other three against, so it
+            // is the one lane with nothing to calibrate.
+            if lane.id != DecisionLaneID.jev.wireName {
+                calibrationRow(for: lane.id)
+            }
         }
         .padding(.vertical, 2)
+    }
+
+    // MARK: Calibration
+
+    /// Per lane: when it was last calibrated, or that it never has been, and a button to
+    /// run it. The backend (`calibrateDecisionLane`, `POST /decisions/calibrate`) already
+    /// does this for every lane; this is the one place on the panel that now shows it.
+    @ViewBuilder
+    private func calibrationRow(for laneID: String) -> some View {
+        HStack(spacing: 8) {
+            if let calibration = status?.calibrations[laneID] {
+                Text("Calibrated \(Self.calibrationDate(calibration.date))")
+            } else {
+                Text("Never calibrated")
+            }
+            Spacer()
+            Button(calibratingLane == laneID ? "Calibrating…" : "Calibrate") {
+                calibrate(laneID)
+            }
+            .controlSize(.small)
+            .disabled(calibratingLane != nil)
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
+
+    private static func calibrationDate(_ iso8601: String) -> String {
+        ControlAPI.date(fromTimestamp: iso8601)?
+            .formatted(date: .abbreviated, time: .shortened) ?? iso8601
+    }
+
+    private func calibrate(_ laneID: String) {
+        guard calibratingLane == nil else { return }
+        calibratingLane = laneID
+        Task {
+            defer { calibratingLane = nil }
+            do {
+                _ = try await model.calibrateDecisionLane(laneID)
+                await refresh()
+            } catch is CancellationError {
+            } catch {
+                problem = error.localizedDescription
+            }
+        }
     }
 
     private func badge(_ text: String, _ colour: Color) -> some View {

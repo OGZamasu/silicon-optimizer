@@ -343,6 +343,41 @@ public actor LayaSidecar {
     /// death to whoever is still waiting.
     private var stopping = false
 
+    /// Whether a write-then-read round trip is in flight, and who is queued for the next
+    /// one.
+    ///
+    /// `decide()` is `async`, so between its `write` and its matching `answer` there is a
+    /// suspension point — and this actor is otherwise reentrant across one, which is exactly
+    /// how two callers used to interleave: caller A's request went out, then caller B's did
+    /// too, before A had read anything back. Both were then racing `LayaLineReader.next()`
+    /// for lines that answer only one of them, and whichever line arrived first went to
+    /// whichever caller happened to be parked, not to the one whose id it carried.
+    ///
+    /// Every `decide()` call now takes a numbered turn before it writes anything, and the
+    /// next one in line only starts once the previous caller's answer (or failure) has
+    /// been read. The pipe was already answering one request at a time — this just stops
+    /// two Swift-side callers from racing to be the one reading it.
+    private var turnHolder = false
+    private var turnQueue: [CheckedContinuation<Void, Never>] = []
+
+    /// Waits for exclusive use of the pipe, in arrival order.
+    private func acquireTurn() async {
+        if !turnHolder {
+            turnHolder = true
+            return
+        }
+        await withCheckedContinuation { turnQueue.append($0) }
+    }
+
+    /// Hands the turn to whoever has been waiting longest, or frees it if nobody has.
+    private func releaseTurn() {
+        guard !turnQueue.isEmpty else {
+            turnHolder = false
+            return
+        }
+        turnQueue.removeFirst().resume()
+    }
+
     public init(configuration: Configuration, registry: ChildProcessRegistry = .shared) {
         self.configuration = configuration
         self.registry = registry
@@ -464,6 +499,11 @@ public actor LayaSidecar {
     public func decide(
         state: Any, questions: [String: Any]
     ) async throws -> LayaSidecarResponse {
+        // One caller writes and reads at a time. See `turnHolder` above for why: without
+        // this, two calls arriving close together can both write before either reads, and
+        // the second caller's line steals the first caller's continuation.
+        await acquireTurn()
+        defer { releaseTurn() }
         if loaded == nil || !isRunning { try await start() }
         nextID += 1
         let id = "q\(nextID)"

@@ -163,13 +163,32 @@ struct DecisionLanePolicyTests {
         #expect(DecisionLanePolicy.fallbacks(
             after: .oneToken, override: .automatic, available: all
         ).isEmpty)
-        // Jev has no fallback: it is the paid lane, and "it failed, try the free one" would
-        // be a different answer than the caller asked for.
+        // A transient Jev failure under `automatic` falls DOWN to the free local lanes,
+        // in preference order — a cloud hiccup must not fail the whole decision when Laya
+        // is sitting there installed and ready.
         #expect(DecisionLanePolicy.fallbacks(
             after: .jev, override: .automatic, available: all
+        ) == [.laya, .node, .oneToken])
+        // But never when only some of them are actually available.
+        #expect(DecisionLanePolicy.fallbacks(
+            after: .jev, override: .automatic,
+            available: .init(jev: true, laya: false, node: true, oneToken: true)
+        ) == [.node, .oneToken])
+        // `alwaysJev` named the calibrated lane on purpose: a bad moment for Jev does not
+        // turn it into a request for whatever is free.
+        #expect(DecisionLanePolicy.fallbacks(
+            after: .jev, override: .alwaysJev, available: all
         ).isEmpty)
         #expect(DecisionLanePolicy.fallbacks(
             after: .laya, override: .alwaysJev, available: all
+        ).isEmpty)
+        // `alwaysLocal` and `off` never even reach `.jev` as the chosen lane, but the
+        // function refuses to fall from it for them regardless of what is asked.
+        #expect(DecisionLanePolicy.fallbacks(
+            after: .jev, override: .alwaysLocal, available: all
+        ).isEmpty)
+        #expect(DecisionLanePolicy.fallbacks(
+            after: .jev, override: .off, available: all
         ).isEmpty)
     }
 
@@ -357,6 +376,60 @@ struct DecisionRouterTests {
         #expect(await laya.count() == 1, "it tried Laya first")
         #expect(await oneToken.count() == 1)
         #expect(await jev.count() == 0)
+    }
+
+    /// The mutation this fix targets: a transient Jev failure under `automatic` must not
+    /// fail the whole decision when a free local lane is installed and ready. It falls
+    /// DOWN to Laya, never back up to Jev for a second try — one attempt at Jev, one
+    /// answer from Laya, nothing billed twice.
+    ///
+    /// Points at the loopback address nothing answers on rather than a fake server: the
+    /// point is that Jev *fails*, and a refused connection to 127.0.0.1 fails it without
+    /// ever reaching a network or costing a real request.
+    @Test func automaticFallsDownFromAFailedJevToTheFreeLocalLane() async throws {
+        let harness = harness()
+        defer { harness.clean() }
+        await harness.configure()
+        try await harness.enable()
+        let jev = CountingLane(.jev)
+        let laya = CountingLane(.laya)
+        let router = DecisionRouter(service: harness.service)
+        await router.register(jev)
+        await router.register(laya)
+        // `.automatic` is the default, but named for the reader: this is the case the
+        // policy fix is about.
+        try await harness.service.update { $0.laneOverrides[.decideTool] = .automatic }
+
+        let response = try await router.decide(
+            .decideTool, state: .string("s"),
+            questions: ControlAPI.DecideRequest.fixture().questions
+        )
+        #expect(response.provider == "laya")
+        #expect(await laya.count() == 1)
+        // The counting lane never touches the real Jev path — this proves the *policy*
+        // routed to Laya, not that Jev happened to answer.
+        #expect(await jev.count() == 0)
+    }
+
+    /// `alwaysJev` is the opposite promise: it named the calibrated lane on purpose, so a
+    /// bad moment for Jev must not quietly become a free answer instead.
+    @Test func alwaysJevDoesNotFallToAFreeLaneWhenJevFails() async throws {
+        let harness = harness()
+        defer { harness.clean() }
+        await harness.configure()
+        try await harness.enable()
+        let laya = CountingLane(.laya)
+        let router = DecisionRouter(service: harness.service)
+        await router.register(laya)
+        try await harness.service.update { $0.laneOverrides[.decideTool] = .alwaysJev }
+
+        await #expect(throws: (any Error).self) {
+            _ = try await router.decide(
+                .decideTool, state: .string("s"),
+                questions: ControlAPI.DecideRequest.fixture().questions
+            )
+        }
+        #expect(await laya.count() == 0, "alwaysJev must not spend a free answer on a Jev failure")
     }
 
     @Test func theBenchAsksTheLaneItWasToldToAndNotThePolicysChoice() async throws {

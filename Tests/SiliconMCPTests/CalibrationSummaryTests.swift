@@ -105,4 +105,34 @@ struct CalibrationSummaryTests {
         #expect(tool.description.contains("`sources`"))
         #expect(tool.description.contains("calibrate_decisions"))
     }
+
+    /// The handler accepts "laya" and "node" as a `provider` — `AppModel.decide` switches
+    /// on exactly those two spellings, beside "auto", "local" and "typesafe" — so the
+    /// property an agent reads before choosing one has to name them too.
+    @Test func theDecideToolsProviderPropertyNamesEveryLaneTheHandlerAccepts() throws {
+        let tool = try #require(Tools.all.first { $0.name == "decide" })
+        let provider = try #require(tool.properties["provider"])
+        guard case .object(let fields) = provider,
+              case .string(let description) = fields["description"] ?? .null
+        else {
+            Issue.record("provider has no description")
+            return
+        }
+        for word in ["auto", "local", "laya", "node", "typesafe"] {
+            #expect(description.contains(word), "provider's description omits \"\(word)\"")
+        }
+    }
+
+    /// The handler now calibrates whichever lane it is told to, not only the loaded model
+    /// — so the tool needs a `lane` argument, and its description has to say what the
+    /// lane words are and that Jev is never one of them.
+    @Test func calibrateDecisionsTakesALaneArgumentNamingEveryCalibratableLane() throws {
+        let tool = try #require(Tools.all.first { $0.name == "calibrate_decisions" })
+        #expect(tool.properties["lane"] != nil, "no way to name which lane to calibrate")
+        #expect(tool.description.contains("\"laya\""))
+        #expect(tool.description.contains("\"node\""))
+        #expect(tool.description.contains("\"typesafe\""), "must say Jev cannot be calibrated")
+        // Still optional: the old, lane-less call is still the same route, unchanged.
+        #expect(tool.required.isEmpty)
+    }
 }

@@ -43,8 +43,13 @@ struct FakeSidecar {
     /// on the system interpreter every Mac has and needs nothing installed.
     static func source(_ behaviour: String) -> String {
         """
-        import json, sys, time
+        import json, os, sys, time
         hello = json.loads(sys.stdin.readline())
+        # One line per process start, beside the script itself — so a test can tell a
+        # restart from a process that just kept answering, without the production code
+        # needing to plumb a test-only environment variable through to get here.
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "starts.log"), "a") as f:
+            f.write("1\\n")
         behaviour = \(behaviour.debugDescription)
         if behaviour == "notInstalled":
             print(json.dumps({"id": hello.get("id"), "ok": False,
@@ -127,6 +132,49 @@ struct LayaSidecarTests {
         #expect(await sidecar.isRunning == false)
     }
 
+    /// The concurrency bug this fix targets: two callers close together must not cross
+    /// wires. `LayaLineReader` used to hold a single pending continuation, so a second
+    /// `decide()` arriving before the first had read its answer stole that continuation —
+    /// the first caller then hung until its own 30s timeout, which tore the whole sidecar
+    /// down for both of them. Eight abilities share one runtime, so this is not exotic.
+    ///
+    /// Two requests with different criteria, dispatched at the same time: if either
+    /// serialization is missing, the likely failure is either a `protocolBroken` throw (an
+    /// answer's id does not match the request that is reading it) or an answer that quietly
+    /// belongs to the other question — either way this test catches it, because the two
+    /// requests are built to have different, checkable answers.
+    @Test func concurrentDecisionsEachGetTheirOwnAnswerAndTheSidecarStartsOnce() async throws {
+        let fake = try FakeSidecar("ok")
+        defer { fake.clean() }
+        let sidecar = LayaSidecar(
+            configuration: fake.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+
+        async let first = sidecar.decide(
+            state: "state one",
+            questions: ["q": ["type": "choice", "instructions": "?",
+                              "criteria": ["alpha": "one", "beta": "two"]]]
+        )
+        async let second = sidecar.decide(
+            state: "state two",
+            questions: ["q": ["type": "choice", "instructions": "?",
+                              "criteria": ["gamma": "three", "delta": "four"]]]
+        )
+        let (firstResponse, secondResponse) = try await (first, second)
+
+        // The fake always picks the alphabetically first label in *that request's own*
+        // criteria — so a correct answer here is proof the two requests were not mixed up.
+        #expect(firstResponse.answers["q"]?.choice == "alpha")
+        #expect(secondResponse.answers["q"]?.choice == "delta")
+        // Neither request's timeout fired and tore the process down to get here.
+        #expect(await sidecar.isRunning)
+
+        let startsLog = fake.directory.appendingPathComponent("starts.log")
+        let starts = (try? String(contentsOf: startsLog, encoding: .utf8)) ?? ""
+        #expect(starts.split(separator: "\n").count == 1, "the sidecar was started once")
+    }
+
     /// The crash path: it dies mid-conversation, and the error says so with the status
     /// rather than becoming a decode failure or a hang.
     @Test func aSidecarThatDiesIsReportedAsADeath() async throws {
@@ -154,19 +202,40 @@ struct LayaSidecarTests {
     ///
     /// Driven through `LayaLane` rather than the sidecar, because the retry is the lane's
     /// decision — only it knows whether the retry has been spent.
+    ///
+    /// Counts the fake process's own starts rather than only checking that *something* was
+    /// thrown: deleting the retry block entirely still throws on the very first failure, so
+    /// a test that only asserted `throws` passed just as well with no retry at all. A
+    /// mutation that removes the retry has to fail *this*, on the starts count.
     @Test func theLaneRestartsOnceAndThenReportsTheSecondFailure() async throws {
         let fake = try FakeSidecar("dieOnRequest")
         defer { fake.clean() }
         let runtime = LayaRuntime()
         let library = fake.directory
+        // A fake environment laid out exactly the way `sidecar(for:)` expects one —
+        // `library/Engine Cache/laya-env/bin/python3` — symlinked to the system
+        // interpreter. Without this, `LayaSidecar.start()` refuses at "python is missing"
+        // before the `dieOnRequest` script ever runs even once, which is a different
+        // failure from the one this test is named for. A *copy* of `/usr/bin/python3`
+        // will not do here: macOS kills it on launch (signature validation tied to its
+        // original path), where a symlink to it runs the original binary and passes.
+        let bin = LayaRuntime.environmentDirectory(library: library).appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: bin.appendingPathComponent("python3"),
+            withDestinationURL: URL(fileURLWithPath: "/usr/bin/python3")
+        )
         await runtime.configure(library: { library }, script: { fake.script })
-        // A runtime pointed at a fake environment: the interpreter is the system one and
-        // the "environment" is a directory that does not have laya-mlx in it, which is
-        // exactly the shape `sidecar(for:)` needs and nothing more.
         let lane = LayaLane(runtime: runtime, checkpoint: { .english })
         await #expect(throws: (any Error).self) {
             _ = try await lane.decide(.fixture())
         }
+        let startsLog = fake.directory.appendingPathComponent("starts.log")
+        let starts = (try? String(contentsOf: startsLog, encoding: .utf8)) ?? ""
+        #expect(
+            starts.split(separator: "\n").count == 2,
+            "one start for the first failure, one for the retry — not fewer, not a loop"
+        )
     }
 
     @Test func aMissingPackageSaysSoRatherThanFailingToParse() async throws {
@@ -267,9 +336,39 @@ struct LayaInstallTests {
         return url
     }
 
+    /// A stand-in for `pip`, driven through the same `Process`-spawning code
+    /// `LayaRuntime.install()` actually uses. `download` writes a wheel of the given bytes
+    /// wherever `--dest` says, exactly as `pip download --no-deps` would; `install` only
+    /// leaves a marker beside itself — which is how the mismatch test below proves that
+    /// step never ran on a wheel that failed verification.
+    private func writeFakePip(at url: URL, wheelContents: String) throws {
+        let source = """
+            #!/usr/bin/python3
+            import os, sys
+            args = sys.argv[1:]
+            here = os.path.dirname(os.path.abspath(__file__))
+            if args and args[0] == "download":
+                dest = None
+                for i, a in enumerate(args):
+                    if a == "--dest" and i + 1 < len(args):
+                        dest = args[i + 1]
+                os.makedirs(dest, exist_ok=True)
+                with open(os.path.join(dest, "laya_mlx-0.1.0-py3-none-any.whl"), "w") as f:
+                    f.write(\(wheelContents.debugDescription))
+                sys.exit(0)
+            if args and args[0] == "install":
+                with open(os.path.join(here, "pip-install.marker"), "a") as f:
+                    f.write("installed\\n")
+                sys.exit(0)
+            sys.exit(1)
+            """
+        try source.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
     /// The owner's rule, as a test: nothing goes on the startup disk. Both the environment
     /// and the Hugging Face cache resolve inside the configured library.
-    @Test func everythingLandsInsideTheModelLibrary() {
+    @Test func everythingLandsInsideTheModelLibrary() throws {
         let library = URL(fileURLWithPath: "/Volumes/External/Local Models")
         let environment = LayaRuntime.environmentDirectory(library: library)
         let cache = LayaRuntime.hubCacheDirectory(library: library)
@@ -287,6 +386,15 @@ struct LayaInstallTests {
         #expect(child["HF_HOME"] == cache.path)
         #expect(child["HF_HUB_DISABLE_TELEMETRY"] == "1")
         #expect(child["HF_TOKEN"] == nil, "no token unless one was given")
+        // Same rule, pip's own cache: left unset it lands at ~/Library/Caches/pip on the
+        // startup disk regardless of HF_HOME, which is exactly the thing this feature's
+        // error text promises will not happen.
+        let pipCache = try #require(child["PIP_CACHE_DIR"])
+        #expect(pipCache.hasPrefix(library.path), "pip's cache stays inside the model library")
+        #expect(!pipCache.hasPrefix(
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Caches").path
+        ))
     }
 
     @Test func withNoLibraryConfiguredItRefusesRatherThanUsingTheStartupDisk() async {
@@ -419,5 +527,66 @@ struct LayaInstallTests {
         // never use — so no checkpoint here may be spelled the way that default is.
         let repositories = LayaCheckpoint.allCases.map(\.repository)
         #expect(!repositories.contains("convaiinnovations/laya"))
+    }
+
+    /// The hashing primitive the install step is built on, against a published test
+    /// vector rather than a value this test invented — so a broken implementation fails
+    /// here rather than only in a harder-to-read end-to-end test.
+    @Test func sha256HexMatchesAPublishedTestVector() throws {
+        let file = scratch().appendingPathComponent("vector.txt")
+        try "abc".write(to: file, atomically: true, encoding: .utf8)
+        // NIST's own SHA-256("abc") example.
+        #expect(
+            try LayaRuntime.sha256Hex(ofFileAt: file)
+            == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+    }
+
+    /// The mutation the brief describes exactly: the digest is recorded and shown in the
+    /// panel, but unless the install step actually checks it, a wheel with the wrong bytes
+    /// installs exactly like the right one. Drives the real `LayaRuntime.install()` through
+    /// a fake `pip` that hands back a wheel that cannot match the pin, and proves the
+    /// mismatch is caught — clearly, and before `pip install` ever runs — rather than
+    /// discovered later with `laya_mlx` already on disk.
+    ///
+    /// If the comparison in `downloadAndVerifyWheel` is deleted, this wheel is handed
+    /// straight to `pip install`, the marker below is written, and this test fails on that
+    /// assertion rather than only on the thrown error's type.
+    @Test func aWrongWheelDigestFailsTheInstallBeforeAnythingIsInstalled() async throws {
+        let library = scratch()
+        defer { try? FileManager.default.removeItem(at: library) }
+        let environment = LayaRuntime.environmentDirectory(library: library)
+        let bin = environment.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        // A real interpreter (symlinked, not copied — see the note on the sidecar restart
+        // test above) so `install()` gets past "no environment yet" and reaches the wheel
+        // download this test is actually about.
+        try FileManager.default.createSymbolicLink(
+            at: bin.appendingPathComponent("python3"),
+            withDestinationURL: URL(fileURLWithPath: "/usr/bin/python3")
+        )
+        try writeFakePip(at: bin.appendingPathComponent("pip"), wheelContents: "not the pinned wheel")
+
+        let runtime = LayaRuntime()
+        await runtime.configure(library: { library }, script: { nil })
+        do {
+            try await runtime.install(checkpoint: .english) { _ in }
+            Issue.record("a wheel that does not match the pin was installed")
+        } catch let LayaInstallError.wheelHashMismatch(expected, got) {
+            #expect(expected == LayaPackage.wheelSHA256, "measured against the real pin")
+            #expect(got != expected)
+        } catch {
+            Issue.record("expected wheelHashMismatch, got \(error)")
+        }
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: bin.appendingPathComponent("pip-install.marker").path
+            ),
+            "pip install must never run on a wheel that failed verification"
+        )
+        #expect(
+            !LayaRuntime.hasPackage(environment: environment),
+            "nothing half-installed: the venv exists, laya_mlx does not"
+        )
     }
 }

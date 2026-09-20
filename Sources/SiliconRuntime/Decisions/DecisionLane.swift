@@ -219,12 +219,26 @@ public enum DecisionLanePolicy {
     /// availability check and the question should not turn into a failed decision when a
     /// node is sitting there ready. Never crosses from local to Jev — a lane failing is not
     /// the owner deciding to spend money.
+    ///
+    /// Jev *is* allowed to fall — but only downward, and only for `automatic`. A transient
+    /// TypeSafe failure (a timeout, a 5xx, the network dropping) must not fail the whole
+    /// decision when Laya is sitting there installed and free: `automatic` already means
+    /// "the routing policy decides", and downgrading to a free local lane on a cloud failure
+    /// is the same spirit as choosing Laya when Jev was never on. `alwaysJev` gets none of
+    /// this: it named the calibrated lane on purpose, and a feature pinned to it is not
+    /// asking for an uncalibrated substitute when the calibrated one has a bad moment. And
+    /// nothing here ever retries Jev itself, so a fallen-through decision never becomes a
+    /// second charge.
     public static func fallbacks(
         after lane: DecisionLaneID,
         override: DecisionLaneOverride,
         available: DecisionLaneAvailability
     ) -> [DecisionLaneID] {
-        guard override != .off, override != .alwaysJev, lane != .jev else { return [] }
+        guard override != .off, override != .alwaysJev else { return [] }
+        if lane == .jev {
+            guard override == .automatic else { return [] }
+            return localPreference.filter { available[$0] }
+        }
         guard let start = localPreference.firstIndex(of: lane) else { return [] }
         return localPreference[(start + 1)...].filter { available[$0] }
     }
