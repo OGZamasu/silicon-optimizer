@@ -231,6 +231,7 @@ public final class AppModel {
         case video = "Video"
         case swarm = "Swarm"
         case cloud = "Cloud"
+        case decisions = "Decisions"
         case settings = "Settings"
 
         public var id: String { rawValue }
@@ -246,6 +247,7 @@ public final class AppModel {
             case .video: "film"
             case .swarm: "point.3.connected.trianglepath.dotted"
             case .cloud: "cloud"
+            case .decisions: "arrow.triangle.branch"
             case .settings: "gearshape"
             }
         }
