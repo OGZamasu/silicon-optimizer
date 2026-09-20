@@ -3565,9 +3565,17 @@ public final class AppModel {
             configuration ?? defaultConfiguration(for: model), for: model
         )
 
+        // Held where the `catch` can see it. `let runtime` below is scoped to the `do`, so
+        // the name resolved to `self.runtime` down there — and when a second load has
+        // replaced this one, that is the *winning* load's runtime: the catch read the
+        // winner's log and then set `self.runtime = nil`, leaving a live llama-server with
+        // nobody holding it and no way to unload it.
+        var started: (any InferenceRuntime)?
+
         do {
             let selection = try selector.select(model: model, configuration: resolved)
             let runtime = selector.makeRuntime(for: selection)
+            started = runtime
             self.runtime = runtime
 
             // Bridge the actor's state changes onto the main actor for SwiftUI.
@@ -3596,15 +3604,22 @@ public final class AppModel {
             // model's name and true context takes effect from the next message.
             refreshHarnessProviderIfNeeded()
         } catch {
-            runtimeState = .failed(message: error.localizedDescription)
-            alert = AlertContent(
-                title: "Could not load \(model.name)",
-                message: error.localizedDescription
-            )
-            if let llama = runtime as? LlamaCppRuntime {
-                runtimeLog = await llama.serverLog()
+            // A load that was replaced, or stopped on purpose, is not a failure to show: the
+            // load that displaced it owns the screen, and an unload part-way through is the
+            // owner getting what they asked for.
+            if Self.showsFailure(for: error) {
+                runtimeState = .failed(message: error.localizedDescription)
+                alert = AlertContent(
+                    title: "Could not load \(model.name)",
+                    message: error.localizedDescription
+                )
+                if let llama = started as? LlamaCppRuntime {
+                    runtimeLog = await llama.serverLog()
+                }
             }
-            runtime = nil
+            // Only if nothing has taken the slot since: clearing it unconditionally threw
+            // away the handle to a server that is running perfectly well.
+            if started === self.runtime { self.runtime = nil }
         }
     }
 

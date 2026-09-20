@@ -51,11 +51,26 @@ extension AppModel: ControlHost {
             expertStreaming: activeConfiguration?.expertStreaming != nil,
             lastGenerationTokensPerSecond: lastGeneration?.generationTokensPerSecond,
             activity: activeGenerationSummary,
-            failure: failedLoadDetail()
+            failure: Self.failedLoadDetail(
+                state: runtimeState, recorded: LoadFailureRecorder.shared.last
+            )
         )
     }
 
-    /// The structured account of the load that produced the current `state`, or nothing.
+    /// Whether a load that ended in this error is one to put in front of the owner.
+    ///
+    /// A load that was replaced belongs to the load that replaced it — its progress line is
+    /// the true one, and stamping a failure over it would replace a fact with a leftover.
+    /// An unload part-way through a load is the owner getting exactly what they asked for,
+    /// and answering that with an error dialog is the app arguing with them.
+    ///
+    /// Here rather than inline in `loadAsync` so the rule can be tested: it is the whole
+    /// difference between "your model failed" and "you loaded something else".
+    static func showsFailure(for error: any Error) -> Bool {
+        (error as? RuntimeError)?.wasInterrupted != true
+    }
+
+    /// The structured account of the load that produced this state line, or nothing.
     ///
     /// Two conditions, both necessary. The app has to be *in* a failed state — a recorded
     /// failure beside a model that is loading happily is a lie about the present. And the
@@ -65,12 +80,15 @@ extension AppModel: ControlHost {
     /// somewhere the runtime never reached — no such model, a plan the selector refused —
     /// has a state line and no detail, which is the honest answer rather than the previous
     /// failure's log.
-    private func failedLoadDetail() -> ControlAPI.LoadFailure? {
-        guard case .failed = runtimeState else { return nil }
-        guard let failure = LoadFailureRecorder.shared.last,
-              failure.summary == runtimeState.label
-        else { return nil }
-        return failure.wire
+    ///
+    /// Static and pure so that rule can be tested. Both halves of it are a promise to a
+    /// client, and a promise nothing checks is one the next edit gets to break quietly.
+    static func failedLoadDetail(
+        state: RuntimeState, recorded: LoadFailure?
+    ) -> ControlAPI.LoadFailure? {
+        guard case .failed = state else { return nil }
+        guard let recorded, recorded.summary == state.label else { return nil }
+        return recorded.wire
     }
 
     public func installed() async -> [ControlAPI.InstalledModel] {

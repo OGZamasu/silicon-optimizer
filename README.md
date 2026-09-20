@@ -528,13 +528,13 @@ it is still going, the answer is the live status instead — the same shape, `st
 the stage line, `loadedModelID` still null — and the load carries on. Follow it with
 `GET /status` or on `/events`.
 
-**One load at a time.** A second `POST /load` while one is running is a **409** naming the
-model already loading and how long it has been going, and nothing is changed. The alternative
-was to obey it: kill a load the owner asked for, possibly minutes into reading a 30 GB file,
-and leave the first load to fail in a way that looked like the model's fault. `POST /unload`
-stops a load in flight when that is really what is wanted. The Mac's own window still wins —
-loading from there replaces whatever is loading — and the load that loses now says so rather
-than reporting a mystery.
+**One load at a time on that route.** A second `POST /load` while one is running is a **409**
+naming the model already loading and how long it has been going, and nothing is changed. The
+alternative was to obey it: kill a load the owner asked for, possibly minutes into reading a
+30 GB file, and leave the first load to fail in a way that looked like the model's fault.
+`POST /unload` stops a load in flight when that is really what is wanted. The Mac's own window
+is not held by that route and still wins — loading from there replaces whatever is loading —
+and the load that loses now says so rather than reporting a mystery.
 
 **When a load fails, it says what happened.** One sentence, meant to be shown as it is:
 
@@ -553,6 +553,13 @@ answers with. Beside it, `failure` carries the facts: `reason` (`exited`, `kille
 the runtime's own log, for behind a tap rather than for the first line anyone reads —
 `runtime`, `exitStatus`, `signal`, `wasReplaced` and `at`. The key is absent unless a load
 has failed, so a client that only ever read `state` reads exactly what it always did.
+
+`detail` is the one part of that with a door on it. A llama.cpp log names the model file on
+most of its opening lines, and on a Mac a file name comes with the folders around it, so
+absolute paths are reduced to the file's own name before the log leaves the app — and a device
+paired for **chat only**, and the swarm, are answered the whole failure *without* the log at
+all. On `GET /status` and in the `status` frame on `/events` alike: a rule enforced at the
+front door and not on the side channel is a rule enforced nowhere.
 
 What llama.cpp says about itself still wins where it says anything: "failed to allocate"
 is still answered with *reduce the context length, quantize the KV cache, or choose a

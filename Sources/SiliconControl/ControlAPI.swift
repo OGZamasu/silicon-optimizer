@@ -316,6 +316,15 @@ public enum ControlAPI {
             self.activity = activity
             self.failure = failure
         }
+
+        /// This status with anything only a full-control caller may see taken out. See
+        /// `LoadFailure.withoutDetail`.
+        public var withoutPrivilegedDetail: Status {
+            guard failure?.detail != nil else { return self }
+            var narrowed = self
+            narrowed.failure = failure?.withoutDetail
+            return narrowed
+        }
     }
 
     /// The structured half of a failed load.
@@ -343,6 +352,19 @@ public enum ControlAPI {
         public var wasReplaced: Bool
         /// ISO 8601, in the Mac's own offset.
         public var at: String
+
+        /// The same failure with the runtime's log taken out.
+        ///
+        /// Everything else — what ended it, which runtime, the status or signal, whether a
+        /// second load is what did it — describes this Mac's own behaviour and is fine for
+        /// anyone it answers at all. The log is different: it is the runtime's raw output,
+        /// and it names files. A device paired for chat and a peer node were given less
+        /// than that on purpose.
+        public var withoutDetail: LoadFailure {
+            var narrowed = self
+            narrowed.detail = nil
+            return narrowed
+        }
 
         public init(
             reason: String, detail: String? = nil, runtime: String? = nil,
@@ -1317,8 +1339,8 @@ extension ControlAPI {
         public var status: Int { 409 }
 
         public var errorDescription: String? {
-            "This Mac is already loading \(modelID) (started \(secondsAgo)s ago), and one "
-                + "load at a time is all it can do. Nothing was changed. Follow it with "
+            "This Mac is already loading \(modelID) (started \(secondsAgo)s ago), and this "
+                + "route runs one load at a time. Nothing was changed. Follow it with "
                 + "GET /status, or POST /unload to stop it and then load again."
         }
     }

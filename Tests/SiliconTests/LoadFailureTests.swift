@@ -62,6 +62,26 @@ struct LoadFailureTests {
                 + "finished loading.")
     }
 
+    /// A kill in the first moment is not the memory killer: a binary that never got to run
+    /// is one macOS refused — a quarantined download, a signature that does not check out —
+    /// and sending that owner to shorten their context length wastes their afternoon.
+    @Test func aKillBeforeItCouldEvenStartIsNotBlamedOnMemory() {
+        let instant = LoadEnding.processEnded(
+            ProcessTermination(signal: SIGKILL, ranFor: 0.4)
+        )
+        #expect(instant.sentence(process: "llama-server")
+                == "llama-server was killed (signal 9) after less than a second, which this "
+                + "early usually means macOS refused to run it at all — a quarantined or "
+                + "unsigned build — rather than memory pressure.")
+
+        // And once a load has really started, it is the memory reading again.
+        let later = LoadEnding.processEnded(
+            ProcessTermination(signal: SIGKILL, ranFor: LoadEnding.tooSoonForMemoryPressure)
+        )
+        #expect(later.sentence(process: "llama-server")
+                .hasSuffix("which usually means the system reclaimed its memory."))
+    }
+
     /// A crash is not the memory killer, and saying so would send someone to buy RAM they
     /// do not need.
     @Test func aCrashIsNotBlamedOnMemory() {
@@ -74,7 +94,11 @@ struct LoadFailureTests {
 
     @Test(arguments: [
         (0.0, "less than a second"), (0.4, "less than a second"), (1.0, "1 second"),
-        (8.4, "8 seconds"), (60.0, "60 seconds"), (120.0, "2 minutes"), (600.0, "10 minutes"),
+        (8.4, "8 seconds"), (60.0, "60 seconds"), (119.4, "119 seconds"),
+        // Rounded before it is classified, not after: these two used to read "120 seconds"
+        // and "60 minutes".
+        (119.6, "2 minutes"), (120.0, "2 minutes"), (600.0, "10 minutes"),
+        (3_600.0, "1 hour"), (9_000.0, "3 hours"),
     ])
     func durationsReadLikeSomeoneSayingThem(seconds: TimeInterval, expected: String) {
         #expect(LoadEnding.spell(seconds) == expected)
@@ -117,6 +141,39 @@ struct LoadFailureTests {
         #expect(message == "llama-server stopped on its own after 8 seconds (exit 1).")
         // The log is not thrown away — it moves to where a client can put it behind a tap.
         #expect(LoadDiagnosis.tail(of: log) == log)
+    }
+
+    /// But a load *this app* stopped is not diagnosable, and reading its log for advice puts
+    /// words in the runtime's mouth. A replaced load whose log happened to carry "failed to
+    /// allocate" was being reported as having run out of memory — a bug report nobody can
+    /// act on, about a load nobody asked to keep.
+    @Test func anAppCausedEndingIsNeverReadOutOfTheLog() {
+        let log = "ggml_metal_graph_compute: failed to allocate buffer"
+        let replaced = LoadEnding.processEnded(
+            ProcessTermination(signal: SIGTERM, stopRequest: .replaced, ranFor: 8)
+        )
+        #expect(LlamaCppRuntime.diagnose(log: log, ending: replaced, replacedBy: "Qwen3 30B")
+                == "llama-server was replaced by another load (Qwen3 30B).")
+
+        let unloaded = LoadEnding.processEnded(
+            ProcessTermination(signal: SIGTERM, stopRequest: .unload, ranFor: 8)
+        )
+        #expect(LlamaCppRuntime.diagnose(log: log, ending: unloaded)
+                == "llama-server was stopped by an unload before it finished loading.")
+
+        #expect(LlamaCppRuntime.diagnose(log: log, ending: .cancelled(by: nil))
+                == "The load was cancelled before llama-server finished loading.")
+
+        // And the endings that are the runtime's own still read the log first.
+        for ending in [
+            LoadEnding.processEnded(ProcessTermination(exitStatus: 1, ranFor: 8)),
+            .processEnded(ProcessTermination(signal: SIGKILL, ranFor: 8)),
+            .neverAnswered(after: 600),
+        ] {
+            #expect(LlamaCppRuntime.diagnose(log: log, ending: ending).contains("context length"),
+                    "\(ending)")
+            #expect(ending.wasAppCaused == false)
+        }
     }
 
     @Test func mlxSpeaksForItselfTheSameWay() {
@@ -172,7 +229,11 @@ struct LoadFailureTests {
     /// The one the owner actually hit: the process is gone and nothing in the log explains
     /// it, because the system took the memory back.
     @Test func aRuntimeKilledBySignalSaysWhatThatUsuallyMeans() async throws {
-        let fixture = try Fixture(script: "echo 'loaded multimodal model' >&2; sleep 1; kill -9 $$")
+        // Three seconds, not one: the wording turns on how long it lived, and a fixture that
+        // sits on the boundary is a coin toss against process-startup jitter.
+        let fixture = try Fixture(
+            script: "echo 'loaded multimodal model' >&2; sleep 3; kill -9 $$"
+        )
         defer { fixture.clean() }
 
         let failure = try await fixture.expectFailedLoad()
@@ -181,6 +242,7 @@ struct LoadFailureTests {
         #expect(failure.exitStatus == nil)
         #expect(failure.summary.contains("was killed (signal 9)"))
         #expect(failure.summary.hasSuffix("which usually means the system reclaimed its memory."))
+        #expect(!failure.summary.contains("quarantined"))
         #expect(failure.detail?.contains("loaded multimodal model") == true)
     }
 
@@ -344,6 +406,96 @@ struct LoadFailureTests {
         let termination = try #require(await server.termination)
         #expect(termination.exitStatus == 7)
         #expect(termination.stopRequest == nil)
+    }
+
+    // MARK: - The arbiter
+
+    /// A winner that has already finished is still the load that displaced this one. The
+    /// arbiter used to forget a claim the moment it ended, so a fast winner left the loser
+    /// reporting an unload nobody had asked for.
+    @Test func aWinnerThatHasAlreadyFinishedStillCounts() async {
+        let arbiter = LoadArbiter(settle: .seconds(3))
+        let loser = await arbiter.begin(model: "Bonsai 2 27B", runtime: .llamaCpp)
+        let winner = await arbiter.begin(model: "Qwen3-Coder 30B", runtime: .llamaCpp)
+
+        // The winner is over before the loser gets around to asking.
+        let began = ContinuousClock.now
+        let displacement = await arbiter.displacement(of: loser)
+        #expect(displacement?.model == "Qwen3-Coder 30B")
+        #expect(displacement?.id == winner.id)
+        // And an answer that is already known costs no waiting at all.
+        #expect(ContinuousClock.now - began < .milliseconds(500))
+    }
+
+    /// With nobody else in the race, the wait is real and the answer is honestly nothing.
+    @Test func aLoadNothingDisplacedIsToldSo() async {
+        let arbiter = LoadArbiter(settle: .milliseconds(200))
+        let only = await arbiter.begin(model: "Bonsai 2 27B", runtime: .llamaCpp)
+        #expect(await arbiter.displacement(of: only) == nil)
+    }
+
+    // MARK: - Two loads on one runtime
+
+    /// The load that wins must keep its server. `start` lets a second load take a runtime
+    /// that is already loading; the loser then tidies up after itself, and clearing
+    /// `server`/`client` unconditionally threw away the *winner's* handles — its process
+    /// stayed alive, `stop()` had nothing to stop, and the model it held was not released
+    /// until the app quit.
+    @Test func aSecondLoadOnOneRuntimeDoesNotOrphanTheWinnersServer() async throws {
+        let fixture = try Fixture(
+            script: "sleep 30", readinessTimeout: 30, settle: .milliseconds(200)
+        )
+        defer { fixture.clean() }
+
+        let first = Task { try await fixture.runtime.start(fixture.request) }
+        try await fixture.waitUntilRunning()
+
+        // The second load displaces the first, exactly as a second tap would.
+        let second = Task { try await fixture.runtime.start(fixture.request) }
+        let failure = try await fixture.failure(from: first)
+        #expect(failure.wasReplaced)
+
+        // The winner is still there, and still this runtime's.
+        try await fixture.waitUntilRunning()
+        #expect(await fixture.runtime.serverIsRunning)
+
+        // And stopping really stops it.
+        second.cancel()
+        _ = try? await second.value
+        await fixture.runtime.stop()
+        #expect(await fixture.runtime.serverIsRunning == false)
+    }
+
+    // MARK: - What travels
+
+    /// The log is the runtime's raw output, and llama.cpp names the model file on most of
+    /// its opening lines. That text goes to a phone and rides `/events`, so the part that
+    /// identifies the model stays and the part that describes somebody's disk does not.
+    @Test func theLogTailKeepsFileNamesAndDropsThePathsAroundThem() throws {
+        let log = """
+        llama_model_loader: loaded meta data with 30 key-value pairs and 435 tensors from         /Volumes/External/Local Models/orca/Ternary-2-27B-PTQ1_0.gguf (version GGUF V3)
+        load_model: loading model '/Volumes/External/Local Models/orca/mmproj-Q8_0.gguf'
+        error loading model: failed to open /Users/someone/Library/x.gguf: No such file
+        """
+        let tail = try #require(LoadDiagnosis.tail(of: log))
+
+        #expect(tail.contains("Ternary-2-27B-PTQ1_0.gguf"))
+        #expect(tail.contains("mmproj-Q8_0.gguf"))
+        #expect(tail.contains("x.gguf"))
+        #expect(!tail.contains("/Volumes"))
+        #expect(!tail.contains("/Users"))
+        #expect(!tail.contains("Local Models"))
+        // The prose around a path survives it.
+        #expect(tail.contains("loaded meta data with 30 key-value pairs"))
+        #expect(tail.contains("(version GGUF V3)"))
+        #expect(tail.contains("No such file"))
+    }
+
+    /// A relative word with a slash in it is not a path, and a log that mentions one should
+    /// come out the other side unchanged.
+    @Test func ordinaryTextIsLeftAlone() {
+        let log = "llama_context: n_ctx = 16384, 24/7 slots busy, ratio 3/4"
+        #expect(LoadDiagnosis.tail(of: log) == log)
     }
 
     // MARK: - Fixture

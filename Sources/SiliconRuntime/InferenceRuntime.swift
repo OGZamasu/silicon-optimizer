@@ -193,6 +193,18 @@ public enum RuntimeError: Error, LocalizedError {
     case expertStreamingUnsupported
     case prismTernaryUnsupported
 
+    /// Whether this is the load being taken away rather than the model failing.
+    ///
+    /// A load that was replaced belongs to the load that replaced it: its screen, its
+    /// progress line, its alert if it fails. And an unload part-way through a load is the
+    /// owner getting exactly what they asked for. Neither is a failure to put in front of
+    /// anybody, and reporting them as one is how pressing Unload came to raise an error
+    /// dialog.
+    public var wasInterrupted: Bool {
+        guard case .didNotBecomeReady(let failure) = self else { return false }
+        return failure.wasReplaced || failure.reason == .cancelled
+    }
+
     public var errorDescription: String? {
         switch self {
         case .notInstalled(let kind):

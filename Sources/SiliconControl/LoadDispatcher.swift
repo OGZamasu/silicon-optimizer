@@ -56,8 +56,10 @@ actor LoadDispatcher {
         let id = UUID()
         running = Running(id: id, modelID: request.modelID, startedAt: Date())
 
-        // Detached on purpose: an unstructured child of this request would be cancelled with
-        // it, which is the bug. The load belongs to the Mac now, not to the socket.
+        // What detaches the load's lifetime is that nothing here awaits this task — an
+        // unstructured `Task {}` would survive this request too. `Task.detached` on top of
+        // that, so the load inherits nothing from the caller: not its priority, not its
+        // task-locals, not its actor. A load is the Mac's work, whoever happened to ask.
         Task.detached { [self] in
             do {
                 await finish(id, .success(try await host.load(request)))

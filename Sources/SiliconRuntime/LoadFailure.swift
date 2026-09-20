@@ -165,20 +165,33 @@ extension LoadEnding {
         let lived = spell(termination.ranFor)
         if let signal = termination.signal {
             return "\(process) was killed (signal \(signal)) after \(lived)"
-                + "\(Self.explain(signal: signal))"
+                + "\(Self.explain(signal: signal, after: termination.ranFor))"
         }
-        let status = termination.exitStatus ?? 0
+        // Exit 0 is still a failure — it never answered — but "stopped on its own (exit 0)"
+        // reads like a success somebody mislabelled, so it says what was missing.
+        guard let status = termination.exitStatus, status != 0 else {
+            return "\(process) stopped on its own after \(lived), before it finished "
+                + "loading (exit 0)."
+        }
         return "\(process) stopped on its own after \(lived) (exit \(status))."
     }
 
     /// What a signal usually means on this machine, when it usually means something.
     ///
-    /// SIGKILL during a load is the memory pressure killer far more often than it is
-    /// anything else — nothing else on a Mac reaches for it while a process is reading
-    /// tens of gigabytes — and a person who has just watched a 27B model disappear is
-    /// owed that sentence rather than the number on its own.
-    private static func explain(signal: Int32) -> String {
+    /// SIGKILL *during* a load is the memory pressure killer far more often than it is
+    /// anything else — nothing else on a Mac reaches for it while a process is reading tens
+    /// of gigabytes — and a person who has just watched a 27B model disappear is owed that
+    /// sentence rather than the number on its own.
+    ///
+    /// SIGKILL in the first moment is a different animal and must not be blamed on memory:
+    /// a binary that never got to run is one Gatekeeper refused — a quarantined download, a
+    /// build whose signature does not check out — and telling that owner to reduce their
+    /// context length would send them somewhere with nothing to find.
+    private static func explain(signal: Int32, after seconds: TimeInterval) -> String {
         switch signal {
+        case SIGKILL where seconds < Self.tooSoonForMemoryPressure:
+            return ", which this early usually means macOS refused to run it at all — a "
+                + "quarantined or unsigned build — rather than memory pressure."
         case SIGKILL:
             return ", which usually means the system reclaimed its memory."
         case SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP:
@@ -188,17 +201,25 @@ extension LoadEnding {
         }
     }
 
-    /// Durations as a person would say them: seconds up to two minutes, whole minutes after
-    /// that. Exact seconds are noise once a load has been going for minutes, and "0 seconds"
-    /// is not a thing anyone says.
+    /// Before this, a SIGKILL is about the binary; after it, about the memory. Two seconds
+    /// is long enough for any real load to have started reading weights and short enough
+    /// that a Gatekeeper kill is always inside it.
+    static let tooSoonForMemoryPressure: TimeInterval = 2
+
+    /// Durations as a person would say them: seconds up to two minutes, then minutes, then
+    /// hours. Exact seconds are noise once a load has been going for minutes, and "0
+    /// seconds" is not a thing anyone says.
+    ///
+    /// Rounded before it is classified, not after, or 119.6 seconds is "120 seconds" and an
+    /// hour is "60 minutes".
     static func spell(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite, seconds >= 1 else { return "less than a second" }
-        if seconds < 120 {
-            let whole = Int(seconds.rounded())
-            return "\(whole) second\(whole == 1 ? "" : "s")"
-        }
-        let minutes = Int((seconds / 60).rounded())
-        return "\(minutes) minute\(minutes == 1 ? "" : "s")"
+        let whole = Int(seconds.rounded())
+        if whole < 120 { return "\(whole) second\(whole == 1 ? "" : "s")" }
+        let minutes = Int((Double(whole) / 60).rounded())
+        if minutes < 60 { return "\(minutes) minute\(minutes == 1 ? "" : "s")" }
+        let hours = Int((Double(minutes) / 60).rounded())
+        return "\(hours) hour\(hours == 1 ? "" : "s")"
     }
 
     /// The machine-readable half of the same fact.
@@ -212,6 +233,20 @@ extension LoadEnding {
             }
         case .neverAnswered: return .timedOut
         case .cancelled: return .cancelled
+        }
+    }
+
+    /// Whether this app — or the person using it — is the reason the load ended.
+    ///
+    /// The distinction the summary turns on: a runtime that was stopped on purpose is not
+    /// diagnosable, and reading its log for advice puts words in its mouth. A load replaced
+    /// while its log happened to carry "failed to allocate" was being reported as running
+    /// out of memory, which is a bug report nobody can act on.
+    public var wasAppCaused: Bool {
+        switch self {
+        case .processEnded(let termination): termination.stopRequest != nil
+        case .cancelled: true
+        case .neverAnswered: false
         }
     }
 
@@ -286,15 +321,55 @@ public enum LoadDiagnosis {
     }
 
     /// The tail of a log, or nil when there is nothing worth carrying.
+    ///
+    /// Paths are reduced to file names on the way out. See `withoutPaths`.
     public static func tail(of log: String) -> String? {
-        let tail = log
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .suffix(detailLines)
-            .joined(separator: "\n")
+        let tail = withoutPaths(
+            log
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .suffix(detailLines)
+                .joined(separator: "\n")
+        )
         guard !tail.isEmpty else { return nil }
         guard tail.count > detailCharacters else { return tail }
         return "…" + tail.suffix(detailCharacters)
     }
+
+    /// Absolute paths, reduced to the name of the file at the end of them.
+    ///
+    /// A llama.cpp log names the model file on most of its opening lines, and that path is
+    /// somebody's home: which drive, which folders, what those folders are called. This
+    /// text travels — to a phone, and on `/events` — so the part that identifies the model
+    /// stays and the part that describes the owner's disk does not. It is not the only
+    /// guard: a chat-scope device and the swarm are sent no `detail` at all.
+    static func withoutPaths(_ text: String) -> String {
+        guard let expression = absolutePath else { return text }
+        let whole = text as NSString
+        var out = ""
+        var cursor = 0
+        for match in expression.matches(
+            in: text, range: NSRange(location: 0, length: whole.length)
+        ) {
+            out += whole.substring(
+                with: NSRange(location: cursor, length: match.range.location - cursor)
+            )
+            let path = whole.substring(with: match.range)
+            let name = path.split(separator: "/").last.map(String.init) ?? path
+            // The match can end on the spaces that followed the path; keep them, or the
+            // file name runs into the next word.
+            let trailing = String(path.reversed().prefix { $0 == " " })
+            out += name.trimmingCharacters(in: .whitespaces) + trailing
+            cursor = match.range.location + match.range.length
+        }
+        return out + whole.substring(from: cursor)
+    }
+
+    /// Two or more slash-separated segments, starting at a slash. Quotes, brackets, commas
+    /// and colons end a segment, because that is what a log puts around a path — and a
+    /// segment may contain spaces, because folder names do.
+    private static let absolutePath = try? NSRegularExpression(
+        pattern: #"/(?:[^/\n'"(),:]+/)+[^/\n'"(),:]*"#
+    )
 }
 
 // MARK: - Keeping the last one

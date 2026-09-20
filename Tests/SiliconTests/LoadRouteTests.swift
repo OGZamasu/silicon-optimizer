@@ -1,7 +1,9 @@
 import Foundation
 import Testing
+@testable import SiliconCatalog
 @testable import SiliconControl
 @testable import SiliconRuntime
+@testable import SiliconUI
 
 /// `POST /load` and `GET /status` as a phone meets them.
 ///
@@ -205,6 +207,89 @@ struct LoadRouteTests {
                 .failure == nil)
     }
 
+    // MARK: - Who may see the runtime's log
+
+    /// `detail` is the runtime's raw output. Everyone who may ask what happened is told
+    /// what happened; only a caller with the Mac's full confidence is handed the log.
+    @Test func onlyAFullControlCallerIsShownTheRuntimesLog() throws {
+        let full = ControlAPI.Status(
+            state: "llama-server stopped on its own after 8 seconds (exit 1).",
+            loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+            expertStreaming: false, lastGenerationTokensPerSecond: nil,
+            failure: ControlAPI.LoadFailure(
+                reason: "exited", detail: "error loading model: bonsai.gguf",
+                runtime: "llama.cpp", exitStatus: 1, wasReplaced: false,
+                at: "2026-09-19T11:04:38Z"
+            )
+        )
+
+        for caller in [ControlServer.Caller.control, .device(id: "d", scope: .full)] {
+            #expect(ControlServer.narrowed(full, for: caller).failure?.detail != nil,
+                    "\(caller) should see the log")
+        }
+        for caller: ControlServer.Caller? in [.device(id: "d", scope: .chat), .swarm, nil] {
+            let narrowed = ControlServer.narrowed(full, for: caller)
+            // Withheld — and nothing else is.
+            #expect(narrowed.failure?.detail == nil, "\(String(describing: caller))")
+            #expect(narrowed.state == full.state)
+            #expect(narrowed.failure?.reason == "exited")
+            #expect(narrowed.failure?.exitStatus == 1)
+            #expect(narrowed.failure?.runtime == "llama.cpp")
+            #expect(narrowed.failure?.wasReplaced == false)
+            #expect(narrowed.failure?.at == "2026-09-19T11:04:38Z")
+        }
+
+        // A status with nothing to withhold is passed through untouched.
+        let healthy = ControlAPI.Status(
+            state: "Ready", loadedModelID: "m", loadedModelName: "M", contextLength: 4096,
+            expertStreaming: false, lastGenerationTokensPerSecond: 12
+        )
+        #expect(ControlServer.narrowed(healthy, for: .swarm).failure == nil)
+    }
+
+    /// And the same payload on the side channel. `/events` sends a `status` frame to every
+    /// credential this server honours, so a rule enforced only on the route would be a rule
+    /// enforced nowhere.
+    @Test func theEventStreamWithholdsTheLogFromTheSameAudiences() async throws {
+        let hub = BuddyEventHub()
+        let mac = await hub.subscribe(as: .thisMac)
+        let phone = await hub.subscribe(as: .device(id: "phone", scope: .chat))
+        let peer = await hub.subscribe(as: .peer)
+        let trusted = await hub.subscribe(as: .device(id: "tablet", scope: .full))
+
+        await hub.post(.status(ControlAPI.Status(
+            state: "llama-server was killed (signal 9) after 8 seconds.",
+            loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+            expertStreaming: false, lastGenerationTokensPerSecond: nil,
+            failure: ControlAPI.LoadFailure(
+                reason: "killed", detail: "loaded multimodal model, 'mmproj-Q8_0.gguf'",
+                runtime: "llama.cpp", signal: 9, wasReplaced: false,
+                at: "2026-09-19T11:04:38Z"
+            )
+        )))
+
+        func firstFrame(_ stream: AsyncStream<BuddyEvent.Frame>) async throws -> String {
+            for await frame in stream { return String(decoding: frame.data, as: UTF8.self) }
+            throw LoadTestError.timeout
+        }
+        let seenByMac = try await firstFrame(mac.stream)
+        let seenByTablet = try await firstFrame(trusted.stream)
+        let seenByPhone = try await firstFrame(phone.stream)
+        let seenByPeer = try await firstFrame(peer.stream)
+
+        #expect(seenByMac.contains("mmproj-Q8_0.gguf"))
+        #expect(seenByTablet.contains("mmproj-Q8_0.gguf"))
+        #expect(!seenByPhone.contains("mmproj-Q8_0.gguf"))
+        #expect(!seenByPeer.contains("mmproj-Q8_0.gguf"))
+        // Everyone is still told what happened, and still gets a `status` frame.
+        for seen in [seenByPhone, seenByPeer] {
+            #expect(seen.contains("\"reason\" : \"killed\"")
+                    || seen.contains("\"reason\":\"killed\""))
+            #expect(seen.contains("signal"))
+            #expect(seen.contains("was killed (signal 9)"))
+        }
+    }
+
     // MARK: - Fixture
 
     private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
@@ -276,6 +361,112 @@ struct LoadRouteTests {
         }
         await host.release()
         await server.stop()
+    }
+}
+
+/// The two rules the app applies to a failed load, which are promises to a client and to
+/// the person watching the window — and a promise nothing checks is one the next edit gets
+/// to break quietly.
+@Suite("What the app does with a failed load")
+@MainActor
+struct FailedLoadReportingTests {
+
+    private func failure(
+        _ reason: LoadFailure.Reason, summary: String, wasReplaced: Bool = false
+    ) -> LoadFailure {
+        LoadFailure(
+            reason: reason, summary: summary, detail: "error loading model: bonsai.gguf",
+            runtime: .llamaCpp, wasReplaced: wasReplaced
+        )
+    }
+
+    /// Published only for the state line it belongs to.
+    @Test func theDetailIsPublishedWithTheSentenceItCameFrom() {
+        let sentence = "llama-server stopped on its own after 8 seconds (exit 1)."
+        let recorded = failure(.exited, summary: sentence)
+
+        let published = AppModel.failedLoadDetail(
+            state: .failed(message: sentence), recorded: recorded
+        )
+        #expect(published?.reason == "exited")
+        #expect(published?.detail == "error loading model: bonsai.gguf")
+    }
+
+    /// Never beside a model that is loading, loaded or idle — a recorded failure is about
+    /// the past, and `state` is about now.
+    @Test func nothingIsPublishedUnlessTheAppIsInAFailedState() {
+        let sentence = "llama-server stopped on its own after 8 seconds (exit 1)."
+        let recorded = failure(.exited, summary: sentence)
+        for state: RuntimeState in [
+            .idle, .starting(stage: "Loading weights… 42%"), .stopping,
+            .ready(endpoint: URL(string: "http://127.0.0.1:8080")!),
+        ] {
+            #expect(AppModel.failedLoadDetail(state: state, recorded: recorded) == nil,
+                    "\(state)")
+        }
+    }
+
+    /// And never a failure that belongs to a different sentence. A load that failed
+    /// somewhere the runtime never reached has a state line and no detail, which is the
+    /// honest answer rather than the previous failure's log.
+    @Test func aStaleFailureIsNotPublishedBesideAnotherSentence() {
+        let recorded = failure(
+            .exited, summary: "llama-server stopped on its own after 8 seconds (exit 1)."
+        )
+        #expect(AppModel.failedLoadDetail(
+            state: .failed(message: "'bonsai-2-27b' is not installed. Use install_model first."),
+            recorded: recorded
+        ) == nil)
+        #expect(AppModel.failedLoadDetail(
+            state: .failed(message: recorded.summary), recorded: nil
+        ) == nil)
+    }
+
+    /// A load that was taken away is not an error to put in front of the owner: the load
+    /// that replaced it owns the screen, and an unload mid-load is the owner getting what
+    /// they asked for. Both used to raise an alert.
+    @Test func anInterruptedLoadIsNotReportedAsAFailure() {
+        let replaced = RuntimeError.didNotBecomeReady(failure(
+            .replaced, summary: "llama-server was replaced by another load (Qwen3 30B).",
+            wasReplaced: true
+        ))
+        let unloaded = RuntimeError.didNotBecomeReady(failure(
+            .cancelled,
+            summary: "llama-server was stopped by an unload before it finished loading."
+        ))
+        #expect(AppModel.showsFailure(for: replaced) == false)
+        #expect(AppModel.showsFailure(for: unloaded) == false)
+        #expect(replaced.wasInterrupted && unloaded.wasInterrupted)
+
+        // Everything that really is a failure still is one.
+        let died = RuntimeError.didNotBecomeReady(failure(
+            .killed, summary: "llama-server was killed (signal 9) after 8 seconds."
+        ))
+        #expect(AppModel.showsFailure(for: died))
+        #expect(AppModel.showsFailure(for: RuntimeError.notInstalled(.llamaCpp)))
+        #expect(AppModel.showsFailure(for: RuntimeError.notRunning))
+        #expect(RuntimeError.notInstalled(.llamaCpp).wasInterrupted == false)
+    }
+
+    /// The catch still reports the failures it should: a model the app has no runtime for
+    /// ends with a state line, an alert, and no runtime left behind.
+    @Test func anOrdinaryFailedLoadStillRaisesItsAlert() async {
+        let model = AppModel(settings: .init())
+        await model.loadAsync(InstalledModel(
+            id: "fixture", name: "Fixture 1B", catalogID: nil, quantization: .q4_K_M,
+            format: .gguf,
+            primaryFile: URL(fileURLWithPath: "/Volumes/External/Local Models/fixture.gguf"),
+            allFiles: [], projectorFile: nil, sizeOnDisk: .mib(64), installedAt: Date(),
+            shape: nil, capabilities: []
+        ))
+
+        guard case .failed(let message) = model.runtimeState else {
+            Issue.record("a load with no runtime should fail: \(model.runtimeState)")
+            return
+        }
+        #expect(!message.isEmpty)
+        #expect(model.alert?.title == "Could not load Fixture 1B")
+        #expect(model.activeRuntime == nil)
     }
 }
 

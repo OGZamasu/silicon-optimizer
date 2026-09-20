@@ -705,6 +705,23 @@ public actor ControlServer {
                 || path == "/conversations" || path.hasPrefix("/conversations/")
         }
 
+        /// Whether this caller may be shown a runtime's own log.
+        ///
+        /// `GET /status` is open to every credential this server honours, and it now carries
+        /// the tail of a failed runtime's output. That text is the runtime's raw log — it
+        /// names files, and on a Mac a file name is a path through somebody's folders. A
+        /// device paired for chat was deliberately given less than full control, and the
+        /// swarm secret is a node's credential rather than a person's; both are answered the
+        /// whole failure *except* its log, which is the part that describes the owner's disk
+        /// rather than what happened.
+        var seesRuntimeLogs: Bool {
+            switch self {
+            case .control: true
+            case .swarm: false
+            case .device(_, let scope): scope == .full
+            }
+        }
+
         /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
         /// nothing and costs the machine minutes — so the set is written out, and a route
         /// added later is closed to chat-only devices until someone decides otherwise.
@@ -736,6 +753,14 @@ public actor ControlServer {
         guard !(request.method == "POST" && request.path == "/buddy/pair") else { return nil }
         guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
         return .error(403, chatOnlyRefusal)
+    }
+
+    /// A status as this caller may see it. Nil — a caller we could not identify — is given
+    /// the narrow one, because the only safe reading of "who is this?" with no answer is
+    /// "not somebody with full control".
+    static func narrowed(_ status: ControlAPI.Status, for caller: Caller?) -> ControlAPI.Status {
+        guard caller?.seesRuntimeLogs == true else { return status.withoutPrivilegedDetail }
+        return status
     }
 
     /// Why a task in the query string is refused. Exported so the contract fixture and the
@@ -1311,7 +1336,7 @@ public actor ControlServer {
             case ("GET", "/metrics"):
                 return try .encode(await host.metrics())
             case ("GET", "/status"):
-                return try .encode(await host.status())
+                return try .encode(Self.narrowed(await host.status(), for: caller))
             case ("GET", "/installed"):
                 return try .encode(await host.installed())
             case ("GET", "/catalog"):
@@ -1358,8 +1383,10 @@ public actor ControlServer {
                     try request.decode(ControlAPI.LoadRequest.self),
                     on: host, patience: loadPatience
                 ) {
-                case .finished(let status): return try .encode(status)
-                case .stillLoading: return try .encode(await host.status())
+                case .finished(let status):
+                    return try .encode(Self.narrowed(status, for: caller))
+                case .stillLoading:
+                    return try .encode(Self.narrowed(await host.status(), for: caller))
                 }
             case ("POST", "/unload"):
                 await host.unload()

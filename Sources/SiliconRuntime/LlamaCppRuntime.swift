@@ -123,8 +123,7 @@ public actor LlamaCppRuntime: InferenceRuntime {
                 }
             )
         } catch {
-            await arbiter.finish(claim)
-            self.server = nil
+            self.release(server)
             throw record(error, reason: .launchFailed)
         }
 
@@ -145,9 +144,7 @@ public actor LlamaCppRuntime: InferenceRuntime {
                 arbiter: arbiter, timeout: readinessTimeout
             )
             await server.terminate()
-            await arbiter.finish(claim)
-            self.server = nil
-            self.client = nil
+            self.release(server)
 
             lastServerLog = log
             let failure = LoadDiagnosis.failure(
@@ -170,12 +167,24 @@ public actor LlamaCppRuntime: InferenceRuntime {
         loadProgress = 1
         lastFailure = nil
         recorder.clear()
-        await arbiter.finish(claim)
         transition(to: .ready(endpoint: endpoint))
     }
 
     public func stop() async {
         await stop(because: .unload)
+    }
+
+    /// Lets go of a server, but only if it is still this load's.
+    ///
+    /// `start` allows a second load on a runtime that is already loading: it stops the first
+    /// and takes the slot. The first then tidies up after itself — and clearing `server` and
+    /// `client` unconditionally wiped the *winner's* handles. Its process stayed alive, a
+    /// later `stop()` had nothing to stop, and the model it was holding was not released
+    /// until the app quit.
+    private func release(_ server: ServerProcess) {
+        guard self.server === server else { return }
+        self.server = nil
+        self.client = nil
     }
 
     /// Stops the server, saying why — which is what lets a load that was interrupted report
@@ -306,6 +315,13 @@ public actor LlamaCppRuntime: InferenceRuntime {
     static func diagnose(
         log: String, ending: LoadEnding? = nil, replacedBy: String? = nil
     ) -> String {
+        // A load this app stopped is not diagnosable, and reading its log for advice puts
+        // words in the runtime's mouth: a replaced load whose log happened to carry "failed
+        // to allocate" was being reported as having run out of memory, which is a bug
+        // report nobody can act on.
+        if let ending, ending.wasAppCaused {
+            return ending.sentence(process: processName, replacedBy: replacedBy)
+        }
         if let advice = advice(for: log) { return advice }
         if let ending {
             return ending.sentence(process: processName, replacedBy: replacedBy)
