@@ -1144,9 +1144,9 @@ struct SettingsView: View {
     private func downloadSharpTemplate() {
         fetchingTemplate = true
         templateStatus = "Downloading…"
-        let token = model.settings.huggingFaceToken
         Task {
             do {
+                let token = await model.huggingFaceToken()
                 _ = try await SharpTemplate.download(token: token)
                 templateStatus = "Downloaded. Reload the model to apply it."
             } catch {
