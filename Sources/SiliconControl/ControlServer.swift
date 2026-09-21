@@ -1330,7 +1330,11 @@ public actor ControlServer {
             case ("POST", "/plan"):
                 return try .encode(await host.plan(try request.decode(ControlAPI.PlanRequest.self)))
             case ("POST", "/install"):
-                let message = try await host.install(request.decode(ControlAPI.LoadRequest.self))
+                let install = try request.decode(ControlAPI.LoadRequest.self)
+                guard install.directory == nil || Self.mayNamePaths(caller) else {
+                    return .error(403, "Only this Mac can choose a model download directory. Omit directory to use the configured model library.")
+                }
+                let message = try await host.install(install)
                 return .json(["status": message])
             case ("POST", "/load"):
                 return try .encode(await host.load(try request.decode(ControlAPI.LoadRequest.self)))
@@ -2064,11 +2068,13 @@ public actor ControlServer {
 
     /// Whether this caller may name a path on the Mac at all.
     ///
-    /// A device may not, ever — that is the whole reason the ids exist. The Mac's own token
-    /// and the swarm secret may, because both already run on machines that can read the
-    /// file, and every script and MCP tool written against these routes passes paths.
+    /// Only the per-launch local control credential grants filesystem authority. A swarm
+    /// peer has authority over its own machine, not this Mac: accepting its paths would
+    /// let it send this Mac's private files to a rendering node as image inputs. Peers and
+    /// paired devices use uploads or registered media IDs instead. Local MCP clients keep
+    /// using the control token from the private handshake file.
     private static func mayNamePaths(_ caller: Caller) -> Bool {
-        caller.deviceID == nil
+        caller == .control
     }
 
     private func resolvedMesh(
@@ -2107,7 +2113,7 @@ public actor ControlServer {
             throw ControlAPI.UnreadableSubject()
         }
         // Unlike a mesh, an image does not need a subject at all — text to image is the
-        // ordinary case. Only a device naming a path is refused.
+        // ordinary case. A device or swarm peer naming a path is refused.
         if request.initImagePath != nil, !Self.mayNamePaths(caller) {
             throw ControlAPI.MissingSubject()
         }

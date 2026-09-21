@@ -849,6 +849,7 @@ struct BuddyMediaFixture {
     static func withServer(
         writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
+        swarmToken: String? = nil,
         _ body: (BuddyMediaFixture) async throws -> Void
     ) async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -887,7 +888,7 @@ struct BuddyMediaFixture {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
-        try await server.start()
+        try await server.start(exposeToTailnet: swarmToken != nil, swarmToken: swarmToken)
         defer { Task { await server.stop() } }
         let deadline = ContinuousClock.now + .seconds(5)
         while !FileManager.default.fileExists(atPath: handshakeURL.path) {
@@ -928,6 +929,7 @@ actor MediaTestHost: ControlHost {
     /// caller sent. Nil means the host was never reached, which is what a refusal looks
     /// like from down here.
     private(set) var lastMeshImagePath: String?
+    private(set) var installRequests: [ControlAPI.LoadRequest] = []
 
     init(roots: [String]) { self.roots = roots }
 
@@ -1003,7 +1005,8 @@ actor MediaTestHost: ControlHost {
         throw BuddyTestError.unexpectedRoute
     }
     func install(_ request: ControlAPI.LoadRequest) async throws -> String {
-        throw BuddyTestError.unexpectedRoute
+        installRequests.append(request)
+        return "fixture download accepted"
     }
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status {
         throw BuddyTestError.unexpectedRoute
