@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 import Testing
@@ -6,8 +7,8 @@ import Testing
 @testable import SiliconPlanner
 @testable import SiliconRuntime
 
-/// PrismML's fork is fetched, not found: the resolution against GitHub's release list, the
-/// download → unpack → verify → swap sequence, and the selector's preference for it.
+/// PrismML's fork is fetched, not found: reviewed archive selection, the
+/// download → digest verification → unpack → probe → swap sequence, and runtime selection.
 @Suite("PrismML runtime")
 struct PrismRuntimeTests {
 
@@ -19,49 +20,21 @@ struct PrismRuntimeTests {
         #endif
     }()
 
-    /// The real shape of the fork's releases API on 2026-09-17: the newest tag had only its
-    /// Windows CUDA zips uploaded so far; the one before carried every platform.
-    static let releasesJSON = """
-    [
-      {"tag_name": "prism-b10687-5d80cff", "draft": false, "prerelease": false,
-       "assets": [{"name": "cudart-llama-bin-win-cuda-12.4-x64.zip",
-                   "browser_download_url": "https://example.invalid/a", "size": 1}]},
-      {"tag_name": "prism-b10686-draft", "draft": true, "prerelease": false,
-       "assets": [{"name": "llama-prism-b10686-draft-bin-macos-arm64.tar.gz",
-                   "browser_download_url": "https://example.invalid/d", "size": 1}]},
-      {"tag_name": "prism-b10685-7dffb15", "draft": false, "prerelease": false,
-       "assets": [
-         {"name": "llama-prism-b10685-7dffb15-bin-macos-arm64-kleidiai.tar.gz",
-          "browser_download_url": "https://example.invalid/k", "size": 11700000},
-         {"name": "llama-prism-b10685-7dffb15-bin-macos-arm64.tar.gz",
-          "browser_download_url": "https://example.invalid/m", "size": 11663250},
-         {"name": "llama-prism-b10685-7dffb15-bin-linux-cuda-12.4-x64.tar.gz",
-          "browser_download_url": "https://example.invalid/l", "size": 260800000}
-       ]}
-    ]
-    """
-
-    @Test func picksTheNewestReleaseThatHasThisMacsBuild() throws {
-        let releases = try JSONDecoder().decode(
-            [PrismRuntime.Release].self, from: Data(Self.releasesJSON.utf8)
-        )
-        let pick = try #require(
-            PrismRuntime.pick(from: releases, suffix: "-bin-macos-arm64.tar.gz")
-        )
-        #expect(pick.tag == "prism-b10685-7dffb15")
-        // The plain Metal build, not the CPU-tuned kleidiai variant beside it.
-        #expect(pick.name == "llama-prism-b10685-7dffb15-bin-macos-arm64.tar.gz")
-        #expect(pick.size == 11_663_250)
-        #expect(PrismRuntime.pick(from: releases, suffix: "-bin-macos-x64.tar.gz") == nil)
-
-        let pinned = PrismRuntime.pinnedPick(suffix: "-bin-macos-arm64.tar.gz")
-        #expect(pinned.url.absoluteString
+    @Test func usesOnlyReviewedPlatformArchives() {
+        let arm = PrismRuntime.pinnedPick(suffix: "-bin-macos-arm64.tar.gz")
+        #expect(arm.tag == "prism-b10685-7dffb15")
+        #expect(arm.name == "llama-prism-b10685-7dffb15-bin-macos-arm64.tar.gz")
+        #expect(arm.url.absoluteString
                 == "https://github.com/PrismML-Eng/llama.cpp/releases/download/"
                 + "prism-b10685-7dffb15/llama-prism-b10685-7dffb15-bin-macos-arm64.tar.gz")
+        #expect(arm.sha256 == "7fffa7a40c74f3e9bd78f3f2f9f12f9befb7b13af45d5a69c239cf3fd37b9045")
+        let x64 = PrismRuntime.pinnedPick(suffix: "-bin-macos-x64.tar.gz")
+        #expect(x64.name == "llama-prism-b10685-7dffb15-bin-macos-x64.tar.gz")
+        #expect(x64.sha256 == "b674befce466c4938e7e70a7b13009c7df2e76b072525495a78851c987a5121a")
     }
 
-    /// The whole fetch against a loopback server standing in for GitHub: resolve the
-    /// release, download the tarball, unpack, probe, swap into place, and find it again.
+    /// The whole fetch against a loopback server standing in for GitHub: download the
+    /// reviewed tarball, verify its digest, unpack, probe, swap, and find it again.
     @Test(.enabled(if: PrismRuntimeTests.isArm64))
     func installsFromAReleaseAndFindsItself() async throws {
         let server = try LoopbackServer()
@@ -93,18 +66,16 @@ struct PrismRuntimeTests {
         let archive = try Data(contentsOf: tarball)
         server.set("/download/llama-prism-test-bin-macos-arm64.tar.gz", archive,
                    contentType: "application/gzip")
-        let releases = """
-            [{"tag_name": "prism-test", "draft": false, "prerelease": false, "assets": [
-              {"name": "llama-prism-test-bin-macos-arm64.tar.gz",
-               "browser_download_url": "http://127.0.0.1:\(server.port)/download/llama-prism-test-bin-macos-arm64.tar.gz",
-               "size": \(archive.count)}]}]
-            """
-        server.set("/releases", Data(releases.utf8), contentType: "application/json")
+        let pick = PrismRuntime.Pick(
+            tag: "prism-test", name: "llama-prism-test-bin-macos-arm64.tar.gz",
+            url: URL(string: "http://127.0.0.1:\(server.port)/download/llama-prism-test-bin-macos-arm64.tar.gz")!,
+            size: Int64(archive.count), sha256: Self.sha256(archive)
+        )
 
         let root = scratch.appendingPathComponent("root", isDirectory: true)
         let stages = StageLog()
         let installation = try await PrismRuntime.install(
-            root: root, releasesURL: URL(string: "http://127.0.0.1:\(server.port)/releases")!
+            root: root, pick: pick
         ) { stages.add($0.stage) }
 
         #expect(installation.kind == .llamaCppPrism)
@@ -113,21 +84,61 @@ struct PrismRuntimeTests {
         #expect(installation.source == .managed)
         #expect(installation.executable.path.hasSuffix("root/bin/llama-server"))
         #expect(stages.all.contains { $0.contains("Downloading prism-test") })
+        #expect(stages.all.contains { $0.contains("Verifying prism-test archive") })
         #expect(stages.all.contains { $0.contains("Checking") })
 
         // Found again on the next launch, without the network.
-        #expect(PrismRuntime.managedInstallation(root: root)?.executable
+        #expect(PrismRuntime.managedInstallation(root: root, expected: pick)?.executable
                 == installation.executable)
         // A stock build in the same place would not count.
         try Data("#!/bin/sh\necho 'version: 1 (abc)' # tq1_0 only\n".utf8).write(to: root.appendingPathComponent("bin/llama-server"))
-        #expect(PrismRuntime.managedInstallation(root: root) == nil)
+        #expect(PrismRuntime.managedInstallation(root: root, expected: pick) == nil)
         // And nothing is left after removal.
         try PrismRuntime.remove(root: root)
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
-    /// Against the real GitHub releases: the resolution lands on a tag with a macOS build,
-    /// the tarball unpacks flat, the binary launches, and the ternary types are in it.
+    @Test func refusesChangedArchiveBeforeUnpackingOrLaunching() async throws {
+        let server = try LoopbackServer()
+        defer { server.stop() }
+        let actual = Data("unreviewed archive".utf8)
+        server.set("/tampered.tar.gz", actual, contentType: "application/gzip")
+        let pick = PrismRuntime.Pick(
+            tag: "prism-test", name: "tampered.tar.gz",
+            url: URL(string: "http://127.0.0.1:\(server.port)/tampered.tar.gz")!,
+            size: Int64(actual.count), sha256: Self.sha256(Data("reviewed archive".utf8))
+        )
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prism-reject-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        await #expect(throws: PrismRuntime.InstallError.self) {
+            try await PrismRuntime.install(root: root, pick: pick) { _ in }
+        }
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
+    @Test func refusesLegacyManagedCopyBeforeProbingIt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prism-legacy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let marker = root.appendingPathComponent("probe-ran")
+        let script = bin.appendingPathComponent("llama-server")
+        try Data("#!/bin/sh\n# ptq1_0\ntouch '\(marker.path)'\necho 'version: old'\n".utf8)
+            .write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let pick = PrismRuntime.pinnedPick()
+        try Data("""
+            {"tag":"\(pick.tag)","asset":"\(pick.name)","installedAt":0}
+            """.utf8).write(to: root.appendingPathComponent("prism.json"))
+
+        #expect(PrismRuntime.managedInstallation(root: root) == nil)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    /// Against the real pinned GitHub release: the digest matches, the tarball unpacks
+    /// flat, the binary launches, and the ternary types are in it.
     ///
     ///     SILICON_NETWORK_TESTS=1 swift test --filter fetchesTheRealForkFromGitHub
     @Test(.enabled(if: ProcessInfo.processInfo.environment["SILICON_NETWORK_TESTS"] == "1"))
@@ -192,6 +203,10 @@ struct PrismRuntimeTests {
     }
 
     // MARK: - Fixtures
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 
     private final class StageLog: @unchecked Sendable {
         private let lock = NSLock()

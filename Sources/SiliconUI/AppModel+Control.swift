@@ -279,6 +279,11 @@ extension AppModel: ControlHost {
             ?? .q4_K_M
 
         guard !isInstalled(entry, quantization: quantization) else {
+            if quantization.needsPrismRuntime && !hasPrismTernaryRuntime {
+                installPrismRuntime()
+                return "\(entry.name) (\(quantization.rawValue)) is already installed. "
+                    + "Fetching its reviewed PrismML runtime; progress is shown in the app."
+            }
             return "\(entry.name) (\(quantization.rawValue)) is already installed."
         }
 

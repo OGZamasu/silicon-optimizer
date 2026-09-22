@@ -3359,7 +3359,7 @@ public final class AppModel {
     /// is retried.
     public func installPrismRuntime() {
         if let current = prismRuntimeInstall, current.error == nil { return }
-        prismRuntimeInstall = PrismRuntimeInstall(stage: "Finding the newest PrismML build")
+        prismRuntimeInstall = PrismRuntimeInstall(stage: "Preparing reviewed PrismML build")
         Task { [weak self] in
             do {
                 _ = try await PrismRuntime.install { progress in
