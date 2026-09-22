@@ -377,12 +377,20 @@ so an app can say "available until" rather than discover the 404 a week later.
 
 `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
 `POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on
-this side before the render sees the request. A **device may only use those**: an
-`imagePath` in a request carrying a device token is refused, because a device that could
-name one file could name any file — and the planning routes are gated exactly like the
-renders they plan, since "no image at that path" and a plan are a yes/no oracle for every
-path on the Mac. This Mac's own token and the swarm secret still pass paths, which is what
-every script and MCP tool written against these routes does.
+this side before the render sees the request. **Paired devices and swarm peers use these
+IDs**: `imagePath` and `initImagePath` require this Mac's per-launch control token, even
+when a swarm client connects over loopback. The planning routes apply the same rule as
+rendering. A shared swarm credential grants rendering access, not access to arbitrary
+files on the Mac.
+
+A swarm client can send its input to `POST /uploads`, then pass the returned `uploadID`
+or `mediaID` to the render route. Swarm uploads share a separate `swarm` bucket and cannot
+resolve a paired phone's private uploads. Local scripts and MCP clients can still pass
+paths using the control token from the private handshake file.
+
+The same rule applies to `POST /install`'s optional `directory`: only the local control
+token may choose a destination. Devices and swarm clients omit it to use the library
+configured on the Mac.
 
 **Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
 knew about each peer and used to keep to itself: platform, GPU or chip, memory used and

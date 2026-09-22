@@ -27,6 +27,23 @@ struct ControlBoundaryTests {
         }
     }
 
+    @Test func videoQueueRejectsExtremeCountsBeforeRoutingOrMultiplication() async {
+        let app = AppModel(settings: .init())
+        for variations in [Int.min, -1, 0, 21, Int.max] {
+            await #expect(throws: ControlHostError.self) {
+                _ = try await app.enqueueVideos(.init(
+                    prompts: ["First shot", "Second shot"], variations: variations,
+                    modelID: "hailuo-h3"
+                ))
+            }
+        }
+        for prompts in [[String](), Array(repeating: "A shot", count: 201)] {
+            await #expect(throws: ControlHostError.self) {
+                _ = try await app.enqueueVideos(.init(prompts: prompts, modelID: "hailuo-h3"))
+            }
+        }
+    }
+
     @Test func imagePlanRejectsInvalidGeometryAndSteps() async {
         let app = AppModel(settings: .init())
         let invalid: [(Int?, Int?, Int?)] = [

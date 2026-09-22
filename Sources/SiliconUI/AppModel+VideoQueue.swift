@@ -185,6 +185,14 @@ extension AppModel {
     }
 
     public func enqueueVideos(_ request: ControlAPI.VideoQueueRequest) async throws -> ControlAPI.VideoQueueView {
+        // Bound untrusted counts before routing or multiplying them. The queue repeats
+        // these checks at persistence time, but that is after this method builds its detail.
+        let variations = request.variations ?? 1
+        guard (1...VideoBatchQueue.maximumVariations).contains(variations),
+              !request.prompts.isEmpty,
+              request.prompts.count <= VideoBatchQueue.maximumPending else {
+            throw ControlHostError.badRequest("Use 1–20 variations and between 1 and 200 prompts.")
+        }
         // An omitted or "auto" model is the router's cue. It answers nil when Jev is off, no
         // key is stored, the budget is gone or the call failed — and the lines below then do
         // exactly what they did before this feature existed.
@@ -219,13 +227,13 @@ extension AppModel {
         // Every clip in a batch carries the same line, because one model and one length
         // were chosen for all of them — from the prompts together, not from this clip's.
         // Saying so stops the line reading like a judgment of the shot it sits under.
-        let clipCount = request.prompts.count * (request.variations ?? 1)
+        let clipCount = request.prompts.count * variations
         let detail = routed.map { routed in
             clipCount > 1 ? "\(routed.reason) — chosen for the batch" : routed.reason
         }
         do {
             let batch = try videoBatchQueue.enqueue(
-                prompts: request.prompts, variations: request.variations ?? 1,
+                prompts: request.prompts, variations: variations,
                 title: request.title ?? "Video batch", template: template, baseSeed: request.seed,
                 detail: detail
             )
