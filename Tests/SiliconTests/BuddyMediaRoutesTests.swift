@@ -929,6 +929,7 @@ actor MediaTestHost: ControlHost {
     /// caller sent. Nil means the host was never reached, which is what a refusal looks
     /// like from down here.
     private(set) var lastMeshImagePath: String?
+    private(set) var installRequests: [ControlAPI.LoadRequest] = []
 
     init(roots: [String]) { self.roots = roots }
 
@@ -1004,7 +1005,8 @@ actor MediaTestHost: ControlHost {
         throw BuddyTestError.unexpectedRoute
     }
     func install(_ request: ControlAPI.LoadRequest) async throws -> String {
-        throw BuddyTestError.unexpectedRoute
+        installRequests.append(request)
+        return "fixture download accepted"
     }
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status {
         throw BuddyTestError.unexpectedRoute

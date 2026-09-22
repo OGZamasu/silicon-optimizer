@@ -15,7 +15,11 @@ struct SwarmView: View {
 
     @State private var entries: [GatewayLedgerEntry] = []
     @State private var stats: [String: GatewayModelStats] = [:]
-    @State private var selectedEntryID: String?
+    /// One selection for the whole page: "machine/…", "member/…", or a ledger entry
+    /// id. Whatever is selected fills the always-open detail panel on the right —
+    /// it defaults to this Mac, so the panel is never blank space.
+    @State private var selectedItemID: String? = SwarmView.localMachineID
+    @State private var collapsedMachines: Set<String> = []
     @State private var showingInvite = false
     @State private var showingJoin = false
     @State private var testing: Set<String> = []
@@ -25,68 +29,24 @@ struct SwarmView: View {
     @State private var filterEngine = "all"
     @State private var searchText = ""
 
+    /// Selection and collapse keys a peer cannot claim: peer cards name themselves
+    /// `machine/<name>` and collapse under the same key, so this Mac uses neither scheme.
+    static let localMachineID = "local"
+
     var body: some View {
-        List(selection: $selectedEntryID) {
-            Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                machinesHeader
                 machineGrid
-                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 10, trailing: 12))
-                    .listRowSeparator(.hidden)
                 if let feedback = model.peerLLMError {
                     Label(feedback, systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
                 }
-            } header: {
-                machinesHeader
+                peoplePanel
+                activityPanel
             }
-
-            Section {
-                peopleRows
-            } header: {
-                HStack(spacing: 8) {
-                    Text("People")
-                    if model.swarmMembersLoaded, model.swarmMembers.count > 1 {
-                        Text("\(model.swarmMembers.count)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                }
-            }
-
-            Section {
-                filterBar
-                    .listRowSeparator(.hidden)
-                let visible = filteredEntries
-                if visible.isEmpty {
-                    Text(entries.isEmpty
-                         ? "Requests an engine sends through the model gateway appear "
-                           + "here — the Test button on any machine makes the first one."
-                         : "Nothing matches these filters.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
-                } else {
-                    ForEach(visible) { entry in
-                        activityRow(entry)
-                            .tag(entry.id)
-                    }
-                }
-            } header: {
-                HStack(spacing: 8) {
-                    Text("Activity")
-                    Spacer()
-                    Button("Clear") {
-                        selectedEntryID = nil
-                        entries = []
-                        if let ledger = model.gatewayLedger {
-                            Task { await ledger.clear() }
-                        }
-                    }
-                    .controlSize(.small)
-                    .help("Empty the list — the log file on disk is left alone")
-                }
-            }
+            .padding(EdgeInsets(top: 12, leading: 14, bottom: 24, trailing: 14))
         }
         .navigationTitle("Swarm")
         .toolbar {
@@ -113,11 +73,9 @@ struct SwarmView: View {
                 }
             }
         }
-        .inspector(isPresented: inspectorShown) {
-            if let entry = entries.first(where: { $0.id == selectedEntryID }) {
-                RequestInspector(entry: entry)
-                    .inspectorColumnWidth(min: 300, ideal: 360, max: 460)
-            }
+        .inspector(isPresented: alwaysOpenInspector) {
+            inspectorContent
+                .inspectorColumnWidth(min: 300, ideal: 360, max: 460)
         }
         .sheet(isPresented: $showingInvite) { SwarmInviteSheet() }
         .sheet(isPresented: $showingJoin) { SwarmJoinSheet() }
@@ -140,11 +98,258 @@ struct SwarmView: View {
         }
     }
 
-    private var inspectorShown: Binding<Bool> {
+    /// The detail panel is part of the page, not a drawer: closing it just returns
+    /// it to its default subject, this Mac.
+    private var alwaysOpenInspector: Binding<Bool> {
         Binding(
-            get: { selectedEntryID != nil },
-            set: { shown in if !shown { selectedEntryID = nil } }
+            get: { true },
+            set: { shown in if !shown { selectedItemID = Self.localMachineID } }
         )
+    }
+
+    // MARK: - The detail panel
+
+    @ViewBuilder
+    private var inspectorContent: some View {
+        if let id = selectedItemID, let entry = entries.first(where: { $0.id == id }) {
+            RequestInspector(entry: entry)
+        } else if let id = selectedItemID, id.hasPrefix("member/"),
+                  let member = model.swarmMembers.first(where: {
+                      "member/\($0.id)" == id
+                  }) {
+            memberInspector(member)
+        } else if let id = selectedItemID, id.hasPrefix("machine/"),
+                  id != Self.localMachineID,
+                  let peer = model.swarmPeers.first(where: {
+                      "machine/\($0.name)" == id
+                  }) {
+            peerMachineInspector(peer)
+        } else {
+            localMachineInspector
+        }
+    }
+
+    private var localMachineInspector: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("This Mac").font(.headline)
+                    Text(model.profile.chipName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                let total = model.profile.totalMemory.gibibytes
+                inspectorFact(
+                    "Memory",
+                    String(format: "%.1f of %.0f GB in use",
+                           model.metrics.memoryUsedFraction * total, total)
+                )
+                if let loaded = model.loadedModel {
+                    inspectorFact(
+                        "Serving",
+                        model.runtimeState.isRunning
+                            ? loaded.name : "\(loaded.name) — \(model.runtimeState.label)"
+                    )
+                    if let context = model.activeConfiguration?.contextLength {
+                        inspectorFact("Context", "\(context / 1024)K tokens")
+                    }
+                } else {
+                    inspectorFact("Serving", "nothing loaded")
+                }
+                if let rate = localRate {
+                    inspectorFact("Measured", String(format: "%.1f tok/s", rate))
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Models it offers")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    if model.installedModels.isEmpty {
+                        Text("None installed yet — the Models tab is where they come from.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.installedModels) { installed in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(installed.name).font(.callout)
+                                Text(installed.quantization.rawValue)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if model.loadedModel?.id == installed.id {
+                                Text(
+                                    model.runtimeState.isRunning
+                                        ? "serving" : model.runtimeState.label
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.teal)
+                                .lineLimit(1)
+                            } else {
+                                Button("Load") { model.load(installed) }
+                                    .controlSize(.small)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func peerMachineInspector(_ peer: AppModel.PeerStatus) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(peer.name).font(.headline)
+                    Text(peer.hardware ?? peer.platform ?? "node")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !peer.reachable {
+                    Label(peer.error ?? "Not answering right now.",
+                          systemImage: "wifi.exclamationmark")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                } else {
+                    if let total = peer.totalGB, let used = peer.usedGB {
+                        inspectorFact("Memory", String(format: "%.1f of %.0f GB", used, total))
+                    }
+                    if let gpu = peer.gpuUtil {
+                        inspectorFact("GPU", "\(Int(gpu * 100))%"
+                            + (gpuCaption(peer).map { " — \($0)" } ?? ""))
+                    }
+                    if let llm = peer.llm {
+                        inspectorFact("Chat model", llm.model.map {
+                            "\($0) — \(llm.running ? (llm.healthy ? "serving" : "starting") : "stopped")"
+                        } ?? "none chosen")
+                        if let context = llm.contextLength {
+                            inspectorFact("Context", "\(context / 1024)K tokens")
+                        }
+                        if let engine = llm.engine {
+                            inspectorFact("Engine", engine)
+                        }
+                    }
+                    if let rate = peerRate(peer) {
+                        inspectorFact("Measured", String(format: "%.1f tok/s", rate))
+                    }
+                    let ready = peer.capabilities.filter(\.ready).count
+                    if !peer.capabilities.isEmpty {
+                        inspectorFact("Abilities",
+                                      "\(ready) of \(peer.capabilities.count) ready")
+                    }
+                    let queued = max(
+                        peer.queueDepth ?? 0,
+                        peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1)
+                    )
+                    inspectorFact("Queue", queued == 0 ? "clear" : "\(queued) job\(queued == 1 ? "" : "s")")
+                    let keys = model.swarmMembers.filter { $0.peerName == peer.name }.count
+                    if keys > 0 {
+                        inspectorFact("Keys", "\(keys) member\(keys == 1 ? "" : "s")")
+                    }
+                    if let latency = peer.latency {
+                        inspectorFact("Answers in", String(format: "%.0f ms", latency * 1000))
+                    }
+
+                    if let llm = peer.llm, llm.availableModels.count > 1 {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Models it offers")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(llm.availableModels, id: \.self) { candidate in
+                                HStack(spacing: 8) {
+                                    Text(candidate)
+                                        .font(.callout)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                    if GatewayAPI.modelNamesMatch(candidate, llm.model ?? "") {
+                                        Text(llm.running ? "serving" : "chosen")
+                                            .font(.caption)
+                                            .foregroundStyle(llm.running ? .teal : .secondary)
+                                    } else {
+                                        Button("Serve") {
+                                            Task {
+                                                await model.setPeerLLM(
+                                                    peer, running: true, model: candidate
+                                                )
+                                            }
+                                        }
+                                        .controlSize(.small)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func memberInspector(_ member: AppModel.SwarmMember) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(member.info.name).font(.headline)
+                        if member.info.name == model.localMachineName {
+                            Text("this Mac")
+                                .font(.caption2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("a key to \(member.peerName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let created = member.info.created {
+                    inspectorFact("Joined", String(created.prefix(16)))
+                }
+                if let seen = member.info.lastSeen {
+                    inspectorFact("Last seen", String(seen.prefix(16)))
+                }
+                if let usage = memberUsage(member) {
+                    inspectorFact("Usage", usage)
+                }
+                if let live = memberLiveActivity(member) {
+                    inspectorFact("Right now", live)
+                }
+                if member.info.name != model.localMachineName {
+                    Divider()
+                    Button("Revoke their key", role: .destructive) {
+                        Task { await revokeMember(member) }
+                    }
+                    .help("Immediate, and only them — everyone else keeps working")
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func inspectorFact(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 78, alignment: .leading)
+            Text(value)
+                .font(.callout)
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var ledgerURL: URL {
@@ -167,6 +372,19 @@ struct SwarmView: View {
 
     // MARK: - People
 
+    private var peoplePanel: some View {
+        SwarmPanel {
+            Text("People").font(.headline)
+            if model.swarmMembersLoaded, !model.swarmMembers.isEmpty {
+                Text("\(model.swarmMembers.count)")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        } content: {
+            peopleRows
+        }
+    }
+
     /// Everyone holding a key to a node in this swarm, this Mac included. The nodes
     /// are the source of truth; revocation is immediate and takes only that person.
     @ViewBuilder
@@ -176,7 +394,6 @@ struct SwarmView: View {
                  + "key, which stays on the owner's Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .listRowSeparator(.hidden)
         } else if !model.swarmMembersLoaded {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
@@ -184,7 +401,6 @@ struct SwarmView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .listRowSeparator(.hidden)
         } else if model.swarmMembers.isEmpty {
             Text(model.swarmPeers.contains(where: \.reachable)
                  ? "Just you so far — Invite… in the toolbar lets a friend in. (A node "
@@ -192,11 +408,9 @@ struct SwarmView: View {
                  : "Members are listed by your nodes, and none are reachable right now.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .listRowSeparator(.hidden)
         } else {
             ForEach(model.swarmMembers) { member in
                 memberRow(member)
-                    .listRowSeparator(.hidden)
             }
             if !model.swarmMembers.contains(where: {
                 $0.info.jobsTotal != nil || $0.info.llmRequests != nil
@@ -204,13 +418,13 @@ struct SwarmView: View {
                 Text("Per-person usage counts arrive with node update #132.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .listRowSeparator(.hidden)
             }
         }
     }
 
     private func memberRow(_ member: AppModel.SwarmMember) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        let rowID = "member/\(member.id)"
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: member.info.name == model.localMachineName
                   ? "laptopcomputer" : "person.crop.circle")
                 .foregroundStyle(.secondary)
@@ -252,7 +466,15 @@ struct SwarmView: View {
                       + "immediate, and only them")
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(
+            selectedItemID == rowID
+                ? Color.accentColor.opacity(0.12) : .clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { selectedItemID = rowID }
     }
 
     private func memberFacts(_ member: AppModel.SwarmMember) -> String {
@@ -320,13 +542,14 @@ struct SwarmView: View {
     private var machinesHeader: some View {
         HStack {
             Text("Machines")
+                .font(.headline)
             Spacer()
             Text(summaryLine)
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .textCase(nil)
         }
+        .padding(.horizontal, 2)
     }
 
     private var summaryLine: String {
@@ -355,7 +578,12 @@ struct SwarmView: View {
             alignment: .leading, spacing: 12
         ) {
             MachineCard(
-                title: "This Mac", subtitle: model.profile.chipName, reachable: true
+                title: "This Mac", subtitle: model.profile.chipName, reachable: true,
+                collapsed: collapsedMachines.contains(Self.localMachineID),
+                statusLine: localStatusLine,
+                selected: selectedItemID == Self.localMachineID,
+                onToggleCollapse: { toggleCollapse(Self.localMachineID) },
+                onSelect: { selectedItemID = Self.localMachineID }
             ) {
                 localMachineBody
             }
@@ -363,12 +591,60 @@ struct SwarmView: View {
                 MachineCard(
                     title: peer.name,
                     subtitle: peer.hardware ?? peer.platform ?? "node",
-                    reachable: peer.reachable || model.peerLLMBusy.contains(peer.name)
+                    reachable: peer.reachable || model.peerLLMBusy.contains(peer.name),
+                    collapsed: collapsedMachines.contains("machine/\(peer.name)"),
+                    statusLine: peerStatusLine(peer),
+                    selected: selectedItemID == "machine/\(peer.name)",
+                    onToggleCollapse: { toggleCollapse("machine/\(peer.name)") },
+                    onSelect: { selectedItemID = "machine/\(peer.name)" }
                 ) {
                     peerMachineBody(peer)
                 }
             }
         }
+    }
+
+    private func toggleCollapse(_ key: String) {
+        if collapsedMachines.contains(key) {
+            collapsedMachines.remove(key)
+        } else {
+            collapsedMachines.insert(key)
+        }
+    }
+
+    /// The one line a collapsed card keeps: enough to know the machine is fine
+    /// without expanding it.
+    private var localStatusLine: String {
+        let total = model.profile.totalMemory.gibibytes
+        let memory = String(
+            format: "%.1f of %.0f GB", model.metrics.memoryUsedFraction * total, total
+        )
+        if let loaded = model.loadedModel {
+            return "\(loaded.name) \(model.runtimeState.isRunning ? "serving" : model.runtimeState.label) · \(memory)"
+        }
+        return "nothing loaded · \(memory)"
+    }
+
+    private func peerStatusLine(_ peer: AppModel.PeerStatus) -> String {
+        if model.peerLLMBusy.contains(peer.name), !peer.reachable {
+            return "working — restarting the chat model"
+        }
+        guard peer.reachable else {
+            return peer.error ?? "not answering right now"
+        }
+        var parts: [String] = []
+        if let llm = peer.llm, let name = llm.model {
+            parts.append("\(name) \(llm.running ? (llm.healthy ? "serving" : "starting") : "stopped")")
+        }
+        if let total = peer.totalGB, let used = peer.usedGB {
+            parts.append(String(format: "%.1f of %.0f GB", used, total))
+        }
+        let queued = max(
+            peer.queueDepth ?? 0,
+            peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1)
+        )
+        parts.append(queued == 0 ? "queue clear" : "\(queued) queued")
+        return parts.joined(separator: " · ")
     }
 
     // MARK: Local card
@@ -415,7 +691,8 @@ struct SwarmView: View {
 
         CardFootnotes {
             modelSwitches(
-                title: "Offered by this Mac",
+                title: "Offers",
+                names: model.installedModels.map(\.name),
                 rows: model.installedModels.map { installed in
                     (id: GatewayAPI.modelID(local: installed.id),
                      label: "\(installed.name) — \(installed.quantization.rawValue)")
@@ -489,7 +766,10 @@ struct SwarmView: View {
                     abilitiesBlock(peer)
                 }
                 modelSwitches(
-                    title: "Offered by \(peer.name)",
+                    title: "Offers",
+                    names: peer.llm.map { llm in
+                        peerModelRows(peer, llm: llm).map(\.label)
+                    } ?? [],
                     rows: peer.llm.map { peerModelRows(peer, llm: $0) } ?? []
                 )
                 inFlightLine(forIDPrefix: "node/\(GatewayAPI.peerSlug(peer.name))/")
@@ -751,7 +1031,9 @@ struct SwarmView: View {
     }
 
     @ViewBuilder
-    private func modelSwitches(title: String, rows: [(id: String, label: String)]) -> some View {
+    private func modelSwitches(
+        title: String, names: [String], rows: [(id: String, label: String)]
+    ) -> some View {
         if rows.count > 1 {
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 3) {
@@ -774,11 +1056,20 @@ struct SwarmView: View {
                 }
                 .padding(.top, 2)
             } label: {
-                Text("\(title) · \(rows.count) models")
+                // The names themselves, not a count — "3 models" told nobody anything.
+                Text("\(title) \(Self.offerSummary(names))")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// "A · B · C", capped so a hoarder's library doesn't swallow the card.
+    static func offerSummary(_ names: [String]) -> String {
+        if names.count <= 4 { return names.joined(separator: " · ") }
+        return names.prefix(3).joined(separator: " · ") + " · +\(names.count - 3) more"
     }
 
     @ViewBuilder
@@ -826,6 +1117,29 @@ struct SwarmView: View {
 
     // MARK: - Activity
 
+    private var activityPanel: some View {
+        SwarmPanel {
+            Text("Activity").font(.headline)
+        } content: {
+            filterBar
+            let visible = filteredEntries
+            if visible.isEmpty {
+                Text(entries.isEmpty
+                     ? "Requests an engine sends through the model gateway appear "
+                       + "here — the Test button on any machine makes the first one."
+                     : "Nothing matches these filters.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(visible) { entry in
+                        activityRow(entry)
+                    }
+                }
+            }
+        }
+    }
+
     private var filterBar: some View {
         HStack(spacing: 8) {
             Picker("Machine", selection: $filterMachine) {
@@ -852,6 +1166,17 @@ struct SwarmView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 240)
             Spacer()
+            // In line with the rest of the log controls, where a log control belongs.
+            Button("Clear") {
+                if entries.contains(where: { $0.id == selectedItemID }) {
+                    selectedItemID = Self.localMachineID
+                }
+                entries = []
+                if let ledger = model.gatewayLedger {
+                    Task { await ledger.clear() }
+                }
+            }
+            .help("Empty the list — the log file on disk is left alone")
         }
         .controlSize(.small)
         .labelsHidden()
@@ -917,7 +1242,15 @@ struct SwarmView: View {
                 ProgressView().controlSize(.small).scaleEffect(0.6)
             }
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .background(
+            selectedItemID == entry.id
+                ? Color.accentColor.opacity(0.12) : .clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { selectedItemID = entry.id }
     }
 
     private func requestLabel(_ entry: GatewayLedgerEntry) -> String {
@@ -946,16 +1279,43 @@ struct SwarmView: View {
 
 // MARK: - Card anatomy
 
+/// The page's one panel chrome — machines, people and activity all wear it, so
+/// nothing on the page lies naked next to a card.
+private struct SwarmPanel<Header: View, Content: View>: View {
+    @ViewBuilder var header: Header
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                header
+                Spacer(minLength: 0)
+            }
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 /// One machine. Groups separate by space, not boxes: identity, resources, the model
-/// (the lead), footnotes.
+/// (the lead), footnotes. Collapses to its header plus one status line — with several
+/// nodes, the grid stays a glanceable list. Clicking the header puts the machine in
+/// the detail panel.
 private struct MachineCard<Content: View>: View {
     var title: String
     var subtitle: String
     var reachable: Bool
+    var collapsed: Bool
+    var statusLine: String?
+    var selected: Bool
+    var onToggleCollapse: () -> Void
+    var onSelect: () -> Void
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: collapsed ? 6 : 12) {
             HStack(spacing: 7) {
                 Circle()
                     .fill(reachable ? Color.green : Color.orange)
@@ -967,12 +1327,41 @@ private struct MachineCard<Content: View>: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                Button(action: onToggleCollapse) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(collapsed ? "Expand \(title)" : "Collapse \(title) to one line")
             }
-            content
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
+
+            if collapsed {
+                if let statusLine {
+                    Text(statusLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.leading, 15)
+                }
+            } else {
+                content
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(
+                    selected ? Color.accentColor.opacity(0.55) : .clear, lineWidth: 1
+                )
+        )
     }
 }
 

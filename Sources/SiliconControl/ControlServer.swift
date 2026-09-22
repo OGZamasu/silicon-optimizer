@@ -1388,7 +1388,11 @@ public actor ControlServer {
             case ("POST", "/plan"):
                 return try .encode(await host.plan(try request.decode(ControlAPI.PlanRequest.self)))
             case ("POST", "/install"):
-                let message = try await host.install(request.decode(ControlAPI.LoadRequest.self))
+                let install = try request.decode(ControlAPI.LoadRequest.self)
+                guard install.directory == nil || Self.mayNamePaths(caller) else {
+                    return .error(403, "Only this Mac can choose a model download directory. Omit directory to use the configured model library.")
+                }
+                let message = try await host.install(install)
                 return .json(["status": message])
             case ("POST", "/load"):
                 // The load is detached from this request: a phone that locks its screen
@@ -2178,10 +2182,11 @@ public actor ControlServer {
 
     /// Whether this caller may name a path on the Mac at all.
     ///
-    /// Only this Mac's loopback control token may name a path. A paired device and a
-    /// swarm peer must use an uploadID or mediaID: the swarm secret is a remote peer
-    /// credential and does not prove access to this Mac's filesystem. Local scripts and
-    /// MCP tools use the control token and may continue passing paths.
+    /// Only the per-launch local control credential grants filesystem authority. A swarm
+    /// peer has authority over its own machine, not this Mac: accepting its paths would
+    /// let it send this Mac's private files to a rendering node as image inputs. Peers and
+    /// paired devices use uploads or registered media IDs instead. Local MCP clients keep
+    /// using the control token from the private handshake file.
     private static func mayNamePaths(_ caller: Caller) -> Bool {
         caller == .control
     }

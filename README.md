@@ -377,13 +377,20 @@ so an app can say "available until" rather than discover the 404 a week later.
 
 `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
 `POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on
-this side before the render sees the request. To supply an existing image, a **device or
-swarm peer may only use those IDs**. An `imagePath` or `initImagePath` in a request
-carrying either credential is refused,
-because a peer that could name one file could name any file — and the planning routes are
-gated exactly like the renders they plan, since "no image at that path" and a plan are a
-yes/no oracle for every path on the Mac. Only this Mac's loopback control token may pass
-paths, as the local scripts and MCP tools written against these routes do.
+this side before the render sees the request. **Paired devices and swarm peers use these
+IDs**: `imagePath` and `initImagePath` require this Mac's per-launch control token, even
+when a swarm client connects over loopback, and a request carrying both an ID and a path
+is refused. The planning routes apply the same rule as rendering. A shared swarm
+credential grants rendering access, not access to arbitrary files on the Mac.
+
+A swarm client can send its input to `POST /uploads`, then pass the returned `uploadID`
+or `mediaID` to the render route. Swarm uploads share a separate `swarm` bucket and cannot
+resolve a paired phone's private uploads. Local scripts and MCP clients can still pass
+paths using the control token from the private handshake file.
+
+The same rule applies to `POST /install`'s optional `directory`: only the local control
+token may choose a destination. Devices and swarm clients omit it to use the library
+configured on the Mac.
 
 **Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
 knew about each peer and used to keep to itself: platform, GPU or chip, memory used and
@@ -993,7 +1000,6 @@ nothing at all, so the previous calibration keeps working.
 > the run reports how *both* lanes did against those labels beside the agreement rate. High
 > agreement with two poor label scores is the shape to watch for. Treat the floors as a
 > measurement of one model against another on forty cases, which is what they are.
->>>>>>> be36c32 (Calibrate the local decision lane, and make `auto` a cascade)
 
 ### Model routing
 
@@ -1665,6 +1671,23 @@ swift test                      # run the suite
 Scripts/build-app.sh            # assemble Silicon Optimizer.app into build/
 Scripts/build-app.sh --install  # ...and replace the copy in ~/Applications
 ```
+
+Local builds are signed ad hoc, and macOS files an ad-hoc app under a hash of that exact build.
+The Keychain does too, so after every rebuild the app has to ask for your login password again
+before it can read the saved Hugging Face token or TypeSafe key, and "Always Allow" only lasts
+until the next build. Sign with an Apple-issued identity and the app is filed under your Team ID
+instead: the first build signed that way asks once more, and later builds don't ask at all. A
+free Apple Development certificate is enough (Xcode → Settings → Accounts → your Apple ID →
+Manage Certificates → + → Apple Development):
+
+```bash
+security find-identity -v -p codesigning   # copy the "Apple Development: …" name
+Scripts/build-app.sh --release --dev-sign "Apple Development: Your Name (TEAMID)" --install
+```
+
+`--dev-sign` changes the signature and nothing else. `SILICON_DEV_SIGN_IDENTITY` does the same
+for scripts that call `build-app.sh`, and `--sign` (distribution) ignores it. A self-signed
+certificate doesn't help: it has no Team ID either, so the Keychain still sees a new app.
 
 The tests pin the planner to published benchmark numbers, so a regression in the memory
 model fails the build rather than silently shipping bad advice.

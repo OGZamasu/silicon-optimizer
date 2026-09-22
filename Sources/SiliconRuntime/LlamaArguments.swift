@@ -88,6 +88,10 @@ public struct LlamaArguments: Sendable {
             arguments += ["--threads", String(configuration.threads)]
         }
 
+        if let parallelSequences = configuration.parallelSequences {
+            arguments += ["--parallel", String(parallelSequences)]
+        }
+
         if let projector = model.projectorFile {
             arguments += ["--mmproj", projector.path]
         }
@@ -165,6 +169,10 @@ public struct LlamaArguments: Sendable {
     /// sees a clear message instead of a crashed subprocess.
     public func validate() -> [String] {
         var problems: [String] = []
+
+        if let parallelSequences = configuration.parallelSequences, parallelSequences <= 0 {
+            problems.append("Parallel sequence count must be at least 1.")
+        }
 
         if let streaming = configuration.expertStreaming {
             guard let moe = model.shape?.moe else {

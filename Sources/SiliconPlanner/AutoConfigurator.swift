@@ -42,6 +42,27 @@ public struct AutoConfigurator: Sendable {
         SpeedEstimator(profile: profile, calibration: calibrations[entry.id] ?? 1.0)
     }
 
+    /// Conservative defaults for long-context Prism ternary loads on smaller Macs. A 36 GiB
+    /// Bonsai run reached swap with F16 KV and the runtime's default slot count; Q8 KV, one
+    /// sequence and smaller batches completed the same workload without additional swap.
+    /// Apply only while generating defaults, never to an explicit configuration or preset.
+    public func adjustedRuntimeDefaults(
+        _ configuration: LoadConfiguration, quantization: Quantization
+    ) -> LoadConfiguration {
+        guard quantization.needsPrismRuntime,
+              configuration.contextLength >= 131_072,
+              profile.totalMemory <= .gib(36) else { return configuration }
+
+        var adjusted = configuration
+        if adjusted.kvCachePrecision == .f16 {
+            adjusted.kvCachePrecision = .q8_0
+        }
+        adjusted.batchSize = min(adjusted.batchSize, 512)
+        adjusted.microBatchSize = min(adjusted.microBatchSize, 128)
+        adjusted.parallelSequences = 1
+        return adjusted
+    }
+
     /// Ranks every catalog entry for this machine, best first.
     public func rank(
         catalog: [ModelEntry] = ModelCatalog.all,
@@ -101,6 +122,9 @@ public struct AutoConfigurator: Sendable {
                     flashAttention: true,
                     gpuLayerFraction: 1.0,
                     threads: profile.performanceCores
+                )
+                configuration = adjustedRuntimeDefaults(
+                    configuration, quantization: quantization
                 )
                 let plan = planner.plan(
                     shape: shape, quantization: quantization,
@@ -267,5 +291,4 @@ public struct AutoConfigurator: Sendable {
         tokens >= 1024 ? "\(tokens / 1024)K" : "\(tokens)"
     }
 }
-
 
