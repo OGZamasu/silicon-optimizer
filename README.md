@@ -377,12 +377,13 @@ so an app can say "available until" rather than discover the 404 a week later.
 
 `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
 `POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on
-this side before the render sees the request. A **device may only use those**: an
-`imagePath` in a request carrying a device token is refused, because a device that could
-name one file could name any file — and the planning routes are gated exactly like the
-renders they plan, since "no image at that path" and a plan are a yes/no oracle for every
-path on the Mac. This Mac's own token and the swarm secret still pass paths, which is what
-every script and MCP tool written against these routes does.
+this side before the render sees the request. To supply an existing image, a **device or
+swarm peer may only use those IDs**. An `imagePath` or `initImagePath` in a request
+carrying either credential is refused,
+because a peer that could name one file could name any file — and the planning routes are
+gated exactly like the renders they plan, since "no image at that path" and a plan are a
+yes/no oracle for every path on the Mac. Only this Mac's loopback control token may pass
+paths, as the local scripts and MCP tools written against these routes do.
 
 **Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
 knew about each peer and used to keep to itself: platform, GPU or chip, memory used and

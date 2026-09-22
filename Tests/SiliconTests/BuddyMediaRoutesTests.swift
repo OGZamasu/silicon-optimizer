@@ -849,6 +849,7 @@ struct BuddyMediaFixture {
     static func withServer(
         writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
+        swarmToken: String? = nil,
         _ body: (BuddyMediaFixture) async throws -> Void
     ) async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -887,7 +888,7 @@ struct BuddyMediaFixture {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
-        try await server.start()
+        try await server.start(exposeToTailnet: swarmToken != nil, swarmToken: swarmToken)
         defer { Task { await server.stop() } }
         let deadline = ContinuousClock.now + .seconds(5)
         while !FileManager.default.fileExists(atPath: handshakeURL.path) {
@@ -1582,7 +1583,7 @@ struct BuddyMediaEdgeTests {
 
     // MARK: - B3 + S5: a device may never name a path, on any route that takes one
 
-    /// The mutation this is proof against: dropping any one of these four routes out of the
+    /// The mutation this is proof against: dropping any one of these five routes out of the
     /// resolver. `/image/plan` really was dropped, and a planner that answers "no image at
     /// that path" differently from a plan is a yes/no oracle for every path on the Mac.
     @Test func noRouteThatTakesASubjectLetsADeviceNameAPath() async throws {
@@ -1614,6 +1615,64 @@ struct BuddyMediaEdgeTests {
                 body: #"{"prompt":"a kettle","uploadID":"\#(upload.uploadID)"}"#
             ) == 200)
             #expect(await fixture.host.lastImagePath != nil)
+        }
+    }
+
+    /// The shared swarm token is a peer credential, not the Mac's local control token.
+    /// A peer can upload media and refer to its id, but cannot make the server open an
+    /// arbitrary path on this Mac before a render or planner starts.
+    @Test func noRouteThatTakesASubjectLetsASwarmPeerNameAPath() async throws {
+        let swarmToken = "test-shared-swarm-secret"
+        try await BuddyMediaFixture.withServer(swarmToken: swarmToken) { fixture in
+            let body =
+                #"{"prompt":"a kettle","imagePath":"/etc/passwd","initImagePath":"/etc/passwd"}"#
+
+            for client in [fixture.local, fixture.phone] {
+                for path in ["/mesh/plan", "/mesh/generate", "/image/plan", "/image/generate",
+                             "/video/generate"] {
+                    let status = try await client.status(
+                        "POST", path, token: swarmToken, body: body
+                    )
+                    #expect(status == 400, "\(path) accepted a path from a swarm peer")
+                }
+            }
+            #expect(await fixture.host.lastMeshImagePath == nil)
+            #expect(await fixture.host.lastImagePath == nil)
+
+            let (_, answer) = try await fixture.phone.call(
+                "POST", "/uploads", token: swarmToken,
+                data: BuddyMediaRoutesTests.jpegBytes(count: 900), contentType: "image/jpeg"
+            )
+            let upload = try JSONDecoder().decode(ControlAPI.UploadResponse.self, from: answer)
+            #expect(try await fixture.phone.status(
+                "POST", "/image/plan", token: swarmToken,
+                body: #"{"prompt":"a kettle","uploadID":"\#(upload.uploadID)"}"#
+            ) == 200)
+            let acceptedPath = try #require(await fixture.host.lastImagePath)
+
+            // An id must not turn an otherwise forbidden raw path into an accepted
+            // request. Neither kind of id nor either listener changes that boundary.
+            for (field, value) in [("uploadID", upload.uploadID),
+                                   ("mediaID", upload.mediaID)] {
+                let mixed =
+                    #"{"prompt":"a kettle","\#(field)":"\#(value)","imagePath":"/etc/passwd","initImagePath":"/etc/passwd"}"#
+                for client in [fixture.local, fixture.phone] {
+                    for path in ["/mesh/plan", "/mesh/generate", "/image/plan",
+                                 "/image/generate", "/video/generate"] {
+                        #expect(try await client.status(
+                            "POST", path, token: swarmToken, body: mixed
+                        ) == 400, "\(path) accepted a path mixed with \(field)")
+                    }
+                }
+            }
+            #expect(await fixture.host.lastMeshImagePath == nil)
+            #expect(await fixture.host.lastImagePath == acceptedPath)
+
+            // The local control token still supports the established path-based tools.
+            #expect(try await fixture.local.status(
+                "POST", "/mesh/generate", token: fixture.local.token,
+                body: #"{"imagePath":"/Users/you/Pictures/kettle.png"}"#
+            ) == 200)
         }
     }
 
