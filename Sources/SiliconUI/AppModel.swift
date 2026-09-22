@@ -205,6 +205,67 @@ public final class AppModel {
 
     public var settings = Settings()
 
+    // MARK: - Credentials
+
+    /// Whether the credential comes from the user's Keychain, as in the running app, or arrived
+    /// with injected settings, as in tests and previews, which must never reach for it.
+    private let readsCredentialsFromKeychain: Bool
+
+    /// The Keychain read in flight, so work that needs the token can wait for it rather than
+    /// run without one.
+    private var credentialLoad: Task<Void, Never>?
+
+    /// Fetches the Hugging Face token off the main thread.
+    ///
+    /// `Settings.load()` leaves the credential behind on purpose. A freshly built app carries a
+    /// new code identity, so its first Keychain read puts up a consent dialog, and reading on
+    /// the main thread at launch parked the whole app behind it: no window, no control server,
+    /// no handshake file, so the bundled MCP reported the app not running until the dialog was
+    /// answered. The read now happens on a background thread while the app comes up, and the
+    /// token lands in `settings` when the Keychain answers.
+    func loadHuggingFaceToken() {
+        guard readsCredentialsFromKeychain, !settings.isHuggingFaceTokenResolved,
+              credentialLoad == nil
+        else { return }
+        let legacyToken = settings.huggingFaceToken
+        credentialLoad = Task { [weak self] in
+            let resolution = await withCheckedContinuation { continuation in
+                // A GCD thread rather than the cooperative pool: this call can sit behind the
+                // consent dialog for as long as the user leaves it, and Swift's pool is not
+                // sized to lose a thread that way.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(
+                        returning: Settings.resolveHuggingFaceToken(migrating: legacyToken)
+                    )
+                }
+            }
+            self?.adoptHuggingFaceToken(resolution)
+        }
+    }
+
+    private func adoptHuggingFaceToken(_ resolution: Settings.HuggingFaceTokenResolution) {
+        // A token typed into Settings while the Keychain was still deciding wins over the
+        // stored one.
+        guard case .token(let token) = resolution, !settings.isHuggingFaceTokenResolved
+        else { return }
+        let hadLegacyCopy = !settings.huggingFaceToken.isEmpty
+        settings.huggingFaceToken = token
+        // The document's plaintext copy is redundant now that the Keychain holds the token;
+        // saving redacts it.
+        if hadLegacyCopy { settings.save() }
+    }
+
+    /// The Hugging Face token once the Keychain has answered, or nil when there is none.
+    ///
+    /// Fetches from Hugging Face take the token from here rather than from `settings`, so a
+    /// download started in the moments before the Keychain answers waits for the token instead
+    /// of running anonymously and failing on a gated repository.
+    public func huggingFaceToken() async -> String? {
+        await credentialLoad?.value
+        let token = settings.huggingFaceToken
+        return token.isEmpty ? nil : token
+    }
+
     // MARK: - UI state
 
     /// The tab on screen, restored from last launch so reopening the window lands
@@ -231,9 +292,20 @@ public final class AppModel {
         case video = "Video"
         case swarm = "Swarm"
         case cloud = "Cloud"
+        case decisions = "Decisions"
         case settings = "Settings"
 
         public var id: String { rawValue }
+
+        /// The order the menu bar offers these in: chat first, because that is what the
+        /// menu is usually opened for, then the rest as the sidebar lists them. Settings is
+        /// left out — it sits below the divider with Quit.
+        ///
+        /// Built from `allCases` rather than written out, because the hand-written version
+        /// of this list was already missing Cloud by the time anyone looked.
+        public static var menuOrder: [Tab] {
+            [.chat] + allCases.filter { $0 != .chat && $0 != .settings }
+        }
 
         public var systemImage: String {
             switch self {
@@ -246,6 +318,7 @@ public final class AppModel {
             case .video: "film"
             case .swarm: "point.3.connected.trianglepath.dotted"
             case .cloud: "cloud"
+            case .decisions: "arrow.triangle.branch"
             case .settings: "gearshape"
             }
         }
@@ -981,8 +1054,9 @@ public final class AppModel {
 
     // MARK: - Swarm
 
-    /// Whether the control server is currently reachable beyond loopback.
-    public internal(set) var controlIsOnLAN = false
+    // Whether this Mac is reachable by its peers, and where, lives in `SwarmExposure`
+    // rather than here: it is more than a flag now — an address, a port, and the reason
+    // there is neither.
 
     /// One peer's last-polled state, for the dashboard's read-only swarm view.
     public struct PeerCapability: Identifiable, Sendable {
@@ -1098,16 +1172,21 @@ public final class AppModel {
     /// Applies swarm settings live: tears the control server down and brings it back with
     /// the new bind — the handshake file is rewritten, so local MCP clients reconnect on
     /// their next call.
+    ///
+    /// Restarts queue behind one another rather than racing. Fired off independently, a
+    /// toggle flipped twice in a row could run the first call's start after the second
+    /// call's stop, leaving a listener — loopback, and the tailnet one — that nothing held.
     public func applySwarmSettings() {
-        Task {
-            await controlServer?.stop()
-            startControlServer()
-        }
+        restartControlServer()
     }
 
     /// Polls every registry peer's `/v1/node` — the read-only swarm. Parsed leniently:
     /// a peer that renames a field degrades to "reachable, details unknown", not a crash.
     public func refreshSwarm() async {
+        // Before the peer guard, not after: exposure rides the same tailnet these peers do,
+        // and a Mac with no peers configured yet is exactly the one still being set up —
+        // the one whose listener most needs another try after tailscale comes up.
+        await SwarmExposure.shared.retry(server: controlServer)
         guard let config = SwarmConfig.load(), !config.peers.isEmpty else {
             swarmPeers = []
             return
@@ -2498,6 +2577,15 @@ public final class AppModel {
     private var sampler = MetricsSampler()
     private var samplingTask: Task<Void, Never>?
     var controlServer: ControlServer?
+    /// The restart in flight, if any. Each restart waits for the one before it, so a burst
+    /// of them runs stop-then-start strictly in order and exactly one server is live after
+    /// the last.
+    private var swarmRestart: Task<Void, Never>?
+    /// Builds the control server. Tests swap this for one that publishes to a scratch
+    /// handshake file and a private device registry, so restarting never touches the user's.
+    @ObservationIgnored var makeControlServer: @MainActor (AppModel) -> ControlServer = {
+        ControlServer(host: $0)
+    }
 
     // MARK: - Init
 
@@ -2507,8 +2595,10 @@ public final class AppModel {
         settings: Settings? = nil
     ) {
         self.profile = HardwareProbe.detect()
-        // Tests and previews inject settings instead of reading the user's Keychain.
-        // The ordinary application still loads/migrates its saved credentials.
+        // Tests and previews inject settings instead of reading the user's Keychain. The
+        // ordinary application loads the document here and fetches the credential once it is
+        // running: see `loadHuggingFaceToken()`.
+        self.readsCredentialsFromKeychain = settings == nil
         self.settings = settings ?? Settings.load()
         self.videoRuntime = videoRuntime
         self.videoBatchQueue = videoQueue ?? VideoBatchQueue(
@@ -2529,6 +2619,7 @@ public final class AppModel {
     public func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        loadHuggingFaceToken()
         if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
         reapAbandonedServers()
         selector = RuntimeSelector.discover()
@@ -2536,9 +2627,11 @@ public final class AppModel {
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
         registerServerTermination()
+        registerHandshakeCleanup()
+        configureJev()
         prepareIdleUnloadNotices()
         beginSampling()
-        startControlServer()
+        restartControlServer()
         startGatewayServer()
         startVideoQueueWorker()
         measureStorageIfNeeded()
@@ -2610,28 +2703,52 @@ public final class AppModel {
         }
     }
 
+    /// Stops the control server, if one is up, and starts a fresh one — after any restart
+    /// already queued has finished. Launch and `applySwarmSettings()` both come through
+    /// here, so a toggle flipped straight after launch waits for the first start too.
+    private func restartControlServer() {
+        let previous = swarmRestart
+        swarmRestart = Task {
+            await previous?.value
+            await controlServer?.stop()
+            await startControlServer()
+        }
+    }
+
+    /// Returns once every restart queued so far has run. For tests.
+    func waitForControlServerRestarts() async {
+        await swarmRestart?.value
+    }
+
     /// Publishes the local control API that the MCP bridge talks to, so Claude and ChatGPT can
     /// drive the model this app has loaded rather than starting a second copy of it.
-    private func startControlServer() {
-        let server = ControlServer(host: self)
+    ///
+    /// Returns once the server is listening, or has failed to, and not before: a restart
+    /// queued behind this one must stop a server that has actually started, or its listener
+    /// outlives the app's reference to it.
+    private func startControlServer() async {
+        let server = makeControlServer(self)
         controlServer = server
-        Task {
-            do {
-                // The hard swarm rule lives in the server: LAN exposure without a token
-                // silently stays loopback, so a half-configured setup fails safe.
-                let swarm = SwarmConfig.load()
-                try await server.start(
-                    exposeOnLAN: settings.exposeControlOnLAN,
-                    swarmToken: swarm?.effectiveToken
-                )
-                self.controlIsOnLAN = await server.isExposedOnLAN
-            } catch {
-                // Not fatal: the app is fully usable without external control.
-                self.libraryError = "Control API unavailable: \(error.localizedDescription)"
-            }
+        do {
+            // The hard swarm rule lives in the server: exposure without a token
+            // silently stays loopback, so a half-configured setup fails safe. So does
+            // exposure without a tailnet — there is no interface but the tailscale one.
+            let swarm = SwarmConfig.load()
+            try await server.start(
+                exposeToTailnet: settings.exposeControlOnLAN,
+                swarmToken: swarm?.effectiveToken
+            )
+            await SwarmExposure.shared.refresh(server: server)
+        } catch {
+            // Not fatal: the app is fully usable without external control.
+            libraryError = "Control API unavailable: \(error.localizedDescription)"
         }
-        // The handshake file advertises a live app; make sure a quit does not leave it behind
-        // pointing at a dead port.
+    }
+
+    /// The handshake file advertises a live app; make sure a quit does not leave it behind
+    /// pointing at a dead port. Registered once at launch: it used to be registered with
+    /// every start, so each swarm toggle added another observer.
+    private func registerHandshakeCleanup() {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in
@@ -3309,7 +3426,7 @@ public final class AppModel {
             guard !Task.isCancelled, let self else { return }
             defer { isSearchingRemote = false }
             do {
-                let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
+                let token = await huggingFaceToken()
                 let results = try await HuggingFaceClient(token: token).search(query: trimmed)
                 guard !Task.isCancelled else { return }
                 remoteResults = results
@@ -3411,7 +3528,7 @@ public final class AppModel {
 
         download.task = Task { [weak self] in
             guard let self else { return }
-            let token = self.settings.huggingFaceToken.isEmpty ? nil : self.settings.huggingFaceToken
+            let token = await self.huggingFaceToken()
             let client = HuggingFaceClient(token: token)
             let resolver = ModelResolver(client: client)
             let downloader = ModelDownloader(token: token)
@@ -3558,9 +3675,17 @@ public final class AppModel {
             configuration ?? defaultConfiguration(for: model), for: model
         )
 
+        // Held where the `catch` can see it. `let runtime` below is scoped to the `do`, so
+        // the name resolved to `self.runtime` down there — and when a second load has
+        // replaced this one, that is the *winning* load's runtime: the catch read the
+        // winner's log and then set `self.runtime = nil`, leaving a live llama-server with
+        // nobody holding it and no way to unload it.
+        var started: (any InferenceRuntime)?
+
         do {
             let selection = try selector.select(model: model, configuration: resolved)
             let runtime = selector.makeRuntime(for: selection)
+            started = runtime
             self.runtime = runtime
 
             // Bridge the actor's state changes onto the main actor for SwiftUI.
@@ -3589,15 +3714,22 @@ public final class AppModel {
             // model's name and true context takes effect from the next message.
             refreshHarnessProviderIfNeeded()
         } catch {
-            runtimeState = .failed(message: error.localizedDescription)
-            alert = AlertContent(
-                title: "Could not load \(model.name)",
-                message: error.localizedDescription
-            )
-            if let llama = runtime as? LlamaCppRuntime {
-                runtimeLog = await llama.serverLog()
+            // A load that was replaced, or stopped on purpose, is not a failure to show: the
+            // load that displaced it owns the screen, and an unload part-way through is the
+            // owner getting what they asked for.
+            if Self.showsFailure(for: error) {
+                runtimeState = .failed(message: error.localizedDescription)
+                alert = AlertContent(
+                    title: "Could not load \(model.name)",
+                    message: error.localizedDescription
+                )
+                if let llama = started as? LlamaCppRuntime {
+                    runtimeLog = await llama.serverLog()
+                }
             }
-            runtime = nil
+            // Only if nothing has taken the slot since: clearing it unconditionally threw
+            // away the handle to a server that is running perfectly well.
+            if started === self.runtime { self.runtime = nil }
         }
     }
 
@@ -3614,7 +3746,19 @@ public final class AppModel {
     }
 
     /// The settings the app would choose for this model on this machine.
-    public func defaultConfiguration(for model: InstalledModel) -> LoadConfiguration {
+    public func defaultConfiguration(
+        for model: InstalledModel, contextLength: Int? = nil
+    ) -> LoadConfiguration {
+        var configuration = recommendedConfiguration(for: model)
+        if let contextLength { configuration.contextLength = contextLength }
+        // Resolve memory-sensitive defaults against the context that will actually be loaded,
+        // not a smaller window the recommendation search may have chosen first.
+        return autoConfigurator().adjustedRuntimeDefaults(
+            configuration, quantization: model.quantization
+        )
+    }
+
+    private func recommendedConfiguration(for model: InstalledModel) -> LoadConfiguration {
         guard let shape = model.shape else {
             return LoadConfiguration(threads: profile.performanceCores)
         }

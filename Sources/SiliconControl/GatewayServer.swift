@@ -18,6 +18,44 @@ public struct GatewayReadyBackend: Sendable {
     }
 }
 
+/// What routing decided: the real model that will answer, and one line saying why.
+///
+/// The reason is for the log and the stream's own comment line, never for the answer: a
+/// client asked for a chat completion, not for an explanation of the gateway's reasoning.
+public struct GatewayRoutingDecision: Sendable, Equatable {
+    public var modelID: String
+    public var reason: String
+
+    public init(modelID: String, reason: String) {
+        self.modelID = modelID
+        self.reason = reason
+    }
+}
+
+/// What pruning decided: the request as it should now go out, and what was taken out of it.
+///
+/// The rewritten body rather than a list of edits, because the decision is made up in the app
+/// — where the Jev settings, the model list and the context windows are — and this target
+/// deliberately knows nothing about any of them. The gateway's job is to send what comes back
+/// and to say, on the wire and in the ledger, that it did.
+public struct GatewayPruning: Sendable, Equatable {
+    /// The chat-completions body to forward, with each dropped tool result replaced by a
+    /// one-line stub.
+    public var body: Data
+    /// The step numbers that were dropped, oldest first.
+    public var droppedSteps: [Int]
+    /// One line, for the log. Never for the answer.
+    public var reason: String
+
+    public init(body: Data, droppedSteps: [Int], reason: String) {
+        self.body = body
+        self.droppedSteps = droppedSteps
+        self.reason = reason
+    }
+
+    public var count: Int { droppedSteps.count }
+}
+
 /// The app-side half of the gateway: knows every model, and can make any one of them
 /// answer — loading it locally or starting it on the peer that owns it.
 public protocol GatewayHost: AnyObject, Sendable {
@@ -35,6 +73,38 @@ public protocol GatewayHost: AnyObject, Sendable {
     func gatewayReveal(path: String) async
     /// Jumps the app to the 3D tab, where the newest mesh is already showing.
     func gatewayOpenMeshViewer() async
+    /// Resolves a virtual model id — today only `silicon/auto` — to the real gateway model
+    /// that should answer this particular request, reading the request body for the message
+    /// being routed. Returns nil for every ordinary id, which is what leaves the normal path
+    /// exactly as it was.
+    ///
+    /// This is a question for the app, not for the gateway: the models, the swarm, the keys
+    /// and the Jev settings all live up there, and this target deliberately depends on
+    /// nothing but Foundation and Network.
+    func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision?
+
+    /// Offers one chat-completions request for pruning before it is forwarded, now that the
+    /// model that will answer it is known. Returns nil for every request nothing should be
+    /// taken out of, which is almost all of them — the feature is off by default, cloud
+    /// targets are never touched, and a prompt that is not crowding its window is left alone.
+    ///
+    /// A question for the app for the same reason routing is: the Jev settings, the model
+    /// list and each model's context window all live up there, and this target depends on
+    /// nothing but Foundation and Network.
+    func gatewayPrune(modelID: String, body: Data) async -> GatewayPruning?
+}
+
+extension GatewayHost {
+    /// A host that does not route — every test double, and the app itself before this
+    /// feature — answers the same way for every id: this is not a virtual model.
+    public func gatewayRoute(modelID: String, body: Data) async -> GatewayRoutingDecision? {
+        nil
+    }
+
+    /// A host that does not prune leaves every request exactly as it arrived.
+    public func gatewayPrune(modelID: String, body: Data) async -> GatewayPruning? {
+        nil
+    }
 }
 
 /// The model gateway: one loopback OpenAI-compatible server over every model this app and
@@ -261,27 +331,46 @@ public actor GatewayServer {
     // MARK: - Chat completions (DeepSeek Harness dialect)
 
     private func serveChat(_ request: HTTPRequest, on connection: NWConnection) async {
-        guard let modelID = GatewayAPI.requestedModel(inBody: request.body) else {
+        guard let requestedID = GatewayAPI.requestedModel(inBody: request.body) else {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
         let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
-        let isNode: Bool = {
-            if case .node = GatewayAPI.parseModelID(modelID) { return true }
-            return false
-        }()
         let (preview, promptChars) = GatewayAPI.promptPreview(inBody: request.body)
-        let entry = await ledger?.begin(
-            endpoint: "chat", modelID: modelID, stream: wantsStream,
-            promptChars: promptChars, promptPreview: preview
-        )
 
         if wantsStream {
+            // The head goes out before anything else, including routing. A streaming client
+            // measures time to first byte, and asking another service which model should
+            // answer is not a reason to make it wait for the status line.
             let stream = SSEConnection(connection: connection)
-            guard await stream.sendHead() else {
-                await finishLedger(entry, ok: false, detail: "client gone before headers")
-                return
+            guard await stream.sendHead() else { return }
+
+            let routing = await routeIfVirtual(requestedID, body: request.body)
+            let modelID = routing?.modelID ?? requestedID
+            if let routing {
+                // A comment: invisible to both harnesses' parsers, legible to anyone
+                // watching the wire wonder which machine just answered. The id only — the
+                // reason may quote a service's error text, which does not belong on a
+                // line whose framing depends on there being no newline in it.
+                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(modelID)"))
+            }
+            // A streamed reply's head is already out, so the count goes in a comment for the
+            // same reason the routed model does. The target is checked here, before the hop
+            // to the app: a request bound for a provider is never prunable, and answering
+            // that in pure code keeps it off the main actor.
+            let pruning = await pruneIfPrunable(modelID, body: request.body)
+            if let pruning {
+                await stream.send(
+                    GatewayAPI.sseComment("silicon-pruned: \(pruning.count)")
+                )
+            }
+            let entry = await ledger?.begin(
+                endpoint: "chat", modelID: modelID, stream: true,
+                promptChars: promptChars, promptPreview: preview
+            )
+            if let entry, let pruning {
+                await ledger?.notePruned(entry, steps: pruning.droppedSteps)
             }
             let backend: GatewayReadyBackend
             do {
@@ -295,17 +384,35 @@ public actor GatewayServer {
                 await finishLedger(entry, ok: false, detail: error.localizedDescription)
                 return
             }
-            var body = GatewayAPI.rewritingModel(inBody: request.body, to: backend.backendModel)
-            body = GatewayAPI.normalizingThinking(inBody: body, forNode: isNode)
-            await pipeChatStream(body: body, backend: backend, to: stream, ledgerEntry: entry)
+            var body = GatewayAPI.rewritingModel(
+                inBody: pruning?.body ?? request.body, to: backend.backendModel
+            )
+            body = GatewayAPI.normalizingThinking(
+                inBody: body, forNode: Self.isNodeModel(modelID)
+            )
+            await pipeChatStream(
+                body: body, backend: backend, to: stream, ledgerEntry: entry,
+                routedTo: routing.map { _ in modelID }
+            )
         } else {
+            let routing = await routeIfVirtual(requestedID, body: request.body)
+            let modelID = routing?.modelID ?? requestedID
+            let isNode = Self.isNodeModel(modelID)
+            let pruning = await pruneIfPrunable(modelID, body: request.body)
+            let entry = await ledger?.begin(
+                endpoint: "chat", modelID: modelID, stream: false,
+                promptChars: promptChars, promptPreview: preview
+            )
+            if let entry, let pruning {
+                await ledger?.notePruned(entry, steps: pruning.droppedSteps)
+            }
             do {
                 let backend = try await ensureRespectingWait(
                     modelID: modelID, budget: waitBudget, onStage: { _ in }
                 )
                 if let entry { await ledger?.noteEnsured(entry, backendModel: backend.backendModel) }
                 var body = GatewayAPI.rewritingModel(
-                    inBody: request.body, to: backend.backendModel
+                    inBody: pruning?.body ?? request.body, to: backend.backendModel
                 )
                 body = GatewayAPI.normalizingThinking(inBody: body, forNode: isNode)
                 let (status, data) = try await BackendClient.send(
@@ -314,10 +421,20 @@ public actor GatewayServer {
                 )
                 let warning = status == 200
                     ? GatewayAPI.emptyContentWarning(inResponseBody: data) : nil
-                let out = warning.map {
+                var out = warning.map {
                     GatewayAPI.attachingWarning(toResponseBody: data, warning: $0)
                 } ?? data
-                try? await HTTPResponse(status: status, body: out).write(to: connection)
+                // The client asked `silicon/auto` a question and a real model answered it.
+                // The OpenAI shape has exactly one place to say which: the `model` field.
+                if routing != nil, status == 200 {
+                    out = GatewayAPI.rewritingModel(inBody: out, to: modelID)
+                }
+                var response = HTTPResponse(status: status, body: out)
+                response.extraHeaders = Self.routedHeaders(routing.map { _ in modelID })
+                if let pruning {
+                    response.extraHeaders[GatewayAPI.prunedHeader] = String(pruning.count)
+                }
+                try? await response.write(to: connection)
 
                 let audit = GatewayStreamAudit()
                 if let compact = String(data: data, encoding: .utf8) {
@@ -336,6 +453,40 @@ public actor GatewayServer {
                 await finishLedger(entry, ok: false, detail: error.localizedDescription)
             }
         }
+    }
+
+    /// Asks the app to route, but only for a virtual id.
+    ///
+    /// The check is here rather than in the host so that an ordinary request — which is
+    /// almost all of them — never crosses to the main actor to be told "no". `silicon/auto`
+    /// is the gateway's own vocabulary; recognising it is the gateway's job.
+    private func routeIfVirtual(_ id: String, body: Data) async -> GatewayRoutingDecision? {
+        guard GatewayAPI.isAutoModelID(id) else { return nil }
+        return await host.gatewayRoute(modelID: id, body: body)
+    }
+
+    /// Offers a request for pruning, but only for a target that could ever be pruned.
+    ///
+    /// The check is here rather than only in the host so that a request to a provider — or
+    /// to an id this build does not recognise — never crosses to the main actor at all.
+    private func pruneIfPrunable(_ id: String, body: Data) async -> GatewayPruning? {
+        guard GatewayAPI.isPrunableTarget(id) else { return nil }
+        return await host.gatewayPrune(modelID: id, body: body)
+    }
+
+    static func isNodeModel(_ id: String) -> Bool {
+        if case .node = GatewayAPI.parseModelID(id) { return true }
+        return false
+    }
+
+    /// The one header a routed reply carries, on buffered responses only.
+    ///
+    /// A streamed reply's head is written before routing has happened — that is the point of
+    /// writing it first — so a stream says which model answered in its comment line and in
+    /// every chunk's `model` field instead.
+    static func routedHeaders(_ modelID: String?) -> [String: String] {
+        guard let modelID else { return [:] }
+        return [GatewayAPI.routedToHeader: modelID]
     }
 
     private func finishLedger(
@@ -358,7 +509,7 @@ public actor GatewayServer {
     /// error the client can show, instead of a bare "stream closed".
     private func pipeChatStream(
         body: Data, backend: GatewayReadyBackend, to stream: SSEConnection,
-        ledgerEntry: String? = nil
+        ledgerEntry: String? = nil, routedTo: String? = nil
     ) async {
         var sawDone = false
         let audit = GatewayStreamAudit()
@@ -372,7 +523,13 @@ public actor GatewayServer {
                 for payload in Self.dataPayloads(inFrame: frame) {
                     audit.feed(payload: payload)
                 }
-                await stream.send(frame + Data("\n\n".utf8))
+                // Untouched, unless the client asked Auto: then each chunk's `model` is
+                // the backend's own spelling of a model the client never named, and the
+                // one field the shape has for saying who answered should say so. The
+                // re-serialisation is paid only by routed streams.
+                let out = routedTo.map { GatewayAPI.rewritingModel(inFrame: frame, to: $0) }
+                    ?? frame
+                await stream.send(out + Data("\n\n".utf8))
             }
             if !sawDone {
                 await stream.send(GatewayAPI.sseErrorPayload(
@@ -406,28 +563,33 @@ public actor GatewayServer {
     // MARK: - Responses (Codex dialect)
 
     private func serveResponses(_ request: HTTPRequest, on connection: NWConnection) async {
-        guard let modelID = GatewayAPI.requestedModel(inBody: request.body) else {
+        guard let requestedID = GatewayAPI.requestedModel(inBody: request.body) else {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
-        let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)
         let wantsStream = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any])
             .flatMap { $0?["stream"] as? Bool } ?? false
         let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
-        let isNode: Bool = {
-            if case .node = GatewayAPI.parseModelID(modelID) { return true }
-            return false
-        }()
+
+        // Codex sees the same model list as the harness does, so it can name `silicon/auto`
+        // too. As with chat, a streaming caller gets its head before anything is asked of
+        // anyone; the translator is then told the real model, which is what Codex records
+        // against the thread.
+        let stream = SSEConnection(connection: connection)
+        if wantsStream {
+            guard await stream.sendHead() else { return }
+        }
+        let routing = await routeIfVirtual(requestedID, body: request.body)
+        let modelID = routing?.modelID ?? requestedID
+        let translator = GatewayResponsesTranslator(model: modelID, includeReasoning: true)
+        let isNode = Self.isNodeModel(modelID)
         let entry = await ledger?.begin(
             endpoint: "responses", modelID: modelID, stream: wantsStream,
             promptChars: request.body.count, promptPreview: nil
         )
-
-        let stream = SSEConnection(connection: connection)
         if wantsStream {
-            guard await stream.sendHead() else {
-                await finishLedger(entry, ok: false, detail: "client gone before headers")
-                return
+            if routing != nil {
+                await stream.send(GatewayAPI.sseComment("silicon-routed-to: \(modelID)"))
             }
             await stream.send(translator.opening())
         }
@@ -504,8 +666,11 @@ public actor GatewayServer {
                 }
             } else {
                 _ = translator.translate(payload: "[DONE]")
-                try? await HTTPResponse(status: 200, body: translator.completedResponseBody())
-                    .write(to: connection)
+                var response = HTTPResponse(
+                    status: 200, body: translator.completedResponseBody()
+                )
+                response.extraHeaders = Self.routedHeaders(routing.map { _ in modelID })
+                try? await response.write(to: connection)
             }
             await finishLedger(entry, ok: true, warning: audit.warning, audit: audit)
         } catch {
@@ -672,11 +837,15 @@ private actor SSEConnection {
         self.connection = connection
     }
 
-    func sendHead() async -> Bool {
-        let head = "HTTP/1.1 200 OK\r\n"
+    func sendHead(extraHeaders: [String: String] = [:]) async -> Bool {
+        var head = "HTTP/1.1 200 OK\r\n"
             + "Content-Type: text/event-stream\r\n"
             + "Cache-Control: no-store\r\n"
-            + "Connection: close\r\n\r\n"
+            + "Connection: close\r\n"
+        for (name, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+            head += "\(name): \(value)\r\n"
+        }
+        head += "\r\n"
         return await sendRaw(Data(head.utf8))
     }
 

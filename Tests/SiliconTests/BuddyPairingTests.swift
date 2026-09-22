@@ -196,6 +196,42 @@ struct BuddyPairingRegistryTests {
         #expect(BuddyConfig.load(from: file).devices.isEmpty)
     }
 
+    /// A device paired before the tailnet listener took a fixed port holds an address that
+    /// no longer answers, and nothing about its token says so. The row has to say it, or
+    /// the owner debugs a working phone: `buddy.json` from that version has no port at all,
+    /// which is the one durable mark those devices carry.
+    @Test func aDevicePairedBeforeThePortMovedIsFlaggedForRepairing() async throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        // Written by the version that did not record one.
+        var config = BuddyConfig(allowTailnetDevices: true, devices: [])
+        config.devices.append(BuddyDevice(
+            id: "old", name: "iPhone", platform: "ios",
+            tokenHash: BuddyPairing.hash(token: "whatever"), pairedAt: Date()
+        ))
+        config.save(to: file)
+
+        let registry = BuddyRegistry(url: file)
+        #expect(await registry.devices().first?.needsRepair == true)
+
+        // One paired now is told where to dial, and knows it.
+        await registry.invite(host: "100.64.0.9", port: ControlServer.tailnetPort)
+        let invitation = try #require(await registry.openInvitation())
+        guard case .paired(let response) = await registry.pair(
+            .init(code: invitation.code, deviceName: "Pixel", platform: "android"),
+            from: "100.64.0.4", macName: "Mac", port: ControlServer.tailnetPort
+        ) else {
+            Issue.record("Pairing was refused")
+            return
+        }
+        let fresh = try #require(await registry.devices().first { $0.id == response.deviceID })
+        #expect(fresh.needsRepair == false)
+        // And it survives the trip through the file, which is where it has to live.
+        #expect(BuddyConfig.load(from: file).devices
+            .first { $0.id == response.deviceID }?.pairedPort == ControlServer.tailnetPort)
+    }
+
     @Test func theToggleIsOffUntilSomeoneTurnsItOnAndSurvivesARestart() async {
         let file = temporaryFile()
         defer { try? FileManager.default.removeItem(at: file) }

@@ -302,7 +302,7 @@ struct RemoteModelSheet: View {
 
     private func loadFiles() async {
         defer { isLoadingFiles = false }
-        let token = model.settings.huggingFaceToken.isEmpty ? nil : model.settings.huggingFaceToken
+        let token = await model.huggingFaceToken()
         do {
             let all = try await HuggingFaceClient(token: token).files(in: result.id)
             let weights = all
@@ -329,7 +329,7 @@ struct RemoteModelSheet: View {
         isReadingHeader = true
         headerFailure = nil
         defer { isReadingHeader = false }
-        let token = model.settings.huggingFaceToken.isEmpty ? nil : model.settings.huggingFaceToken
+        let token = await model.huggingFaceToken()
         shape = await RemoteGGUFReader(token: token)
             .readShape(repository: result.id, file: file.path)
         if shape == nil {

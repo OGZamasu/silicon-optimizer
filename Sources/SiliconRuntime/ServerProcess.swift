@@ -14,9 +14,63 @@ actor ServerProcess {
     /// The app always supervises through the shared registry; tests inject their own so
     /// their assertions never see another suite's children.
     private let registry: ChildProcessRegistry
+    /// What became of the child, written the moment it happens and readable without an
+    /// `await`. See `Ending`.
+    private let ending = Ending()
 
     init(registry: ChildProcessRegistry = .shared) {
         self.registry = registry
+    }
+
+    /// The end of a child process, recorded where anyone can read it synchronously.
+    ///
+    /// `Process.terminationHandler` fires on an arbitrary queue, and a load that is waiting
+    /// on `/health` has to be able to ask "is it still there?" between polls without hopping
+    /// onto this actor — which it cannot do, because it is *inside* a call on this actor. So
+    /// the fact is kept behind a lock, in the same spirit as `ChildProcessRegistry`: an
+    /// actor cannot answer the one question that matters at the moment it matters.
+    private final class Ending: @unchecked Sendable {
+        private let lock = NSLock()
+        private var termination: ProcessTermination?
+        private var stopRequest: StopRequest?
+        private var startedAt: Date?
+
+        func began(at date: Date) {
+            lock.lock()
+            startedAt = date
+            lock.unlock()
+        }
+
+        /// Recorded *before* the signal goes out, so a process that dies instantly still
+        /// ends up attributed to the app rather than to a mystery.
+        ///
+        /// Deliberately does not touch a termination that has already been recorded. A
+        /// failed load terminates a process that is often already gone — tidying up after
+        /// itself — and back-filling the request there would turn "it exited with status 3"
+        /// into "we stopped it", which is the exact confusion this type exists to end.
+        func requested(_ request: StopRequest) {
+            lock.lock()
+            if termination == nil { stopRequest = request }
+            lock.unlock()
+        }
+
+        func finished(exitStatus: Int32?, signal: Int32?, at date: Date) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard termination == nil else { return }
+            termination = ProcessTermination(
+                exitStatus: exitStatus, signal: signal, stopRequest: stopRequest,
+                ranFor: startedAt.map { date.timeIntervalSince($0) } ?? 0
+            )
+        }
+
+        var snapshot: ProcessTermination? {
+            lock.lock()
+            defer { lock.unlock() }
+            return termination
+        }
+
+        var hasEnded: Bool { snapshot != nil }
     }
 
     /// Keeps the tail of the log bounded; a long generation session would otherwise grow it
@@ -68,12 +122,24 @@ actor ServerProcess {
         // a synchronous `willTerminate` observer — and the next launch, after a crash — can
         // find it. A server that exits on its own takes itself back out here, so the registry
         // never accumulates pids the kernel is free to reissue.
+        //
+        // This is also the only moment the exit status and the signal exist, so they are
+        // written down here rather than read back later: by the time a failed load asks,
+        // `terminate` has already released the `Process` object.
         let registry = self.registry
+        let ending = self.ending
         process.terminationHandler = { finished in
             registry.unregister(pid: finished.processIdentifier)
+            let signalled = finished.terminationReason == .uncaughtSignal
+            ending.finished(
+                exitStatus: signalled ? nil : finished.terminationStatus,
+                signal: signalled ? finished.terminationStatus : nil,
+                at: Date()
+            )
         }
 
         do {
+            ending.began(at: Date())
             try process.run()
         } catch {
             throw RuntimeError.launchFailed(error.localizedDescription)
@@ -96,7 +162,12 @@ actor ServerProcess {
         }
     }
 
-    func terminate() async {
+    /// Stops the child, and records that it was this app that asked.
+    ///
+    /// The reason is not bookkeeping: "we unloaded it" and "it died" are the two answers a
+    /// failed load has to be able to tell apart, and only the caller knows which one this is.
+    func terminate(because request: StopRequest = .unload) async {
+        ending.requested(request)
         guard let process, process.isRunning else { return }
 
         (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
@@ -127,6 +198,21 @@ actor ServerProcess {
         guard let process, !process.isRunning else { return nil }
         return process.terminationStatus
     }
+
+    /// What became of the child — exit status or signal, whether this app asked for it, and
+    /// how long it ran. Nil while it is still running.
+    ///
+    /// Survives `terminate()`, which is the whole point: the failed load that needs this is
+    /// the one whose server is already gone.
+    var termination: ProcessTermination? { ending.snapshot }
+
+    /// Whether the child is over, answerable without an `await`.
+    ///
+    /// A load waiting on `/health` runs this between polls. Before it existed, a server that
+    /// died two seconds in left the load waiting out its full ten-minute timeout for an
+    /// answer that was never coming — which is how an eight-second failure took ten minutes
+    /// to be reported.
+    nonisolated var hasEnded: Bool { ending.hasEnded }
 }
 
 /// Finds a free localhost port for the server to bind.

@@ -39,23 +39,86 @@ extension AppModel {
             maxTokens: request.maxTokens ?? (settings.maxTokens > 0 ? settings.maxTokens : nil),
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
+        let budget = chatRequest.maxTokens
         return streamed { [weak self] emit in
             guard let self else { return }
+            var answer = ""
+            var finished = GenerationMetrics()
             // Like `chat`, this path has no `generationTask`, so without `whileGenerating`
             // a long answer reads as idleness — and the idle timer unloads the model, or
             // the Mac sleeps, halfway through writing it.
             try await self.whileGenerating {
                 for try await event in try await runtime.chat(chatRequest) {
                     switch event {
-                    case .token(let token): emit(.token(token))
+                    case .token(let token):
+                        answer += token
+                        emit(.token(token))
                     case .reasoningToken(let token): emit(.reasoning(token))
                     case .finished(let metrics):
                         self.lastGeneration = metrics
+                        finished = metrics
                         emit(.finished(Self.metrics(metrics)))
                     }
                 }
             }
+            // `POST /chat/stream` has no transcript, so a verdict that misses the stream
+            // has nowhere to go: no message to hang it on, no id to key an `/events` frame
+            // to. It is bounded like the conversation path and simply dropped if it is
+            // late — which is why the stateful route is the one to use if you want the
+            // verdict guaranteed.
+            let work = Task { @MainActor [weak self] in
+                guard let self else { return nil as ControlAPI.ChatVerdict? }
+                return await self.whileGenerating {
+                    await self.streamVerdict(
+                        prompt: VerificationPrompt(messages: request.messages),
+                        reply: answer, metrics: finished, budget: budget
+                    )
+                }
+            }
+            if let verdict = await VerdictRelay.result(of: work, within: Self.verdictGrace) {
+                emit(.verdict(verdict))
+            }
         }
+    }
+
+    /// How long a stream will hold itself open waiting for Jev before closing without the
+    /// verdict.
+    ///
+    /// Jev answers in about 100 ms, so this is not a budget, it is a backstop: a TypeSafe
+    /// hiccup must not turn into a chat that appears to hang after its last token. The
+    /// conversation path loses nothing when it trips — the verdict still lands on the
+    /// message and on `/events` a moment later.
+    static let verdictGrace: Duration = .seconds(3)
+
+    /// The `verdict` frame, or nil when verification is off or found nothing worth saying.
+    ///
+    /// Deliberately after the whole answer and deliberately without escalating. Jev reads a
+    /// finished reply, and the reply is not finished until the last token — and by then the
+    /// reader has it. See `JevVerifier.streamSuggestion` for why a stream suggests rather
+    /// than substitutes; `POST /chat`, which has shown nothing, does escalate.
+    func streamVerdict(
+        prompt: VerificationPrompt, reply: String, metrics: GenerationMetrics, budget: Int?,
+        conversationID: String? = nil, messageID: String? = nil,
+        using override: JevVerifier? = nil
+    ) async -> ControlAPI.ChatVerdict? {
+        guard !reply.isEmpty else { return nil }
+        guard let (verdict, target) = await verifyWithoutEscalating(
+            prompt: prompt, reply: reply,
+            truncated: metrics.wasTruncated(budget: budget), using: override
+        ) else { return nil }
+        // Nothing fired. A frame saying so is noise on a phone; silence is the accept.
+        guard verdict != .accept else { return nil }
+        return ControlAPI.ChatVerdict(
+            verdict: verdict.name,
+            reasons: verdict.reasons,
+            escalatedTo: nil,
+            suggestion: {
+                if case .escalate = verdict { return JevVerifier.streamSuggestion(target: target) }
+                return nil
+            }(),
+            conversationID: conversationID,
+            messageID: messageID
+        )
     }
 
     // MARK: - Conversations
@@ -87,7 +150,8 @@ extension AppModel {
             messages: conversation.messages.map {
                 .init(
                     role: $0.role.rawValue, content: $0.content,
-                    createdAt: ControlAPI.timestamp($0.createdAt)
+                    createdAt: ControlAPI.timestamp($0.createdAt),
+                    id: $0.id.uuidString, verification: $0.verification
                 )
             }
         )
@@ -139,14 +203,19 @@ extension AppModel {
             reasoningEffort: settings.reasoningEffort.isEmpty ? nil : settings.reasoningEffort
         )
 
+        let budget = chatRequest.maxTokens
+        let asked = chatRequest.messages
         return streamed { [weak self] emit in
             guard let self else { return }
             defer { BuddyGenerations.shared.end(conversationID) }
+            var answer = ""
+            var finished = GenerationMetrics()
             do {
                 try await self.whileGenerating {
                     for try await event in try await runtime.chat(chatRequest) {
                         switch event {
                         case .token(let token):
+                            answer += token
                             self.append(token, to: replyID, in: conversationID, reasoning: false)
                             emit(.token(token))
                         case .reasoningToken(let token):
@@ -154,6 +223,7 @@ extension AppModel {
                             emit(.reasoning(token))
                         case .finished(let metrics):
                             self.lastGeneration = metrics
+                            finished = metrics
                             emit(.finished(Self.metrics(metrics)))
                         }
                     }
@@ -168,7 +238,51 @@ extension AppModel {
                 )
                 throw error
             }
+            // The verdict outlives this stream. It is written onto the message and posted
+            // to `/events`, keyed by the two ids, so a phone that has already closed the
+            // stream — or was not listening at all — still gets it, from the transcript if
+            // not from the wire.
+            let work = Task { @MainActor [weak self] in
+                guard let self else { return nil as ControlAPI.ChatVerdict? }
+                let verdict = await self.whileGenerating {
+                    await self.streamVerdict(
+                        prompt: VerificationPrompt(
+                            messages: asked.map {
+                                .init(
+                                    role: $0.role.rawValue, content: $0.content,
+                                    images: $0.images
+                                )
+                            }
+                        ),
+                        reply: answer, metrics: finished, budget: budget,
+                        conversationID: conversationID.uuidString,
+                        messageID: replyID.uuidString
+                    )
+                }
+                guard let verdict else { return nil }
+                self.attach(verdict, to: replyID, in: conversationID)
+                await BuddyEventHub.shared.post(.verdict(verdict))
+                return verdict
+            }
+            // …and the stream still closes at `finished` if Jev is slow, rather than
+            // leaving a phone watching a socket that has nothing left to say.
+            if let verdict = await VerdictRelay.result(of: work, within: Self.verdictGrace) {
+                emit(.verdict(verdict))
+            }
         }
+    }
+
+    /// Writes a verdict onto the message it is about, so `GET /conversations/{id}` carries
+    /// it for as long as the thread exists.
+    private func attach(
+        _ verdict: ControlAPI.ChatVerdict, to messageID: UUID, in conversationID: Conversation.ID
+    ) {
+        guard let conversation = conversations.firstIndex(where: { $0.id == conversationID }),
+              let message = conversations[conversation].messages.firstIndex(
+                  where: { $0.id == messageID }
+              )
+        else { return }
+        conversations[conversation].messages[message].verification = verdict
     }
 
     /// Appends into a named conversation rather than the selected one: a phone can be
@@ -203,6 +317,14 @@ extension AppModel {
 
     public func beginEventUpdates(postingTo hub: BuddyEventHub) async {
         BuddyEventPump.shared.start(watching: self, hub: hub)
+        // Its own watcher rather than another field on this one: the agent sessions are
+        // sampled ten times a second so streamed prose arrives promptly, and the status
+        // and download frames have no use for that rate. Started only for a subscriber
+        // allowed to see them — a chat-only phone or the swarm on `/events` is sent no
+        // agent frames, so reading transcripts on its behalf would be work for nothing.
+        if await hub.agentAudienceCount > 0 {
+            AgentEventPump.shared.start(watching: self, hub: hub)
+        }
     }
 
     /// What a subscriber would want to know right now. Built whole and diffed, rather than
@@ -212,25 +334,38 @@ extension AppModel {
     func buddyEventSnapshot() async -> BuddyEventPump.Snapshot {
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
+        let roots = await controlMediaRoots()
         for item in queue.items {
-            jobs[item.id] = ControlAPI.JobEvent(
-                id: item.id, kind: "video", status: item.status,
-                title: item.title,
-                fraction: item.id == activeVideoQueueID ? videoProgress : nil
+            let active = item.id == activeVideoQueueID
+            // Registered against the shared table the control server publishes from, so the
+            // id on the frame that says "done" is the id `GET /video/queue` was already
+            // handing out — one fetch, not a second poll to find out what to fetch.
+            var mediaID: String?
+            if let file = item.file {
+                mediaID = await MediaRegistry.shared.register(path: file, within: roots)
+            }
+            jobs[item.id] = Self.jobEvent(
+                for: item, active: active,
+                fraction: active ? videoProgress : nil,
+                stage: active ? videoStage : nil,
+                mediaID: mediaID
             )
         }
         if let image = currentImageJob {
             jobs["image"] = ControlAPI.JobEvent(
                 id: "image", kind: "image", status: "running", title: image.modelName,
-                fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil
+                fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil,
+                stage: imageState.stageLine
             )
         }
         if let mesh = currentMeshJob {
             jobs["mesh"] = ControlAPI.JobEvent(
                 id: "mesh", kind: "mesh", status: "running", title: mesh.modelName,
-                fraction: meshProgress
+                fraction: meshProgress,
+                stage: meshState.stageLine
             )
         }
+        await MediaRegistry.shared.persist()
 
         var downloads: [String: ControlAPI.DownloadEvent] = [:]
         for transfer in activeTransfers {
@@ -245,6 +380,30 @@ extension AppModel {
         }
         return BuddyEventPump.Snapshot(
             status: await status(), downloads: downloads, jobs: jobs
+        )
+    }
+
+    /// One queue item as a `job` frame.
+    ///
+    /// Its own function, and pure, because two of its three optional fields are rules
+    /// rather than copies and a rule that only exists inside a snapshot builder is a rule
+    /// nothing can check.
+    ///
+    /// `stage` belongs to the clip the app is actually following: one waiting its turn has
+    /// a status, and inventing a stage for it would be a sentence the renderer never said.
+    /// `reason` belongs to a clip the Mac has *given up on* — a transient failure that is
+    /// waiting to be retried carries an `error` too, and a phone announcing that beside a
+    /// pending status would be reporting a failure that has not happened.
+    nonisolated static func jobEvent(
+        for item: ControlAPI.VideoQueueView.Item, active: Bool,
+        fraction: Double?, stage: String?, mediaID: String?
+    ) -> ControlAPI.JobEvent {
+        ControlAPI.JobEvent(
+            id: item.id, kind: "video", status: item.status, title: item.title,
+            fraction: active ? fraction : nil,
+            stage: active ? stage : nil,
+            reason: item.status == VideoQueueStatus.failed.rawValue ? item.error : nil,
+            mediaID: mediaID
         )
     }
 
@@ -296,6 +455,61 @@ extension AppModel {
     }
 }
 
+// MARK: - Waiting a little, but not indefinitely
+
+/// Takes a task's result if it arrives inside a deadline, and otherwise gives up on
+/// *waiting* — never on the task, which keeps running and finishes what it started.
+///
+/// That asymmetry is the whole point here. The verdict has two jobs: catching the stream
+/// that is still open, and landing on the message for everyone who reads it later. Only the
+/// first has a deadline. Cancelling the work when the deadline passed would throw away the
+/// second, which is the one that always matters.
+enum VerdictRelay {
+
+    static func result<Value: Sendable>(
+        of work: Task<Value?, Never>, within duration: Duration
+    ) async -> Value? {
+        let slot = Slot<Value>()
+        // `await work.value` is not cancellable for a non-throwing task, so the wait cannot
+        // be raced inside a task group — the group would sit on it anyway. A mailbox the
+        // timer can also post to is what makes the deadline real.
+        let forward = Task { await slot.deliver(work.value) }
+        let timer = Task {
+            try? await Task.sleep(for: duration)
+            await slot.giveUp()
+        }
+        defer { forward.cancel(); timer.cancel() }
+        return await slot.take()
+    }
+
+    private actor Slot<Value: Sendable> {
+        private var waiting: CheckedContinuation<Value?, Never>?
+        private var settled = false
+        private var value: Value?
+
+        func deliver(_ value: Value?) { finish(value) }
+        func giveUp() { finish(nil) }
+
+        /// First writer wins, so a verdict that beat the timer is not overwritten by it.
+        private func finish(_ value: Value?) {
+            guard !settled else { return }
+            settled = true
+            self.value = value
+            waiting?.resume(returning: value)
+            waiting = nil
+        }
+
+        /// Kept rather than dropped when it arrives before anyone asks: on a warm cache
+        /// the verdict can be ready before the caller reaches this line.
+        func take() async -> Value? {
+            if settled { return value }
+            return await withCheckedContinuation { continuation in
+                waiting = continuation
+            }
+        }
+    }
+}
+
 // MARK: - Watching the Mac for subscribers
 
 /// Samples the app's state while at least one `/events` stream is open, and posts what
@@ -331,6 +545,13 @@ public final class BuddyEventPump {
     /// Bumped on every stop, so a task that is winding down can tell whether the handle it
     /// is about to clear is still its own.
     private var generation = UUID()
+    /// Which model and which hub the running loop is watching.
+    ///
+    /// One of each exists in the app, so this never changes there. It changes constantly
+    /// under a test suite, and the singleton was answering "already running" to a start
+    /// against a *different* hub — leaving the loop feeding a hub nobody reads while the
+    /// one with a subscriber on it got nothing but heartbeats.
+    private var watching: WatchTarget?
     /// Incremented on every start request. A task that reads "no subscribers" and then sees
     /// this move knows a phone arrived during that await, and keeps going — otherwise the
     /// new subscriber would find a pump that had just decided to stop and a handle that was
@@ -346,7 +567,14 @@ public final class BuddyEventPump {
         interval: Duration = .seconds(1)
     ) {
         startRequests += 1
-        guard task == nil else { return }
+        let target = WatchTarget(model: model, hub: hub)
+        // Already doing exactly this: nothing to do, and starting a second loop would
+        // double every frame.
+        if task != nil, watching == target { return }
+        // Running against something else. Whatever it was watching, this is the reader
+        // that is actually here, so the loop is re-pointed rather than turned away.
+        if task != nil { stop() }
+        watching = target
         let mine = UUID()
         generation = mine
         task = Task { [weak self, weak model] in
@@ -374,6 +602,7 @@ public final class BuddyEventPump {
         generation = UUID()
         task?.cancel()
         task = nil
+        watching = nil
     }
 
     /// Whether the loop should give up: nobody is reading, and nobody asked it to keep
@@ -471,7 +700,7 @@ public final class BuddyCenter {
     public func refresh(server: ControlServer?) async {
         allowsTailnetDevices = await registry.allowsTailnetDevices
         devices = await registry.devices()
-        invitation = await registry.openInvitation()
+        adopt(await registry.openInvitation())
         reachAddress = await server?.tailnetListenerAddress
         problem = await server?.tailnetError
     }
@@ -495,16 +724,17 @@ public final class BuddyCenter {
             problem = "Turn Silicon Buddy on first — pairing rides on the tailnet listener."
             return
         }
-        guard let host = reachAddress, let port = await server?.listeningPort, port > 0 else {
+        // The tailnet listener's port, never loopback's: loopback takes a fresh ephemeral
+        // port every launch, and a QR pointing at yesterday's is a QR that stops working.
+        guard let host = reachAddress, let port = await server?.tailnetListenerPort, port > 0
+        else {
             problem = problem ?? "The tailnet listener is not up yet. Try again in a moment."
             return
         }
         problem = nil
         let granting = scope ?? nextScope
         nextScope = granting
-        let fresh = await registry.invite(host: host, port: port, scope: granting)
-        invitation = fresh
-        scheduleExpiry(of: fresh)
+        adopt(await registry.invite(host: host, port: port, scope: granting))
     }
 
     /// Called while the sheet is open. A code that has just been spent should turn into the
@@ -512,17 +742,16 @@ public final class BuddyCenter {
     public func followPairing(server: ControlServer?) async -> Bool {
         let stillOpen = await registry.openInvitation()
         guard stillOpen == nil, invitation != nil else {
-            invitation = stillOpen
+            adopt(stillOpen)
             return false
         }
-        invitation = nil
+        adopt(nil)
         await refresh(server: server)
         return true
     }
 
     public func cancelInvitation() async {
-        expiryTask?.cancel()
-        expiryTask = nil
+        cancelExpiry()
         await registry.cancelInvitation()
         invitation = nil
     }
@@ -532,16 +761,44 @@ public final class BuddyCenter {
         devices = await registry.devices()
     }
 
+    /// Takes up whatever invitation is open now, re-arming the expiry whenever the code
+    /// on screen is a different one.
+    ///
+    /// The code is the identity, and this has to notice a swap rather than merely an
+    /// arrival. `POST /buddy/invitations` can mint underneath an open pairing sheet, and
+    /// the sheet's poll adopts what it finds — which leaves the expiry armed for the code
+    /// that was replaced still counting down towards a credential that is live. Firing it
+    /// would blank a code the owner is halfway through typing into a phone.
+    private func adopt(_ fresh: BuddyInvitation?) {
+        let superseded = fresh?.code != invitation?.code
+            || fresh?.expiresAt != invitation?.expiresAt
+        invitation = fresh
+        guard superseded else { return }
+        if let fresh {
+            scheduleExpiry(of: fresh)
+        } else {
+            cancelExpiry()
+        }
+    }
+
     /// Clears the code from the screen when it stops working, so the window never shows a
     /// QR that the server would now refuse.
     private func scheduleExpiry(of invitation: BuddyInvitation) {
-        expiryTask?.cancel()
+        cancelExpiry()
         let wait = invitation.expiresAt.timeIntervalSinceNow
         expiryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(max(wait, 0)))
             guard !Task.isCancelled else { return }
+            // Belt and braces with `adopt`: a timer that has outlived the code it was
+            // armed for must never take the live one down with it.
+            guard self?.invitation?.code == invitation.code else { return }
             self?.invitation = nil
         }
+    }
+
+    private func cancelExpiry() {
+        expiryTask?.cancel()
+        expiryTask = nil
     }
 
     /// The QR the phone camera reads. Scaled up from the generator's tiny native output,

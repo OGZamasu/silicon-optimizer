@@ -163,6 +163,60 @@ extension AppModel {
         }
     }
 
+    // MARK: - Guardrails
+
+    // TODO: screen the harness's tool calls through `JevGuardrails`. Everything needed is
+    // here except one plugin, and this is what it would take.
+    //
+    // The harness *does* have an approval seam — `@deepseek-ai/dsh-user-approval`. A tool
+    // that needs permission calls `ctx.approval.request(...)`, and the answer comes from
+    // whichever plugin registered an `approval/request` waterfall listener; with no
+    // answerer the request resolves `unavailable` and the call fails closed. The session
+    // policy is `ask` or `never`, and `ask` is what routes through the seam.
+    //
+    // So the shape is clear: `Resources/dsh-llm-silicon` — the plugin this app already
+    // vendors into the harness profile, today only a model provider — registers an
+    // `approval/request` listener, calls this Mac's control API to have the call screened,
+    // and maps the verdict onto `allowed-once` / `rejected`, leaving anything it cannot
+    // decide to the harness's own permission UI. It would need a `POST /jev/guardrails/screen`
+    // route beside the `GET /jev/guardrails/recent` this branch adds, taking the call and
+    // returning the verdict, because the plugin runs in a Node process and cannot reach
+    // `JevGuardrails` directly.
+    //
+    // What stops it being worth doing yet is the evidence, not the plumbing: the seam's own
+    // documentation says the request carries the tool name, a reason and a call id, and
+    // *not* the arguments. Eight of this guardrail's nine questions are about the arguments
+    // — what path, what destination, whether the text came from a previous tool result — so
+    // a screening from that seam would be Jev guessing from a tool's name. That is worse
+    // than no verdict, because it would look like one. The harness also renders its own
+    // conversation in a web view, so there is no card of ours to put the verdict on.
+    //
+    // Revisit when the seam carries arguments, or when the harness exposes the tool call
+    // itself to a plugin the way Pi's `tool_call` event does.
+
+    // MARK: - Tool selection
+
+    // Not wired either, and here the blocker is plumbing rather than evidence.
+    //
+    // The roster is genuinely available: `Resources/dsh-llm-silicon` is an `LlmAdapter`, so
+    // every request passes through it with the harness's whole `tools` array — names and
+    // descriptions — on the way to the gateway. That is more than Codex offers and about
+    // what Pi's `systemPromptOptions` offers. Appending one `<tool_relevance>` line as a
+    // trailing message, after the system prompt rather than inside it, is the same move the
+    // Pi extension makes and would leave prefix caching intact.
+    //
+    // What is missing is a way for that plugin to ask. It runs in the harness's Node
+    // process, cannot reach `SkillSelector` directly, and the control API has no route that
+    // would answer it — the same gap the guardrail note above describes, and the same fix: a
+    // `POST /jev/...` route on this Mac taking the turn and the roster and returning at most
+    // one name. One route serves both features.
+    //
+    // Doing it at the *gateway* instead — where the `tools` array is also visible — is
+    // deliberately not the answer. The gateway serves every engine, including Pi, which
+    // already has its own hook; a suggestion added there would arrive twice for Pi and
+    // arrive uninvited for Codex, and nothing in a chat-completions body says which engine
+    // sent it. A suggestion belongs to the engine that will act on it.
+
     /// Reacts to the chat engine picker: a sidecar only runs while it is the chosen engine,
     /// and the chosen one starts as soon as the Chat tab is showing.
     public func chatEngineDidChange() {

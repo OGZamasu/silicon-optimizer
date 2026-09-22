@@ -194,13 +194,20 @@ private actor WaitingVideoHost: ControlHost {
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel] { [] }
     func installed() async -> [ControlAPI.InstalledModel] { [] }
-    func recommend(category: String?) async -> ControlAPI.CatalogModel? { nil }
+    func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? { nil }
     func plan(_ request: ControlAPI.PlanRequest) async throws -> ControlAPI.Plan { throw TestControlError.unexpectedRoute }
     func install(_ request: ControlAPI.LoadRequest) async throws -> String { throw TestControlError.unexpectedRoute }
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status { throw TestControlError.unexpectedRoute }
     func unload() async {}
     func chat(_ request: ControlAPI.ChatRequest) async throws -> ControlAPI.ChatResponse { throw TestControlError.unexpectedRoute }
     func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse { throw TestControlError.unexpectedRoute }
+    func jevStatus() async -> ControlAPI.JevStatus { .fixture() }
+    func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings {
+        .init(available: false, questions: [], screenings: [])
+    }
+    func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus { throw TestControlError.unexpectedRoute }
+    func jevCalibration() async -> ControlAPI.JevCalibration? { nil }
+    func calibrateJev() async throws -> ControlAPI.JevCalibration { throw TestControlError.unexpectedRoute }
     func benchmark() async throws -> ControlAPI.BenchmarkResult { throw TestControlError.unexpectedRoute }
     func imageModels() async -> [ControlAPI.ImageModel] { [] }
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan { throw TestControlError.unexpectedRoute }

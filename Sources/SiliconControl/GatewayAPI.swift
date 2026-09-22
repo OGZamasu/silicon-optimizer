@@ -92,6 +92,48 @@ public enum GatewayAPI {
         return nil
     }
 
+    // MARK: - The virtual routing model
+
+    /// The one id in this list that is not a model.
+    ///
+    /// A request naming `silicon/auto` is routed — the app asks Jev which real model should
+    /// answer it — and then proxied exactly as if the client had named the chosen one. The
+    /// `silicon/` prefix sits deliberately outside the three real schemes, so `parseModelID`
+    /// returns nil for it and nothing downstream can mistake it for a model some machine
+    /// serves. Harnesses store model ids forever, so this spelling is as permanent as theirs.
+    public static let autoModelID = "silicon/auto"
+    public static let autoModelDisplayName = "Auto — Jev picks"
+
+    public static func isAutoModelID(_ id: String) -> Bool { id == autoModelID }
+
+    /// Names the model that actually answered a routed request. Set on both the buffered
+    /// and the streamed reply, because a client that asked for `silicon/auto` and cannot
+    /// see which machine it reached has been told nothing useful about its own bill.
+    public static let routedToHeader = "X-Silicon-Routed-To"
+
+    /// How many earlier tool results were dropped out of a request before it was forwarded.
+    /// Set on buffered chat replies only; a streamed one says it in a comment line instead,
+    /// because its head is written before anything has been asked of anyone.
+    ///
+    /// Present even when a caller has no use for it, because a reply computed from less than
+    /// what was sent should say so somewhere a client can see without reading the app's log.
+    public static let prunedHeader = "X-Silicon-Pruned"
+
+    /// Whether a request for this model may have history taken out of it at all.
+    ///
+    /// Answered here, in pure code the gateway can run on its own thread, so an ordinary
+    /// request to a provider never crosses to the main actor to be told "not that one" —
+    /// the same reason `isAutoModelID` is the gateway's own vocabulary. Only models running
+    /// on hardware the owner owns qualify: a provider's window is large, its history is
+    /// what the bill is for, and sending someone else's model less than the client wrote is
+    /// not a decision this app should be making quietly.
+    public static func isPrunableTarget(_ modelID: String) -> Bool {
+        switch parseModelID(modelID) {
+        case .local, .node: true
+        case .cloud, nil: false
+        }
+    }
+
     // MARK: - Model listing
 
     /// One entry in `GET /v1/models`. The `silicon` extension block carries what the OpenAI
@@ -189,8 +231,11 @@ public enum GatewayAPI {
     }
 
     public static func sseComment(_ text: String) -> Data {
-        // A comment must be one line; anything else would break framing.
-        let clean = text.replacingOccurrences(of: "\n", with: " ")
+        // A comment must be one line; anything else would break framing. A lone carriage
+        // return ends a line on this wire exactly as a newline does, so both go.
+        let clean = text.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
         return Data(": \(clean)\n\n".utf8)
     }
 
@@ -502,6 +547,32 @@ public enum GatewayAPI {
         else { return body }
         json["model"] = model
         return (try? JSONSerialization.data(withJSONObject: json)) ?? body
+    }
+
+    /// The same rewrite across one SSE frame's `data:` payloads.
+    ///
+    /// Line by line rather than over the whole frame: a frame may carry several payloads and
+    /// a terminal `[DONE]`, and anything that is not a JSON object with a `model` — the
+    /// sentinel, a comment, an event line — is passed through exactly as it arrived.
+    public static func rewritingModel(inFrame frame: Data, to model: String) -> Data {
+        let text = String(decoding: frame, as: UTF8.self)
+        let rewritten = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                guard line.hasPrefix("data:") else { return String(line) }
+                var payload = line.dropFirst("data:".count)
+                let spaced = payload.hasPrefix(" ")
+                if spaced { payload = payload.dropFirst() }
+                guard payload != "[DONE]",
+                      var json = (try? JSONSerialization.jsonObject(with: Data(payload.utf8)))
+                        as? [String: Any],
+                      json["model"] != nil
+                else { return String(line) }
+                json["model"] = model
+                guard let encoded = try? JSONSerialization.data(withJSONObject: json)
+                else { return String(line) }
+                return "data:\(spaced ? " " : "")\(String(decoding: encoded, as: UTF8.self))"
+            }
+        return Data(rewritten.joined(separator: "\n").utf8)
     }
 
     /// Whether a chat-completions request asked for a stream.

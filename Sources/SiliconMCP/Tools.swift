@@ -105,13 +105,29 @@ enum Tools {
                 The single best model this Mac can run, with the quantization, context length \
                 and settings to use, plus estimated tokens/sec and a full memory breakdown. \
                 This is the right tool for "what should I run?" — it accounts for the machine's \
-                actual memory, bandwidth and current load.
+                actual memory, bandwidth and current load. Describe the work in `task` and it \
+                judges what that job needs — vision, tool calling, long context, speed — and \
+                returns the best three for it with a reason each, instead of the strongest \
+                model in general.
                 """,
             properties: [
                 "category": property(
                     "string",
                     "Optional filter: General, Coding, Reasoning, Vision, Small & Fast, Embeddings."
-                )
+                ),
+                "task": property(
+                    "string",
+                    """
+                    Optional. What the model will actually be used for, in the user's own \
+                    words — "reviewing Rust pull requests", "reading scanned invoices", \
+                    "a Japanese support bot". A sentence or two beats a keyword; anything \
+                    past about 4 KB is trimmed before it is judged. Asking Jev costs the \
+                    owner money per distinct description, so send a task when the job is \
+                    known and leave it out otherwise. Needs the model recommendation \
+                    feature enabled in Settings → TypeSafe (Jev); without it the answer is \
+                    the ordinary hardware-fit pick.
+                    """
+                ),
             ],
             required: []
         ),
@@ -233,11 +249,24 @@ enum Tools {
                 {"type":"choice","instructions":"…","criteria":{"label":"when it applies",…}} \
                 picks a label; {"type":"score","instructions":"…","criteria":["level 0","level \
                 1",…]} rates on an ordered rubric and returns the expected level. Ask several \
-                questions in one call. By default the model loaded on this Mac answers (one \
-                forward pass per question, nothing leaves the machine, uncalibrated \
-                probabilities); with a TypeSafe key in Settings, provider "typesafe" asks Jev \
-                (calibrated, ~$0.0003 per call). Use it for routing, gating, scoring and \
-                classification inside a loop, not for anything that needs generated text.
+                questions in one call. Every question needs instructions saying what is being \
+                judged. By default ("auto") the best free local lane answers first — Laya on \
+                this Mac if it is installed, then a swarm node, then the model loaded here, \
+                one forward pass per question, nothing leaves the machine for that half, \
+                uncalibrated probabilities — and then only the answers it was unsure of are \
+                put to Jev, which returns `provider: "local+typesafe"` and a `sources` map \
+                saying which lane answered each question. Where "unsure" sits is set by \
+                calibrate_decisions; with nothing free installed, or Decision calibration \
+                off, "auto" is a single lane as before. provider "local" never pays and never \
+                escalates, choosing from that same free order; "laya" or "node" names one of \
+                those lanes outright, skipping the order; "typesafe" asks Jev alone \
+                (calibrated, ~$0.0003 per call). The Jev lane is \
+                governed by Settings → TypeSafe (Jev) on the Mac: the master switch, the \
+                decide-tool switch, the pinned model version, the state size limit and the \
+                monthly budget all apply, and every call is recorded \
+                in that ledger. If it refuses, call jev_status to see which of those said no. \
+                Use it for routing, gating, scoring and classification inside a loop, not for \
+                anything that needs generated text.
                 """,
             properties: [
                 "state": .object([
@@ -253,10 +282,56 @@ enum Tools {
                         + "instructions?, criteria?} as described above."
                     ),
                 ]),
-                "provider": property("string", "auto (default), local, or typesafe."),
-                "model": property("string", "TypeSafe model alias, default jev-latest. Ignored locally."),
+                "provider": property(
+                    "string", "auto (default), local, laya, node, or typesafe."
+                ),
             ],
             required: ["state", "questions"]
+        ),
+        Tool(
+            name: "jev_status",
+            description: """
+                How the TypeSafe (Jev) integration on this Mac is set up and what it has cost \
+                this month: the master switch, the pinned model version, whether a key is \
+                stored, the per-feature switches with what each one would do, the monthly \
+                budget and the running spend. Read-only, costs nothing, and never returns the \
+                API key — it stays in this Mac's Keychain. Call it when decide with provider \
+                "typesafe" refuses, to see which switch said no.
+                """,
+            properties: [:], required: []
+        ),
+        Tool(
+            name: "calibrate_decisions",
+            description: """
+                Measure how often a local decision lane decides the way Jev does, and retune \
+                when `decide` with provider "auto" escalates to Jev. Runs a fixed set of about \
+                \(ControlAPI.JevCalibration.builtInCaseCount) short cases — routing, support \
+                triage, safety, sentiment — through both lanes, then reports agreement per \
+                question kind, a reliability table of local confidence against agreement, and \
+                the two floors "auto" will use from now on: the confidence below which a \
+                choice or score is sent to Jev, and the middle band in which a noul is. Takes \
+                an optional lane: "local" (the model loaded here, one token deep — the \
+                default), "laya" (Laya on this Mac), or "node" (Laya on a swarm node); never \
+                "typesafe", which is the reference a calibration measures against, not a lane \
+                it can measure. \
+                COSTS MONEY: about \(ControlAPI.JevCalibration.estimatedCents()) cent(s) of \
+                Jev tokens, plus a minute or two of whichever lane is being measured, so ask \
+                the user before running it. Needs that lane ready — a model loaded for \
+                "local", Laya installed for "laya", a reachable node for "node" — and \
+                Decision calibration switched on in Settings → TypeSafe (Jev). The result is \
+                kept and reused only while that same lane is the one running — a threshold \
+                found on one says nothing about another. \
+                Jev is the reference here, not ground truth: agreement means the two lanes \
+                landed in the same place, which they can do while both being wrong.
+                """,
+            properties: [
+                "lane": property(
+                    "string",
+                    "Which lane to calibrate: \"local\" (default), \"laya\", or \"node\". "
+                    + "Never \"typesafe\"."
+                ),
+            ],
+            required: []
         ),
         Tool(
             name: "run_benchmark",
@@ -289,7 +364,8 @@ enum Tools {
             properties: [
                 "prompt": property("string", "Not used for planning, but accepted so the same "
                     + "arguments work for generate_image."),
-                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b."),
+                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b. "
+                    + "\"auto\" plans the model the router would pick for this prompt."),
                 "width": property("number", "Image width in pixels."),
                 "height": property("number", "Image height in pixels."),
                 "steps": property("number", "Denoising steps."),
@@ -305,11 +381,15 @@ enum Tools {
                 the estimate is pessimistic on some models — and reports a warning in the \
                 response instead of refusing beforehand. Use plan_image first if you want to \
                 know the risk before spending the time. The first use of a model downloads its \
-                weights, which can take several minutes.
+                weights, which can take several minutes. Pass model_id "auto" (or omit it) to \
+                let the app pick: with TypeSafe's media routing turned on it reads the prompt \
+                and chooses the model and the denoising steps, and otherwise it falls back to \
+                the best model this Mac can comfortably run.
                 """,
             properties: [
                 "prompt": property("string", "What to draw."),
-                "model_id": property("string", "Optional. Defaults to the best model that fits."),
+                "model_id": property("string", "Optional. \"auto\" asks the app to choose from "
+                    + "the prompt; omitted or unset defaults to the best model that fits."),
                 "width": property("number", "Image width in pixels."),
                 "height": property("number", "Image height in pixels."),
                 "steps": property("number", "Denoising steps. Distilled models need very few."),
@@ -391,14 +471,18 @@ enum Tools {
                 and hailuo-h3 through Phosphene may take several minutes or longer for a \
                 chained clip. Call list_video_models first for availability and supported \
                 lengths. The finished clip also appears in the app's Video tab under Recent \
-                clips.
+                clips. Pass model_id "auto" (or omit it) to let the app pick: with TypeSafe's \
+                media routing turned on it reads the prompt once and chooses the model, the \
+                clip length and the sampling, returns what it chose and why in `detail`, and \
+                refuses rather than sending a prompt to a lane that would reject it.
                 """,
             properties: [
                 "prompt": property("string", "What happens in the clip."),
                 "model_id": property("string", "Optional: wan22-ti2v-5b (cinematic, ~10 min), "
                     + "ltx2-distilled (fast, 1-3 min), ltx23-uncensored (LTX-2.3 merge, "
                     + "adult content allowed, audio, 2-5 min) or hailuo-h3 (local Phosphene, "
-                    + "chained 10/15 s clips). Defaults to the app's selection."),
+                    + "chained 10/15 s clips). \"auto\" reads the prompt and picks one, along "
+                    + "with the clip length. Defaults to the app's selection."),
                 "seconds": .object([
                     "type": .string("number"),
                     "description": .string(
@@ -432,12 +516,13 @@ enum Tools {
         ),
         Tool(
             name: "queue_videos",
-            description: "Persist video prompts and return immediately. Generate 1–20 variations per prompt with distinct saved seeds, up to 200 unfinished clips, one render at a time. Clips and manifests go in batch folders. Leave the app open and the Mac powered with its lid open. A relaunch reconnects to saved jobs. Inspect video_queue before resubmitting after an uncertain response. Call list_video_models for supported controls.",
+            description: "Persist video prompts and return immediately. Generate 1–20 variations per prompt with distinct saved seeds, up to 200 unfinished clips, one render at a time. Clips and manifests go in batch folders. Leave the app open and the Mac powered with its lid open. A relaunch reconnects to saved jobs. Inspect video_queue before resubmitting after an uncertain response. Call list_video_models for supported controls. Pass model_id \"auto\" (or omit it) to let the app read the prompts and choose the model, the clip length and the sampling for the whole batch; each queued clip records what it decided.",
             properties: [
                 "prompts": .object(["type": .string("array"), "minItems": .number(1), "maxItems": .number(200), "items": .object(["type": .string("string"), "minLength": .number(1), "maxLength": .number(12000)]), "description": .string("One prompt per shot, in scene order.")]),
                 "title": property("string", "Optional batch name."),
                 "variations": .object(["type": .string("integer"), "minimum": .number(1), "maximum": .number(20), "description": .string("Generations per prompt; default 1.")]),
-                "model_id": property("string", "Optional model ID; defaults to the app selection."),
+                "model_id": property("string", "Optional model ID. \"auto\" reads the prompts "
+                    + "and picks one, along with the clip length; omitted defaults to the app selection."),
                 "seconds": property("integer", "Supported clip length for the model, up to 15 seconds."),
                 "resolution": property("string", "480p, 720p or 1080p. Higher sizes may need more memory."),
                 "seed": .object(["type": .string("integer"), "minimum": .number(0), "maximum": .number(4294967295), "description": .string("Optional base seed, incremented per clip. Omit for random.")]),
@@ -474,17 +559,36 @@ enum Tools {
             return try await describe(await client.get("/metrics") as ControlAPI.Metrics)
 
         case "get_status":
-            return try await describe(await client.get("/status") as ControlAPI.Status)
+            var status = try await describe(await client.get("/status") as ControlAPI.Status)
+            // Appended rather than folded into `ControlAPI.Status`, which the phone apps are
+            // generated from and which has nothing to do with Jev — and read through a short
+            // cache, so a tool an agent calls in a loop does not pay a second round trip
+            // every time. A Mac that has never calibrated answers 404, which is remembered
+            // too rather than re-asked.
+            if let calibration = await CalibrationCache.shared.current(from: client) {
+                status += "\n" + cascadeLine(calibration)
+            }
+            return status
 
         case "recommend_model":
+            let category = arguments["category"]?.stringValue
+            // A task is the paid, full-control half of this route and goes in a body: a job
+            // description is the user's prose about their own work, and a URL is the part
+            // of a request that survives in histories and logs.
+            if let task = arguments["task"]?.stringValue,
+               !task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let ranked: ControlAPI.CatalogModel = try await client.post(
+                    "/recommend", ControlAPI.RecommendRequest(category: category, task: task)
+                )
+                return describeRecommendation(ranked)
+            }
             var path = "/recommend"
-            if let category = arguments["category"]?.stringValue,
-               let escaped = category.addingPercentEncoding(
-                   withAllowedCharacters: .urlQueryAllowed
-               ) {
+            if let category, let escaped = category.addingPercentEncoding(
+                withAllowedCharacters: Tools.queryValueCharacters
+            ) {
                 path += "?category=\(escaped)"
             }
-            return try await describe(await client.get(path) as ControlAPI.CatalogModel)
+            return describeRecommendation(try await client.get(path) as ControlAPI.CatalogModel)
 
         case "list_models":
             var path = "/catalog?onlyRunnable="
@@ -760,10 +864,36 @@ enum Tools {
                 maxTokens: arguments["max_tokens"]?.intValue
             ))
             let reasoning = response.reasoning ?? ""
-            let footer = String(
-                format: "\n\n---\n%d tokens at %.1f tok/s (local)",
-                response.generatedTokens, response.tokensPerSecond
-            )
+            // Jev's verdict, when answer verification is on, under the rule rather than in
+            // the reply: it is a note *about* the answer, not part of it.
+            //
+            // The first line has to be right about who wrote the text above it. Normally
+            // that is the model on this Mac and the line is its token count. When an
+            // escalation replaced the answer, saying "(local)" would be false and the local
+            // run's throughput would describe text that is no longer here — so both are
+            // dropped and the line names the model that did answer.
+            var footer: String
+            if let escalated = response.verification?.escalatedTo {
+                footer = "\n\n---\nAnswered by \(escalated). Jev flagged the local model's "
+                    + "reply and it was re-run there."
+            } else {
+                footer = String(
+                    format: "\n\n---\n%d tokens at %.1f tok/s (local)",
+                    response.generatedTokens, response.tokensPerSecond
+                )
+            }
+            if let verification = response.verification {
+                let reasons = verification.reasons.joined(separator: " ")
+                switch verification.verdict {
+                case "escalate" where verification.escalatedTo != nil:
+                    if !reasons.isEmpty { footer += "\n" + reasons }
+                case "escalate", "annotate":
+                    footer += "\nJev flagged this answer: " + reasons
+                default:
+                    break
+                }
+                if let suggestion = verification.suggestion { footer += "\n" + suggestion }
+            }
 
             // A reasoning model can spend its entire token budget thinking and never reach an
             // answer. Returning an empty string looks like a broken tool, so say what happened
@@ -796,7 +926,9 @@ enum Tools {
             // going through bytes once; a malformed question fails right here, by name.
             var envelope: [String: JSONValue] = ["state": state, "questions": .object(questions)]
             if let provider = arguments["provider"]?.stringValue { envelope["provider"] = .string(provider) }
-            if let model = arguments["model"]?.stringValue { envelope["model"] = .string(model) }
+            // No `model`: the local lane uses what is loaded and the Jev lane uses the
+            // version pinned in Settings, so accepting one here would be a promise this
+            // tool cannot keep.
             let request: ControlAPI.DecideRequest
             do {
                 request = try JSONDecoder().decode(
@@ -811,10 +943,31 @@ enum Tools {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let answers = String(decoding: try encoder.encode(response.answers), as: UTF8.self)
             let latency = response.latencyMS.map { String(format: "%.0f ms", $0) } ?? "-"
-            return answers + String(
+            var footer = String(
                 format: "\n\n---\n%@ · %@ · %d input tokens · %@",
                 response.provider ?? "unknown lane", response.model, response.usage.inputTokens, latency
             )
+            // Only the cascade sets this, and when it does, "which lane answered" is no
+            // longer one fact about the response — so it is spelled out per question.
+            if let sources = response.sources, !sources.isEmpty {
+                footer += "\n" + sources.sorted { $0.key < $1.key }
+                    .map { "\($0.key): \($0.value)" }.joined(separator: " · ")
+            }
+            return answers + footer
+
+        case "jev_status":
+            return describe(try await client.get("/jev") as ControlAPI.JevStatus)
+
+        case "calibrate_decisions":
+            // No `lane` is still the old route, unchanged: `POST /decisions/calibrate` with
+            // an absent lane is `POST /jev/calibrate` in every respect but the path.
+            let lane = arguments["lane"]?.stringValue
+            let result: ControlAPI.JevCalibration = try await client.post(
+                "/decisions/calibrate", ControlAPI.DecisionCalibrateRequest(lane: lane)
+            )
+            // What get_status is holding is now last week's answer.
+            await CalibrationCache.shared.forget()
+            return describe(result)
 
         default:
             throw ToolError.unknown(name)
@@ -936,6 +1089,155 @@ enum Tools {
             return String(format: "%.1f %@", Double(value) / scale, suffix)
         }
         return "\(value) B"
+    }
+
+    /// The one line `get_status` appends: what `decide` with provider "auto" will send to
+    /// Jev, and what measured it.
+    ///
+    /// Written for an agent deciding whether a local answer is worth trusting, so it leads
+    /// with the floors *in effect*. A calibration measured against a model that is no longer
+    /// loaded is not a description of what will happen now, and saying its numbers plainly
+    /// would be a quiet lie — so that case says so first and gives the defaults that are
+    /// actually running.
+    static func cascadeLine(_ calibration: ControlAPI.JevCalibration) -> String {
+        let applies = calibration.appliesToLoadedModel ?? true
+        let floors = calibration.floorsInEffect ?? calibration.floors
+        let head = String(
+            format: "Decision cascade: choices under %.2f confidence, scores under %.2f, "
+            + "and nouls between %.2f and %.2f are escalated to Jev.",
+            floors.choiceConfidence, floors.scoreConfidence, floors.noulLow, floors.noulHigh
+        )
+        guard applies else {
+            return head + String(
+                format: " The %@ calibration of %@ is NOT in effect — it was measured on %@, "
+                + "and %@ is loaded — so those are the defaults. Run calibrate_decisions "
+                + "against the loaded model to replace them.",
+                calibration.date.prefix(10).description, calibration.modelName,
+                calibration.modelName, calibration.loadedModelName ?? "another model"
+            )
+        }
+        return head + String(
+            format: " Calibrated %@ against %@: %d cases, %d%% agreement, %d%% of answers "
+            + "escalated.%@",
+            calibration.date.prefix(10).description, calibration.modelName,
+            calibration.cases,
+            Int((calibration.overallAgreementRate * 100).rounded()),
+            Int((calibration.escalationRate * 100).rounded()),
+            calibration.choiceFloorMeasured && calibration.scoreFloorMeasured
+                && calibration.noulBandMeasured
+                ? "" : " Some floors fell back to the defaults."
+        )
+    }
+
+    /// A calibration run as a page an agent can read: what it measured, what it changed, and
+    /// the caveat that goes with it.
+    static func describe(_ calibration: ControlAPI.JevCalibration) -> String {
+        var lines = [
+            "Calibrated \(calibration.modelName) against \(calibration.jevModel) "
+            + "on \(calibration.date).",
+            "\(calibration.cases) cases (\(calibration.builtInCases) built in, "
+            + "\(calibration.userCases) yours) · \(calibration.comparisons) answers compared "
+            + String(format: "· %d%% agreement overall", Int((calibration.overallAgreementRate * 100).rounded())),
+            String(
+                format: "Cost: %d input tokens, about $%.4f.",
+                calibration.inputTokens, calibration.estimatedUSD
+            ),
+            "",
+            "Agreement by question kind:",
+        ]
+        for row in calibration.agreement where row.compared > 0 {
+            lines.append(String(
+                format: "- %@: %d of %d (%d%%)", row.kind, row.agreed, row.compared,
+                Int((row.rate * 100).rounded())
+            ))
+        }
+        lines.append("")
+        lines.append(cascadeLine(calibration))
+        lines.append(String(
+            format: "Under these floors, %d%% of this set would have gone to Jev.",
+            Int((calibration.escalationRate * 100).rounded())
+        ))
+        if !calibration.choiceFloorMeasured {
+            lines.append("  The choice floor is the default; the search found none better.")
+        }
+        if !calibration.scoreFloorMeasured {
+            lines.append("  The score floor is the default; the search found none better.")
+        }
+        if !calibration.noulBandMeasured {
+            lines.append("  The noul band is the default; there were too few disagreements to place one.")
+        }
+        if !calibration.bins.isEmpty {
+            lines.append("")
+            lines.append("Local confidence against agreement:")
+            for bin in calibration.bins {
+                lines.append(String(
+                    format: "- %.1f–%.1f: %d answers, %d%% agreed (mean confidence %.2f)",
+                    bin.lower, bin.upper, bin.count,
+                    Int((bin.agreementRate * 100).rounded()), bin.meanConfidence
+                ))
+            }
+        }
+        if !calibration.notes.isEmpty {
+            lines.append("")
+            lines.append("Notes:")
+            lines.append(contentsOf: calibration.notes.map { "- \($0)" })
+        }
+        lines.append("")
+        lines.append(
+            "Jev is the reference, not ground truth: an agreement rate says the two lanes "
+            + "landed in the same place, not that either was right. These floors apply only "
+            + "while \(calibration.modelName) is the loaded model."
+        )
+        return lines.joined(separator: "\n")
+    }
+
+    /// The same facts as `GET /jev`, as a page an agent can read. Deliberately not the raw
+    /// JSON: the useful answer to "why did decide refuse?" is one of these lines.
+    static func describe(_ status: ControlAPI.JevStatus) -> String {
+        var lines = [
+            "TypeSafe (Jev): \(status.enabled ? "on" : "off") · model \(status.model) · "
+            + "API key \(status.keySet ? "stored on this Mac" : "not set")",
+        ]
+        let spend = String(format: "$%.4f", status.estimatedUSD)
+        var spendLine = "\(status.month): \(status.calls) calls · "
+            + "\(status.inputTokens) input tokens · about \(spend)"
+        if let budget = status.monthlyBudgetUSD {
+            spendLine += String(
+                format: " of a $%.2f cap (%@ left)", budget,
+                String(format: "$%.4f", max(0, status.budgetRemainingUSD ?? 0))
+            )
+        } else {
+            spendLine += " (no budget cap set)"
+        }
+        lines.append(spendLine)
+        if !status.models.isEmpty {
+            lines.append("Answered by: " + status.models.sorted { $0.key < $1.key }
+                .map { "\($0.key) ×\($0.value)" }.joined(separator: ", "))
+        }
+        lines.append("")
+        lines.append("Features:")
+        for feature in status.features {
+            let state = feature.available
+                ? "available"
+                : (feature.enabled ? "on, but not available" : "off")
+            lines.append(
+                "- \(feature.displayName) (\(feature.id)): \(state)"
+                + (feature.built ? "" : " — not built yet")
+            )
+            lines.append("  \(feature.summary)")
+            if feature.calls > 0 {
+                lines.append(String(
+                    format: "  %d calls · %d input tokens · about $%.4f this month",
+                    feature.calls, feature.inputTokens, feature.estimatedUSD
+                ))
+            }
+        }
+        lines.append("")
+        lines.append(
+            "Only the state a feature needs is sent. The key stays in this Mac's Keychain and "
+            + "is never returned by this API. Change any of this in Settings → TypeSafe (Jev)."
+        )
+        return lines.joined(separator: "\n")
     }
 
     static func describe(_ profile: ControlAPI.Profile) -> String {
@@ -1091,6 +1393,38 @@ enum Tools {
         return lines.joined(separator: "\n")
     }
 
+    /// Everything a query-string value may carry unescaped.
+    ///
+    /// `.urlQueryAllowed` is the set legal in a whole query *string*, which includes `&`,
+    /// `+` and `=` — so a task description containing one would arrive at the Mac as two
+    /// parameters, or with its pluses read as spaces. Subtracted here rather than hoped
+    /// about, because the value being escaped is a sentence a person typed.
+    static let queryValueCharacters: CharacterSet = {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&+=?#")
+        return allowed
+    }()
+
+    /// The answer to `recommend_model`. With a task, the top three and why each one is
+    /// there, then the winner in full; without one, exactly what it printed before.
+    static func describeRecommendation(_ model: ControlAPI.CatalogModel) -> String {
+        guard let reason = model.reason else { return describe(model) }
+        var lines = ["Best for this job:", "1. \(model.name) [\(model.id)] — \(reason)"]
+        for (offset, alternative) in (model.alternatives ?? []).enumerated() {
+            lines.append(
+                "\(offset + 2). \(alternative.name) [\(alternative.id)]"
+                + (alternative.reason.map { " — \($0)" } ?? "")
+            )
+        }
+        // Why this list is this list, when that is not simply "Jev said so". An agent that
+        // reads "ranked by how well they run here" knows not to quote the order as a
+        // judgment about the models.
+        if let note = model.note { lines.append("Note: \(note)") }
+        lines.append("")
+        lines.append(describe(model))
+        return lines.joined(separator: "\n")
+    }
+
     static func describe(_ model: ControlAPI.CatalogModel) -> String {
         var lines = [
             "\(model.name) — \(model.author), \(model.license)",
@@ -1143,5 +1477,34 @@ enum Tools {
                 + ", \(model.category)\n  \(fit)"
                 + (model.runtimeNote.map { "\n  \($0)" } ?? "")
         }.joined(separator: "\n")
+    }
+}
+
+/// `GET /jev/calibration`, remembered for a minute.
+///
+/// `get_status` is one of the cheapest tools here and agents call it in loops; adding an
+/// unconditional second HTTP request to it would make "what is loaded?" twice as expensive
+/// for a line most callers never read. A minute is long enough to cover a burst and short
+/// enough that a calibration run started elsewhere shows up on its own. A 404 — the Mac has
+/// never calibrated — is cached just as firmly, because that is the common case and the one
+/// that would otherwise re-ask forever.
+actor CalibrationCache {
+    static let shared = CalibrationCache()
+
+    static let lifetime: TimeInterval = 60
+
+    private var value: ControlAPI.JevCalibration?
+    private var readAt: Date?
+
+    func current(from client: ControlClient) async -> ControlAPI.JevCalibration? {
+        if let readAt, Date().timeIntervalSince(readAt) < Self.lifetime { return value }
+        value = try? await client.get("/jev/calibration") as ControlAPI.JevCalibration
+        readAt = Date()
+        return value
+    }
+
+    func forget() {
+        value = nil
+        readAt = nil
     }
 }

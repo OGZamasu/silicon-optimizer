@@ -39,6 +39,7 @@ public struct MainWindow: View {
             case .video: VideoView()
             case .swarm: SwarmView()
             case .cloud: CloudView()
+            case .decisions: DecisionsView()
             case .settings: SettingsView()
             }
         }

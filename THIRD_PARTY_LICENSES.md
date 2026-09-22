@@ -41,3 +41,20 @@ Its own content check runs as shipped.
 
 Its face model (`inswapper_128`) is downloaded by the project's own pre-check, from the
 project's own release, and carries the InsightFace non-commercial research licence.
+
+## laya-mlx and the Laya decision models
+
+The local decision lane (**Settings → Decisions**) is optional and is downloaded on request,
+into the model library you configure — nothing ships in this app's bundle but the small
+driver script it runs.
+
+- **laya-mlx** (`laya-mlx==0.1.0`), the MLX runtime — Apache-2.0.
+  <https://github.com/mizorewww/laya-mlx>
+- **Laya** decision model weights, © Convai Innovations — Apache-2.0.
+  <https://github.com/NandhaKishorM/laya>
+  Fetched as `aac6fef/laya-mlx`, `aac6fef/laya-multilingual-mlx` or
+  `aac6fef/laya-typed-decisions-mlx`, each pinned to an exact commit.
+
+The two halves share a licence and have different rightsholders. Each repository ships its
+own `NOTICE`, which is fetched alongside its weights and kept beside them, as Apache-2.0
+§4(d) requires; both attributions are shown on the lane's row in Settings.

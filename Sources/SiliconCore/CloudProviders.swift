@@ -185,16 +185,24 @@ public struct CloudModel: Sendable, Equatable, Identifiable, Codable {
     /// Token Harbor put no slash in their ids, and a 400-model list without a maker
     /// filter is a wall.
     public var owner: String?
+    /// What a million input tokens costs, when the provider publishes a price in its own
+    /// listing. OpenRouter does; the others do not, and nil means exactly that — nobody
+    /// said — rather than "free", which `isFree` answers from the id.
+    ///
+    /// Read rather than tabulated, for the same reason the model list is: a price kept here
+    /// would be wrong the first time a provider changed one.
+    public var pricePerMillionInputUSD: Double?
 
     public init(
         id: String, displayName: String, provider: CloudProvider, contextWindow: Int? = nil,
-        owner: String? = nil
+        owner: String? = nil, pricePerMillionInputUSD: Double? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.provider = provider
         self.contextWindow = contextWindow
         self.owner = owner
+        self.pricePerMillionInputUSD = pricePerMillionInputUSD
     }
 
     /// The gateway id this model answers to — `cloud/<provider>/<model>`. The model half may

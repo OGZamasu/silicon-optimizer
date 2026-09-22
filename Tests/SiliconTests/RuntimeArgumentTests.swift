@@ -262,9 +262,16 @@ struct DiagnosisTests {
                 "got: \(message)")
     }
 
-    @Test func unknownFailuresFallBackToTheLogTail() {
-        let message = LlamaCppRuntime.diagnose(log: "something entirely unexpected happened")
-        #expect(message.contains("something entirely unexpected"))
+    /// The fallback used to be the last eight lines of the log, which is how a phone came
+    /// to show a wall of text cut off mid-sentence. It names how the load ended instead —
+    /// and when nothing is known about the ending, it says that rather than pretending a
+    /// slab of log is an explanation. The log is still carried, on `LoadFailure.detail`.
+    @Test func unknownFailuresNameHowTheLoadEnded() {
+        let log = "something entirely unexpected happened"
+        #expect(LlamaCppRuntime.diagnose(
+            log: log, ending: .processEnded(ProcessTermination(exitStatus: 1, ranFor: 8))
+        ) == "llama-server stopped on its own after 8 seconds (exit 1).")
+        #expect(LlamaCppRuntime.diagnose(log: log) == "llama-server stopped without saying why.")
     }
 }
 

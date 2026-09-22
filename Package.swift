@@ -40,9 +40,15 @@ let package = Package(
         ),
         .testTarget(name: "SiliconTests", dependencies: [
             "SiliconCore", "SiliconHardware", "SiliconPlanner", "SiliconCatalog", "SiliconRuntime",
-            "SiliconControl", "SiliconUI",
+            // The MCP bridge is here for one reason: the tool-selection tests derive their
+            // roster from the real `Tools.all`, so a description rewritten to something a
+            // roster line cannot be built from fails a test instead of quietly degrading a
+            // suggestion nobody is looking at.
+            "SiliconControl", "SiliconUI", "SiliconMCP",
         ]),
-        .testTarget(name: "SiliconMCPTests", dependencies: ["SiliconMCP"]),
+        // SiliconControl for the wire types the tools print; the MCP target already
+        // links it, and naming it here keeps the import from relying on that.
+        .testTarget(name: "SiliconMCPTests", dependencies: ["SiliconMCP", "SiliconControl"]),
     ],
     swiftLanguageModes: [.v6]
 )

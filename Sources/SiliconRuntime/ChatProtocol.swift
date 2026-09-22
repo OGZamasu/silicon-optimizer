@@ -1,4 +1,5 @@
 import Foundation
+import SiliconControl
 import SiliconCore
 
 public struct ChatMessage: Sendable, Codable, Hashable, Identifiable {
@@ -13,17 +14,25 @@ public struct ChatMessage: Sendable, Codable, Hashable, Identifiable {
     public var images: [String]
     /// Separated reasoning output, where the model emits it distinctly from the answer.
     public var reasoning: String?
+    /// What Jev made of this answer, when answer verification is on and it was verified.
+    ///
+    /// Stored on the message because a verdict can land after the stream that carried the
+    /// message has closed: a phone that reconnects, or opens the thread tomorrow, reads it
+    /// from the transcript rather than having had to be listening at the right moment.
+    public var verification: ControlAPI.ChatVerdict?
     public var createdAt: Date
 
     public init(
         id: UUID = UUID(), role: Role, content: String,
-        images: [String] = [], reasoning: String? = nil, createdAt: Date = Date()
+        images: [String] = [], reasoning: String? = nil,
+        verification: ControlAPI.ChatVerdict? = nil, createdAt: Date = Date()
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.images = images
         self.reasoning = reasoning
+        self.verification = verification
         self.createdAt = createdAt
     }
 }

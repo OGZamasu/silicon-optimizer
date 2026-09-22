@@ -368,3 +368,15 @@ struct NodeImageRoutingTests {
         #expect(urls[1].absoluteString == "http://100.64.0.9:8081/b.png")
     }
 }
+
+
+/// The card footnote names the models now — "3 models" told nobody anything.
+@Suite("Offer summary")
+struct OfferSummaryTests {
+    @Test func namesJoinAndLongListsCap() {
+        #expect(SwarmView.offerSummary(["A", "B"]) == "A · B")
+        #expect(SwarmView.offerSummary(["A", "B", "C", "D"]) == "A · B · C · D")
+        #expect(SwarmView.offerSummary(["A", "B", "C", "D", "E", "F"])
+                == "A · B · C · +3 more")
+    }
+}

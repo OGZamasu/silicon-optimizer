@@ -24,6 +24,49 @@ extension ControlAPI {
 
     // MARK: - Pairing
 
+    /// The body of `POST /buddy/invitations` — the Mac asking itself for the same code
+    /// BuddyCenter's "Pair a device" would put on screen.
+    ///
+    /// Only the scope, because nothing else about a code is the caller's to choose: where
+    /// it points is wherever the tailnet listener actually is, and how long it lives is
+    /// `BuddyPairing.codeLifetime`. The field is optional so a caller with nothing to say
+    /// can send `{}`, or no body at all, and get what the Settings window offers by default.
+    public struct BuddyInvitationRequest: Codable, Sendable, Equatable {
+        /// "full" or "chat". Absent means full control.
+        public var scope: String?
+
+        public init(scope: String? = nil) { self.scope = scope }
+    }
+
+    /// A code the owner would otherwise be reading aloud off the Settings window, with the
+    /// two things a device needs in order to spend it: where to dial, and when it stops
+    /// working.
+    ///
+    /// This response is the only place the code exists outside the Mac's own memory. It is
+    /// never logged and never handed out twice — a second `GET` for it would turn a code
+    /// with a five-minute life into one that lasts as long as the process does.
+    public struct BuddyInvitationResponse: Codable, Sendable, Equatable {
+        public var code: String
+        /// The tailnet listener's address and port, never loopback's: loopback takes a
+        /// fresh ephemeral port every launch, so a device sent there would lose this Mac
+        /// the next time it restarted.
+        public var host: String
+        public var port: Int
+        public var expiresAt: String
+        /// "full" or "chat" — what `POST /buddy/pair` will grant whoever spends this code.
+        public var scope: String
+
+        public init(
+            code: String, host: String, port: Int, expiresAt: String, scope: String = "full"
+        ) {
+            self.code = code
+            self.host = host
+            self.port = port
+            self.expiresAt = expiresAt
+            self.scope = scope
+        }
+    }
+
     /// The body of the one unauthenticated POST on this server. A device offers the code the
     /// owner is looking at and says what it is; it gets back a credential of its own.
     public struct BuddyPairRequest: Codable, Sendable, Equatable {
@@ -75,10 +118,14 @@ extension ControlAPI {
         public var scope: String
         public var pairedAt: String
         public var lastSeen: String?
+        /// True when this device was paired before the tailnet listener took a fixed port
+        /// and therefore holds an address that no longer answers. Nothing is wrong with the
+        /// token — the device simply cannot find this Mac until it is paired again.
+        public var needsRepair: Bool
 
         public init(
             id: String, name: String, platform: String, scope: String = "full",
-            pairedAt: String, lastSeen: String? = nil
+            pairedAt: String, lastSeen: String? = nil, needsRepair: Bool = false
         ) {
             self.id = id
             self.name = name
@@ -86,16 +133,66 @@ extension ControlAPI {
             self.scope = scope
             self.pairedAt = pairedAt
             self.lastSeen = lastSeen
+            self.needsRepair = needsRepair
         }
     }
 
     // MARK: - Streaming chat
 
     /// One frame of `POST /chat/stream`, named after the SSE event that carries it.
+    ///
+    /// **`finished` ends the reply.** A client may stop rendering there. `verdict` is an
+    /// optional extra frame that follows it when answer verification is on *and* Jev
+    /// answered quickly enough to catch the stream; otherwise the verdict arrives later on
+    /// `/events`, or on the message itself in `GET /conversations/{id}`. Any event name a
+    /// client does not recognise must be ignored rather than treated as an error — that is
+    /// what lets this contract grow without breaking the apps generated from it.
     public enum ChatStreamEvent: Sendable, Equatable {
         case token(String)
         case reasoning(String)
         case finished(ChatMetrics)
+        case verdict(ChatVerdict)
+    }
+
+    /// What Jev made of a finished answer.
+    ///
+    /// One shape for both places it appears — the `verification` field of a `/chat`
+    /// response and the `verdict` SSE frame — so a client parses it once.
+    public struct ChatVerdict: Codable, Sendable, Equatable, Hashable {
+        /// `accept`, `annotate` or `escalate`.
+        public var verdict: String
+        /// Plain sentences, already written for a reader. Empty on `accept`.
+        public var reasons: [String]
+        /// The gateway model that answered instead, when one did. Always nil on a stream:
+        /// the tokens are already on screen there, so a stream reports and suggests rather
+        /// than silently replacing what the reader has been watching arrive.
+        public var escalatedTo: String?
+        /// What to do about it, when nothing was done automatically — including the case
+        /// where there was nowhere to escalate to. A reason says what is wrong with the
+        /// answer; a suggestion says what the reader can do, and the two are kept apart so
+        /// a client can show one without the other.
+        public var suggestion: String?
+        /// Which conversation and which message this is about, when it is about one.
+        ///
+        /// Both nil for `POST /chat` and `POST /chat/stream`, which have no transcript to
+        /// point at. Set on `/conversations/{id}/messages`, and it is what makes the
+        /// `verdict` frame on `/events` usable: a verdict that arrives after the stream has
+        /// closed has to say which bubble it belongs to.
+        public var conversationID: String?
+        public var messageID: String?
+
+        public init(
+            verdict: String, reasons: [String] = [], escalatedTo: String? = nil,
+            suggestion: String? = nil, conversationID: String? = nil,
+            messageID: String? = nil
+        ) {
+            self.verdict = verdict
+            self.reasons = reasons
+            self.escalatedTo = escalatedTo
+            self.suggestion = suggestion
+            self.conversationID = conversationID
+            self.messageID = messageID
+        }
     }
 
     /// The payload of a `token` or `reasoning` event. An object rather than a bare string so
@@ -134,10 +231,16 @@ extension ControlAPI {
         public var bytesExpected: Int64
         public var bytesPerSecond: Double
         public var error: String?
+        /// What an unfinished transfer is doing, for the ones that have more than one thing
+        /// to do: a model the Mac keeps for the phone is fetched, then checked, and follows
+        /// the library when it moves (`ControlAPI.phoneModelStages`). Absent on the frame
+        /// that says it is done — and on the Mac's own model downloads, which have no stages.
+        public var stage: String?
 
         public init(
             id: String, name: String, fraction: Double, bytesReceived: Int64,
-            bytesExpected: Int64, bytesPerSecond: Double, error: String? = nil
+            bytesExpected: Int64, bytesPerSecond: Double, error: String? = nil,
+            stage: String? = nil
         ) {
             self.id = id
             self.name = name
@@ -146,6 +249,7 @@ extension ControlAPI {
             self.bytesExpected = bytesExpected
             self.bytesPerSecond = bytesPerSecond
             self.error = error
+            self.stage = stage
         }
     }
 
@@ -156,15 +260,30 @@ extension ControlAPI {
         public var status: String
         public var title: String
         public var fraction: Double?
+        /// What the renderer is doing right now — "Rendering", "video-denoise", "Texture
+        /// bake". Only ever set for the job the Mac is actually following; a clip waiting
+        /// its turn has a status and no stage.
+        public var stage: String?
+        /// Why it failed, in the words the queue would show. Present only on a terminal
+        /// failure, and the reason a phone no longer has to poll `GET /video/queue`
+        /// alongside the stream to have something true to say when a render breaks.
+        public var reason: String?
+        /// The finished file, fetchable at `GET /media/{mediaID}`. Set on the frame that
+        /// says the job is done, which is the frame a notification is written from.
+        public var mediaID: String?
 
         public init(
-            id: String, kind: String, status: String, title: String, fraction: Double? = nil
+            id: String, kind: String, status: String, title: String, fraction: Double? = nil,
+            stage: String? = nil, reason: String? = nil, mediaID: String? = nil
         ) {
             self.id = id
             self.kind = kind
             self.status = status
             self.title = title
             self.fraction = fraction
+            self.stage = stage
+            self.reason = reason
+            self.mediaID = mediaID
         }
     }
 
@@ -173,6 +292,23 @@ extension ControlAPI {
         public var at: String
 
         public init(at: String) { self.at = at }
+    }
+
+    /// The `resync` frame: this stream fell behind and frames were dropped to catch it up.
+    ///
+    /// A subscriber that reads slower than the Mac writes keeps the newest frames and loses
+    /// the oldest — a phone on a bad link wants now, not a queue of every percentage point
+    /// it missed. That trade is only honest if the phone is *told*, so this frame arrives
+    /// **exactly where the gap is**: after the last frame read before it and before
+    /// anything newer, one per gap. What to do about it is the same for every kind of
+    /// frame: fetch what you show again — `GET /status`, `GET /video/queue`, and each agent
+    /// session with the `since`/`epoch` from the last frame you read before this one. That
+    /// cursor sits just before the gap, so the answer holds exactly what was dropped.
+    public struct ResyncEvent: Codable, Sendable, Equatable {
+        /// How many frames were dropped since the last `resync` this stream was sent.
+        public var dropped: Int
+
+        public init(dropped: Int) { self.dropped = dropped }
     }
 
     // MARK: - Conversations
@@ -198,11 +334,24 @@ extension ControlAPI {
             public var role: String
             public var content: String
             public var createdAt: String
+            /// Stable within this Mac's transcript, and what a `verdict` event on `/events`
+            /// points at. Absent on a transcript written by a build before verification.
+            public var id: String?
+            /// What Jev made of this message, when it was verified. It is kept on the
+            /// message rather than only sent down the stream because the stream closes at
+            /// `finished` and a verdict may land after it — a phone that reconnects, or
+            /// opens the thread tomorrow, reads it here.
+            public var verification: ChatVerdict?
 
-            public init(role: String, content: String, createdAt: String) {
+            public init(
+                role: String, content: String, createdAt: String, id: String? = nil,
+                verification: ChatVerdict? = nil
+            ) {
                 self.role = role
                 self.content = content
                 self.createdAt = createdAt
+                self.id = id
+                self.verification = verification
             }
         }
 

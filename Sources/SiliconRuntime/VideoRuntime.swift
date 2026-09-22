@@ -7,6 +7,10 @@ import SiliconControl
 public struct VideoRequest: Sendable, Codable {
     public var entryID: String
     public var prompt: String
+    /// What to keep out of the shot. Optional, and absent from the node body entirely when
+    /// it is nil — an empty `negative_prompt` is not the same request as no field at all on
+    /// every pipeline, and this one never has to find out which.
+    public var negativePrompt: String?
     /// A still image to animate, for models that take one.
     public var image: URL?
     public var seconds: Int
@@ -23,10 +27,11 @@ public struct VideoRequest: Sendable, Codable {
         entryID: String, prompt: String, image: URL? = nil,
         seconds: Int = 5, resolution: String = "720p", h3ChainPrompts: [String]? = nil,
         outputDirectory: URL, seed: UInt32? = nil, h3Turbo: Bool? = nil,
-        clientID: String? = nil, h3Steps: Int? = nil
+        clientID: String? = nil, h3Steps: Int? = nil, negativePrompt: String? = nil
     ) {
         self.entryID = entryID
         self.prompt = prompt
+        self.negativePrompt = negativePrompt
         self.image = image
         self.seconds = seconds
         self.resolution = resolution
@@ -47,6 +52,9 @@ public struct VideoRequest: Sendable, Codable {
         var body: [String: Any] = [
             "model": entryID, "prompt": prompt, "seconds": seconds, "resolution": resolution,
         ]
+        if let negativePrompt, !negativePrompt.isEmpty {
+            body["negative_prompt"] = negativePrompt
+        }
         if let chainPrompts { body["h3_chain_prompts"] = chainPrompts }
         if let seed { body["seed"] = seed }
         if let h3Turbo { body["h3_turbo"] = h3Turbo }
