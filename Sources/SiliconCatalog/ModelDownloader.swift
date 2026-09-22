@@ -141,7 +141,7 @@ public actor ModelDownloader {
                 (file.path as NSString).lastPathComponent
             )
 
-            // Skip files already present and verified from an earlier run.
+            // Reuse only files whose bytes still match this repository's expected digest.
             if FileManager.default.fileExists(atPath: destination.path),
                try await isValid(destination, expecting: file) {
                 completedBytes += file.size
@@ -158,6 +158,7 @@ public actor ModelDownloader {
             written.append(destination)
         }
 
+        try Task.checkCancellation()
         return written
     }
 
@@ -212,6 +213,12 @@ public actor ModelDownloader {
         var existingBytes: Int64 = 0
         if let attributes = try? FileManager.default.attributesOfItem(atPath: partial.path) {
             existingBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        // A partial prefix from another file cannot be authenticated without a digest.
+        // Start a fresh transfer instead of combining that prefix with a 206 response.
+        if file.sha256 == nil && existingBytes > 0 {
+            try FileManager.default.removeItem(at: partial)
+            existingBytes = 0
         }
 
         // One builder for the Hub and for a test's stand-in, so the path a test sees is the
@@ -338,17 +345,23 @@ public actor ModelDownloader {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         guard size == file.size.rawValue else { return false }
-        // Size matching is enough to skip a re-download; a full re-hash of a 40 GB file on
-        // every launch would be worse than the risk it guards against.
-        return true
+        // A same-named, same-size file can belong to another repository. Installation is
+        // explicit and does not run on every app launch, so hash before reusing LFS bytes.
+        // Without a published digest there is no safe way to reuse local bytes here.
+        guard let expected = file.sha256 else { return false }
+        try Task.checkCancellation()
+        let actual = try sha256(of: url, checkingCancellation: true)
+        try Task.checkCancellation()
+        return actual == expected
     }
 
     /// Streams the file through SHA-256 so verification never loads it into memory.
-    nonisolated func sha256(of url: URL) throws -> String {
+    nonisolated func sha256(of url: URL, checkingCancellation: Bool = false) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
         while let chunk = try handle.read(upToCount: 8 * 1_048_576), !chunk.isEmpty {
+            if checkingCancellation { try Task.checkCancellation() }
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
