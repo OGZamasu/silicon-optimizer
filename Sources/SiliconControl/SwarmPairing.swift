@@ -222,6 +222,10 @@ public actor PairingServer {
     private var activeConnections = 0
     private static let maximumConnections = 16
     private var slot: Slot?
+    /// A denial must not occupy the only invitation slot while its requester is offline.
+    /// Retain just enough to tell late pollers they were denied, once.
+    private var deniedRequests: [(id: String, deniedAt: Date)] = []
+    private static let maximumDeniedRequests = 64
     private let requestLifetime: TimeInterval
 
     public init(hostName: String, requestLifetime: TimeInterval = 300) {
@@ -250,6 +254,7 @@ public actor PairingServer {
         listener?.cancel()
         listener = nil
         slot = nil
+        deniedRequests.removeAll()
     }
 
     // MARK: Owner-side controls
@@ -269,9 +274,12 @@ public actor PairingServer {
     }
 
     public func deny(_ id: String) {
-        guard var slot, slot.request.id == id, slot.state == .pending else { return }
-        slot.state = .denied
-        self.slot = slot
+        guard let slot, slot.request.id == id, slot.state == .pending else { return }
+        deniedRequests.append((id: id, deniedAt: Date()))
+        if deniedRequests.count > Self.maximumDeniedRequests {
+            deniedRequests.removeFirst()
+        }
+        self.slot = nil
     }
 
     /// True once an approved request has actually collected its payload — the sheet's
@@ -329,7 +337,15 @@ public actor PairingServer {
             )) ?? HTTPResponse.error(500, "encode")
 
         case ("GET", "/swarm/pair/status"):
-            guard let id = request.query["id"], let slot, slot.request.id == id else {
+            guard let id = request.query["id"] else {
+                return .error(404, "No such pairing request.")
+            }
+            if let index = deniedRequests.firstIndex(where: { $0.id == id }) {
+                deniedRequests.remove(at: index)
+                return (try? HTTPResponse.encode(PairingStatus(state: "denied")))
+                    ?? HTTPResponse.error(500, "encode")
+            }
+            guard let slot, slot.request.id == id else {
                 return .error(404, "No such pairing request.")
             }
             switch slot.state {
@@ -359,8 +375,10 @@ public actor PairingServer {
     }
 
     private func expireIfStale() {
+        let now = Date()
+        deniedRequests.removeAll { now.timeIntervalSince($0.deniedAt) > requestLifetime }
         guard let current = slot, current.state == .pending,
-              Date().timeIntervalSince(current.request.receivedAt) > requestLifetime
+              now.timeIntervalSince(current.request.receivedAt) > requestLifetime
         else { return }
         slot = nil
     }

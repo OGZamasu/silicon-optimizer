@@ -193,6 +193,39 @@ struct SwarmPairingFlowTests {
         #expect(hello?.accepting == true)
     }
 
+    @Test("a denied requester cannot hold the invite by never polling")
+    func denialFreesSlotWithoutRequesterPoll() async throws {
+        let server = PairingServer(hostName: "Owner")
+        let port = try await freePort()
+        try await server.start(on: "127.0.0.1", port: port)
+        defer { Task { await server.stop() } }
+        try await Task.sleep(for: .milliseconds(300))
+
+        let deniedReceipt = try await PairingClient.requestJoin(
+            host: "127.0.0.1", name: "Uncooperative Joiner", port: port
+        )
+        await server.deny(deniedReceipt.requestID)
+
+        // The denied client has not polled, but the invitation is available again.
+        let hello = await PairingClient.hello(host: "127.0.0.1", port: port)
+        #expect(hello?.accepting == true)
+        let nextReceipt = try await PairingClient.requestJoin(
+            host: "127.0.0.1", name: "Next Joiner", port: port
+        )
+        #expect(await server.pending()?.name == "Next Joiner")
+
+        // A late poll still tells the denied client what happened, without disturbing
+        // the next client's pending request.
+        let denied = try await PairingClient.status(
+            host: "127.0.0.1", requestID: deniedReceipt.requestID, port: port
+        )
+        #expect(denied.state == "denied")
+        let next = try await PairingClient.status(
+            host: "127.0.0.1", requestID: nextReceipt.requestID, port: port
+        )
+        #expect(next.state == "pending")
+    }
+
     @Test("stale requests expire on their own")
     func expiry() async throws {
         let server = PairingServer(hostName: "Owner", requestLifetime: 0.2)
