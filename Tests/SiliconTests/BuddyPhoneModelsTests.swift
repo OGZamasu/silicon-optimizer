@@ -2058,7 +2058,8 @@ struct BuddyPhoneModelsTests {
 
     /// What the Mac fetches for the owner's phone is the owner's business: frames about it
     /// go to this Mac's own token and full-control devices, never to a chat-only phone or
-    /// the swarm. The Mac's own downloads still go to everyone.
+    /// the swarm. Ordinary Mac model downloads remain visible to paired devices but not
+    /// to a shared peer bearer.
     @Test func phoneModelFramesGoOnlyToFullControl() async throws {
         let hub = BuddyEventHub()
         let full = await hub.subscribe(as: .device(id: "full", scope: .full))
@@ -2089,7 +2090,7 @@ struct BuddyPhoneModelsTests {
         #expect(await ids(full.stream) == [phoneFrame.id, macFrame.id])
         #expect(await ids(mac.stream) == [phoneFrame.id, macFrame.id])
         #expect(await ids(chat.stream) == [macFrame.id])
-        #expect(await ids(peer.stream) == [macFrame.id])
+        #expect(await ids(peer.stream) == [])
     }
 
     /// 3.35 GB is served from wherever the phone asks without the file ever being read

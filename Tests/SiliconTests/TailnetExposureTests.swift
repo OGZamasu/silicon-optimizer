@@ -275,6 +275,96 @@ struct TailnetExposureTests {
         }
     }
 
+    /// The shared secret may borrow this Mac for direct work, but it is not the owner's
+    /// control token. The same role applies on the tailnet and on loopback, where old
+    /// tools can still present the shared secret.
+    @Test func theSwarmSecretCannotReachOwnerConversationsModelsOrQueue() async throws {
+        try await withExposedServer { fixture in
+            let (created, body) = try await fixture.local.call(
+                "POST", "/conversations", token: fixture.local.token,
+                body: #"{"title":"Owner notes"}"#
+            )
+            #expect(created == 200)
+            let conversation = try JSONDecoder().decode(
+                ControlAPI.ConversationSummary.self, from: body
+            )
+
+            let ownerRoutes: [(String, String, String?)] = [
+                ("GET", "/conversations", nil),
+                ("POST", "/conversations", #"{"title":"Peer"}"#),
+                ("GET", "/conversations/\(conversation.id)", nil),
+                ("POST", "/conversations/\(conversation.id)/messages",
+                 #"{"content":"Peer reply","images":[]}"#),
+                ("POST", "/install", "{}"),
+                ("POST", "/load", "{}"),
+                ("POST", "/unload", nil),
+                ("GET", "/video/queue", nil),
+                ("POST", "/video/queue", "{}"),
+                ("POST", "/video/queue/control", #"{"action":"pause"}"#),
+                ("GET", "/swarm/peers/another-node/status", nil),
+                ("GET", "/jev/guardrails/recent", nil),
+                ("POST", "/recommend", #"{"task":"private work"}"#),
+                ("POST", "/benchmark", nil),
+            ]
+            for client in [fixture.peer, fixture.local] {
+                for (method, path, requestBody) in ownerRoutes {
+                    let (status, refusal) = try await client.call(
+                        method, path, token: Bench.swarmToken, body: requestBody
+                    )
+                    #expect(status == 403, "\(method) \(path) on port \(client.port)")
+                    #expect(try JSONDecoder().decode(
+                        ControlAPI.ErrorResponse.self, from: refusal
+                    ).error == ControlServer.swarmRouteRefusal)
+                }
+            }
+
+            // Neither the local owner nor an owner-approved full-control phone loses
+            // their existing view of conversations and the queue.
+            #expect(try await fixture.local.status(
+                "GET", "/conversations", token: fixture.local.token
+            ) == 200)
+            #expect(try await fixture.local.status(
+                "GET", "/video/queue", token: fixture.local.token
+            ) == 200)
+            try await fixture.allowDevices(true)
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status(
+                "GET", "/conversations", token: paired.token
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "GET", "/video/queue", token: paired.token
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "POST", "/video/queue/control", token: paired.token,
+                body: #"{"action":"pause"}"#
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "GET", "/conversations", token: nil
+            ) == 401)
+            #expect(try await fixture.peer.status(
+                "GET", "/video/queue", token: "guessed"
+            ) == 401)
+
+            // Discovery and direct work are still what a peer credential is for.
+            for path in ["/status", "/v1/node", "/swarm", "/video/models"] {
+                #expect(try await fixture.peer.status(
+                    "GET", path, token: Bench.swarmToken
+                ) == 200, "\(path)")
+            }
+            #expect(try await fixture.peer.status(
+                "POST", "/chat", token: Bench.swarmToken,
+                body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "POST", "/video/generate", token: Bench.swarmToken,
+                body: #"{"prompt":"a peer render"}"#
+            ) != 403)
+            #expect(try await fixture.peer.status(
+                "GET", "/media/not-an-id", token: Bench.swarmToken
+            ) == 404)
+        }
+    }
+
     /// The mirror image, and the reason the swarm toggle still means something once Silicon
     /// Buddy can raise the same socket by itself: "let other Silicon nodes reach this Mac",
     /// turned off, has to keep them out even while the listener is up for the phones.
