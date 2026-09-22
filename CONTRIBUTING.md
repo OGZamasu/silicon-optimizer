@@ -1,7 +1,8 @@
 # Contributing
 
 A Swift 6 package that builds a macOS 14+ app. Everything below runs from a clone; no
-account, no key, no network.
+account, no key, no network — beyond the first `swift build` fetching the package
+dependencies (Sparkle).
 
 ## Build and test
 
