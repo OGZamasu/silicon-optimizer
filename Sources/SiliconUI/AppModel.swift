@@ -231,9 +231,20 @@ public final class AppModel {
         case video = "Video"
         case swarm = "Swarm"
         case cloud = "Cloud"
+        case decisions = "Decisions"
         case settings = "Settings"
 
         public var id: String { rawValue }
+
+        /// The order the menu bar offers these in: chat first, because that is what the
+        /// menu is usually opened for, then the rest as the sidebar lists them. Settings is
+        /// left out — it sits below the divider with Quit.
+        ///
+        /// Built from `allCases` rather than written out, because the hand-written version
+        /// of this list was already missing Cloud by the time anyone looked.
+        public static var menuOrder: [Tab] {
+            [.chat] + allCases.filter { $0 != .chat && $0 != .settings }
+        }
 
         public var systemImage: String {
             switch self {
@@ -246,6 +257,7 @@ public final class AppModel {
             case .video: "film"
             case .swarm: "point.3.connected.trianglepath.dotted"
             case .cloud: "cloud"
+            case .decisions: "arrow.triangle.branch"
             case .settings: "gearshape"
             }
         }
@@ -981,8 +993,9 @@ public final class AppModel {
 
     // MARK: - Swarm
 
-    /// Whether the control server is currently reachable beyond loopback.
-    public internal(set) var controlIsOnLAN = false
+    // Whether this Mac is reachable by its peers, and where, lives in `SwarmExposure`
+    // rather than here: it is more than a flag now — an address, a port, and the reason
+    // there is neither.
 
     /// One peer's last-polled state, for the dashboard's read-only swarm view.
     public struct PeerCapability: Identifiable, Sendable {
@@ -1109,6 +1122,10 @@ public final class AppModel {
     /// Polls every registry peer's `/v1/node` — the read-only swarm. Parsed leniently:
     /// a peer that renames a field degrades to "reachable, details unknown", not a crash.
     public func refreshSwarm() async {
+        // Before the peer guard, not after: exposure rides the same tailnet these peers do,
+        // and a Mac with no peers configured yet is exactly the one still being set up —
+        // the one whose listener most needs another try after tailscale comes up.
+        await SwarmExposure.shared.retry(server: controlServer)
         guard let config = SwarmConfig.load(), !config.peers.isEmpty else {
             swarmPeers = []
             return
@@ -2547,6 +2564,7 @@ public final class AppModel {
 
         registerServerTermination()
         registerHandshakeCleanup()
+        configureJev()
         prepareIdleUnloadNotices()
         beginSampling()
         restartControlServer()
@@ -2648,14 +2666,15 @@ public final class AppModel {
         let server = makeControlServer(self)
         controlServer = server
         do {
-            // The hard swarm rule lives in the server: LAN exposure without a token
-            // silently stays loopback, so a half-configured setup fails safe.
+            // The hard swarm rule lives in the server: exposure without a token
+            // silently stays loopback, so a half-configured setup fails safe. So does
+            // exposure without a tailnet — there is no interface but the tailscale one.
             let swarm = SwarmConfig.load()
             try await server.start(
-                exposeOnLAN: settings.exposeControlOnLAN,
+                exposeToTailnet: settings.exposeControlOnLAN,
                 swarmToken: swarm?.effectiveToken
             )
-            controlIsOnLAN = await server.isExposedOnLAN
+            await SwarmExposure.shared.refresh(server: server)
         } catch {
             // Not fatal: the app is fully usable without external control.
             libraryError = "Control API unavailable: \(error.localizedDescription)"
@@ -3592,9 +3611,17 @@ public final class AppModel {
             configuration ?? defaultConfiguration(for: model), for: model
         )
 
+        // Held where the `catch` can see it. `let runtime` below is scoped to the `do`, so
+        // the name resolved to `self.runtime` down there — and when a second load has
+        // replaced this one, that is the *winning* load's runtime: the catch read the
+        // winner's log and then set `self.runtime = nil`, leaving a live llama-server with
+        // nobody holding it and no way to unload it.
+        var started: (any InferenceRuntime)?
+
         do {
             let selection = try selector.select(model: model, configuration: resolved)
             let runtime = selector.makeRuntime(for: selection)
+            started = runtime
             self.runtime = runtime
 
             // Bridge the actor's state changes onto the main actor for SwiftUI.
@@ -3623,15 +3650,22 @@ public final class AppModel {
             // model's name and true context takes effect from the next message.
             refreshHarnessProviderIfNeeded()
         } catch {
-            runtimeState = .failed(message: error.localizedDescription)
-            alert = AlertContent(
-                title: "Could not load \(model.name)",
-                message: error.localizedDescription
-            )
-            if let llama = runtime as? LlamaCppRuntime {
-                runtimeLog = await llama.serverLog()
+            // A load that was replaced, or stopped on purpose, is not a failure to show: the
+            // load that displaced it owns the screen, and an unload part-way through is the
+            // owner getting what they asked for.
+            if Self.showsFailure(for: error) {
+                runtimeState = .failed(message: error.localizedDescription)
+                alert = AlertContent(
+                    title: "Could not load \(model.name)",
+                    message: error.localizedDescription
+                )
+                if let llama = started as? LlamaCppRuntime {
+                    runtimeLog = await llama.serverLog()
+                }
             }
-            runtime = nil
+            // Only if nothing has taken the slot since: clearing it unconditionally threw
+            // away the handle to a server that is running perfectly well.
+            if started === self.runtime { self.runtime = nil }
         }
     }
 

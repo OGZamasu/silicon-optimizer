@@ -29,30 +29,91 @@ extension AppModel {
             return
         }
         let submittedPrompts = videoBatchPrompts
-        let request = ControlAPI.VideoQueueRequest(
-            prompts: VideoBatchQueue.parsePrompts(submittedPrompts), title: videoBatchTitle,
-            variations: videoBatchVariations, modelID: selectedVideoModel,
-            // The picker only offers supported lengths, but a stale selection must not
-            // turn into a refused batch; snap it to the model's nearest length.
-            seconds: VideoCatalog.entry(id: selectedVideoModel)?.normalizedSeconds(videoSeconds)
-                ?? videoSeconds,
-            resolution: videoResolution, seed: UInt32(seedText),
-            h3Turbo: selectedVideoModel == "hailuo-h3" ? videoSampling.h3Turbo : nil,
-            h3Steps: composerH3Steps
-        )
         isEnqueuingVideoBatch = true
         Task {
             defer { isEnqueuingVideoBatch = false }
             do {
-                _ = try await enqueueVideos(request)
+                _ = try await enqueueVideos(composerRequest(prompts: submittedPrompts,
+                                                            seed: UInt32(seedText)))
                 if videoBatchPrompts == submittedPrompts { videoBatchPrompts = "" }
             } catch { videoQueueMessage = error.localizedDescription }
         }
     }
 
+    /// The batch the composer's controls describe.
+    ///
+    /// "Let Jev pick" is a stored preference, so it outlives the thing that makes it work:
+    /// turning Jev off, running out of budget or removing the key must put this composer
+    /// back to exactly what it did before, sampling controls and all. So the stored answer
+    /// is ANDed with whether routing can actually happen, here, at the moment of queueing —
+    /// not where the toggle was drawn, which may have been an hour ago.
+    func composerRequest(prompts: String, seed: UInt32?) async -> ControlAPI.VideoQueueRequest {
+        let wanted = await mediaRoutingSettings.composerAutoRoute
+        let available = await mediaRoutingIsAvailable
+        let autoRoute = wanted && available
+        return ControlAPI.VideoQueueRequest(
+            prompts: VideoBatchQueue.parsePrompts(prompts), title: videoBatchTitle,
+            variations: videoBatchVariations,
+            modelID: autoRoute ? MediaRoutingQuestions.autoModelID : selectedVideoModel,
+            // The picker only offers supported lengths, but a stale selection must not
+            // turn into a refused batch; snap it to the model's nearest length.
+            seconds: autoRoute
+                ? nil
+                : VideoCatalog.entry(id: selectedVideoModel)?.normalizedSeconds(videoSeconds)
+                    ?? videoSeconds,
+            resolution: videoResolution, seed: seed,
+            h3Turbo: autoRoute || selectedVideoModel != "hailuo-h3" ? nil : videoSampling.h3Turbo,
+            h3Steps: autoRoute ? nil : composerH3Steps
+        )
+    }
+
+    /// The composer's "Add to queue" button.
+    ///
+    /// With "Let Jev pick" off — and whenever Jev cannot answer — this is `generateVideo()`
+    /// and nothing else: same model, same length, same sampling, same draft handling. With
+    /// it on, the prompt chooses the lane and the length first, and the clip carries the one
+    /// line saying why.
+    public func enqueueVideoClip() {
+        guard !isEnqueuingVideoBatch else { return }
+        let prompt = videoPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        isEnqueuingVideoBatch = true
+        Task {
+            defer { isEnqueuingVideoBatch = false }
+            do {
+                // Same rule as the batch composer: the stored preference only counts while
+                // routing can actually happen.
+                guard await mediaRoutingSettings.composerAutoRoute else {
+                    return generateVideo()
+                }
+                guard let routed = try await mediaRoutedVideo(
+                    prompt: prompt, explicitModelID: nil, seconds: nil
+                ), let entry = VideoCatalog.entry(id: routed.modelID) else {
+                    return generateVideo()
+                }
+                let request = VideoRequest(
+                    entryID: entry.id,
+                    prompt: prompt,
+                    image: entry.supportsImageInput ? videoImage : nil,
+                    seconds: routed.seconds ?? entry.normalizedSeconds(videoSeconds),
+                    resolution: videoResolution,
+                    outputDirectory: settings.resolvedVideoOutputDirectory,
+                    h3Turbo: routed.h3Turbo, h3Steps: routed.h3Steps
+                )
+                videoError = nil
+                _ = try enqueueSingleVideo(request, detail: routed.reason)
+                // Only clear the draft once the queue has durably accepted it.
+                videoPrompt = ""
+                videoImage = nil
+            } catch {
+                videoError = error.localizedDescription
+            }
+        }
+    }
+
     @discardableResult
-    func enqueueSingleVideo(_ request: VideoRequest) throws -> VideoQueueItem {
-        let item = try videoBatchQueue.enqueueSingle(request)
+    func enqueueSingleVideo(_ request: VideoRequest, detail: String? = nil) throws -> VideoQueueItem {
+        let item = try videoBatchQueue.enqueueSingle(request, detail: detail)
         videoQueueMessage = nil
         do { try videoBatchQueue.exportManifest(batchID: item.batchID) }
         catch { videoQueueMessage = "Clip queued, but its editing manifest could not be written: \(error.localizedDescription)" }
@@ -78,7 +139,8 @@ extension AppModel {
             }
             if item.status == .completed, let file = item.file {
                 return .init(file: file.path, node: item.nodeName ?? "Video node",
-                             model: item.request.entryID, elapsedSeconds: item.elapsed ?? 0)
+                             model: item.request.entryID, elapsedSeconds: item.elapsed ?? 0,
+                             detail: item.detail)
             }
             if item.status == .failed {
                 throw ControlHostError.badRequest("\(item.error ?? "The render failed.") \(receipt)")
@@ -117,26 +179,55 @@ extension AppModel {
                   resolution: item.request.resolution, h3Turbo: item.request.h3Turbo,
                   status: item.status.rawValue, nodeJobID: item.nodeJob?.id, file: item.file?.path,
                   outputDirectory: item.request.outputDirectory.path, error: item.error,
-                  uncertainSubmission: item.uncertainSubmission, h3Steps: item.request.h3Steps)
+                  uncertainSubmission: item.uncertainSubmission, h3Steps: item.request.h3Steps,
+                  detail: item.detail, negativePrompt: item.request.negativePrompt)
         })
     }
 
     public func enqueueVideos(_ request: ControlAPI.VideoQueueRequest) async throws -> ControlAPI.VideoQueueView {
+        // An omitted or "auto" model is the router's cue. It answers nil when Jev is off, no
+        // key is stored, the budget is gone or the call failed — and the lines below then do
+        // exactly what they did before this feature existed.
+        let routed = try await mediaRoutedVideo(
+            prompt: Self.routingPrompt(for: request.prompts),
+            explicitModelID: request.modelID, seconds: request.seconds
+        )
+        // "auto" is a routing instruction, never a model id: with nothing to route it back
+        // to the app's own selection, which is what an omitted model has always meant.
+        let namedID = MediaRoutingQuestions.isAuto(request.modelID) ? nil : request.modelID
         // Model/duration defaults are snapshotted now, not read when a later job starts.
-        guard let entry = VideoCatalog.entry(id: request.modelID ?? selectedVideoModel) else {
+        guard let entry = VideoCatalog.entry(
+            id: routed?.modelID ?? namedID ?? selectedVideoModel
+        ) else {
             throw ControlHostError.badRequest("Unknown video model.")
         }
         let template = VideoRequest(
             entryID: entry.id, prompt: "Batch template",
-            seconds: request.seconds ?? entry.normalizedSeconds(videoSeconds),
+            seconds: request.seconds ?? routed?.seconds ?? entry.normalizedSeconds(videoSeconds),
             resolution: request.resolution ?? videoResolution,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            h3Turbo: request.h3Turbo, h3Steps: request.h3Steps
+            h3Turbo: routed?.h3Turbo ?? request.h3Turbo,
+            h3Steps: routed?.h3Steps ?? request.h3Steps,
+            // One line for the whole batch, and only where the chosen lane reads it: the
+            // batch picks one model for every clip, so what to keep out of frame is a
+            // property of the batch rather than of a shot.
+            negativePrompt: entry.supportsNegativePrompt
+                ? request.negativePrompt?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).nilWhenEmpty
+                : nil
         )
+        // Every clip in a batch carries the same line, because one model and one length
+        // were chosen for all of them — from the prompts together, not from this clip's.
+        // Saying so stops the line reading like a judgment of the shot it sits under.
+        let clipCount = request.prompts.count * (request.variations ?? 1)
+        let detail = routed.map { routed in
+            clipCount > 1 ? "\(routed.reason) — chosen for the batch" : routed.reason
+        }
         do {
             let batch = try videoBatchQueue.enqueue(
                 prompts: request.prompts, variations: request.variations ?? 1,
-                title: request.title ?? "Video batch", template: template, baseSeed: request.seed
+                title: request.title ?? "Video batch", template: template, baseSeed: request.seed,
+                detail: detail
             )
             do { try videoBatchQueue.exportManifest(batchID: batch) }
             catch { videoQueueMessage = "Queue saved, but its editing manifest could not be written: \(error.localizedDescription)" }
@@ -172,7 +263,7 @@ extension AppModel {
                     try videoBatchQueue.exportManifest(batchID: batchID)
                 }
                 try videoBatchQueue.clearFinished()
-            default: throw ControlHostError.badRequest("Use pause, resume, retry, remove, stop_following, or clear_finished.")
+            default: throw ControlHostError.badRequest(ControlServer.unknownQueueAction)
             }
         } catch { throw ControlHostError.badRequest(error.localizedDescription) }
         videoQueueMessage = nil

@@ -82,7 +82,9 @@ struct ModelDownloadTests {
         private func respond(_ connection: NWConnection, head: Data) {
             let text = String(decoding: head, as: UTF8.self)
             let lines = text.components(separatedBy: "\r\n")
-            let path = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+            let target = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+            // The query (`?download=true`, which every Hub URL carries) is not part of the file.
+            let path = target.split(separator: "?", maxSplits: 1).first.map(String.init) ?? target
             var from: Int64?
             for line in lines where line.lowercased().hasPrefix("range:") {
                 let value = line.split(separator: "=").last ?? ""

@@ -152,7 +152,9 @@ struct BuddyControlTests {
                 ("POST", "/benchmark"), ("POST", "/video/generate"),
                 ("POST", "/image/generate"), ("POST", "/mesh/generate"),
                 ("POST", "/video/queue"), ("POST", "/video/queue/control"),
-                ("GET", "/buddy/devices"),
+                ("GET", "/buddy/devices"), ("GET", "/jev"),
+                ("GET", "/jev/guardrails/recent"),
+                ("GET", "/jev/calibration"), ("POST", "/jev/calibrate"),
             ] {
                 let (code, body) = try await fixture.phone.call(
                     refused.0, refused.1, token: token, body: refused.0 == "POST" ? "{}" : nil
@@ -176,6 +178,163 @@ struct BuddyControlTests {
             #expect(try await fixture.phone.status(
                 "POST", "/video/queue/control", token: full.token, body: #"{"action":"pause"}"#
             ) == 200)
+        }
+    }
+
+    /// Reading what Jev costs is a full-control device's business; changing what this Mac
+    /// will spend is the Mac's alone. A stolen phone token must not be able to lift the
+    /// budget cap or switch a feature on.
+    /// The calibration pair splits the same way the settings pair does, and for the same
+    /// reason — a run spends Jev tokens and holds the loaded model for a minute — but says
+    /// so in its own words, because "you may not change a setting" is not what happened.
+    @Test func onlyTheMacMayStartACalibration() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            #expect(paired.scope == "full")
+
+            // Nothing has been run, so reading is a 404 with a sentence rather than an
+            // empty body a client has to guess at.
+            let (missing, missingBody) = try await fixture.phone.call(
+                "GET", "/jev/calibration", token: paired.token
+            )
+            #expect(missing == 404)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: missingBody
+            ).error == ControlServer.noCalibrationYet)
+
+            // A full-control phone may read a result once there is one.
+            await fixture.host.setCalibration(Self.exampleCalibration)
+            let (readStatus, readBody) = try await fixture.phone.call(
+                "GET", "/jev/calibration", token: paired.token
+            )
+            #expect(readStatus == 200)
+            let result = try JSONDecoder().decode(
+                ControlAPI.JevCalibration.self, from: readBody
+            )
+            #expect(result.floors.choiceConfidence == 0.72)
+
+            // But it may not start one.
+            let (writeStatus, writeBody) = try await fixture.phone.call(
+                "POST", "/jev/calibrate", token: paired.token
+            )
+            #expect(writeStatus == 403)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: writeBody
+            ).error == ControlServer.jevCalibrateRefusal)
+            // Refused before the host was ever asked, not after it had already spent.
+            #expect(await fixture.host.calibrationRuns == 0)
+
+            // The Mac's own token may.
+            let (accepted, _) = try await fixture.local.call(
+                "POST", "/jev/calibrate", token: fixture.local.token
+            )
+            #expect(accepted == 200)
+            #expect(await fixture.host.calibrationRuns == 1)
+
+            // A run already in progress is a 409, not a 400: "come back later" is something
+            // a client can act on, and every other host error is something it cannot.
+            await fixture.host.setCalibrationBusy(true)
+            let (busy, busyBody) = try await fixture.local.call(
+                "POST", "/jev/calibrate", token: fixture.local.token
+            )
+            #expect(busy == 409)
+            #expect(try JSONDecoder().decode(
+                ControlAPI.ErrorResponse.self, from: busyBody
+            ).error.contains("already running"))
+        }
+    }
+
+
+    static let exampleCalibration = ControlAPI.JevCalibration(
+        modelID: "test-model", modelName: "Test 1B", jevModel: "jev-1.13.0",
+        date: "2026-09-18T09:41:00Z",
+        cases: 40, builtInCases: 40, userCases: 0, comparisons: 80,
+        agreement: [.init(kind: "choice", compared: 30, agreed: 27, rate: 0.9)],
+        overallAgreementRate: 0.85,
+        floors: .init(confidence: 0.72, noulLow: 0.25, noulHigh: 0.75),
+        escalationRate: 0.21,
+        choiceFloorMeasured: true, scoreFloorMeasured: true, noulBandMeasured: false,
+        bins: [], inputTokens: 31_204, estimatedUSD: 0.0013
+    )
+
+    @Test func onlyTheMacMayChangeTheJevSettings() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            #expect(paired.scope == "full")
+
+            // A full-control phone may look.
+            let (readStatus, readBody) = try await fixture.phone.call(
+                "GET", "/jev", token: paired.token
+            )
+            #expect(readStatus == 200)
+            let status = try JSONDecoder().decode(ControlAPI.JevStatus.self, from: readBody)
+            #expect(status.model == "jev-1.13.0")
+            #expect(status.features.count == 8)
+            // Whatever else this route says, it never says the key.
+            let text = String(decoding: readBody, as: UTF8.self)
+            #expect(text.contains("\"keySet\""))
+            #expect(!text.lowercased().contains("apikey"))
+            #expect(!text.contains("sk-"))
+
+            // But not set.
+            let (writeStatus, writeBody) = try await fixture.phone.call(
+                "POST", "/jev", token: paired.token, body: #"{"enabled":true}"#
+            )
+            #expect(writeStatus == 403)
+            let refusal = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: writeBody)
+            #expect(refusal.error == ControlServer.jevWriteRefusal)
+            // And nothing changed on the way to being refused.
+            #expect(try await JSONDecoder().decode(
+                ControlAPI.JevStatus.self,
+                from: fixture.phone.call("GET", "/jev", token: paired.token).1
+            ).enabled == false)
+
+            // The Mac's own token may.
+            let (accepted, updated) = try await fixture.local.call(
+                "POST", "/jev", token: fixture.local.token,
+                body: #"{"enabled":true,"model":"jev-latest"}"#
+            )
+            #expect(accepted == 200)
+            let after = try JSONDecoder().decode(ControlAPI.JevStatus.self, from: updated)
+            #expect(after.enabled && after.model == "jev-latest")
+        }
+    }
+
+    /// The guardrail log is for the screen that approves tool calls, so a full-control
+    /// phone may read it and a chat-only one may not. What it carries matters as much as
+    /// who can read it: verdicts and question ids, never the command that was screened.
+    @Test func theGuardrailLogIsReadableByAPhoneWithFullControl() async throws {
+        try await withServer { fixture in
+            let paired = try await fixture.pair()
+            let (status, body) = try await fixture.phone.call(
+                "GET", "/jev/guardrails/recent", token: paired.token
+            )
+            #expect(status == 200)
+            let log = try JSONDecoder().decode(
+                ControlAPI.GuardrailScreenings.self, from: body
+            )
+            #expect(log.available)
+            #expect(log.screenings.first?.screening.verdict == "block")
+            #expect(log.screenings.first?.screening.reasons == ["destructive"])
+            #expect(log.screenings.first?.bands["destructive"] == "fired")
+            #expect(log.questions.contains("destructive"))
+
+            // The Mac's own token reaches it too, and neither answer carries content.
+            let (localStatus, localBody) = try await fixture.local.call(
+                "GET", "/jev/guardrails/recent", token: fixture.local.token
+            )
+            #expect(localStatus == 200)
+            for text in [String(decoding: body, as: UTF8.self),
+                         String(decoding: localBody, as: UTF8.self)] {
+                #expect(!text.contains("rm "))
+                #expect(!text.contains("sk-"))
+                #expect(!text.lowercased().contains("command"))
+                #expect(!text.lowercased().contains("argument"))
+            }
+
+            #expect(try await fixture.phone.status(
+                "GET", "/jev/guardrails/recent", token: nil
+            ) == 401)
         }
     }
 
@@ -206,6 +365,197 @@ struct BuddyControlTests {
         }
     }
 
+    // MARK: - Minting a pairing code
+
+    /// The route exists so a test or a script can pair without a human at the Settings
+    /// window, which means the only thing worth proving about the code it hands back is
+    /// that the server will actually honour it.
+    @Test func mintingWithNoBodyGivesAFullControlCodeThatPairs() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint()
+            #expect(minted.scope == "full")
+            // Six digits, read as digits: a code with a space or a letter in it is one a
+            // phone would offer back verbatim and be refused for.
+            #expect(minted.code.count == 6)
+            #expect(Int(minted.code) != nil)
+            // Where the device is told to dial: the second listener, never loopback — whose
+            // port is a different number in this fixture precisely so the two can be told
+            // apart, and which takes a fresh one every launch in the real app.
+            #expect(minted.host == "127.0.0.1")
+            #expect(minted.port == fixture.phone.port)
+            #expect(minted.port != fixture.local.port)
+            let expiry = try #require(ControlAPI.date(fromTimestamp: minted.expiresAt))
+            let life = expiry.timeIntervalSinceNow
+            #expect(life > BuddyPairing.codeLifetime - 60)
+            #expect(life <= BuddyPairing.codeLifetime)
+
+            let device = try await fixture.spend(minted)
+            #expect(device.scope == "full")
+            #expect(try await fixture.phone.status("GET", "/status", token: device.token) == 200)
+            // One use, like any code the Settings window mints: the second device offering
+            // it is told what every wrong guess is told.
+            #expect(try await fixture.phone.status(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(minted.code)","deviceName":"Second","platform":"ios"}"#
+            ) == 403)
+        }
+    }
+
+    @Test func anExplicitChatScopeIsTheScopeTheDeviceGets() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint(scope: "chat")
+            #expect(minted.scope == "chat")
+
+            let device = try await fixture.spend(minted, name: "Lent out")
+            #expect(device.scope == "chat")
+            #expect(try await fixture.phone.status("GET", "/status", token: device.token) == 200)
+            #expect(try await fixture.phone.status(
+                "POST", "/load", token: device.token, body: "{}"
+            ) == 403)
+
+            // Said the other way round too, so "chat" cannot quietly become the default:
+            // an empty body is full control, which is what the owner is offered by hand.
+            #expect(try await fixture.mint().scope == "full")
+            #expect(try await fixture.mint(scope: "full").scope == "full")
+            // An empty string is nothing said, not a scope this server does not have.
+            #expect(try await fixture.mint(scope: "").scope == "full")
+        }
+    }
+
+    /// A scope this server does not have is a refusal, never a quiet fall back to the more
+    /// powerful of the two — and it must not spend the code the owner is already holding.
+    @Test func aScopeThisMacDoesNotHaveIsRefusedAndBurnsNothing() async throws {
+        try await withServer { fixture in
+            let standing = try await fixture.mint(scope: "chat")
+
+            for bogus in ["admin", "owner", "FULL", "Chat", "full ", "full,chat"] {
+                let (status, body) = try await fixture.local.call(
+                    "POST", "/buddy/invitations", token: fixture.local.token,
+                    body: #"{"scope":"\#(bogus)"}"#
+                )
+                #expect(status == 400, "\(bogus) should not be a scope")
+                let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+                #expect(envelope.error == ControlServer.unknownScopeRefusal)
+            }
+            // A body that is not JSON at all is the other 400, and mints nothing either.
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token, body: "not json"
+            ) == 400)
+
+            // Every one of those left the code that was already open exactly as it was.
+            #expect(await fixture.registry.openInvitation()?.code == standing.code)
+            #expect(await fixture.registry.openInvitation()?.scope == .chat)
+        }
+    }
+
+    @Test func cancellingTakesTheCodeOutOfCirculationAndIsIdempotent() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint()
+
+            let (first, body) = try await fixture.local.call(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            )
+            #expect(first == 200)
+            #expect(String(decoding: body, as: UTF8.self).contains("cancelled"))
+            #expect(await fixture.registry.openInvitation() == nil)
+
+            // What was a live credential a moment ago is now six wrong digits.
+            #expect(try await fixture.phone.status(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(minted.code)","deviceName":"Late","platform":"ios"}"#
+            ) == 403)
+
+            // Cancelling a code already gone — spent, expired, or never opened at all — is
+            // what the caller asked for, not a race it has to check.
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+        }
+    }
+
+    /// A code carries an address and a deadline as much as it carries six digits. With
+    /// nothing listening on the far side, minting one would cost somebody a minute of
+    /// typing into a phone that cannot reach this Mac.
+    @Test func aCodeWithNowhereToDialIsRefusedRatherThanMinted() async throws {
+        try await withServer { fixture in
+            try await fixture.server.setTailnetAccess(address: nil)
+
+            let (status, body) = try await fixture.local.call(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            )
+            #expect(status == 409)
+            let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+            #expect(envelope.error == ControlServer.buddyListenerDown)
+            #expect(await fixture.registry.openInvitation() == nil)
+
+            // Cancelling needs nowhere to dial, so it carries on working regardless.
+            #expect(try await fixture.local.status(
+                "DELETE", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+
+            // The listener back up, but Silicon Buddy switched off: a device token minted
+            // now would be refused on sight, so the code that mints it is refused instead.
+            _ = try await Self.bindTailnetListener(on: fixture.server)
+            await fixture.registry.setAllowsTailnetDevices(false)
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            ) == 409)
+
+            // And on again, which is the whole of what was standing in the way.
+            await fixture.registry.setAllowsTailnetDevices(true)
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/invitations", token: fixture.local.token
+            ) == 200)
+        }
+    }
+
+    /// The gate this route exists behind. Minting admits the *next* device to this Mac: a
+    /// phone that could mint could pair the phone after it without the owner ever seeing a
+    /// code. So it is answered for this Mac's own token on this Mac's own listener, and for
+    /// nothing else — the same rule `/buddy/devices` has always had.
+    @Test func noTailnetCallerMayMintOrCancelAPairingCode() async throws {
+        try await withServer { fixture in
+            let full = try await fixture.pair(name: "Studio phone")
+            let chat = try await fixture.pair(name: "Lent out", scope: .chat)
+
+            for route in [("POST", "/buddy/invitations"), ("DELETE", "/buddy/invitations")] {
+                let (method, path) = route
+                // Out here the control token is not a credential at all, so it reads as no
+                // token — which is the point: a phone cannot hold what these routes want.
+                #expect(try await fixture.phone.status(method, path, token: fixture.local.token)
+                    == 401, "\(method) \(path) with the control token")
+                #expect(try await fixture.phone.status(method, path, token: nil) == 401)
+                #expect(try await fixture.phone.status(method, path, token: "guessed") == 401)
+
+                // A paired device's token is a credential out there, and buys nothing here.
+                let (fullStatus, fullBody) = try await fixture.phone.call(
+                    method, path, token: full.token
+                )
+                #expect(fullStatus == 403, "\(method) \(path) with a full-control device")
+                let refusal = try JSONDecoder().decode(
+                    ControlAPI.ErrorResponse.self, from: fullBody
+                )
+                #expect(refusal.error.contains("Only this Mac"))
+
+                let (chatStatus, chatBody) = try await fixture.phone.call(
+                    method, path, token: chat.token
+                )
+                #expect(chatStatus == 403, "\(method) \(path) with a chat-only device")
+                #expect(try JSONDecoder().decode(
+                    ControlAPI.ErrorResponse.self, from: chatBody
+                ).error == ControlServer.chatOnlyRefusal)
+            }
+
+            // None of that minted a code, and none of it cancelled one either.
+            #expect(await fixture.registry.openInvitation() == nil)
+            // Which the Mac's own listener settles by minting the first one that works.
+            #expect(try await fixture.mint().scope == "full")
+        }
+    }
+
     // MARK: - The second listener
 
     @Test func onlyTailnetAndLoopbackAddressesMayBeBound() {
@@ -231,11 +581,14 @@ struct BuddyControlTests {
                 try await fixture.server.setTailnetAccess(address: "0.0.0.0")
             }
 
-            // Same routes, same auth, a different way in.
+            // Same routes, a different way in — but not the same credentials. The control
+            // token is this Mac's own and is refused out here; a paired device's works.
             #expect(try await fixture.phone.status("GET", "/health", token: nil) == 200)
             #expect(try await fixture.phone.status(
                 "GET", "/status", token: fixture.local.token
-            ) == 200)
+            ) == 401)
+            let paired = try await fixture.pair(name: "Onward")
+            #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
             #expect(try await fixture.phone.status("GET", "/status", token: nil) == 401)
 
             // A tailscale address can move under the app; the listener has to follow.
@@ -257,34 +610,6 @@ struct BuddyControlTests {
                 "GET", "/status", token: fixture.local.token
             ) == 200)
         }
-    }
-
-    /// Swarm LAN access binds every interface, and a device token is only a credential on
-    /// the tailnet listener — so the two cannot both be on, and the window has to say which
-    /// one is in the way rather than blaming a missing tailscale address.
-    @Test func swarmLANAccessKeepsTheTailnetListenerDown() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("buddy-lan-\(UUID())")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
-        await registry.setAllowsTailnetDevices(true)
-        let server = ControlServer(
-            host: BuddyTestHost(tokens: [], pace: .milliseconds(1), failing: false),
-            handshakeURL: directory.appendingPathComponent("control.json"),
-            buddy: registry, discoverTailnetAddress: { nil }
-        )
-        defer { Task { await server.stop() } }
-
-        // Whether the LAN bind itself succeeds is the host machine's business; the
-        // interlock keys off the decision, which `start` makes either way.
-        try await server.start(exposeOnLAN: true, swarmToken: "a-swarm-token")
-        #expect(await server.isExposedOnLAN)
-
-        try await server.setTailnetAccess(address: "127.0.0.1", port: 49_999)
-        #expect(await server.tailnetListenerAddress == nil)
-        #expect(await server.tailnetError?.contains("Swarm LAN access") == true)
-        await server.stop()
     }
 
     /// A tailscale address can move under the app — a re-auth, a different tailnet. A
@@ -379,6 +704,41 @@ struct BuddyControlTests {
                 ControlAPI.ChatMetrics.self, from: Data(finished.data.utf8)
             )
             #expect(metrics.generatedTokens == 3 && metrics.promptTokens == 7)
+        }
+    }
+
+    /// The frame answer verification ends a stream with, on the wire.
+    ///
+    /// A phone that has never heard of `verdict` skips an unknown event name, which is why
+    /// this can be added to a frozen contract at all — and why it has to come after
+    /// `finished` rather than replacing it.
+    @Test func chatStreamEndsWithTheVerdictFrameWhenVerificationIsOn() async throws {
+        let sent = ControlAPI.ChatVerdict(
+            verdict: "escalate",
+            reasons: ["The reply stops mid-thought and the token budget ran out."],
+            escalatedTo: nil,
+            suggestion: "Send this again on cloud/openai/gpt-5.5 for a stronger answer."
+        )
+        try await withServer(tokens: ["Hel", "lo"], verdict: sent) { fixture in
+            let events = try await fixture.local.events(
+                "POST", "/chat/stream", token: fixture.local.token,
+                body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            ) { $0.contains { $0.name == "verdict" } }
+
+            // After the metrics, not before them and not instead of them.
+            let names = events.map(\.name)
+            #expect(names.last == "verdict")
+            #expect(names.firstIndex(of: "finished") ?? 0 < names.count - 1)
+
+            let frame = try #require(events.last)
+            let decoded = try JSONDecoder().decode(
+                ControlAPI.ChatVerdict.self, from: Data(frame.data.utf8)
+            )
+            #expect(decoded == sent)
+            // A stream never escalates: the tokens are already on screen, so it reports
+            // and suggests instead of swapping the message out from under the reader.
+            #expect(decoded.escalatedTo == nil)
+            #expect(decoded.suggestion?.isEmpty == false)
         }
     }
 
@@ -636,6 +996,31 @@ struct BuddyControlTests {
             return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
         }
 
+        /// Mints a code the way a script would: this Mac's own token, on this Mac's own
+        /// listener, and no Settings window anywhere.
+        func mint(scope: String? = nil) async throws -> ControlAPI.BuddyInvitationResponse {
+            let (status, body) = try await local.call(
+                "POST", "/buddy/invitations", token: local.token,
+                body: scope.map { #"{"scope":"\#($0)"}"# }
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(
+                ControlAPI.BuddyInvitationResponse.self, from: body
+            )
+        }
+
+        /// Spends a minted code from the far listener, as the device holding it would.
+        func spend(
+            _ invitation: ControlAPI.BuddyInvitationResponse, name: String = "CI runner"
+        ) async throws -> ControlAPI.BuddyPairResponse {
+            let (status, body) = try await phone.call(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(invitation.code)","deviceName":"\#(name)","platform":"ios"}"#
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
+        }
+
         func createConversation(title: String = "Fixture") async throws
             -> ControlAPI.ConversationSummary {
             let (status, body) = try await local.call(
@@ -715,6 +1100,7 @@ struct BuddyControlTests {
 
     private func withServer(
         tokens: [String] = ["ok"], pace: Duration = .milliseconds(1), failing: Bool = false,
+        verdict: ControlAPI.ChatVerdict? = nil,
         hub: BuddyEventHub = BuddyEventHub(),
         writeDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         _ body: (Fixture) async throws -> Void
@@ -726,7 +1112,9 @@ struct BuddyControlTests {
 
         let handshakeURL = directory.appendingPathComponent("control.json")
         let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
-        let host = BuddyTestHost(tokens: tokens, pace: pace, failing: failing)
+        let host = BuddyTestHost(
+            tokens: tokens, pace: pace, failing: failing, verdict: verdict
+        )
         let server = ControlServer(
             host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
             eventWriteDeadline: writeDeadline,
@@ -937,17 +1325,32 @@ actor BuddyTestHost: ControlHost {
     private let tokens: [String]
     private let pace: Duration
     private let failing: Bool
+    /// The `verdict` frame answer verification adds after `finished`, when it is on.
+    private let verdict: ControlAPI.ChatVerdict?
     private(set) var startedStreams = 0
     private(set) var cancelledStreams = 0
     private(set) var emitted = 0
     private(set) var eventUpdatesRequested = 0
     private var stored: [ControlAPI.ConversationDetail] = []
     private var answering: Set<String> = []
+    /// Where `GET /swarm` gets its exposure block, when a test cares. The app reads it off
+    /// the control server; a double has to be handed the same thing to read.
+    private var exposureSource: (@Sendable () async -> ControlAPI.SwarmView.Exposure?)?
 
-    init(tokens: [String], pace: Duration, failing: Bool) {
+    func reportExposure(
+        from source: @escaping @Sendable () async -> ControlAPI.SwarmView.Exposure?
+    ) {
+        exposureSource = source
+    }
+
+    init(
+        tokens: [String], pace: Duration, failing: Bool,
+        verdict: ControlAPI.ChatVerdict? = nil
+    ) {
         self.tokens = tokens
         self.pace = pace
         self.failing = failing
+        self.verdict = verdict
     }
 
     private func noteCancelled() { cancelledStreams += 1 }
@@ -981,6 +1384,9 @@ actor BuddyTestHost: ControlHost {
                         promptTokens: 7, generatedTokens: tokens.count,
                         tokensPerSecond: 12.5, timeToFirstToken: 0.25
                     )))
+                    // Strictly last: Jev reads a finished reply, so the verdict cannot
+                    // exist until the final token has already gone out.
+                    if let verdict = self.verdict { continuation.yield(.verdict(verdict)) }
                     continuation.finish()
                 } catch {
                     await self.noteCancelled()
@@ -1052,7 +1458,7 @@ actor BuddyTestHost: ControlHost {
     }
     func installed() async -> [ControlAPI.InstalledModel] { [] }
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel] { [] }
-    func recommend(category: String?) async -> ControlAPI.CatalogModel? { nil }
+    func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? { nil }
     func unload() async {}
     func videoModels() async -> [ControlAPI.VideoModel] { [] }
     func imageModels() async -> [ControlAPI.ImageModel] { [] }
@@ -1065,7 +1471,9 @@ actor BuddyTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoQueueView {
         await videoQueue()
     }
-    func swarm() async -> ControlAPI.SwarmView { .init(peers: [], polledSecondsAgo: nil) }
+    func swarm() async -> ControlAPI.SwarmView {
+        .init(peers: [], polledSecondsAgo: nil, exposure: await exposureSource?())
+    }
     func profile() async -> ControlAPI.Profile { fatalError("Unexpected test route") }
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
     /// Answered rather than trapped: `/v1/node` is one of the routes a chat-only device
@@ -1095,6 +1503,52 @@ actor BuddyTestHost: ControlHost {
     func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         throw BuddyTestError.unexpectedRoute
     }
+
+    /// Answered rather than trapped: the scope test really calls both, and `POST /jev` has
+    /// to get past the route before the control-token gate can refuse it.
+    private var jev = ControlAPI.JevStatus.fixture()
+    func jevStatus() async -> ControlAPI.JevStatus { jev }
+
+    /// Answered rather than trapped: the scope tests call it with both kinds of token.
+    /// One screening, with no content in it — which is the thing the route promises.
+    func recentGuardrailScreenings() async -> ControlAPI.GuardrailScreenings {
+        .init(
+            available: true,
+            questions: ["destructive", "harm"],
+            screenings: [.init(
+                at: "2026-09-18T14:04:38Z", engine: "codex",
+                screening: .init(verdict: "block", reasons: ["destructive"], latencyMS: 240),
+                bands: ["destructive": "fired", "harm": "plausible"]
+            )]
+        )
+    }
+    /// Set by the 403 test, so `GET /jev/calibration` has something to answer with when the
+    /// scope gate lets a caller through to it.
+    var calibration: ControlAPI.JevCalibration?
+    var calibrationRuns = 0
+
+    func setCalibration(_ value: ControlAPI.JevCalibration?) { calibration = value }
+
+    func jevCalibration() async -> ControlAPI.JevCalibration? { calibration }
+
+    /// Set by the single-flight test: what the second caller is told.
+    var calibrationIsBusy = false
+
+    func setCalibrationBusy(_ value: Bool) { calibrationIsBusy = value }
+
+    func calibrateJev() async throws -> ControlAPI.JevCalibration {
+        calibrationRuns += 1
+        if calibrationIsBusy { throw CalibrationBusy() }
+        guard let calibration else { throw BuddyTestError.unexpectedRoute }
+        return calibration
+    }
+
+    func updateJev(_ update: ControlAPI.JevUpdate) async throws -> ControlAPI.JevStatus {
+        if let enabled = update.enabled { jev.enabled = enabled }
+        if let model = update.model { jev.model = model }
+        return jev
+    }
+
     func benchmark() async throws -> ControlAPI.BenchmarkResult {
         throw BuddyTestError.unexpectedRoute
     }
@@ -1122,4 +1576,14 @@ actor BuddyTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoQueueView {
         throw BuddyTestError.unexpectedRoute
     }
+}
+
+
+/// A host error that knows it is a 409, which is what a second calibration gets. At file
+/// scope because the host that throws it is, too.
+struct CalibrationBusy: Error, LocalizedError, ControlStatusError {
+    var errorDescription: String? {
+        "A calibration is already running on this Mac. Wait for it to finish."
+    }
+    var status: Int { 409 }
 }

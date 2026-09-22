@@ -401,9 +401,14 @@ public struct Settings: Codable, Sendable, Equatable {
 
     // Swarm
 
-    /// Whether the control server also listens on the LAN (port 8788) so swarm peers can
-    /// reach this Mac. Ignored — the server stays loopback — unless swarm.json holds a
-    /// token, because the jobs API is remote execution.
+    /// Whether the control server also listens on this Mac's tailscale address (port 8788)
+    /// so swarm peers can reach it. Ignored — the server stays loopback — unless swarm.json
+    /// holds a token, because the jobs API is remote execution, and unless this Mac is on a
+    /// tailnet, because there is no other interface it will bind.
+    ///
+    /// The name is the stored key, and it predates the decision that the swarm is
+    /// tailnet-only; renaming it would silently turn the setting off for everyone who
+    /// already has it on.
     public var exposeControlOnLAN = false
 
     // Runtime overrides

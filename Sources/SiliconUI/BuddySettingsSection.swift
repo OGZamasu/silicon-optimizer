@@ -4,10 +4,11 @@ import SwiftUI
 
 /// Settings → Silicon Buddy.
 ///
-/// The toggle here is the whole security story: off, the control API is what it has always
-/// been — loopback and one token. On, a second listener goes up on this Mac's tailscale
-/// address and nowhere else, and only devices the owner has paired can use it. Nothing about
-/// this makes anything public; a phone that is not on the tailnet cannot see the Mac at all.
+/// The toggle here is the whole security story: off, device tokens mean nothing and the
+/// control API is what it has always been — loopback and one token. On, the listener on
+/// this Mac's tailscale address (shared with the swarm, which binds the same one) honours
+/// the devices the owner has paired, and nothing else. Nothing about this makes anything
+/// public; a phone that is not on the tailnet cannot see the Mac at all.
 struct BuddySettingsSection: View {
     @Environment(AppModel.self) private var model
     /// A singleton, so this is a reference rather than something the view owns. Observation
@@ -50,6 +51,8 @@ struct BuddySettingsSection: View {
                     deviceRow(device)
                 }
             }
+
+            BuddyPhoneModelsRow()
         }
         .task { await buddy.refresh(server: model.controlServer) }
         .sheet(isPresented: $showingPairing) {
@@ -69,13 +72,12 @@ struct BuddySettingsSection: View {
     }
 
     private var statusText: String {
-        // The server's own reason comes first: "no tailscale address" and "swarm LAN access
-        // is on" are different problems with different fixes, and guessing between them
-        // sends people to the wrong screen.
+        // The server's own reason comes first — it is nearly always "join the tailnet
+        // first", and guessing at it sends people to the wrong screen.
         if let problem = buddy.problem { return problem }
         guard buddy.allowsTailnetDevices else {
-            return "Off. The control API stays on 127.0.0.1, as it always has, and paired "
-                + "devices are suspended until you turn this back on."
+            return "Off. Device tokens are refused everywhere, and paired devices are "
+                + "suspended until you turn this back on."
         }
         guard let address = buddy.reachAddress else {
             return "On, but the listener is not up yet. Nothing is reachable until it is."
@@ -108,6 +110,11 @@ struct BuddySettingsSection: View {
             parts.append("last seen \(seen.formatted(date: .abbreviated, time: .shortened))")
         } else {
             parts.append("never seen")
+        }
+        // Said outright rather than left to be discovered as "the phone stopped working":
+        // this device holds a port that moved, and only pairing again can tell it so.
+        if device.needsRepair {
+            parts.append("paired before the port moved — pair again")
         }
         return parts.joined(separator: " · ")
     }
@@ -164,11 +171,27 @@ struct BuddyPairingSheet: View {
         }
     }
 
+    /// What the sheet shows: the scope of the code that is actually on screen, and only
+    /// when there is no code, what the next one would grant.
+    ///
+    /// The picker cannot keep an answer of its own. `POST /buddy/invitations` mints
+    /// underneath an open sheet, and the poll below adopts what it finds — so the live
+    /// invitation is the credential the owner is about to hand over, and the last thing
+    /// this window happened to pick is not. A picker reading "full control" over a code
+    /// that pairs chat-only is the owner approving something they were never shown.
+    var displayedScope: BuddyScope { buddy.invitation?.scope ?? buddy.nextScope }
+
+    /// The line under the code that says what typing it in will grant. Said on the same
+    /// screen as the digits, because that is where the decision is actually made.
+    static func grantLine(_ scope: BuddyScope) -> String {
+        "This code grants \(scope.label.lowercased())."
+    }
+
     @ViewBuilder
     private var scopePicker: some View {
         VStack(alignment: .leading, spacing: 4) {
             Picker("This device gets", selection: Binding(
-                get: { buddy.nextScope },
+                get: { displayedScope },
                 set: { scope in
                     // Changing the answer has to change the code: one already on screen was
                     // issued for the old one.
@@ -181,7 +204,7 @@ struct BuddyPairingSheet: View {
             }
             .pickerStyle(.segmented)
             .disabled(paired)
-            Text(buddy.nextScope.detail)
+            Text(displayedScope.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -200,6 +223,11 @@ struct BuddyPairingSheet: View {
         Text(invitation.displayCode)
             .font(.system(.title, design: .monospaced))
             .textSelection(.enabled)
+        // The code's own scope, not the picker's: these two can disagree, and when they do
+        // the code is the one the server will honour.
+        Text(Self.grantLine(invitation.scope))
+            .font(.caption)
+            .foregroundStyle(.secondary)
         // Typed in by hand when a camera will not cooperate, which on a tablet propped up
         // behind a monitor is most of the time.
         Text("Scan this in Silicon Buddy, or type the code and \(invitation.host).")

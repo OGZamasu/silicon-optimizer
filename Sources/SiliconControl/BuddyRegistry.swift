@@ -132,7 +132,10 @@ public actor BuddyRegistry {
         let token = BuddyPairing.makeDeviceToken()
         let device = BuddyDevice(
             id: UUID().uuidString, name: name, platform: platform, scope: invitation.scope,
-            tokenHash: BuddyPairing.hash(token: token), pairedAt: now, lastSeen: now
+            tokenHash: BuddyPairing.hash(token: token), pairedAt: now, lastSeen: now,
+            // Recorded, so a device that was told where to dial can be told apart later
+            // from one paired before that was a promise worth making.
+            pairedPort: port
         )
         config.devices.append(device)
         config.save(to: url)

@@ -56,6 +56,14 @@ public enum RuntimeState: Sendable, Equatable {
         case .stopping: "Unloading…"
         }
     }
+
+    /// What is happening right now, or nothing. Unlike `label`, this never manufactures a
+    /// sentence for a state that has none — "Not loaded" is a label for a screen, not a
+    /// stage to put on a `job` event a phone will show under a progress bar.
+    public var stageLine: String? {
+        if case .starting(let stage) = self { return stage }
+        return nil
+    }
 }
 
 /// A concrete request to load a model.
@@ -140,27 +148,62 @@ public struct GenerationMetrics: Sendable, Equatable {
     public var prefillTokensPerSecond: Double
     public var generationTokensPerSecond: Double
     public var timeToFirstToken: TimeInterval
+    /// The OpenAI `finish_reason` the runtime reported on the last chunk: `stop` when the
+    /// model chose to end, `length` when the token budget ran out, nil when the runtime
+    /// said nothing. Carried rather than dropped because "did this answer get cut off?" is
+    /// a fact the server already knows, and asking a model to guess at it instead would be
+    /// inventing an answer to a question code can read.
+    public var finishReason: String?
 
     public init(
         promptTokens: Int = 0, generatedTokens: Int = 0,
         prefillTokensPerSecond: Double = 0, generationTokensPerSecond: Double = 0,
-        timeToFirstToken: TimeInterval = 0
+        timeToFirstToken: TimeInterval = 0, finishReason: String? = nil
     ) {
         self.promptTokens = promptTokens
         self.generatedTokens = generatedTokens
         self.prefillTokensPerSecond = prefillTokensPerSecond
         self.generationTokensPerSecond = generationTokensPerSecond
         self.timeToFirstToken = timeToFirstToken
+        self.finishReason = finishReason
+    }
+
+    /// Whether the token budget, not the model, ended the answer.
+    ///
+    /// Either signal is enough, and that is deliberate. `llama-server` says `length` and
+    /// means it; some `mlx_lm.server` builds stop exactly at `max_tokens` and still report
+    /// `stop`, so believing the finish reason alone would read a truncated answer as a
+    /// finished one. An answer that used every token it was given is truncated whatever the
+    /// server called it — the cost of being wrong here is one unnecessary escalation, and
+    /// the cost of the other error is shipping half a sentence as if it were the answer.
+    public func wasTruncated(budget: Int?) -> Bool {
+        if finishReason == "length" { return true }
+        guard let budget, budget > 0 else { return false }
+        return generatedTokens >= budget
     }
 }
 
 public enum RuntimeError: Error, LocalizedError {
     case notInstalled(RuntimeKind)
     case launchFailed(String)
-    case didNotBecomeReady(log: String)
+    /// A load that ended without a model in memory, carrying the whole account of itself:
+    /// the sentence, the log, and how the runtime process ended.
+    case didNotBecomeReady(LoadFailure)
     case notRunning
     case expertStreamingUnsupported
     case prismTernaryUnsupported
+
+    /// Whether this is the load being taken away rather than the model failing.
+    ///
+    /// A load that was replaced belongs to the load that replaced it: its screen, its
+    /// progress line, its alert if it fails. And an unload part-way through a load is the
+    /// owner getting exactly what they asked for. Neither is a failure to put in front of
+    /// anybody, and reporting them as one is how pressing Unload came to raise an error
+    /// dialog.
+    public var wasInterrupted: Bool {
+        guard case .didNotBecomeReady(let failure) = self else { return false }
+        return failure.wasReplaced || failure.reason == .cancelled
+    }
 
     public var errorDescription: String? {
         switch self {
@@ -168,8 +211,13 @@ public enum RuntimeError: Error, LocalizedError {
             "\(kind.rawValue) is not installed. Install it from Settings."
         case .launchFailed(let message):
             "Could not start the runtime: \(message)"
-        case .didNotBecomeReady(let log):
-            "The model did not finish loading.\n\n\(log)"
+        case .didNotBecomeReady(let failure):
+            // One sentence, and only one. This used to be "The model did not finish
+            // loading." followed by whatever the last eight lines of the server log
+            // happened to be — which is what a phone rendered, verbatim, mid-sentence.
+            // The log is still there, on `failure.detail`, where a client can put it
+            // behind a tap.
+            failure.summary
         case .notRunning:
             "No model is loaded."
         case .expertStreamingUnsupported:

@@ -36,6 +36,16 @@ public struct VideoEntry: Sendable, Identifiable {
     public var supportsImageInput: Bool
     /// Clip lengths this model/runtime contract can actually serve.
     public var supportedSeconds: [Int]
+    /// The canvas sizes this lane actually renders at, in the spelling the `resolution`
+    /// field takes. Written out per model rather than shared, because a lane that is asked
+    /// for a size it does not have does not refuse — it renders at its own and says
+    /// nothing, which is the worst of the three possible behaviours.
+    public var supportedResolutions: [String]
+    /// Whether this lane reads a negative prompt. Every node lane does — silicon-node
+    /// passes `negative_prompt` straight into the pipeline for Wan and both LTX merges —
+    /// so this is a fact about the runtime, kept per entry because the next lane added may
+    /// not, and a client should be told rather than have its text quietly dropped.
+    public var supportsNegativePrompt: Bool
     public var setupHint: String?
 
     public init(
@@ -44,6 +54,8 @@ public struct VideoEntry: Sendable, Identifiable {
         acceptsGenericTextToVideo: Bool = false, weightsSize: Bytes,
         typicalDuration: String, outputs: String, rating: Int,
         supportsImageInput: Bool = false, supportedSeconds: [Int],
+        supportedResolutions: [String] = ["480p", "720p"],
+        supportsNegativePrompt: Bool = true,
         setupHint: String? = nil
     ) {
         self.id = id
@@ -60,6 +72,8 @@ public struct VideoEntry: Sendable, Identifiable {
         self.rating = rating
         self.supportsImageInput = supportsImageInput
         self.supportedSeconds = supportedSeconds
+        self.supportedResolutions = supportedResolutions
+        self.supportsNegativePrompt = supportsNegativePrompt
         self.setupHint = setupHint
     }
 
@@ -103,6 +117,9 @@ public enum VideoCatalog {
         supportsImageInput: true,
         // silicon-node caps Wan at 121 frames (5 s at 24 fps) and clamps silently.
         supportedSeconds: [3, 5],
+        // The node's own size table for Wan: 832x480 and 1280x704, and anything else
+        // falls back to the second of those without saying so.
+        supportedResolutions: ["480p", "720p"],
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
     )
@@ -128,6 +145,7 @@ public enum VideoCatalog {
         // take up to 15 s, but there is no per-node way to say so yet; the catalog
         // publishes what every node that advertises this id can deliver.
         supportedSeconds: [3, 5],
+        supportedResolutions: ["480p", "720p", "1080p"],
         setupHint: "Runs on a swarm node with an NVIDIA card. Your silicon-node machine "
             + "qualifies — it just hasn't set video up yet."
     )
@@ -154,6 +172,7 @@ public enum VideoCatalog {
         supportsImageInput: true,
         // silicon-node lets the merge run to 241 frames (10 s); longer is clamped.
         supportedSeconds: [3, 5, 8, 10],
+        supportedResolutions: ["480p", "720p"],
         setupHint: "Runs on a swarm node with an NVIDIA card, on top of the LTX-2 distilled "
             + "install it borrows the text encoder and decoders from. Install it from the "
             + "node's Store page; it is not in the recommended set."
@@ -176,6 +195,7 @@ public enum VideoCatalog {
         rating: 5,
         supportsImageInput: true,
         supportedSeconds: [3, 5, 10, 15],
+        supportedResolutions: ["480p", "720p", "1080p"],
         setupHint: "Install MiniMax-H3 in Phosphene after accepting its license and obtaining "
             + "any authorization it requires, then enable the model-aware video adapter so it "
             + "advertises the hailuo-h3 capability."

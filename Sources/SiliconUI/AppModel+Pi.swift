@@ -17,17 +17,45 @@ extension AppModel {
             case thinking
             case tool(name: String)
             case notice
+            /// A tool call held at the guardrail. `requestID` is the
+            /// `extension_ui_request` id the answer has to quote.
+            case approval(requestID: String, tool: String)
         }
 
         public let id = UUID()
         public let kind: Kind
         public var text: String
         public var running: Bool
+        /// What Jev made of the call this entry is about. Set on a `.tool` entry that was
+        /// screened and allowed, and on every `.approval` entry.
+        public var screening: GuardrailScreening?
+        /// Whether an approval card has been answered. The card stays in the transcript —
+        /// a decision is part of the history — but its buttons go away.
+        public var answered = false
+        /// What the answer was, once there is one. The card says which, because "answered"
+        /// leaves the reader to guess the one thing they came back to find out.
+        public var allowed: Bool?
+        /// Pi's own id for the tool call this entry is about. How a verdict finds its row
+        /// when two calls to the same tool are in flight at once.
+        public var callID: String?
+        /// What the tool-selection feature suggested for this turn, on the `.user` row the
+        /// suggestion was made about. Nil on every other row, and on a turn where nothing
+        /// was suggested — which is most of them.
+        public var suggestion: String?
+        /// Which suggestion request this row is the turn for, stamped when the request
+        /// arrives. How `suggestPiTools` finds the row again afterwards: by then the newest
+        /// user row may be a different turn, typed while Jev was thinking.
+        var suggestionRequestID: String?
 
-        init(kind: Kind, text: String, running: Bool = false) {
+        init(
+            kind: Kind, text: String, running: Bool = false,
+            screening: GuardrailScreening? = nil, callID: String? = nil
+        ) {
             self.kind = kind
             self.text = text
             self.running = running
+            self.screening = screening
+            self.callID = callID
         }
     }
 
@@ -113,7 +141,7 @@ extension AppModel {
     // MARK: - Actions
 
     /// Encodes and ships one RPC command to Pi.
-    private func piSend(_ command: [String: Any]) {
+    func piSend(_ command: [String: Any]) {
         guard let runtime = piRuntime,
               let data = try? JSONSerialization.data(withJSONObject: command),
               let line = String(data: data, encoding: .utf8)
@@ -136,13 +164,246 @@ extension AppModel {
     }
 
     func abortPi() {
+        // Answer anything the guardrail is holding first. An abort that leaves a dialog
+        // open leaves the extension waiting on an answer that is never coming.
+        for item in piItems where !item.answered {
+            guard case .approval(let requestID, _) = item.kind else { continue }
+            item.answered = true
+            item.allowed = false
+            item.running = false
+            piSend(["type": "extension_ui_response", "id": requestID, "cancelled": true])
+        }
         piSend(["type": "abort"])
+    }
+
+    // MARK: - Guardrails
+
+    /// One tool call Pi is holding at the gate.
+    ///
+    /// Pi's RPC protocol has no permission request of its own: a client is told that a tool
+    /// ran, not asked whether it may. The gate is installed from the extension this app
+    /// writes into Pi's workspace, whose `tool_call` handler blocks the call and asks
+    /// through `ctx.ui.confirm` — which in RPC mode is an `extension_ui_request` on stdout
+    /// waiting for an `extension_ui_response` on stdin. So this is a real pre-execution
+    /// gate, and a refusal here means the tool does not run.
+    struct PiGuardrailRequest {
+        /// The title the extension's dialog carries, matched exactly. The other half of
+        /// this constant is `GUARDRAIL_MARKER` in `Resources/pi-silicon/silicon.ts`.
+        static let marker = "silicon.guardrail.v1"
+
+        var requestID: String
+        var tool: String
+        var arguments: String
+        /// Pi's own id for the call, so the verdict can find its transcript row.
+        var callID: String?
+    }
+
+    /// Which of this app's handlers, if any, owns one `extension_ui_request`.
+    ///
+    /// A table rather than a chain of `if`s, because it is the one place two features meet
+    /// on one channel and getting it wrong is not a cosmetic mistake: a guardrail `confirm`
+    /// that reached the suggestion handler would be answered with a system-prompt line
+    /// instead of a verdict, and Pi reads anything that is not `confirmed: false` as
+    /// permission. Both are matched on the method *and* the title, so neither marker can
+    /// arrive through the other's method and be mistaken for it.
+    enum PiDialogRoute: Equatable {
+        /// A tool call held at the guardrail's gate. Fails closed.
+        case guardrail
+        /// A turn asking which tool or skill to point Pi at. Fails open.
+        case toolSuggestion
+        /// Somebody else's dialog. This app has no surface for it, and an unanswered dialog
+        /// stops the turn forever, so it is answered `cancelled` rather than ignored.
+        case cancel
+        /// Not a blocking dialog at all — a notification, a status line. Nothing owes it a
+        /// reply.
+        case ignore
+    }
+
+    /// The blocking dialog methods. A fire-and-forget one expects no answer, and sending it
+    /// one would be a response with no request.
+    static let piDialogMethods: Set<String> = ["select", "confirm", "input", "editor"]
+
+    static func piDialogRoute(method: String, title: String?) -> PiDialogRoute {
+        if method == "confirm", title == PiGuardrailRequest.marker { return .guardrail }
+        if method == "input", title == PiSkillSuggestionRequest.marker {
+            return .toolSuggestion
+        }
+        return piDialogMethods.contains(method) ? .cancel : .ignore
+    }
+
+    /// Routes one `extension_ui_request` to whichever handler owns it.
+    private func handlePiExtensionUIRequest(_ event: [String: Any]) {
+        guard let id = event["id"] as? String else { return }
+        let method = event["method"] as? String ?? ""
+
+        switch Self.piDialogRoute(method: method, title: event["title"] as? String) {
+        case .guardrail:
+            let call = Self.parsePiGuardrailRequest(event["message"] as? String ?? "")
+            Task {
+                await screenPiToolCall(PiGuardrailRequest(
+                    requestID: id, tool: call.tool, arguments: call.arguments,
+                    callID: call.callID
+                ))
+            }
+        case .toolSuggestion:
+            let request = Self.parsePiSuggestionRequest(
+                event["placeholder"] as? String ?? "", requestID: id
+            )
+            // Stamped here, synchronously, before anything is awaited: the turn this is
+            // about is the one on screen now, not whichever one is newest when the answer
+            // comes back a second or two later.
+            stampPiSuggestionTurn(id)
+            Task { await suggestPiTools(request) }
+        case .cancel:
+            piSend(["type": "extension_ui_response", "id": id, "cancelled": true])
+        case .ignore:
+            break
+        }
+    }
+
+    /// The extension sends `{v, tool, toolCallId, arguments}` as the dialog's message.
+    /// A payload that will not parse is screened as-is rather than waved through.
+    static func parsePiGuardrailRequest(
+        _ payload: String
+    ) -> (tool: String, arguments: String, callID: String?) {
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return ("tool", payload, nil) }
+        let tool = object["tool"] as? String ?? "tool"
+        let callID = object["toolCallId"] as? String
+        guard let raw = object["arguments"],
+              let encoded = try? JSONSerialization.data(
+                withJSONObject: raw, options: [.sortedKeys, .fragmentsAllowed]
+              )
+        else { return (tool, "", callID) }
+        return (tool, String(decoding: encoded, as: UTF8.self), callID)
+    }
+
+    /// Screens one held call and answers the extension.
+    ///
+    /// The card goes up *before* the screening starts, empty, and fills in when the verdict
+    /// lands. Two reasons, and they are the same two as on the Codex side: the person can
+    /// answer at once instead of waiting on a round trip, and a call that is being held
+    /// appears in the transcript as a call that is being held — the in-flight list is the
+    /// transcript, which is what lets `abortPi` answer every one of them.
+    ///
+    /// The three-way rule is the Codex hook's, for the same reason: `.confirm` is what a
+    /// person is for, and a screening that could not happen is not a yes.
+    func screenPiToolCall(
+        _ request: PiGuardrailRequest, using service: JevService = .shared
+    ) async {
+        // Off means off. Pi ran unattended before this feature existed, and a guardrail
+        // nobody switched on must not start holding tool calls.
+        guard await JevGuardrails.isTurnedOn(using: service) else {
+            answerPiGuardrail(request.requestID, allow: true)
+            return
+        }
+
+        let card = PiItem(
+            kind: .approval(requestID: request.requestID, tool: request.tool),
+            text: request.arguments, running: true, callID: request.callID
+        )
+        piItems.append(card)
+
+        let autoApprove = await service.settings().autoApproveSafeToolCalls
+        let screening = await JevGuardrails.screen(
+            engine: .pi,
+            request: lastPiUserMessage(),
+            userIntent: lastSubstantivePiRequest(),
+            tool: request.tool,
+            arguments: request.arguments,
+            workingDirectory: PiRuntime.workspaceDirectory.path,
+            recentTranscript: recentPiToolResults(),
+            protecting: [PiRuntime.configurationDirectory.path],
+            autoApproveArmed: autoApprove,
+            using: service
+        )
+        card.screening = screening
+
+        // They may have answered while the request was in flight. Their decision stands.
+        guard !card.answered else { return }
+
+        if autoApprove, let verdict = screening.verdict {
+            switch verdict {
+            case .act:
+                markPiToolCall(request.callID, with: screening)
+                answerPiApproval(card, allow: true, silently: true)
+                return
+            case .block:
+                answerPiApproval(card, allow: false, silently: true)
+                return
+            case .confirm:
+                break
+            }
+        }
+        card.running = false
+    }
+
+    /// The buttons on the approval card, and the auto-answer path.
+    ///
+    /// - Parameter silently: true when the guardrail answered rather than the person. The
+    ///   card records which either way; `silently` only decides whether the transcript also
+    ///   gets a line saying so.
+    public func answerPiApproval(_ item: PiItem, allow: Bool, silently: Bool = false) {
+        guard case .approval(let requestID, _) = item.kind, !item.answered else { return }
+        // Which way it went, for any paired device watching this session — see the same
+        // line in `answerCodexApproval` for why it is recorded at the funnel.
+        BuddyAgentSessions.shared.noteAnswerHere(
+            id: item.id.uuidString, owner: agentLedgerOwner, engine: "pi", accept: allow
+        )
+        item.answered = true
+        item.allowed = allow
+        item.running = false
+        answerPiGuardrail(requestID, allow: allow)
+        guard silently, let screening = item.screening else { return }
+        piItems.append(PiItem(
+            kind: .notice,
+            text: allow
+                ? "Allowed automatically — \(screening.summary)."
+                : "Blocked automatically — \(screening.summary).",
+            screening: screening
+        ))
+    }
+
+    private func answerPiGuardrail(_ requestID: String, allow: Bool) {
+        piSend(["type": "extension_ui_response", "id": requestID, "confirmed": allow])
+    }
+
+    /// Puts the verdict on the transcript entry for a call that was allowed without asking,
+    /// so "it ran" and "it was screened" are visible in the same place.
+    ///
+    /// Keyed on Pi's own call id rather than the tool's name: two `bash` calls can be in
+    /// flight from one assistant message, and "the last running one with this name" would
+    /// hang the second call's verdict on the first call's row.
+    private func markPiToolCall(_ callID: String?, with screening: GuardrailScreening) {
+        guard let callID else { return }
+        piItems.last { $0.callID == callID }?.screening = screening
+    }
+
+    func lastPiUserMessage() -> String {
+        piItems.last { $0.kind == .user }?.text ?? ""
+    }
+
+    /// The last message that actually asked for something — see the Codex side for why
+    /// "thanks, that worked" must not become the goal every later call is judged against.
+    func lastSubstantivePiRequest() -> String {
+        piItems.last { $0.kind == .user && Self.isSubstantiveRequest($0.text) }?.text
+            ?? lastPiUserMessage()
+    }
+
+    /// The last few finished tool results — where an injected instruction would have
+    /// arrived. A running entry is this call's own arguments, not a result.
+    func recentPiToolResults() -> [String] {
+        piItems
+            .filter { if case .tool = $0.kind { return !$0.running } else { return false } }
+            .suffix(GuardrailState.maximumResults)
+            .map(\.text)
     }
 
     func setPiModel(_ id: String) {
         guard piRuntime != nil else { return }
         settings.piModel = id
-        settings.save()
+        persistSettings()
         piCurrentModel = id
         piSend(["type": "set_model", "provider": "silicon", "modelId": id])
     }
@@ -152,7 +413,11 @@ extension AppModel {
     /// Maps Pi's RPC events onto transcript items. Streaming text and thinking are
     /// appended to the newest item of their kind; tools get their own entries that
     /// resolve in place when execution ends.
-    private func handlePiEvent(_ event: [String: Any]) {
+    ///
+    /// Internal rather than private so the tests that pin Silicon Buddy's normalisation can
+    /// drive recorded Pi events through the real handler. Normalising a second copy of this
+    /// mapping in a test would only ever prove the copy right.
+    func handlePiEvent(_ event: [String: Any]) {
         switch event["type"] as? String {
         case "agent_start":
             piBusy = true
@@ -185,7 +450,8 @@ extension AppModel {
                     piItems.append(PiItem(
                         kind: .tool(name: name),
                         text: Self.piToolSummary(call["arguments"]),
-                        running: true
+                        running: true,
+                        callID: call["id"] as? String
                     ))
                 }
             default:
@@ -221,6 +487,9 @@ extension AppModel {
                     }
                 }
             }
+
+        case "extension_ui_request":
+            handlePiExtensionUIRequest(event)
 
         case "extension_error":
             let text = event["error"] as? String ?? "An extension failed."

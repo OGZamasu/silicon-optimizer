@@ -50,8 +50,45 @@ extension AppModel: ControlHost {
             contextLength: activeConfiguration?.contextLength,
             expertStreaming: activeConfiguration?.expertStreaming != nil,
             lastGenerationTokensPerSecond: lastGeneration?.generationTokensPerSecond,
-            activity: activeGenerationSummary
+            activity: activeGenerationSummary,
+            failure: Self.failedLoadDetail(
+                state: runtimeState, recorded: LoadFailureRecorder.shared.last
+            )
         )
+    }
+
+    /// Whether a load that ended in this error is one to put in front of the owner.
+    ///
+    /// A load that was replaced belongs to the load that replaced it — its progress line is
+    /// the true one, and stamping a failure over it would replace a fact with a leftover.
+    /// An unload part-way through a load is the owner getting exactly what they asked for,
+    /// and answering that with an error dialog is the app arguing with them.
+    ///
+    /// Here rather than inline in `loadAsync` so the rule can be tested: it is the whole
+    /// difference between "your model failed" and "you loaded something else".
+    static func showsFailure(for error: any Error) -> Bool {
+        (error as? RuntimeError)?.wasInterrupted != true
+    }
+
+    /// The structured account of the load that produced this state line, or nothing.
+    ///
+    /// Two conditions, both necessary. The app has to be *in* a failed state — a recorded
+    /// failure beside a model that is loading happily is a lie about the present. And the
+    /// recorded failure has to be the one the state line came from: the app's own catch sets
+    /// the state to the error's description, which is the failure's summary, so equal
+    /// sentences mean the detail belongs to the line a client is showing. A load that failed
+    /// somewhere the runtime never reached — no such model, a plan the selector refused —
+    /// has a state line and no detail, which is the honest answer rather than the previous
+    /// failure's log.
+    ///
+    /// Static and pure so that rule can be tested. Both halves of it are a promise to a
+    /// client, and a promise nothing checks is one the next edit gets to break quietly.
+    static func failedLoadDetail(
+        state: RuntimeState, recorded: LoadFailure?
+    ) -> ControlAPI.LoadFailure? {
+        guard case .failed = state else { return nil }
+        guard let recorded, recorded.summary == state.label else { return nil }
+        return recorded.wire
     }
 
     public func installed() async -> [ControlAPI.InstalledModel] {
@@ -91,14 +128,101 @@ extension AppModel: ControlHost {
             }
     }
 
-    public func recommend(category: String?) async -> ControlAPI.CatalogModel? {
+    /// The strongest model this Mac can run — and, when the caller says what the job is,
+    /// the strongest model *for that job*.
+    ///
+    /// Hardware fit is computed first either way, because it is what decides which models
+    /// are candidates at all: a model that will not run here cannot be recommended for
+    /// anything, and the ranking it produces is the fallback whenever Jev is off, has no
+    /// key, is out of budget, or fails. A task with the feature disabled is answered exactly
+    /// as it was before this existed, and costs nothing.
+    public func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? {
         let filter = category.flatMap { ModelCategory(rawValue: $0) }
         let pool = filter.map { wanted in ModelCatalog.all.filter { $0.category == wanted } }
             ?? ModelCatalog.all.filter { $0.category != .embedding }
-        guard let pick = autoConfigurator().rank(
+        let ranked = autoConfigurator().rank(
             catalog: pool, otherAppsInUse: memoryUsedByOtherApps
-        ).first else { return nil }
-        return describe(pick.entry, recommendation: pick)
+        )
+        guard let pick = ranked.first else { return nil }
+
+        guard let job = RecommendationQuestions.trimmedTask(task) else {
+            return describe(pick.entry, recommendation: pick)
+        }
+        await JevBootstrap.ready()
+        guard await DecisionRouter.shared.canAnswer(.recommendation) else {
+            return describe(pick.entry, recommendation: pick)
+        }
+        guard let answer = await taskRanking(job, over: ranked) else {
+            return describe(pick.entry, recommendation: pick)
+        }
+        return answer
+    }
+
+    /// Asks Jev what the job needs, applies `RecommendationPolicy`, and turns the top three
+    /// into one answer with its runners-up attached.
+    ///
+    /// Returns nil — rather than throwing — on any failure. A recommendation is advice; an
+    /// expired budget, a 500 from TypeSafe or a question id that no longer matches should
+    /// leave the caller with the hardware-fit answer, not with an error where a model name
+    /// was expected.
+    private func taskRanking(
+        _ job: (text: String, truncated: Bool), over ranked: [AutoConfigurator.Recommendation]
+    ) async -> ControlAPI.CatalogModel? {
+        // Fit order first, then the reservations, so a job that needs to see is offered
+        // something that can even on a Mac whose sixteen best fits are all text models.
+        let all = ranked.map {
+            RecommendationCandidate(
+                entry: $0.entry, recommendation: $0,
+                isInstalled: isInstalled($0.entry, quantization: $0.quantization)
+            )
+        }
+        let candidates = RecommendationQuestions.shortlist(from: all)
+        guard !candidates.isEmpty else { return nil }
+
+        let byID = Dictionary(ranked.map { ($0.entry.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let fitScores = RecommendationPolicy.normalizedFit(
+            Dictionary(
+                candidates.compactMap { candidate in
+                    byID[candidate.id].map { (candidate.id, $0.score) }
+                },
+                uniquingKeysWith: max
+            )
+        )
+
+        let outcome: RecommendationPolicy.Outcome
+        do {
+            let answers = try await RecommendationQuestions.ask(
+                task: job.text, candidates: candidates
+            )
+            outcome = try RecommendationPolicy.rank(
+                answers: answers, candidates: candidates, fitScores: fitScores
+            )
+        } catch {
+            return nil
+        }
+
+        let described: [ControlAPI.CatalogModel] = outcome.ranked.compactMap { place in
+            guard let fit = byID[place.id] else { return nil }
+            var model = describe(fit.entry, recommendation: fit)
+            model.reason = place.reason
+            return model
+        }
+        guard var best = described.first else { return nil }
+
+        var notes = outcome.notes
+        if job.truncated {
+            // Said rather than swallowed: a six-page description was judged on its first
+            // four kilobytes, and somebody wondering why the answer ignored the last page
+            // should be told the last page was never sent.
+            notes.append(
+                "The description was trimmed to "
+                + "\(RecommendationQuestions.maximumTaskBytes / 1024) KB before it was sent."
+            )
+        }
+        best.note = notes.isEmpty ? nil : notes.joined(separator: " ")
+        best.followedJev = outcome.followedJev
+        best.alternatives = Array(described.dropFirst())
+        return best
     }
 
     // MARK: - Plan
@@ -266,53 +390,215 @@ extension AppModel: ControlHost {
         }
         lastGeneration = metrics
 
+        // Verification, and — when the policy says so — a stronger model's answer instead.
+        //
+        // This path can escalate where the streaming ones cannot: it has shown the caller
+        // nothing yet, so replacing the reply costs nobody a message they were reading.
+        // Truncation is read from the runtime's own finish reason against the budget this
+        // request actually sent, never asked of a model.
+        //
+        // Inside `whileGenerating` like the generation above it, and for the same reason:
+        // an escalation to a cold cloud model is seconds of no local activity at all, and
+        // the idle timer would happily unload the model — or let the Mac sleep — in the
+        // middle of a request that is still being answered.
+        let outcome = await whileGenerating {
+            await self.verify(
+                prompt: VerificationPrompt(messages: request.messages),
+                reply: content,
+                truncated: metrics.wasTruncated(budget: chatRequest.maxTokens)
+            )
+        }
+        var answer = content
+        var thinking = reasoning
+        var reported = metrics
+        if case .escalated(_, let better, _, _) = outcome {
+            answer = better
+            // The local model's chain of thought is not the escalated answer's, and its
+            // throughput describes text this response no longer contains. Returning either
+            // beside a reply another model wrote would be a plain untruth about where the
+            // answer came from — so both are dropped, and `verification.escalatedTo` says
+            // who did write it.
+            thinking = ""
+            reported = GenerationMetrics()
+        }
+
         return ControlAPI.ChatResponse(
-            content: content,
-            reasoning: reasoning.isEmpty ? nil : reasoning,
-            promptTokens: metrics.promptTokens,
-            generatedTokens: metrics.generatedTokens,
-            tokensPerSecond: metrics.generationTokensPerSecond
+            content: answer,
+            reasoning: thinking.isEmpty ? nil : thinking,
+            promptTokens: reported.promptTokens,
+            generatedTokens: reported.generatedTokens,
+            tokensPerSecond: reported.generationTokensPerSecond,
+            verification: outcome.verdictName.map {
+                ControlAPI.ChatVerdict(
+                    verdict: $0, reasons: outcome.reasons,
+                    escalatedTo: outcome.escalatedTo, suggestion: outcome.suggestion
+                )
+            }
         )
     }
 
-    /// Who answers a decision. `auto` prefers the model loaded here — nothing leaves the
-    /// Mac and there is nothing to pay — and falls back to TypeSafe when a key is set.
-    /// Naming a lane makes it a hard requirement instead.
+    /// Who answers a decision.
+    ///
+    /// `auto` is a **cascade**, not a fallback. The model loaded here answers first — nothing
+    /// leaves the Mac and there is nothing to pay — and then, per question, only the answers
+    /// it was not sure of are put to Jev. What counts as "not sure" is the calibration's
+    /// business: `POST /jev/calibrate` measures where this model's confidence stops
+    /// predicting Jev's verdict, and the cascade thresholds there. With no model loaded there
+    /// is nothing to cascade from and `auto` is the old fallback; with Jev unavailable there
+    /// is nothing to cascade to and it is the local lane, unchanged.
+    ///
+    /// Naming a lane makes it a hard requirement instead, and skips the cascade in both
+    /// directions: `local` never pays, `typesafe` never asks the model here.
     public func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         try request.validate()
         let provider = (request.provider ?? "auto").lowercased()
         var localEndpoint: URL?
         if case .ready(let endpoint) = runtimeState { localEndpoint = endpoint }
 
-        func local() async throws -> ControlAPI.DecideResponse {
+        func oneToken(
+            _ asked: ControlAPI.DecideRequest = request
+        ) async throws -> ControlAPI.DecideResponse {
             guard let endpoint = localEndpoint, let loaded = loadedModel else {
                 throw ControlHostError.noModelLoaded
             }
             noteActivity()
             let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
-            return try await whileGenerating { try await decider.decide(request) }
+            return try await whileGenerating { try await decider.decide(asked) }
+        }
+
+        /// The free half of the cascade, and of `provider: "local"`.
+        ///
+        /// "Local" used to have exactly one meaning — the loaded chat model, read one token
+        /// deep — and now has three. The best of them answers: Laya if it is installed,
+        /// because it is a decision model where the one-token reading is an approximation
+        /// of one; then a swarm node, which costs nothing either; then the loaded model,
+        /// which is what this always was and still is on a Mac with nothing installed.
+        ///
+        /// Nothing about the *shape* changes: the response is the same type, `provider`
+        /// says which of the three answered, and a caller that only ever looked at
+        /// `answers` cannot tell the difference.
+        func local(
+            _ asked: ControlAPI.DecideRequest = request
+        ) async throws -> ControlAPI.DecideResponse {
+            guard let lane = await DecisionRouter.shared.localLane(for: .decideTool),
+                  lane != .oneToken
+            else { return try await oneToken(asked) }
+            do {
+                return try await DecisionRouter.shared.ask(
+                    lane: lane, feature: .decideTool,
+                    state: asked.state, questions: asked.questions
+                )
+            } catch {
+                // A lane that was ready a moment ago and is not now — a sidecar that died,
+                // a node that went to sleep. The loaded model is still here, and an answer
+                // from it beats a failed decision.
+                guard localEndpoint != nil else { throw error }
+                return try await oneToken(asked)
+            }
         }
         func typeSafe() async throws -> ControlAPI.DecideResponse {
-            // The Keychain is consulted here and not before: a local answer never needs it.
-            guard let key = TypeSafeCredential.read() else { throw SystemOneError.noAPIKey }
-            return try await SystemOneClient(apiKey: key).decide(request)
+            // Through the one door rather than straight at `SystemOneClient`: the decide
+            // tool is a Jev feature like any other, so it obeys the same master switch,
+            // model pin, size limit, budget, cache and ledger as the rest. The Keychain is
+            // consulted inside, at the moment a request is sent — a local answer, or a
+            // refusal by any of those checks, never touches it.
+            //
+            // `request.model` is deliberately dropped: the version is the owner's choice,
+            // pinned in Settings, and a tool call should not be able to move this Mac onto
+            // an alias whose answers the thresholds were never tuned against.
+            //
+            // Waited on rather than assumed: a request arriving in the first milliseconds of
+            // launch must not be told there is no key on a Mac that has one.
+            await JevBootstrap.ready()
+            return try await JevService.shared.ask(
+                .decideTool, state: request.state, questions: request.questions
+            )
         }
 
         switch provider {
         case "local": return try await local()
         case "typesafe": return try await typeSafe()
+        // Named outright, which skips the policy: "answer with Laya" rather than "answer
+        // with whatever is best", which is what a test bench and a comparison need.
+        case "laya", "node":
+            guard let lane = DecisionLaneID.named(provider) else {
+                throw ControlHostError.badRequest(
+                    ControlAPI.DecisionLaneVocabulary.unknownLane(provider)
+                )
+            }
+            return try await DecisionRouter.shared.ask(
+                lane: lane, feature: .decideTool,
+                state: request.state, questions: request.questions
+            )
         case "auto":
-            if localEndpoint != nil { return try await local() }
-            if TypeSafeCredential.isSet { return try await typeSafe() }
-            throw ControlHostError.badRequest(
-                "Nothing can decide yet: load a model for the local lane, or add a TypeSafe "
-                + "API key in Settings → TypeSafe (Jev)."
+            // With nothing free to cascade *from*, `auto` is a single lane and the policy
+            // picks it: Jev when the owner has turned it on and keyed it, otherwise Laya,
+            // otherwise a node. Only when none of those exists is there nothing to say.
+            let free = await DecisionRouter.shared.localLane(for: .decideTool)
+            guard localEndpoint != nil || free != nil else {
+                await JevBootstrap.ready()
+                if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
+                throw ControlHostError.badRequest(
+                    "Nothing can decide yet: install Laya in Settings → Decisions, load a "
+                    + "model, or add a TypeSafe API key and turn on the decide tool."
+                )
+            }
+            // The floors belonging to the lane that is about to answer the free pass,
+            // not to "the local lane" as if there were only one of them.
+            let floors = await cascadeFloors(for: free ?? .oneToken)
+            return try await DecisionCascade.run(
+                request,
+                floors: floors,
+                // Asked only once the local answers are in and at least one of them was
+                // uncertain, so a confident run never reads the settings file — and the
+                // Keychain is not touched until a request is actually about to be sent.
+                jevAvailable: {
+                    await JevBootstrap.ready()
+                    return await Self.cascadeMayEscalate()
+                },
+                local: { try await local($0) },
+                jev: { try await Self.escalate($0) }
             )
         default:
             throw ControlHostError.badRequest(
-                "Unknown provider \"\(request.provider ?? "")\". Use auto, local or typesafe."
+                "Unknown provider \"\(request.provider ?? "")\". "
+                + "Use auto, local, laya, node or typesafe."
             )
         }
+    }
+
+    /// Whether `auto` may pay Jev for an answer this machine was unsure of.
+    ///
+    /// Two switches, both of them the owner's, and the order matters.
+    ///
+    /// **Decide tool** is the switch that governs ongoing `/decide` spending. Turning it off
+    /// has to stop every penny of it — including a chat-scope phone's, which reaches this
+    /// same code through `POST /decide` — so it is checked first and it is what the
+    /// escalation is billed to. Its budget, its cache and its ledger line all apply.
+    ///
+    /// **Decision calibration** is what turns the old fallback into a cascade at all. With
+    /// it off, `auto` is the single lane it has always been, whatever the decide tool says.
+    ///
+    /// A free function rather than a closure inside `decide` so a test can hold the gate and
+    /// the ledger it writes to, which is the only way to prove that turning the first switch
+    /// off actually stops the spending.
+    static func cascadeMayEscalate(_ service: JevService = .shared) async -> Bool {
+        guard await service.isAvailable(.decideTool) else { return false }
+        return await service.settings().isOn(.calibration)
+    }
+
+    /// The escalation itself, billed to the decide tool.
+    ///
+    /// Not to `.calibration`: that line is for calibration runs, and an owner reading the
+    /// ledger to find out what `decide` costs should find it under the decide tool. Gating
+    /// on one feature and spending another's budget would also mean a decide-tool budget
+    /// that `/decide` could spend past.
+    static func escalate(
+        _ request: ControlAPI.DecideRequest, using service: JevService = .shared
+    ) async throws -> ControlAPI.DecideResponse {
+        try await service.ask(
+            .decideTool, state: request.state, questions: request.questions
+        )
     }
 
     public func benchmark() async throws -> ControlAPI.BenchmarkResult {
@@ -444,12 +730,14 @@ extension AppModel: ControlHost {
     }
 }
 
-public enum ControlHostError: Error, LocalizedError {
+public enum ControlHostError: Error, LocalizedError, ControlStatusError {
     case unknownModel(String)
     case notInstalled(String)
     case noModelLoaded
     case loadFailed(String)
     case badRequest(String)
+    /// The Mac is already doing this, and doing it twice would be worse than waiting.
+    case busy(String)
 
     public var errorDescription: String? {
         switch self {
@@ -463,6 +751,17 @@ public enum ControlHostError: Error, LocalizedError {
             "The model failed to load: \(reason)"
         case .badRequest(let reason):
             reason
+        case .busy(let reason):
+            reason
+        }
+    }
+
+    /// Everything here is "you asked wrong", which is a 400 — except being told to come back
+    /// later, which a caller can act on and a 400 gives it no way to recognise.
+    public var status: Int {
+        switch self {
+        case .busy: 409
+        default: 400
         }
     }
 }
@@ -493,14 +792,29 @@ extension AppModel {
     }
 
     public func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
-        let (entry, configuration) = try resolveImage(request)
-        return describe(
+        // An omitted or "auto" model is the media router's cue; with Jev off this only
+        // normalises the word and the plan is the one this call has always produced.
+        let routed = try await mediaRoutedImage(request)
+        let (entry, configuration) = try resolveImage(routed.request)
+        var plan = describe(
             diffusionPlan(for: entry, configuration: configuration),
             configuration: configuration
         )
+        if let reason = routed.reason { plan.notes.insert(reason, at: 0) }
+        return plan
     }
 
     public func generateImage(
+        _ request: ControlAPI.ImageRequest
+    ) async throws -> ControlAPI.ImageResponse {
+        let routed = try await mediaRoutedImage(request)
+        var response = try await generateRoutedImage(routed.request)
+        response.warning = Self.merged(response.warning, routed.reason)
+        return response
+    }
+
+    /// The image render itself, with the model and the settings already decided.
+    private func generateRoutedImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
         let (entry, configuration) = try resolveImage(request)
@@ -757,7 +1071,13 @@ extension AppModel {
         _ request: ControlAPI.MeshRequest
     ) async throws -> ControlAPI.MeshResponse {
         let (entry, configuration) = try resolveMesh(request)
-        let image = URL(fileURLWithPath: (request.imagePath as NSString).expandingTildeInPath)
+        // Optional on the wire since devices got `uploadID`/`mediaID`, which the control
+        // server resolves into this field before the request reaches here. Nothing this
+        // side can do with a request that still has none.
+        guard let named = request.imagePath, !named.isEmpty else {
+            throw ControlHostError.badRequest(ControlServer.noSubjectImage)
+        }
+        let image = URL(fileURLWithPath: (named as NSString).expandingTildeInPath)
         guard FileManager.default.fileExists(atPath: image.path) else {
             throw MeshRuntimeError.generationFailed(
                 "No image at \(image.path). Pass an absolute path to an existing image file."
@@ -854,7 +1174,9 @@ extension AppModel {
                 supportedSeconds: entry.supportedSeconds,
                 available: node != nil,
                 node: node?.name,
-                supportedParameters: node.flatMap { videoCapability(for: entry, on: $0)?.supportedParameters }
+                supportedParameters: node.flatMap { videoCapability(for: entry, on: $0)?.supportedParameters },
+                supportedResolutions: entry.supportedResolutions,
+                supportsNegativePrompt: entry.supportsNegativePrompt
             )
         }
     }
@@ -866,8 +1188,16 @@ extension AppModel {
     ) async throws -> ControlAPI.VideoResponse {
         let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { throw ControlHostError.badRequest("The prompt is empty.") }
+        // An omitted or "auto" model goes to the media router. It answers nil when Jev is
+        // not available, and everything below then behaves exactly as it did before.
+        let routed = try await mediaRoutedVideo(
+            prompt: prompt, explicitModelID: request.modelID, seconds: request.seconds
+        )
+        // "auto" is a routing instruction rather than a model id, so it never reaches the
+        // catalog: unrouted, it means what an omitted model has always meant.
+        let namedID = MediaRoutingQuestions.isAuto(request.modelID) ? nil : request.modelID
         let explicitEntry: VideoEntry?
-        if let requestedID = request.modelID {
+        if let requestedID = routed?.modelID ?? namedID {
             guard let entry = VideoCatalog.entry(id: requestedID) else {
                 let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
                 throw ControlHostError.badRequest(
@@ -882,12 +1212,15 @@ extension AppModel {
         // A cold refresh may replace the historical Wan default with the first exact
         // capability actually available. Resolve an omitted model only after that.
         await refreshSwarmIfStale()
-        let entryID = request.modelID ?? selectedVideoModel
+        let entryID = routed?.modelID ?? namedID ?? selectedVideoModel
         guard let entry = explicitEntry ?? VideoCatalog.entry(id: entryID) else {
             let known = VideoCatalog.all.map(\.id).joined(separator: ", ")
             throw ControlHostError.badRequest("Unknown video model \(entryID). Known: \(known)")
         }
         let seconds: Int
+        // A named length is still checked against the model here, routed or not: the router
+        // honours it exactly or refuses, so it can only agree with this — and a caller that
+        // named both a model and a length never reaches the router at all.
         if let requestedSeconds = request.seconds {
             guard entry.supportedSeconds.contains(requestedSeconds) else {
                 let choices = entry.supportedSeconds.map(String.init).joined(separator: ", ")
@@ -896,6 +1229,8 @@ extension AppModel {
                 )
             }
             seconds = requestedSeconds
+        } else if let routedSeconds = routed?.seconds {
+            seconds = routedSeconds
         } else {
             seconds = entry.normalizedSeconds(
                 ControlAPI.VideoGenerateRequest.clampedSeconds(videoSeconds)
@@ -917,12 +1252,16 @@ extension AppModel {
                 + "off or still setting that model up."
             )
         }
-        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: request.h3Turbo, h3Steps: request.h3Steps, modelID: entry.id)
-        if request.h3Turbo != nil,
+        // The router only sets these when the node advertised them, so they go through the
+        // same checks as a caller's own and are refused the same way if the node changed.
+        let h3Turbo = routed?.h3Turbo ?? request.h3Turbo
+        let h3Steps = routed?.h3Steps ?? request.h3Steps
+        try ControlAPI.VideoGenerateRequest.validateSampling(h3Turbo: h3Turbo, h3Steps: h3Steps, modelID: entry.id)
+        if h3Turbo != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_turbo") != true {
             throw ControlHostError.badRequest("This node does not support per-clip h3_turbo; update its video-node adapter or omit that field.")
         }
-        if request.h3Steps != nil,
+        if h3Steps != nil,
            videoCapability(for: entry, on: node)?.supportedParameters.contains("h3_steps") != true {
             throw ControlHostError.badRequest("This node does not advertise h3_steps. Update its video-node adapter and Phosphene, or omit steps for Auto.")
         }
@@ -941,14 +1280,21 @@ extension AppModel {
             resolution: request.resolution ?? videoResolution,
             h3ChainPrompts: chainPrompts,
             outputDirectory: settings.resolvedVideoOutputDirectory,
-            seed: request.seed, h3Turbo: request.h3Turbo, h3Steps: request.h3Steps
+            seed: request.seed, h3Turbo: h3Turbo, h3Steps: h3Steps,
+            // Sent only where the lane takes one. Every node lane does today; dropping it
+            // silently on one that does not is better than a refusal over a field the
+            // caller could not have known about — and `GET /video/models` says which.
+            negativePrompt: entry.supportsNegativePrompt
+                ? request.negativePrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .nilWhenEmpty
+                : nil
         )
 
         videoError = nil
         // A disconnected synchronous client must not enqueue after a slow
         // capability refresh. Once accepted, only its waiter is cancellable.
         try Task.checkCancellation()
-        let item = try enqueueSingleVideo(videoRequest)
+        let item = try enqueueSingleVideo(videoRequest, detail: routed?.reason)
         // Lease before the first suspension after acceptance, so even a very
         // fast completion + clear cannot beat entry into the polling function.
         videoBatchQueue.retainReceipt(item.id)
@@ -982,10 +1328,35 @@ extension AppModel {
                         ControlAPI.SwarmView.Capability(
                             id: $0.id, kind: $0.kind, ready: $0.ready
                         )
-                    }
+                    },
+                    // Everything below was already on this Mac's own Swarm card and went
+                    // no further. The phone showed a name, an address and a dot; this is
+                    // the rest of what the last poll actually learned. Nothing new is
+                    // fetched to answer it — a peer that is down still carries its error
+                    // and nothing else, because that is all there is to say about it.
+                    platform: peer.platform,
+                    hardware: peer.hardware,
+                    totalMemoryGB: peer.totalGB,
+                    usedMemoryGB: peer.usedGB,
+                    headroomGB: peer.headroomGB,
+                    gpuUtilization: peer.gpuUtil,
+                    queueDepth: peer.queueDepth,
+                    gpuConsumer: peer.gpuConsumer,
+                    // The name only while it is actually serving: a stopped lane has a
+                    // model on disk, which is `lanes.gguf == false` and not a claim that
+                    // something is loaded.
+                    loadedModel: peer.llm?.running == true ? peer.llm?.model : nil,
+                    modelEngine: peer.llm?.running == true ? peer.llm?.engine : nil,
+                    modelContextLength: peer.llm?.running == true
+                        ? peer.llm?.contextLength : nil,
+                    lanes: Self.lanes(of: peer)
                 )
             },
-            polledSecondsAgo: lastSwarmPoll.map { Date().timeIntervalSince($0) }
+            polledSecondsAgo: lastSwarmPoll.map { Date().timeIntervalSince($0) },
+            // The other half of the swarm: whether this Mac's peers can reach *it*. A node
+            // that cannot call back looks exactly like a node that is down, and the reason
+            // is nearly always that tailscale is not running here.
+            exposure: await controlServer?.exposure
         )
     }
 

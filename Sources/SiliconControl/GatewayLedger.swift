@@ -25,6 +25,11 @@ public struct GatewayLedgerEntry: Codable, Sendable, Identifiable, Equatable {
     public var detail: String?
     /// The empty-content diagnosis, when one applied.
     public var warning: String?
+    /// Which earlier tool results were dropped from this request before it was forwarded, by
+    /// step number. Nil for the requests nothing was taken out of, which is almost all of
+    /// them. Recorded because a reply computed from less than the client sent is a fact about
+    /// that reply, and a row that did not say so would be a row you could not trust.
+    public var prunedSteps: [Int]?
 
     /// Generation speed for this one request, when it can be computed honestly:
     /// tokens over the time spent generating, not loading.
@@ -107,6 +112,15 @@ public actor GatewayLedger {
         entries.append(entry)
         trim()
         return entry.id
+    }
+
+    /// Records that this request went out shorter than it arrived. Always kept, previews
+    /// setting or not: these are step numbers, not message content.
+    public func notePruned(_ id: String, steps: [Int]) {
+        guard !steps.isEmpty, let index = entries.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        entries[index].prunedSteps = steps
     }
 
     public func noteEnsured(_ id: String, backendModel: String) {

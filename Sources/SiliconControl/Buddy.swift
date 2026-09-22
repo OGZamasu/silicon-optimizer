@@ -103,10 +103,14 @@ public struct BuddyDevice: Codable, Sendable, Equatable, Identifiable {
     public var tokenHash: String
     public var pairedAt: Date
     public var lastSeen: Date?
+    /// The port the device was told to keep dialling. Absent in a file written while the
+    /// tailnet listener still followed loopback's ephemeral port — which is exactly the
+    /// set of devices that can no longer find this Mac, whatever their token says.
+    public var pairedPort: Int?
 
     public init(
         id: String, name: String, platform: String, scope: BuddyScope = .full,
-        tokenHash: String, pairedAt: Date, lastSeen: Date? = nil
+        tokenHash: String, pairedAt: Date, lastSeen: Date? = nil, pairedPort: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -115,15 +119,22 @@ public struct BuddyDevice: Codable, Sendable, Equatable, Identifiable {
         self.tokenHash = tokenHash
         self.pairedAt = pairedAt
         self.lastSeen = lastSeen
+        self.pairedPort = pairedPort
     }
 
     public var effectiveScope: BuddyScope { scope ?? .full }
+
+    /// Told where to dial by a version that could not promise the address would still be
+    /// there. Said as a fact about the record rather than guessed from behaviour: the old
+    /// port was ephemeral, so it cannot be compared against — only its absence can.
+    public var needsRepair: Bool { pairedPort == nil }
 
     public var summary: ControlAPI.BuddyDeviceSummary {
         ControlAPI.BuddyDeviceSummary(
             id: id, name: name, platform: platform, scope: effectiveScope.rawValue,
             pairedAt: ControlAPI.timestamp(pairedAt),
-            lastSeen: lastSeen.map(ControlAPI.timestamp)
+            lastSeen: lastSeen.map(ControlAPI.timestamp),
+            needsRepair: needsRepair
         )
     }
 }

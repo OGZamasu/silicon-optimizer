@@ -270,6 +270,100 @@ struct BuddyAppModelTests {
         #expect(image.width > 100 && image.width == image.height)
     }
 
+    // MARK: - A code minted underneath the open sheet
+
+    @Test func theSheetShowsTheScopeOfTheCodeRatherThanItsOwnPicker() async {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let registry = BuddyRegistry(url: file)
+        let center = BuddyCenter(registry: registry)
+        await registry.setAllowsTailnetDevices(true)
+
+        let sheet = BuddyPairingSheet(buddy: center, server: nil, onClose: {})
+        // Nothing on screen yet, so the picker can only offer what the next code would be.
+        #expect(sheet.displayedScope == .full)
+
+        // Minted underneath the open sheet — this is `POST /buddy/invitations`, which does
+        // not go anywhere near the picker and carries a scope of its own.
+        await registry.invite(host: "100.64.0.9", port: 8788, scope: .chat)
+        await center.refresh(server: nil)
+        #expect(center.invitation?.scope == .chat)
+        #expect(sheet.displayedScope == .chat)
+        #expect(BuddyPairingSheet.grantLine(.chat).contains("chat only"))
+
+        // And the window's own last answer does not get to argue with it. This is the bug
+        // the sheet had: a picker saying "full control" over a code that pairs chat-only.
+        center.nextScope = .full
+        #expect(sheet.displayedScope == .chat)
+
+        // A code minted the other way round moves it back, for the same reason.
+        await registry.invite(host: "100.64.0.9", port: 8788, scope: .full)
+        await center.refresh(server: nil)
+        #expect(sheet.displayedScope == .full)
+        #expect(BuddyPairingSheet.grantLine(.full).contains("full control"))
+    }
+
+    @Test func aCodeIsBlankedWhenItsOwnExpiryArrives() async throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let registry = BuddyRegistry(url: file)
+        let center = BuddyCenter(registry: registry)
+        await registry.setAllowsTailnetDevices(true)
+
+        // Long enough that a loaded machine cannot let it lapse between here and the
+        // refresh below — an invitation already dead by then would never be adopted, and
+        // this test would be checking nothing.
+        let opened = await registry.invite(host: "100.64.0.9", port: 8788, lifetime: 3)
+        await center.refresh(server: nil)
+        #expect(center.invitation?.code == opened.code)
+
+        // Adopting a code arms its expiry, whichever way the code arrived: the window must
+        // never show a QR the server would now refuse. Polled rather than slept through, so
+        // a slow machine costs time instead of a false failure.
+        let deadline = ContinuousClock.now + .seconds(30)
+        while center.invitation != nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(center.invitation == nil)
+    }
+
+    @Test func aSupersededExpiryDoesNotBlankTheCodeThatReplacedIt() async throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let registry = BuddyRegistry(url: file)
+        let center = BuddyCenter(registry: registry)
+        await registry.setAllowsTailnetDevices(true)
+
+        // On screen, and dying shortly — but not so shortly that a loaded machine could
+        // let it lapse before the refresh below adopts it.
+        let first = await registry.invite(host: "100.64.0.9", port: 8788, lifetime: 3)
+        await center.refresh(server: nil)
+        #expect(center.invitation?.code == first.code)
+
+        // Minted underneath the sheet, replacing it with a code that has minutes to live.
+        let second = await registry.invite(
+            host: "100.64.0.9", port: 8788, scope: .chat, lifetime: 300
+        )
+        #expect(second.code != first.code)
+
+        // The sheet's poll picks the new one up, which has to re-arm the expiry: the timer
+        // still counting down belongs to a code that no longer exists.
+        let paired = await center.followPairing(server: nil)
+        #expect(!paired)
+        #expect(center.invitation?.code == second.code)
+
+        // Well past the first code's expiry, measured from the deadline itself rather than
+        // guessed at. The live code is still on screen.
+        let past = first.expiresAt.timeIntervalSinceNow + 1
+        if past > 0 { try await Task.sleep(for: .seconds(past)) }
+        #expect(first.expiresAt < Date())
+        #expect(center.invitation?.code == second.code)
+        #expect(center.invitation?.scope == .chat)
+
+        await center.cancelInvitation()
+        #expect(center.invitation == nil)
+    }
+
     @Test func aDeviceThatHasNeverCalledInSaysSo() {
         let paired = ControlAPI.BuddyDeviceSummary(
             id: "a", name: "iPad mini", platform: "ipados",

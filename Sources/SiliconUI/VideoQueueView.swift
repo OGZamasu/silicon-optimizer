@@ -87,6 +87,15 @@ struct VideoQueueView: View {
             Text(item.request.prompt).font(.caption).lineLimit(3).textSelection(.enabled)
             Text("\(item.request.entryID) · \(item.request.seconds)s · \(item.request.resolution) · seed \(String(item.request.seed ?? 0))")
                 .font(.caption2).foregroundStyle(.secondary)
+            if let detail = item.detail {
+                // How these settings were arrived at, when nobody typed them. Kept with the
+                // clip rather than shown once at enqueue time: the queue outlives the
+                // composer, and "why is this one 8 seconds?" is asked days later.
+                Label(detail, systemImage: "wand.and.stars")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if item.request.entryID == "hailuo-h3" {
                 Text(item.request.h3Turbo.map { $0 ? VideoSampling.turbo.label : VideoSampling.full.label }
                      ?? VideoSampling.nodeDefault.label)
