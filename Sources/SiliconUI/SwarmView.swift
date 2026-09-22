@@ -29,7 +29,9 @@ struct SwarmView: View {
     @State private var filterEngine = "all"
     @State private var searchText = ""
 
-    static let localMachineID = "machine/__local"
+    /// Selection and collapse keys a peer cannot claim: peer cards name themselves
+    /// `machine/<name>` and collapse under the same key, so this Mac uses neither scheme.
+    static let localMachineID = "local"
 
     var body: some View {
         ScrollView {
@@ -144,7 +146,11 @@ struct SwarmView: View {
                            model.metrics.memoryUsedFraction * total, total)
                 )
                 if let loaded = model.loadedModel {
-                    inspectorFact("Serving", loaded.name)
+                    inspectorFact(
+                        "Serving",
+                        model.runtimeState.isRunning
+                            ? loaded.name : "\(loaded.name) — \(model.runtimeState.label)"
+                    )
                     if let context = model.activeConfiguration?.contextLength {
                         inspectorFact("Context", "\(context / 1024)K tokens")
                     }
@@ -176,9 +182,13 @@ struct SwarmView: View {
                             }
                             Spacer()
                             if model.loadedModel?.id == installed.id {
-                                Text("serving")
-                                    .font(.caption)
-                                    .foregroundStyle(.teal)
+                                Text(
+                                    model.runtimeState.isRunning
+                                        ? "serving" : model.runtimeState.label
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.teal)
+                                .lineLimit(1)
                             } else {
                                 Button("Load") { model.load(installed) }
                                     .controlSize(.small)
@@ -234,7 +244,10 @@ struct SwarmView: View {
                         inspectorFact("Abilities",
                                       "\(ready) of \(peer.capabilities.count) ready")
                     }
-                    let queued = peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1)
+                    let queued = max(
+                        peer.queueDepth ?? 0,
+                        peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1)
+                    )
                     inspectorFact("Queue", queued == 0 ? "clear" : "\(queued) job\(queued == 1 ? "" : "s")")
                     let keys = model.swarmMembers.filter { $0.peerName == peer.name }.count
                     if keys > 0 {
@@ -566,10 +579,10 @@ struct SwarmView: View {
         ) {
             MachineCard(
                 title: "This Mac", subtitle: model.profile.chipName, reachable: true,
-                collapsed: collapsedMachines.contains("__local"),
+                collapsed: collapsedMachines.contains(Self.localMachineID),
                 statusLine: localStatusLine,
                 selected: selectedItemID == Self.localMachineID,
-                onToggleCollapse: { toggleCollapse("__local") },
+                onToggleCollapse: { toggleCollapse(Self.localMachineID) },
                 onSelect: { selectedItemID = Self.localMachineID }
             ) {
                 localMachineBody
@@ -579,10 +592,10 @@ struct SwarmView: View {
                     title: peer.name,
                     subtitle: peer.hardware ?? peer.platform ?? "node",
                     reachable: peer.reachable || model.peerLLMBusy.contains(peer.name),
-                    collapsed: collapsedMachines.contains(peer.name),
+                    collapsed: collapsedMachines.contains("machine/\(peer.name)"),
                     statusLine: peerStatusLine(peer),
                     selected: selectedItemID == "machine/\(peer.name)",
-                    onToggleCollapse: { toggleCollapse(peer.name) },
+                    onToggleCollapse: { toggleCollapse("machine/\(peer.name)") },
                     onSelect: { selectedItemID = "machine/\(peer.name)" }
                 ) {
                     peerMachineBody(peer)
@@ -626,7 +639,10 @@ struct SwarmView: View {
         if let total = peer.totalGB, let used = peer.usedGB {
             parts.append(String(format: "%.1f of %.0f GB", used, total))
         }
-        let queued = peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1)
+        let queued = max(
+            peer.queueDepth ?? 0,
+            peer.pendingJobs.count + (peer.runningJob == nil ? 0 : 1)
+        )
         parts.append(queued == 0 ? "queue clear" : "\(queued) queued")
         return parts.joined(separator: " · ")
     }
