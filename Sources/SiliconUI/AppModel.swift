@@ -103,6 +103,23 @@ public final class AppModel {
     var pairingRequest: PendingPairing?
     var pairingDelivered = false
     var pairingPollTask: Task<Void, Never>?
+    enum PairingApprovalState: Equatable {
+        case idle
+        case minting(String)
+        case cancelling(String)
+        case committing(String)
+        case committed(String)
+    }
+    var pairingApprovalState: PairingApprovalState = .idle
+    var pairingApprovalTask: Task<Void, Never>?
+    var pairingStopTask: Task<Void, Never>?
+    var pairingApprovalAdmin: String?
+    struct PairingCleanupNeeded {
+        var clientName: String
+        var peers: [SwarmPeer]
+        var admin: String?
+    }
+    var pairingCleanupNeeded: PairingCleanupNeeded?
     /// The code shown on the joiner's screen while awaiting the owner's decision.
     var joinCode: String?
 

@@ -205,6 +205,13 @@ public struct PendingPairing: Sendable, Equatable, Identifiable {
 /// swarm config exactly once per approved request.
 public actor PairingServer {
 
+    /// An approved payload that the joiner never collected before the invite closed.
+    /// The owner uses this to revoke credentials already minted on remote nodes.
+    public struct UndeliveredApproval: Sendable {
+        public let clientName: String
+        public let payload: SwarmConfig
+    }
+
     public enum RequestState: String, Sendable {
         case pending, approved, denied, expired, delivered
     }
@@ -252,6 +259,19 @@ public actor PairingServer {
         slot = nil
     }
 
+    /// Closes the invite and atomically takes any approved, uncollected payload.
+    /// A delivered payload belongs to the joiner and must not be revoked on close.
+    public func stopAndTakeUndeliveredApproval() -> UndeliveredApproval? {
+        let undelivered: UndeliveredApproval?
+        if let slot, slot.state == .approved, let payload = slot.payload {
+            undelivered = UndeliveredApproval(clientName: slot.request.name, payload: payload)
+        } else {
+            undelivered = nil
+        }
+        stop()
+        return undelivered
+    }
+
     // MARK: Owner-side controls
 
     public func pending() -> PendingPairing? {
@@ -261,11 +281,13 @@ public actor PairingServer {
     }
 
     /// Approves one request, attaching exactly what this member receives.
-    public func approve(_ id: String, releasing payload: SwarmConfig) {
-        guard var slot, slot.request.id == id, slot.state == .pending else { return }
+    @discardableResult
+    public func approve(_ id: String, releasing payload: SwarmConfig) -> Bool {
+        guard var slot, slot.request.id == id, slot.state == .pending else { return false }
         slot.state = .approved
         slot.payload = payload
         self.slot = slot
+        return true
     }
 
     public func deny(_ id: String) {
