@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import ServiceManagement
+import os
 import SiliconCore
 import SiliconPlanner
 import SiliconRuntime
@@ -49,70 +50,151 @@ public enum ChatEngine: String, Codable, Sendable, CaseIterable {
     case legacy
 }
 
-/// User preferences, persisted to `UserDefaults`.
-/// A credential can still decode from an older settings document for migration, but its
-/// encoded representation is always empty. The live value is persisted separately in Keychain.
+/// A credential kept in the Keychain rather than in the settings document.
+///
+/// The document only ever carries a placeholder for it: an empty string, or a plaintext copy
+/// an older build stored there before the Keychain held it. Whether the value is still that
+/// placeholder, or has since been replaced by the Keychain's answer, is what `isResolved` says.
 @propertyWrapper
 public struct KeychainCredential: Codable, Sendable, Equatable {
-    public var wrappedValue: String
+    private var value: String
 
-    public init(wrappedValue: String) { self.wrappedValue = wrappedValue }
+    /// True once the value is authoritative: read from the Keychain, or assigned since.
+    ///
+    /// A decoded or default credential is only a placeholder, and `Settings.save()` leaves the
+    /// Keychain alone rather than write it there — pushing an empty placeholder would delete
+    /// the token the user stored. Assignment resolves the value, because a token the user
+    /// typed is the one to keep.
+    public private(set) var isResolved: Bool
+
+    public var wrappedValue: String {
+        get { value }
+        set {
+            value = newValue
+            isResolved = true
+        }
+    }
+
+    /// A placeholder. The `= ""` on the declaration arrives here.
+    public init(wrappedValue: String) {
+        value = wrappedValue
+        isResolved = false
+    }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
-        self.wrappedValue = (try? container.decode(String.self)) ?? ""
+        value = (try? container.decode(String.self)) ?? ""
+        isResolved = false
     }
 
+    /// A resolved credential encodes as empty: the Keychain holds it. An unresolved one keeps
+    /// whatever the document had, so a legacy plaintext copy survives every save until the
+    /// Keychain has confirmed it holds the token and the next save redacts it.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
-        try container.encode("")
+        try container.encode(isResolved ? "" : value)
     }
+
+    /// Equality is by value. Resolution is bookkeeping about the Keychain, not a setting.
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.value == rhs.value }
 }
 
-private enum CredentialStore {
+/// How a Keychain read ended.
+enum KeychainReadResult: Sendable, Equatable {
+    case found(String)
+    case absent
+    /// The Keychain would not answer — locked, or its consent dialog dismissed — so nothing is
+    /// known about the credential, and nothing must be written over it.
+    case unavailable(OSStatus)
+}
+
+/// The two Keychain calls behind `CredentialStore`, as a value so tests can substitute an
+/// in-memory store and see exactly which code paths reach for the real one.
+///
+/// The real one, `.keychain`, can block on a consent dialog: a freshly built app has a new
+/// code identity, and macOS asks the user before handing it a token an earlier build stored.
+/// That is why nothing on the launch path may call it.
+struct KeychainAccess: Sendable {
+    var readHuggingFaceToken: @Sendable () -> KeychainReadResult
+    /// Stores the token, or deletes the item when the token is empty.
+    var writeHuggingFaceToken: @Sendable (String) -> Bool
+
     private static let service = "dev.siliconoptimizer.credentials"
     private static let huggingFaceAccount = "hugging-face-access-token"
 
-    static func huggingFaceToken() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: huggingFaceAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let token = String(data: data, encoding: .utf8), !token.isEmpty
-        else { return nil }
-        return token
+    static let keychain = KeychainAccess(
+        readHuggingFaceToken: {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: huggingFaceAccount,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            switch status {
+            case errSecSuccess:
+                guard let data = result as? Data,
+                      let token = String(data: data, encoding: .utf8), !token.isEmpty
+                else { return .absent }
+                return .found(token)
+            case errSecItemNotFound:
+                return .absent
+            default:
+                return .unavailable(status)
+            }
+        },
+        writeHuggingFaceToken: { token in
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: huggingFaceAccount,
+            ]
+            if token.isEmpty {
+                let status = SecItemDelete(query as CFDictionary)
+                return status == errSecSuccess || status == errSecItemNotFound
+            }
+            let data = Data(token.utf8)
+            let update: [String: Any] = [kSecValueData as String: data]
+            let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+            if status == errSecSuccess { return true }
+            guard status == errSecItemNotFound else { return false }
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+        }
+    )
+}
+
+enum CredentialStore {
+    private static let access = OSAllocatedUnfairLock(initialState: KeychainAccess.keychain)
+
+    /// Blocking, and possibly for a long time: see `KeychainAccess`.
+    static func readHuggingFaceToken() -> KeychainReadResult {
+        // The call runs outside the lock; it can sit behind the consent dialog indefinitely.
+        access.withLock { $0 }.readHuggingFaceToken()
     }
 
     @discardableResult
     static func setHuggingFaceToken(_ rawValue: String) -> Bool {
         let token = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: huggingFaceAccount,
-        ]
-        if token.isEmpty {
-            let status = SecItemDelete(query as CFDictionary)
-            return status == errSecSuccess || status == errSecItemNotFound
+        return access.withLock { $0 }.writeHuggingFaceToken(token)
+    }
+
+    /// Testing seam: swaps the Keychain for `replacement` and hands back what was there, for
+    /// the caller to restore.
+    @discardableResult
+    static func replaceAccess(with replacement: KeychainAccess) -> KeychainAccess {
+        access.withLock { current in
+            defer { current = replacement }
+            return current
         }
-        let data = Data(token.utf8)
-        let update: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess { return true }
-        guard status == errSecItemNotFound else { return false }
-        var item = query
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
 }
 
+/// User preferences, persisted to `UserDefaults`.
 public struct Settings: Codable, Sendable, Equatable {
 
     // Generation
@@ -218,7 +300,14 @@ public struct Settings: Codable, Sendable, Equatable {
     }
 
     // Credentials
+
+    /// Lives in the Keychain; the document only carries a placeholder. `load()` leaves it
+    /// there, and `resolveHuggingFaceToken(migrating:)` fetches it off the main thread.
     @KeychainCredential public var huggingFaceToken = ""
+
+    /// Whether `huggingFaceToken` is the Keychain's answer, or a value assigned since, rather
+    /// than the placeholder `load()` leaves behind.
+    public var isHuggingFaceTokenResolved: Bool { _huggingFaceToken.isResolved }
 
     // Output
 
@@ -470,7 +559,7 @@ public struct Settings: Codable, Sendable, Equatable {
             String.self, forKey: .measuredSSDVolumeID
         )
         speedCalibrations = value(.speedCalibrations, fallback.speedCalibrations)
-        huggingFaceToken = value(.huggingFaceToken, fallback.huggingFaceToken)
+        _huggingFaceToken = value(.huggingFaceToken, fallback._huggingFaceToken)
         imageOutputDirectory = value(.imageOutputDirectory, fallback.imageOutputDirectory)
         meshOutputDirectory = value(.meshOutputDirectory, fallback.meshOutputDirectory)
         voiceOutputDirectory = value(.voiceOutputDirectory, fallback.voiceOutputDirectory)
@@ -533,30 +622,51 @@ public struct Settings: Codable, Sendable, Equatable {
 
     // MARK: - Persistence
 
-    private static let defaultsKey = "dev.siliconoptimizer.settings"
+    static let defaultsKey = "dev.siliconoptimizer.settings"
 
+    /// The saved preferences, with the credential still a placeholder.
+    ///
+    /// Deliberately never touches the Keychain. This runs on the main thread at launch, and a
+    /// Keychain read can block on the consent dialog every freshly built app gets: while it
+    /// was here, nothing came up behind it — no window, no control server, no handshake file,
+    /// so the bundled MCP reported the app not running until the dialog was answered. The
+    /// token arrives through `resolveHuggingFaceToken(migrating:)`, off the main thread; until
+    /// then `huggingFaceToken` is what the document holds: empty, or a plaintext copy from
+    /// before the Keychain kept it.
     public static func load() -> Settings {
         let data = UserDefaults.standard.data(forKey: defaultsKey)
-        var settings = data.flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
-            ?? Settings()
-        let legacyToken = settings.huggingFaceToken.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let secureToken = CredentialStore.huggingFaceToken()
-        let migrationSucceeded = legacyToken.isEmpty
-            || secureToken != nil
-            || CredentialStore.setHuggingFaceToken(legacyToken)
-        settings.huggingFaceToken = CredentialStore.huggingFaceToken()
-            ?? secureToken
-            ?? legacyToken
-        // Remove the legacy copy only after Keychain confirms the credential is durable.
-        // When Keychain is locked or denied, leave the old document untouched so the next
-        // launch can retry instead of destroying the user's only usable credential.
-        if !legacyToken.isEmpty, migrationSucceeded,
-           let redacted = try? JSONEncoder().encode(settings) {
-            UserDefaults.standard.set(redacted, forKey: defaultsKey)
+        return data.flatMap { try? JSONDecoder().decode(Settings.self, from: $0) } ?? Settings()
+    }
+
+    /// What the Keychain said about the Hugging Face token.
+    public enum HuggingFaceTokenResolution: Sendable, Equatable {
+        /// The credential is settled: this is the token, empty when none is stored.
+        case token(String)
+        /// The Keychain would not answer — locked, or its consent dialog dismissed. The
+        /// credential stays as it was, so a bad moment cannot lose anything that was stored.
+        case unavailable
+    }
+
+    /// Consults the Keychain for the Hugging Face token, moving `legacyToken` — a plaintext
+    /// copy an older build kept in the settings document — into it when the Keychain has none.
+    ///
+    /// Blocking, and on a fresh build blocked behind the consent dialog: call it off the main
+    /// thread, never at launch. `AppModel.loadHuggingFaceToken()` does; `load()` does not.
+    public static func resolveHuggingFaceToken(
+        migrating legacyToken: String
+    ) -> HuggingFaceTokenResolution {
+        let legacy = legacyToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch CredentialStore.readHuggingFaceToken() {
+        case .found(let token):
+            return .token(token)
+        case .absent:
+            guard !legacy.isEmpty else { return .token("") }
+            // The document holds the only copy, and keeps it — `save()` leaves an unresolved
+            // credential in the document — until the Keychain has taken it.
+            return CredentialStore.setHuggingFaceToken(legacy) ? .token(legacy) : .unavailable
+        case .unavailable:
+            return .unavailable
         }
-        return settings
     }
 
     /// Returns false without rewriting preferences when secure credential persistence fails.
@@ -564,7 +674,12 @@ public struct Settings: Codable, Sendable, Equatable {
     /// silently replacing them with a redacted credential.
     @discardableResult
     public func save() -> Bool {
-        guard CredentialStore.setHuggingFaceToken(huggingFaceToken) else { return false }
+        // Only a resolved credential goes to the Keychain. A placeholder is nothing to store —
+        // an empty one would delete the token the user has — and a legacy plaintext copy rides
+        // along in the document until `resolveHuggingFaceToken(migrating:)` has moved it.
+        if _huggingFaceToken.isResolved {
+            guard CredentialStore.setHuggingFaceToken(huggingFaceToken) else { return false }
+        }
         guard let data = try? JSONEncoder().encode(self) else { return false }
         UserDefaults.standard.set(data, forKey: Self.defaultsKey)
         return true

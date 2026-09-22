@@ -862,9 +862,10 @@ extension AppModel {
         defer { imageState = .idle; imageProgress = nil }
 
         var result: ImageResult?
+        let token = await huggingFaceToken()
         do {
             for try await event in try await MFluxRuntime(
-                installation: installation, huggingFaceToken: settings.huggingFaceToken,
+                installation: installation, huggingFaceToken: token,
                 hubCache: settings.resolvedEngineCacheDirectory
             ).generate(
                 ImageRequest(

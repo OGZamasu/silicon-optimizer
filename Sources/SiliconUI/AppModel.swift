@@ -205,6 +205,67 @@ public final class AppModel {
 
     public var settings = Settings()
 
+    // MARK: - Credentials
+
+    /// Whether the credential comes from the user's Keychain, as in the running app, or arrived
+    /// with injected settings, as in tests and previews, which must never reach for it.
+    private let readsCredentialsFromKeychain: Bool
+
+    /// The Keychain read in flight, so work that needs the token can wait for it rather than
+    /// run without one.
+    private var credentialLoad: Task<Void, Never>?
+
+    /// Fetches the Hugging Face token off the main thread.
+    ///
+    /// `Settings.load()` leaves the credential behind on purpose. A freshly built app carries a
+    /// new code identity, so its first Keychain read puts up a consent dialog, and reading on
+    /// the main thread at launch parked the whole app behind it: no window, no control server,
+    /// no handshake file, so the bundled MCP reported the app not running until the dialog was
+    /// answered. The read now happens on a background thread while the app comes up, and the
+    /// token lands in `settings` when the Keychain answers.
+    func loadHuggingFaceToken() {
+        guard readsCredentialsFromKeychain, !settings.isHuggingFaceTokenResolved,
+              credentialLoad == nil
+        else { return }
+        let legacyToken = settings.huggingFaceToken
+        credentialLoad = Task { [weak self] in
+            let resolution = await withCheckedContinuation { continuation in
+                // A GCD thread rather than the cooperative pool: this call can sit behind the
+                // consent dialog for as long as the user leaves it, and Swift's pool is not
+                // sized to lose a thread that way.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(
+                        returning: Settings.resolveHuggingFaceToken(migrating: legacyToken)
+                    )
+                }
+            }
+            self?.adoptHuggingFaceToken(resolution)
+        }
+    }
+
+    private func adoptHuggingFaceToken(_ resolution: Settings.HuggingFaceTokenResolution) {
+        // A token typed into Settings while the Keychain was still deciding wins over the
+        // stored one.
+        guard case .token(let token) = resolution, !settings.isHuggingFaceTokenResolved
+        else { return }
+        let hadLegacyCopy = !settings.huggingFaceToken.isEmpty
+        settings.huggingFaceToken = token
+        // The document's plaintext copy is redundant now that the Keychain holds the token;
+        // saving redacts it.
+        if hadLegacyCopy { settings.save() }
+    }
+
+    /// The Hugging Face token once the Keychain has answered, or nil when there is none.
+    ///
+    /// Fetches from Hugging Face take the token from here rather than from `settings`, so a
+    /// download started in the moments before the Keychain answers waits for the token instead
+    /// of running anonymously and failing on a gated repository.
+    public func huggingFaceToken() async -> String? {
+        await credentialLoad?.value
+        let token = settings.huggingFaceToken
+        return token.isEmpty ? nil : token
+    }
+
     // MARK: - UI state
 
     /// The tab on screen, restored from last launch so reopening the window lands
@@ -2534,8 +2595,10 @@ public final class AppModel {
         settings: Settings? = nil
     ) {
         self.profile = HardwareProbe.detect()
-        // Tests and previews inject settings instead of reading the user's Keychain.
-        // The ordinary application still loads/migrates its saved credentials.
+        // Tests and previews inject settings instead of reading the user's Keychain. The
+        // ordinary application loads the document here and fetches the credential once it is
+        // running: see `loadHuggingFaceToken()`.
+        self.readsCredentialsFromKeychain = settings == nil
         self.settings = settings ?? Settings.load()
         self.videoRuntime = videoRuntime
         self.videoBatchQueue = videoQueue ?? VideoBatchQueue(
@@ -2556,6 +2619,7 @@ public final class AppModel {
     public func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        loadHuggingFaceToken()
         if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
         reapAbandonedServers()
         selector = RuntimeSelector.discover()
@@ -3362,7 +3426,7 @@ public final class AppModel {
             guard !Task.isCancelled, let self else { return }
             defer { isSearchingRemote = false }
             do {
-                let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
+                let token = await huggingFaceToken()
                 let results = try await HuggingFaceClient(token: token).search(query: trimmed)
                 guard !Task.isCancelled else { return }
                 remoteResults = results
@@ -3464,7 +3528,7 @@ public final class AppModel {
 
         download.task = Task { [weak self] in
             guard let self else { return }
-            let token = self.settings.huggingFaceToken.isEmpty ? nil : self.settings.huggingFaceToken
+            let token = await self.huggingFaceToken()
             let client = HuggingFaceClient(token: token)
             let resolver = ModelResolver(client: client)
             let downloader = ModelDownloader(token: token)
