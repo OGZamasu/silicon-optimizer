@@ -7,13 +7,24 @@
 #
 # Usage:
 #   Scripts/build-app.sh [--release] [--sign "Developer ID Application: ..."] [--dmg]
-#                        [--install [DIR]]
+#                        [--dev-sign "Apple Development: ..."] [--install [DIR]]
 #
 # --install puts the finished bundle somewhere stable — ~/Applications by default — replacing
 # whatever was there. Without it the only copy lives in build/, which is gitignored and easy to
 # clean away, so anything pointing at it (a login item, the Dock, a second copy someone dragged
 # to /Applications months ago) drifts out of date silently. Installing every build to one place
 # is what keeps "the app" and "the build" the same thing.
+#
+# --dev-sign signs a build for this Mac with a real identity instead of ad hoc and changes
+# nothing else: no hardened runtime, no timestamp, no entitlements, the same bundle the
+# ad-hoc path makes. It exists for the Keychain. An ad-hoc build has no Team ID, so macOS
+# files the app's Keychain access under the build's own hash; every rebuild is a stranger,
+# and reading the saved Hugging Face token or TypeSafe key asks for the login password
+# again. Signed by an Apple-issued identity (a free "Apple Development" certificate from an
+# Apple ID in Xcode is enough) the access is filed under the Team ID, and one "Always Allow"
+# lasts across rebuilds. A self-signed certificate does not help: it has no Team ID either.
+# SILICON_DEV_SIGN_IDENTITY sets the same thing for scripts that call this one; --sign wins
+# over it, because a distribution build must never pick up a developer's local identity.
 
 set -euo pipefail
 
@@ -21,6 +32,8 @@ cd "$(dirname "$0")/.."
 
 CONFIGURATION="debug"
 SIGN_IDENTITY=""
+DEV_IDENTITY="${SILICON_DEV_SIGN_IDENTITY:-}"
+DEV_IDENTITY_FROM_FLAG=0
 MAKE_DMG=0
 INSTALL=0
 INSTALL_DIR="$HOME/Applications"
@@ -32,6 +45,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 && -n "$2" ]] || { echo "--sign requires an identity" >&2; exit 1; }
             SIGN_IDENTITY="$2"; shift 2
             ;;
+        --dev-sign)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "--dev-sign requires an identity" >&2; exit 1; }
+            DEV_IDENTITY="$2"; DEV_IDENTITY_FROM_FLAG=1; shift 2
+            ;;
         --dmg) MAKE_DMG=1; shift ;;
         --install)
             INSTALL=1
@@ -41,6 +58,16 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    if [[ "$DEV_IDENTITY_FROM_FLAG" == "1" ]]; then
+        echo "--sign is for distribution and --dev-sign is for this Mac; pass one" >&2
+        exit 1
+    fi
+    DEV_IDENTITY=""
+fi
+# Every build that is not for distribution is signed the same way; only the identity varies.
+LOCAL_IDENTITY="${DEV_IDENTITY:--}"
 
 APP_NAME="Silicon Optimizer"
 BUNDLE="build/${APP_NAME}.app"
@@ -55,7 +82,7 @@ sign_nested_code() {
     if [[ -n "$SIGN_IDENTITY" ]]; then
         codesign --force --options runtime --timestamp "$@" --sign "$SIGN_IDENTITY" "$target"
     else
-        codesign --force "$@" --sign - "$target"
+        codesign --force "$@" --sign "$LOCAL_IDENTITY" "$target"
     fi
 }
 
@@ -275,8 +302,18 @@ if [[ -n "$SIGN_IDENTITY" ]]; then
     codesign --verify --strict --verbose=2 "$BUNDLE"
 else
     # Ad-hoc signing is enough to run locally; without any signature at all macOS refuses
-    # to launch the bundle on Apple Silicon.
-    codesign --force --deep --sign - "$BUNDLE"
+    # to launch the bundle on Apple Silicon. --dev-sign swaps in a real identity, nothing more.
+    codesign --force --deep --sign "$LOCAL_IDENTITY" "$BUNDLE"
+    if [[ -n "$DEV_IDENTITY" ]]; then
+        codesign --verify --strict "$BUNDLE"
+        TEAM_ID="$(codesign -dv "$BUNDLE" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+        if [[ -z "$TEAM_ID" || "$TEAM_ID" == "not set" ]]; then
+            echo "WARNING: \"$DEV_IDENTITY\" has no Team ID, so the Keychain will still treat" \
+                "every rebuild as a new app. Use an Apple-issued identity." >&2
+        else
+            echo "==> Signed for this Mac by team $TEAM_ID"
+        fi
+    fi
 fi
 
 echo "==> Built $BUNDLE"
