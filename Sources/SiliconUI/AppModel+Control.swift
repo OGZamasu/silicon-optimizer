@@ -317,7 +317,19 @@ extension AppModel: ControlHost {
             throw ControlHostError.notInstalled(request.modelID)
         }
 
-        var configuration = defaultConfiguration(for: target)
+        let configuration = try controlLoadConfiguration(for: target, request: request)
+        await loadAsync(target, configuration: configuration)
+        guard runtimeState.isRunning else {
+            throw ControlHostError.loadFailed(runtimeState.label)
+        }
+        return await status()
+    }
+
+    /// Resolve defaults after validating the caller's actual context. Keeping this separate
+    /// from process launch lets the control path's load policy be checked without a model file.
+    func controlLoadConfiguration(
+        for target: InstalledModel, request: ControlAPI.LoadRequest
+    ) throws -> LoadConfiguration {
         if let context = request.contextLength {
             let catalogMaximum = target.catalogID.flatMap(ModelCatalog.entry(id:))?.maxContext
             let maximum = catalogMaximum ?? target.shape?.trainingContextLength ?? 1_048_576
@@ -326,8 +338,10 @@ extension AppModel: ControlHost {
                     "Context length must be between 1 and \(maximum) tokens for this model."
                 )
             }
-            configuration.contextLength = context
         }
+        var configuration = defaultConfiguration(
+            for: target, contextLength: request.contextLength
+        )
         if let slots = request.expertSlots {
             guard let moe = target.shape?.moe, slots >= 1, moe.expertCount >= 1,
                   slots <= moe.expertCount else {
@@ -342,11 +356,7 @@ extension AppModel: ControlHost {
             configuration.batchSize = max(configuration.microBatchSize, 256)
         }
 
-        await loadAsync(target, configuration: configuration)
-        guard runtimeState.isRunning else {
-            throw ControlHostError.loadFailed(runtimeState.label)
-        }
-        return await status()
+        return configuration
     }
 
     // `unload()` is not implemented here: AppModel's own method already satisfies the

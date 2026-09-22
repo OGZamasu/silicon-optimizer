@@ -3682,7 +3682,19 @@ public final class AppModel {
     }
 
     /// The settings the app would choose for this model on this machine.
-    public func defaultConfiguration(for model: InstalledModel) -> LoadConfiguration {
+    public func defaultConfiguration(
+        for model: InstalledModel, contextLength: Int? = nil
+    ) -> LoadConfiguration {
+        var configuration = recommendedConfiguration(for: model)
+        if let contextLength { configuration.contextLength = contextLength }
+        // Resolve memory-sensitive defaults against the context that will actually be loaded,
+        // not a smaller window the recommendation search may have chosen first.
+        return autoConfigurator().adjustedRuntimeDefaults(
+            configuration, quantization: model.quantization
+        )
+    }
+
+    private func recommendedConfiguration(for model: InstalledModel) -> LoadConfiguration {
         guard let shape = model.shape else {
             return LoadConfiguration(threads: profile.performanceCores)
         }

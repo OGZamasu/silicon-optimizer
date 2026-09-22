@@ -42,6 +42,9 @@ public struct LoadConfiguration: Sendable, Codable, Hashable {
     public var gpuLayerFraction: Double
     public var expertStreaming: ExpertStreamingConfiguration?
     public var threads: Int
+    /// Explicit llama-server sequence slots. Nil keeps the runtime's default and lets older
+    /// saved configurations decode without changing their concurrency.
+    public var parallelSequences: Int?
 
     public init(
         contextLength: Int = 8192,
@@ -51,7 +54,8 @@ public struct LoadConfiguration: Sendable, Codable, Hashable {
         flashAttention: Bool = true,
         gpuLayerFraction: Double = 1.0,
         expertStreaming: ExpertStreamingConfiguration? = nil,
-        threads: Int = 0
+        threads: Int = 0,
+        parallelSequences: Int? = nil
     ) {
         self.contextLength = contextLength
         self.batchSize = batchSize
@@ -61,6 +65,7 @@ public struct LoadConfiguration: Sendable, Codable, Hashable {
         self.gpuLayerFraction = gpuLayerFraction
         self.expertStreaming = expertStreaming
         self.threads = threads
+        self.parallelSequences = parallelSequences
     }
 }
 
