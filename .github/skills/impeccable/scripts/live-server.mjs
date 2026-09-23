@@ -33,31 +33,43 @@ import { runGenerationPreflight } from './live/generation-preflight.mjs';
 import { validateEvent } from './live/event-validation.mjs';
 import { selectAvailablePendingEvent } from './live/poll-lanes.mjs';
 import { createManualEditRoutes } from './live/manual-edit-routes.mjs';
+import { renderControlUi } from './live/control-ui.mjs';
+import { pageSafeAgentReply, pageSafeManualEditActivity } from './live/page-safe-activity.mjs';
+import { createPendingDispatchAuth } from './live/pending-dispatch-auth.mjs';
 import {
+  CHECKPOINT_REASONS,
+  AGENT_PHASES,
   LIVE_COMMANDS,
+  SESSION_PHASES,
   VARIANT_PROGRESS_CHECKPOINT_REASONS as VARIANT_PROGRESS_CHECKPOINT_REASON_LIST,
 } from './live/vocabulary.mjs';
 import {
   getDesignSidecarPath,
-  getLiveDir,
+  getLivePrivateDir,
   getLiveAnnotationsDir,
   IMPECCABLE_COMMAND_PREFIX,
+  isLiveServerPidReachable,
+  liveControllerUrl,
+  liveHelperBase,
+  livePrivateDirIsVolatile,
+  migrateLegacyLivePrivateArtifacts,
   readLiveServerInfo,
   removeLiveServerInfo,
   resolveDesignSidecarPath,
   writeLiveServerInfo,
 } from './lib/impeccable-paths.mjs';
-import { countByPage as countPendingByPage } from './live/manual-edits-buffer.mjs';
+import { countByPage as countPendingByPage, readBufferStrict as readManualEditsBufferStrict } from './live/manual-edits-buffer.mjs';
 import {
   createManualApplyController,
+  MAX_MANUAL_APPLY_EVIDENCE_BYTES,
+  manualApplyEvidenceDir,
   summarizeManualApplyFailures,
 } from './live/manual-apply.mjs';
 import {
-  applyDeferredSvelteComponentAccepts,
   bumpSvelteComponentPreviewRevision,
   compileCheckVariants,
   removeAllSvelteComponentSessions,
-  sweepInactiveSvelteComponentSessions,
+  quarantineLegacySvelteComponentSessions,
 } from './live/svelte-component.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
 import { matchesTemplateExtension, resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
@@ -67,7 +79,9 @@ import {
   readBoundedBody,
   readBoundedJson,
   requireRequestToken,
+  requestToken,
   sendHttpInputError,
+  tokenMatches,
 } from './lib/http-security.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -132,15 +146,16 @@ async function findOpenPort(start = 8400) {
 
 const state = {
   token: null,
+  pageToken: null,
   port: null,
   sseClients: new Set(),   // SSE response objects (server→browser push)
   pendingEvents: [],        // browser events waiting for agent ack ({ event, leaseUntil })
   pendingPolls: [],         // agent poll callbacks waiting for browser events
   nextEventSeq: 1,
   lastAgentPollingBroadcast: null,
-  exitTimer: null,
   sessionDir: null,         // per-session tmp dir for annotation screenshots
   sessionStore: null,
+  pendingDispatchAuth: null,
   leaseTimer: null,
   manualEditActivity: null,
   nextManualEditSeq: 1,
@@ -153,6 +168,11 @@ const state = {
   // a poll to be parked at the exact moment we dispatch.
   lastPollAt: 0,
   timedOutApplyIds: new Map(),
+  pageApprovals: new Map(),
+  pageApprovalOutcomes: new Map(),
+  annotationSizes: new Map(),
+  annotationBytes: 0,
+  pageCheckpointLastAt: new Map(),
 };
 
 const CHAT_POLL_FRESHNESS_MS = 60_000;
@@ -173,6 +193,7 @@ const manualApply = createManualApplyController({
 const manualEditRoutes = createManualEditRoutes({
   getToken: () => state.token,
   authorizePost: (req, res) => requireLivePostAuth(req, res),
+  authorizeStashPost: (req, res) => requirePagePostAuth(req, res),
   readJson: (req) => readBoundedJson(req, { maxBytes: MAX_LIVE_JSON_BYTES }),
   sendInputError: (req, res, error) => sendHttpInputError(req, res, error),
   manualApply,
@@ -192,11 +213,147 @@ function chatAgentLikelyActive() {
 // Cap per-annotation upload size. A full 1920×1080 PNG is typically <1 MB;
 // cap at 10 MB to guard against runaway writes from a misbehaving client.
 const MAX_ANNOTATION_BYTES = 10 * 1024 * 1024;
+const MAX_ANNOTATION_FILES = 64;
+const MAX_ANNOTATION_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_LIVE_JSON_BYTES = 1024 * 1024;
 const LIVE_SOURCE_AUX_EXTENSIONS = Object.freeze(['.css', '.scss', '.sass', '.less']);
+const PAGE_TELEMETRY_TYPES = new Set(['checkpoint', 'variant_mounted']);
+const PERSISTED_PENDING_TYPES = new Set([
+  'generate', 'accept', 'accept_intent', 'discard', 'steer',
+  'carbonize_cleanup', 'variant_mount_failed',
+]);
+// Exactly the fields live-browser.js sends for each action it may propose.
+// Approval turns a proposal into a controller event, and the agent trusts
+// helper-authored fields on such events as plumbing (a scaffold names the
+// file and lines to rewrite; `_instructions` is "the authoritative next
+// step"), so anything else is dropped before the controller reviews it.
+// `carbonize_cleanup` is agent-side work; the browser never proposes it.
+const PAGE_PROPOSAL_FIELDS = Object.freeze({
+  generate: new Set(['type', 'id', 'mode', 'action', 'freeformPrompt', 'count', 'pageUrl',
+    'element', 'insert', 'placeholder', 'comments', 'strokes', 'screenshotPath', 'clientSentAt']),
+  accept: new Set(['type', 'id', 'variantId', 'paramValues', 'pageUrl', 'clientSentAt']),
+  discard: new Set(['type', 'id', 'orphaned']),
+  steer: new Set(['type', 'id', 'message', 'pageUrl']),
+  variant_mount_failed: new Set(['type', 'id', 'variant', 'url', 'error']),
+  prefetch: new Set(['type', 'pageUrl']),
+  exit: new Set(['type']),
+});
+const PAGE_ACTION_TYPES = new Set(Object.keys(PAGE_PROPOSAL_FIELDS));
+const MAX_PENDING_PAGE_APPROVALS = 8;
+const MAX_PAGE_APPROVAL_BYTES = MAX_LIVE_JSON_BYTES;
+const MAX_PENDING_PAGE_APPROVAL_BYTES = 2 * MAX_LIVE_JSON_BYTES;
+const MAX_PAGE_CHECKPOINT_PARAM_BYTES = 4 * 1024;
+const MAX_PAGE_TELEMETRY_JOURNAL_BYTES = 16 * 1024 * 1024;
+const PAGE_CHECKPOINT_MIN_INTERVAL_MS = 100;
+const CHECKPOINT_REASON_SET = new Set(CHECKPOINT_REASONS);
+const PAGE_SAFE_SESSION_PHASES = new Set([...SESSION_PHASES, 'generating', 'cycling']);
+const AGENT_PHASE_SET = new Set(AGENT_PHASES);
+const PAGE_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const PAGE_APPROVAL_OUTCOME_TTL_MS = 5 * 60 * 1000;
+const MAX_PAGE_APPROVAL_OUTCOMES = 128;
 
 function requireLivePostAuth(req, res) {
+  if (req.headers.origin && !isSameControllerOrigin(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'controller_origin_required' }));
+    return false;
+  }
   return requireRequestToken(req, res, state.token, { headerName: 'x-impeccable-token' });
+}
+
+function isSameControllerOrigin(req) {
+  const host = req.headers.host;
+  const allowed = new Set([`localhost:${state.port}`, `127.0.0.1:${state.port}`]);
+  return typeof host === 'string' && allowed.has(host) && req.headers.origin === `http://${host}`;
+}
+
+function requirePagePostAuth(req, res) {
+  return requireRequestToken(req, res, state.pageToken, { headerName: 'x-impeccable-token' });
+}
+
+function requireQueryToken(url, res, expected) {
+  if (tokenMatches(url.searchParams.get('token'), expected)) return true;
+  res.writeHead(401, { 'Content-Type': 'text/plain' });
+  res.end('Unauthorized');
+  return false;
+}
+
+function recordPageApprovalOutcome(id, status, body) {
+  const outcome = { status, body };
+  state.pageApprovalOutcomes.set(id, outcome);
+  while (state.pageApprovalOutcomes.size > MAX_PAGE_APPROVAL_OUTCOMES) {
+    state.pageApprovalOutcomes.delete(state.pageApprovalOutcomes.keys().next().value);
+  }
+  const timer = setTimeout(() => {
+    if (state.pageApprovalOutcomes.get(id) === outcome) state.pageApprovalOutcomes.delete(id);
+  }, PAGE_APPROVAL_OUTCOME_TTL_MS);
+  timer.unref?.();
+}
+
+function pageProposal(msg) {
+  const allowed = PAGE_PROPOSAL_FIELDS[msg.type];
+  return Object.fromEntries(Object.entries(msg).filter(([key]) => allowed.has(key)));
+}
+
+function queuePageApproval(res, msg) {
+  const approvalId = randomUUID();
+  const proposal = pageProposal(msg);
+  // An Accept must not fall back to mutable checkpoint params after the user
+  // has reviewed this exact proposal in the trusted controller.
+  const frozen = proposal.type === 'accept' && proposal.paramValues === undefined
+    ? { ...proposal, paramValues: {} }
+    : proposal;
+  const bytes = Buffer.byteLength(JSON.stringify(frozen));
+  if (bytes > MAX_PAGE_APPROVAL_BYTES) {
+    res.writeHead(413, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'approval_payload_too_large' }));
+    return;
+  }
+  const pendingBytes = [...state.pageApprovals.values()].reduce((sum, item) => sum + item.bytes, 0);
+  if (state.pageApprovals.size >= MAX_PENDING_PAGE_APPROVALS
+      || pendingBytes + bytes > MAX_PENDING_PAGE_APPROVAL_BYTES) {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'too_many_pending_approvals' }));
+    return;
+  }
+  const approval = { id: approvalId, msg: frozen, bytes, createdAt: Date.now(), timer: null };
+  approval.timer = setTimeout(() => {
+    if (state.pageApprovals.get(approvalId) !== approval) return;
+    recordPageApprovalOutcome(approvalId, 408, { error: 'controller_approval_timed_out' });
+    state.pageApprovals.delete(approvalId);
+  }, PAGE_APPROVAL_TIMEOUT_MS);
+  approval.timer.unref?.();
+  state.pageApprovals.set(approvalId, approval);
+  res.writeHead(202, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify({ pendingApproval: true, id: approvalId }));
+}
+
+async function resolvePageApproval(approvalId, decision) {
+  const approval = state.pageApprovals.get(approvalId);
+  if (!approval || approval.dispatching) return false;
+  approval.dispatching = true;
+  clearTimeout(approval.timer);
+  if (decision === 'reject') {
+    recordPageApprovalOutcome(approvalId, 403, { error: 'controller_rejected_action' });
+    state.pageApprovals.delete(approvalId);
+    return true;
+  }
+  try {
+    const response = await fetch(`http://127.0.0.1:${state.port}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': state.token },
+      body: JSON.stringify(approval.msg),
+      signal: AbortSignal.timeout(15_000),
+    });
+    // Internal action responses can include source-derived diagnostics. The
+    // page only learns whether its exact approved action dispatched.
+    recordPageApprovalOutcome(approvalId, response.status,
+      response.ok ? { ok: true } : { error: 'approved_action_failed' });
+  } catch {
+    recordPageApprovalOutcome(approvalId, 502, { error: 'controller_dispatch_failed' });
+  }
+  state.pageApprovals.delete(approvalId);
+  return true;
 }
 
 function isAllowedLiveSource(filePath) {
@@ -207,6 +364,26 @@ function isAllowedLiveSource(filePath) {
   const relative = path.relative(process.cwd(), filePath).split(path.sep).join('/');
   return relative.startsWith('.impeccable/live/')
     || relative.startsWith('node_modules/.impeccable-live/');
+}
+
+function pageSafeFileMetadata(meta = {}) {
+  const out = {};
+  const root = process.cwd();
+  const templateExtensions = resolveLiveTemplateExtensions(root);
+  for (const key of ['file', 'sourceFile', 'previewFile']) {
+    const value = meta[key];
+    if (typeof value !== 'string' || value.length > 512 || /[\x00-\x1f\x7f]/.test(value)) continue;
+    try {
+      const full = resolvePathInside(root, value, { kind: 'file' });
+      const relative = path.relative(root, full).split(path.sep).join('/');
+      if (relative.startsWith('.impeccable/') || relative.startsWith('node_modules/')) continue;
+      if (!matchesTemplateExtension(full, templateExtensions)
+          && !LIVE_SOURCE_AUX_EXTENSIONS.some((ext) => full.toLowerCase().endsWith(ext))) continue;
+      out[key] = relative;
+    } catch { /* untrusted reply strings never authorize another path */ }
+  }
+  if (meta.previewMode === 'source') out.previewMode = 'source';
+  return out;
 }
 
 function enqueueEvent(event) {
@@ -227,7 +404,18 @@ function enqueueEvent(event) {
 function restorePendingEventsFromStore() {
   if (!state.sessionStore) return;
   for (const snapshot of state.sessionStore.listActiveSessions()) {
-    if (snapshot.pendingEvent) enqueueEvent(snapshot.pendingEvent);
+    const pending = snapshot.pendingEvent;
+    if (!pending) continue;
+    if (state.pendingDispatchAuth.verify(pending)) {
+      enqueueEvent(pending);
+      continue;
+    }
+    // Pre-upgrade journals could be authored by a page that held the old
+    // shared credential. Preserve the journal, but never dispatch such work
+    // into a new trusted-controller session without a fresh decision.
+    state.sessionStore.appendEvent({ type: 'pending_event_retired', id: snapshot.id,
+      retiredType: pending.type, reason: 'untrusted_legacy_pending_action' });
+    console.warn(`[impeccable] retired untrusted pending ${pending.type} for session ${snapshot.id}; start a new action in the trusted controller`);
   }
 }
 
@@ -260,7 +448,7 @@ function recordGenerateDelivery(entry) {
   const event = entry?.event;
   if (!event || event.type !== 'generate' || event.generationReadyAt) return;
   const at = Date.now();
-  entry.event = { ...event, generationReadyAt: at };
+  entry.event = state.pendingDispatchAuth.sign({ ...event, generationReadyAt: at });
   state.sessionStore?.appendEvent(entry.event);
   recordAgentPhase(event.id, 'generation_ready', { at });
 }
@@ -275,12 +463,12 @@ async function prepareGenerateEventForLease(entry) {
     cwd: process.cwd(),
     scriptsDir: __dirname,
   });
-  entry.event = {
+  entry.event = state.pendingDispatchAuth.sign({
     ...event,
     scaffoldAttempted: true,
     scaffoldDurationMs: result.durationMs ?? null,
     ...(result.ok ? { scaffold: result.scaffold } : { scaffoldError: result.error || result.reason }),
-  };
+  });
   state.sessionStore?.appendEvent(entry.event);
   recordAgentPhase(event.id, result.ok ? 'source_ready' : 'scaffold_fallback', {
     durationMs: result.durationMs ?? null,
@@ -298,7 +486,8 @@ function recordAgentPhase(id, phase, details = {}) {
     ...details,
   };
   state.sessionStore?.appendEvent(event);
-  broadcast(event);
+  broadcast({ type: 'agent_phase', id, phase, at: event.at,
+    ...(Number.isFinite(event.durationMs) ? { durationMs: event.durationMs } : {}) });
 }
 
 /**
@@ -347,15 +536,18 @@ function missedCompletionFromSnapshot(snapshot) {
   // Accept/discard already underway: the browser is no longer waiting on
   // generation, and a late `done` there would collide with teardown.
   if (GENERATION_FENCED_PHASES.has(snapshot.phase)) return null;
-  const file = snapshot.sourceFile || snapshot.previewFile;
+  const safeFiles = pageSafeFileMetadata({
+    file: snapshot.publishedSourceFile || snapshot.publishedPreviewFile,
+    sourceFile: snapshot.publishedSourceFile,
+    previewFile: snapshot.publishedPreviewFile,
+    previewMode: snapshot.publishedPreviewMode,
+  });
+  const file = safeFiles.file;
   if (!file) return null;
   return {
     type: 'done',
     id: snapshot.id,
-    file,
-    sourceFile: snapshot.sourceFile || undefined,
-    previewFile: snapshot.previewFile || undefined,
-    previewMode: snapshot.previewMode || undefined,
+    ...safeFiles,
     redelivered: true,
   };
 }
@@ -374,16 +566,18 @@ function recordGenerationCheckpoint(event) {
   const arrived = Number(event.arrivedVariants) || 0;
   const expected = Number(event.expectedVariants) || 0;
   if (arrived <= 0 || expected <= 0) return;
-  const previewMode = event.previewMode || 'source';
-  const previewFile = event.previewFile || event.file;
+  const safeFiles = pageSafeFileMetadata({
+    file: event.previewFile || event.file,
+    sourceFile: event.sourceFile,
+    previewFile: event.previewFile || event.file,
+    previewMode: event.previewMode || 'source',
+  });
+  const previewFile = safeFiles.previewFile;
   if (previewFile) {
     broadcast({
       type: 'variant_progress',
       id: event.id,
-      file: previewFile,
-      sourceFile: event.sourceFile || (previewMode === 'source' ? previewFile : undefined),
-      previewFile,
-      previewMode,
+      ...safeFiles,
       arrivedVariants: arrived,
       expectedVariants: expected,
       publicationKind: event.publicationKind || 'variants',
@@ -404,6 +598,42 @@ function recordGenerationCheckpoint(event) {
   if (arrived >= expected && !generationPhaseAlreadyRecorded(event.id, 'all_variants_ready')) {
     recordAgentPhase(event.id, 'all_variants_ready', { ...details, at });
   }
+}
+
+function pageCheckpointForJournal(msg, snapshot) {
+  const expected = Number(snapshot?.expectedVariants) || 0;
+  const reportedArrived = Number(msg.arrivedVariants) || 0;
+  // Browser revisions are untrusted. Assign the journal's next revision here,
+  // so a forged huge number cannot permanently stale legitimate checkpoints.
+  const currentRevision = Number(snapshot?.browserCheckpointRevision ?? snapshot?.checkpointRevision) || 0;
+  return {
+    type: 'checkpoint',
+    id: msg.id,
+    revision: currentRevision + 1,
+    revisionDomain: 'browser',
+    owner: typeof msg.owner === 'string' ? msg.owner.slice(0, 64) : undefined,
+    reason: CHECKPOINT_REASON_SET.has(msg.reason) ? msg.reason : undefined,
+    arrivedVariants: Math.max(0, Math.min(expected, reportedArrived)),
+    expectedVariants: expected,
+    visibleVariant: Number.isInteger(msg.visibleVariant) && msg.visibleVariant >= 0 && msg.visibleVariant <= expected
+      ? msg.visibleVariant : undefined,
+    paramValues: msg.paramValues,
+    // File metadata from a page is untrusted. Only agent-published paths may
+    // enter the journal or drive preview/progress reads.
+    sourceFile: snapshot?.publishedSourceFile || undefined,
+    previewFile: snapshot?.publishedPreviewFile || undefined,
+    previewMode: snapshot?.publishedPreviewMode || undefined,
+  };
+}
+
+function pageTelemetryJournalBytes(id) {
+  const roots = [state.sessionStore?.rootDir].filter(Boolean);
+  let bytes = 0;
+  for (const root of roots) {
+    try { bytes = Math.max(bytes, fs.statSync(path.join(root, id + '.jsonl')).size); }
+    catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  }
+  return bytes;
 }
 
 function generationIsFenced(id) {
@@ -495,51 +725,65 @@ function summarizePendingEventForStatus(entry) {
   return summary;
 }
 
-function summarizeActiveSessionForClient(snapshot = {}) {
+function summarizeActiveSessionForClient(snapshot = {}, { pageSafe = false } = {}) {
+  let safePageUrl = null;
+  if (pageSafe && typeof snapshot.pageUrl === 'string' && snapshot.pageUrl.length <= 2048
+      && !/[\x00-\x1f\x7f<>{}]/.test(snapshot.pageUrl)) {
+    try {
+      const candidate = new URL(snapshot.pageUrl, 'http://localhost');
+      if (candidate.pathname.length <= 512) safePageUrl = candidate.pathname;
+    } catch { /* legacy journal supplied malformed URL */ }
+  }
+  const files = pageSafe ? pageSafeFileMetadata({
+    sourceFile: snapshot.sourceFile,
+    previewFile: snapshot.previewFile,
+    previewMode: snapshot.previewMode,
+  }) : snapshot;
   return {
     id: snapshot.id,
-    phase: snapshot.phase,
-    pageUrl: snapshot.pageUrl ?? null,
-    sourceFile: snapshot.sourceFile ?? null,
-    previewFile: snapshot.previewFile ?? null,
-    previewMode: snapshot.previewMode ?? null,
+    phase: pageSafe ? (PAGE_SAFE_SESSION_PHASES.has(snapshot.phase) ? snapshot.phase : 'agent_error') : snapshot.phase,
+    pageUrl: pageSafe ? safePageUrl : (snapshot.pageUrl ?? null),
+    sourceFile: files.sourceFile ?? null,
+    previewFile: files.previewFile ?? null,
+    previewMode: files.previewMode ?? null,
     expectedVariants: snapshot.expectedVariants ?? 0,
     arrivedVariants: snapshot.arrivedVariants ?? 0,
     visibleVariant: snapshot.visibleVariant ?? null,
     checkpointRevision: snapshot.checkpointRevision ?? 0,
     browserCheckpointRevision: snapshot.browserCheckpointRevision ?? snapshot.checkpointRevision ?? 0,
     publicationCheckpointRevision: snapshot.publicationCheckpointRevision ?? 0,
-    paramValues: snapshot.paramValues || {},
-    generationPhase: snapshot.generationPhase ?? null,
+    // Cross-session parameter values may contain private page data from a
+    // legacy journal. A browser with its own local state retains its values;
+    // another tab safely resumes with defaults.
+    paramValues: pageSafe ? {} : (snapshot.paramValues || {}),
+    generationPhase: pageSafe
+      ? (AGENT_PHASE_SET.has(snapshot.generationPhase) ? snapshot.generationPhase : null)
+      : (snapshot.generationPhase ?? null),
     generationCompletedAt: snapshot.generationCompletedAt ?? null,
     generationCanceled: snapshot.generationCanceled === true,
     cancelReason: snapshot.cancelReason ?? null,
     // Render truth, so a browser with no localStorage can rehydrate to the
     // same comparison the server already knows about.
-    mountedVariants: Array.isArray(snapshot.mountedVariants) ? snapshot.mountedVariants : [],
-    mountFailures: Array.isArray(snapshot.mountFailures) ? snapshot.mountFailures : [],
-    renderState: snapshot.renderState ?? null,
+    mountedVariants: pageSafe
+      ? (Array.isArray(snapshot.mountedVariants) ? snapshot.mountedVariants : [])
+        .filter((variant) => Number.isInteger(variant) && variant >= 1 && variant <= 999).slice(-100)
+      : (Array.isArray(snapshot.mountedVariants) ? snapshot.mountedVariants : []),
+    mountFailures: pageSafe
+      ? (Array.isArray(snapshot.mountFailures) ? snapshot.mountFailures : [])
+        .filter((failure) => Number.isInteger(failure?.variant) && failure.variant >= 1 && failure.variant <= 999)
+        .slice(-5).map((failure) => ({ variant: failure.variant,
+          at: Number.isSafeInteger(failure.at) ? failure.at : null,
+          error: 'Variant failed to mount' }))
+      : (Array.isArray(snapshot.mountFailures) ? snapshot.mountFailures : []),
+    renderState: pageSafe
+      ? (['pending', 'mounted', 'failed'].includes(snapshot.renderState) ? snapshot.renderState : null)
+      : (snapshot.renderState ?? null),
   };
 }
 
-function activeSessionSummaries() {
+function activeSessionSummaries({ pageSafe = false } = {}) {
   if (!state.sessionStore) return [];
-  return state.sessionStore.listActiveSessions().map((snapshot) => summarizeActiveSessionForClient(snapshot));
-}
-
-function cancelQueuedAnonymousExitEvents() {
-  let removed = 0;
-  for (let i = state.pendingEvents.length - 1; i >= 0; i -= 1) {
-    const event = state.pendingEvents[i]?.event;
-    if (event?.type !== 'exit' || event.id) continue;
-    state.pendingEvents.splice(i, 1);
-    removed += 1;
-  }
-  if (removed > 0) {
-    scheduleLeaseFlush();
-    broadcastAgentPollingIfChanged();
-  }
-  return removed;
+  return state.sessionStore.listActiveSessions().map((snapshot) => summarizeActiveSessionForClient(snapshot, { pageSafe }));
 }
 
 function scheduleLeaseFlush() {
@@ -630,14 +874,14 @@ function recordManualEditActivity(type, details = {}) {
   state.manualEditActivity = entry;
   if (DEBUG_MANUAL_EDIT_EVENTS) {
     try {
-      const filePath = path.join(getLiveDir(process.cwd()), 'manual-edit-events.jsonl');
+      const filePath = path.join(getLivePrivateDir(process.cwd()), 'manual-edit-events.jsonl');
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.appendFileSync(filePath, JSON.stringify(entry) + '\n');
     } catch {
       /* diagnostics are best-effort; never block live mode on observability */
     }
   }
-  broadcast(entry);
+  broadcast(pageSafeManualEditActivity(entry));
   return entry;
 }
 
@@ -725,50 +969,126 @@ function isLoopbackOrigin(origin) {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
 }
 
+const PAGE_CORS_PATHS = new Set([
+  '/live.js', '/events', '/annotation',
+  '/page-status', '/page-preview', '/page-manual-edit-count',
+]);
+
+function isPageCorsRequest(req, pathname) {
+  if (/^\/page-approval\/[0-9a-f-]{36}$/.test(pathname)) return true;
+  if (pathname === '/manual-edit-stash') {
+    const method = req.method === 'OPTIONS' ? req.headers['access-control-request-method'] : req.method;
+    return method === 'POST';
+  }
+  return PAGE_CORS_PATHS.has(pathname);
+}
+
 // HTTP request handler
 // ---------------------------------------------------------------------------
 
 function createRequestHandler({ detectScript, liveScriptParts }) {
   return (req, res) => {
     const url = new URL(req.url, `http://localhost:${state.port}`);
-    // Token-or-loopback CORS. Reflect the caller's Origin when it is a
-    // loopback origin OR the request carries the valid session token, always
-    // paired with `Vary: Origin` so an intermediary cache never serves a
-    // response authorized for one origin to another. A remote page (e.g.
-    // https://evil.example probing the port from a tab open on the same
-    // machine) has no token and gets no Access-Control-Allow-Origin, so its
-    // JS-initiated fetch cannot read any response. The token branch exists for
-    // dev servers on non-localhost loopback aliases (ddev's *.ddev.site,
-    // Valet's *.test, hosts-file entries): the injected classic <script src>
-    // delivers the token to the page regardless of origin, every overlay
-    // request carries it in the query string (preflights included, since
-    // OPTIONS hits the same URL), and a token bearer is already fully
-    // authorized on every route — the token is the security boundary, not the
-    // origin. Requests with no Origin header (script tags, curl, the agent's
-    // own fetches) are not subject to CORS and keep working; no ACAO header
-    // is needed for them.
+    // The inspected page owns only a page-scoped capability. It may come from
+    // a localhost dev server or a non-loopback alias, but controller responses
+    // must never be CORS-readable by either. Same-origin controller fetches
+    // need no CORS headers.
     const origin = req.headers.origin;
-    if (origin && (isLoopbackOrigin(origin) || url.searchParams.get('token') === state.token)) {
+    const pageCors = isPageCorsRequest(req, url.pathname);
+    if (origin && pageCors
+        && (isLoopbackOrigin(origin)
+          || tokenMatches(url.searchParams.get('token'), state.pageToken))) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Impeccable-Token');
+    if (pageCors) {
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Impeccable-Token');
+    }
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const p = url.pathname;
 
+    if (p === '/control' && req.method === 'GET') {
+      const nonce = randomUUID().replaceAll('-', '');
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+        'X-Frame-Options': 'DENY',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      });
+      res.end(renderControlUi(nonce));
+      return;
+    }
+
+    if (p === '/control/approvals' && req.method === 'GET') {
+      if (!requireLivePostAuth(req, res)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ approvals: [...state.pageApprovals.values()]
+        .filter((approval) => !approval.dispatching)
+        .map(({ id, msg, createdAt }) => ({ id, msg, createdAt })) }));
+      return;
+    }
+    const approvalMatch = /^\/control\/approvals\/([0-9a-f-]{36})\/(approve|reject)$/.exec(p);
+    if (approvalMatch && req.method === 'POST') {
+      if (!requireLivePostAuth(req, res)) return;
+      void resolvePageApproval(approvalMatch[1], approvalMatch[2]).then((found) => {
+        res.writeHead(found ? 200 : 404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(found ? { ok: true } : { error: 'approval_not_found' }));
+      });
+      return;
+    }
+
+    const controllerAnnotationMatch = /^\/control\/annotation\/([A-Za-z0-9_-]{1,64})$/.exec(p);
+    if (controllerAnnotationMatch && req.method === 'GET') {
+      if (!requireLivePostAuth(req, res)) return;
+      const eventId = controllerAnnotationMatch[1];
+      if (!state.annotationSizes.has(eventId)) {
+        res.writeHead(404); res.end('Annotation not found'); return;
+      }
+      try {
+        const png = readFileInside(state.sessionDir, eventId + '.png', {
+          encoding: null, maxBytes: MAX_ANNOTATION_BYTES,
+        });
+        res.writeHead(200, {
+          'Content-Type': 'image/png', 'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+        });
+        res.end(png);
+      } catch {
+        res.writeHead(404); res.end('Annotation not found');
+      }
+      return;
+    }
+
+    const controllerEvidenceMatch = /^\/control\/manual-edit-evidence\/([A-Za-z0-9_-]{1,128})$/.exec(p);
+    if (controllerEvidenceMatch && req.method === 'GET') {
+      if (!requireLivePostAuth(req, res)) return;
+      try {
+        const body = readFileInside(manualApplyEvidenceDir(process.cwd()), `${controllerEvidenceMatch[1]}.json`, {
+          encoding: 'utf8', maxBytes: MAX_MANUAL_APPLY_EVIDENCE_BYTES,
+        });
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+        });
+        res.end(body);
+      } catch (error) {
+        res.writeHead(error?.code === 'FILE_TOO_LARGE' ? 413 : 404);
+        res.end(error?.code === 'FILE_TOO_LARGE' ? 'Evidence exceeds the authorized byte budget' : 'Evidence not found');
+      }
+      return;
+    }
+
     // --- Scripts ---
     if (p === '/live.js') {
-      // Token-gated: the script body embeds state.token, which unlocks every
-      // token-guarded route. Serving it unauthenticated let any local page read
-      // the token and drive the session. The injected <script src> carries
-      // `?token=...` (see live-inject.mjs). A missing/wrong token → 401.
-      if (url.searchParams.get('token') !== state.token) {
-        res.writeHead(401, { 'Content-Type': 'text/plain' });
-        res.end('Unauthorized');
-        return;
-      }
+      // The URL and body are both readable by arbitrary inspected-page JS.
+      // They may carry the page capability, never the controller credential.
+      if (!requireQueryToken(url, res, state.pageToken)) return;
       // Re-read from disk each request so edits to live-browser.js land on
       // the next tab reload. No-store headers prevent browser caching across
       // sessions — during iteration, a cached old script silently breaks
@@ -782,7 +1102,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         return;
       }
       const body = assembleLiveBrowserScript({
-        token: state.token,
+        token: state.pageToken,
         port: state.port,
         vocabulary: LIVE_COMMANDS,
         commandPrefix: IMPECCABLE_COMMAND_PREFIX,
@@ -826,7 +1146,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
     // event with screenshotPath already set. Keeps bytes out of the SSE/poll
     // bridge and preserves the "one shot from the user's POV" UX.
     if (p === '/annotation' && req.method === 'POST') {
-      if (!requireLivePostAuth(req, res)) return;
+      if (!requirePagePostAuth(req, res)) return;
       const eventId = url.searchParams.get('eventId');
       if (!eventId || !/^[A-Za-z0-9_-]{1,64}$/.test(eventId)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -844,6 +1164,17 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         contentType: 'image/png',
       }).then((body) => {
         const absPath = path.join(state.sessionDir, eventId + '.png');
+        if (state.annotationSizes.has(eventId)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'annotation_already_uploaded' }));
+          return;
+        }
+        if (state.annotationSizes.size >= MAX_ANNOTATION_FILES
+            || state.annotationBytes + body.length > MAX_ANNOTATION_TOTAL_BYTES) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'annotation_budget_exceeded' }));
+          return;
+        }
         try {
           atomicWriteFileInside(process.cwd(), absPath, body, { encoding: null, mode: 0o600 });
         } catch (err) {
@@ -851,6 +1182,8 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
           res.end(JSON.stringify({ error: 'Write failed: ' + err.message }));
           return;
         }
+        state.annotationSizes.set(eventId, body.length);
+        state.annotationBytes += body.length;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, path: absPath }));
       }).catch((error) => sendHttpInputError(req, res, error));
@@ -860,9 +1193,9 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
     // --- Health ---
     if (p === '/status') {
       const token = url.searchParams.get('token');
-      if (token !== state.token) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
+      if (!tokenMatches(token, state.token)) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
       const sessions = activeSessionSummaries();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         status: 'ok',
         port: state.port,
@@ -872,6 +1205,52 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         activeSessions: sessions,
         manualEdits: getManualEditStatus(),
       }));
+      return;
+    }
+
+    if (p === '/page-status' && req.method === 'GET') {
+      if (!requireQueryToken(url, res, state.pageToken)) return;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ agentPolling: agentPollingConnected() }));
+      return;
+    }
+
+    if (p === '/page-manual-edit-count' && req.method === 'GET') {
+      if (!requireQueryToken(url, res, state.pageToken)) return;
+      const pageUrl = url.searchParams.get('pageUrl') || '';
+      const { totalCount, perPage } = countPendingByPage(process.cwd());
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ count: perPage[pageUrl] || 0, totalCount }));
+      return;
+    }
+
+    if (p === '/page-preview' && req.method === 'GET') {
+      if (!requireQueryToken(url, res, state.pageToken)) return;
+      // A source-derived wrapper or Svelte manifest can contain expressions,
+      // comments, and attributes never rendered in the inspected DOM. The
+      // page is untrusted, so no source-derived recovery bytes leave here.
+      res.writeHead(410, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+      });
+      res.end('Source recovery is disabled for inspected pages. Wait for HMR or reload the page.');
+      return;
+    }
+
+    const pageApprovalMatch = /^\/page-approval\/([0-9a-f-]{36})$/.exec(p);
+    if (pageApprovalMatch && req.method === 'GET') {
+      if (!requireQueryToken(url, res, state.pageToken)) return;
+      const id = pageApprovalMatch[1];
+      const pending = state.pageApprovals.has(id);
+      const outcome = state.pageApprovalOutcomes.get(id);
+      res.writeHead(pending ? 202 : outcome ? 200 : 404, {
+        'Content-Type': 'application/json', 'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify(pending ? { status: 'pending' }
+        : outcome ? { status: 'settled', eventStatus: outcome.status, body: outcome.body }
+          : { error: 'approval_not_found' }));
       return;
     }
 
@@ -898,7 +1277,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
     //   /design-system/raw     returns DESIGN.md markdown verbatim
     if (p === '/design-system.json' || p === '/design-system/raw') {
       const token = url.searchParams.get('token');
-      if (token !== state.token) { res.writeHead(401); res.end('Unauthorized'); return; }
+      if (!tokenMatches(token, state.token)) { res.writeHead(401); res.end('Unauthorized'); return; }
 
       const projectContext = resolveProjectContext();
       const mdPath = projectContext.resolvedDesignPath;
@@ -914,7 +1293,12 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
 
       if (p === '/design-system/raw') {
         if (!mdFile) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+        });
         res.end(mdFile.content);
         return;
       }
@@ -948,15 +1332,15 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         }
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(response));
       return;
     }
 
-    // --- Source file (no-HMR fallback) ---
+    // --- Trusted-controller source reader ---
     if (p === '/source') {
       const token = url.searchParams.get('token');
-      if (token !== state.token) { res.writeHead(401); res.end('Unauthorized'); return; }
+      if (!tokenMatches(token, state.token)) { res.writeHead(401); res.end('Unauthorized'); return; }
       const filePath = url.searchParams.get('path');
       if (!filePath || filePath.includes('..')) { res.writeHead(400); res.end('Bad path'); return; }
       const lexicalPath = path.resolve(process.cwd(), filePath);
@@ -967,7 +1351,12 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         const status = ['PATH_OUTSIDE_ROOT', 'SYMLINK_REJECTED'].includes(error?.code) ? 403 : 404;
         res.writeHead(status); res.end(status === 403 ? 'Forbidden' : 'File not found'); return;
       }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+      });
       res.end(content);
       return;
     }
@@ -975,10 +1364,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
     // --- SSE: server→browser push (replaces WebSocket) ---
     if (p === '/events' && req.method === 'GET') {
       const token = url.searchParams.get('token');
-      if (token !== state.token) { res.writeHead(401); res.end('Unauthorized'); return; }
-      clearTimeout(state.exitTimer);
-      state.exitTimer = null;
-      cancelQueuedAnonymousExitEvents();
+      if (!tokenMatches(token, state.pageToken)) { res.writeHead(401); res.end('Unauthorized'); return; }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -988,7 +1374,7 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
         type: 'connected',
         hasProjectContext: hasProjectContext(),
         agentPolling: agentPollingConnected(),
-        activeSessions: activeSessionSummaries(),
+        activeSessions: activeSessionSummaries({ pageSafe: true }),
       }) + '\n\n');
 
       state.sseClients.add(res);
@@ -1001,12 +1387,8 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
       req.on('close', () => {
         clearInterval(heartbeat);
         state.sseClients.delete(res);
-        if (state.sseClients.size === 0) {
-          clearTimeout(state.exitTimer);
-          state.exitTimer = setTimeout(() => {
-            if (state.sseClients.size === 0) enqueueEvent({ type: 'exit' });
-          }, 8000);
-        }
+        // A page can close or navigate itself. That must not dispatch an
+        // agent `exit` without a trusted-controller decision.
       });
       return;
     }
@@ -1015,7 +1397,21 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
 
     // --- Browser→server events (replaces WebSocket messages) ---
     if (p === '/events' && req.method === 'POST') {
-      if (!requireLivePostAuth(req, res)) return;
+      const bearer = requestToken(req, 'x-impeccable-token');
+      const controller = tokenMatches(bearer, state.token);
+      const page = tokenMatches(bearer, state.pageToken);
+      if (!controller && !page) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+      // A browser from the inspected page must never be able to replay a
+      // controller credential if one is accidentally exposed elsewhere.
+      if (controller && req.headers.origin && !isSameControllerOrigin(req)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'controller_origin_required' }));
+        return;
+      }
       readBoundedJson(req, { maxBytes: MAX_LIVE_JSON_BYTES }).then((msg) => {
         // Defense in depth: manual copy edits must use the staged stash/apply
         // endpoints. The direct Save event path is disabled in the browser.
@@ -1034,6 +1430,26 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error }));
           return;
+        }
+        if (page) {
+          if (PAGE_ACTION_TYPES.has(msg.type)) {
+            if (msg.type === 'generate' && msg.screenshotPath) {
+              const uploaded = state.annotationSizes.has(msg.id)
+                ? path.join(state.sessionDir, msg.id + '.png') : null;
+              if (msg.screenshotPath !== uploaded) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'screenshot_not_uploaded_for_event' }));
+                return;
+              }
+            }
+            queuePageApproval(res, msg);
+            return;
+          }
+          if (!PAGE_TELEMETRY_TYPES.has(msg.type)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'controller_action_required' }));
+            return;
+          }
         }
         if (msg.type === 'agent_phase') {
           recordAgentPhase(msg.id, msg.phase, {
@@ -1058,7 +1474,71 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
           res.end(JSON.stringify({ error: 'unknown_session', id: msg.id }));
           return;
         }
+        let pageTelemetrySnapshot = null;
+        if (page && PAGE_TELEMETRY_TYPES.has(msg.type)) {
+          pageTelemetrySnapshot = state.sessionStore?.getSnapshot(msg.id);
+          if (!pageTelemetrySnapshot || pageTelemetrySnapshot.generationCanceled
+              || GENERATION_FENCED_PHASES.has(pageTelemetrySnapshot.phase)) {
+            res.writeHead(410, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'session_not_active' }));
+            return;
+          }
+          if (pageTelemetryJournalBytes(msg.id) >= MAX_PAGE_TELEMETRY_JOURNAL_BYTES) {
+            res.writeHead(429, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'page_telemetry_budget_exceeded' }));
+            return;
+          }
+          if (msg.type === 'checkpoint') {
+            const storedRevision = Number(pageTelemetrySnapshot.browserCheckpointRevision
+              ?? pageTelemetrySnapshot.checkpointRevision ?? 0);
+            if (!Number.isSafeInteger(storedRevision) || storedRevision > 10_000_000) {
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'legacy_checkpoint_revision_poisoned',
+                hint: 'End this legacy session and start a new one from the trusted controller.' }));
+              return;
+            }
+            if (msg.paramValues !== undefined
+                && Buffer.byteLength(JSON.stringify(msg.paramValues)) > MAX_PAGE_CHECKPOINT_PARAM_BYTES) {
+              res.writeHead(413, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'checkpoint_params_too_large' }));
+              return;
+            }
+            const now = Date.now();
+            const lastAt = state.pageCheckpointLastAt.get(msg.id) || 0;
+            const reportsNewVariant = CHECKPOINT_REASON_SET.has(msg.reason)
+              && VARIANT_PROGRESS_CHECKPOINT_REASONS.has(msg.reason)
+              && Number(msg.arrivedVariants) > Number(pageTelemetrySnapshot.arrivedVariants || 0);
+            if (now - lastAt < PAGE_CHECKPOINT_MIN_INTERVAL_MS && !reportsNewVariant) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, throttled: true }));
+              return;
+            }
+            if (state.pageCheckpointLastAt.size >= 128 && !state.pageCheckpointLastAt.has(msg.id)) {
+              state.pageCheckpointLastAt.delete(state.pageCheckpointLastAt.keys().next().value);
+            }
+            state.pageCheckpointLastAt.set(msg.id, now);
+          } else {
+            if (msg.variant > Number(pageTelemetrySnapshot.expectedVariants || 0)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'variant_outside_session' }));
+              return;
+            }
+            if (pageTelemetrySnapshot.mountedVariants?.includes(msg.variant)) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, duplicate: true }));
+              return;
+            }
+            // Mount acks are read-only telemetry; never journal arbitrary
+            // extra fields from the page-token JSON object.
+            msg = { type: 'variant_mounted', id: msg.id, variant: msg.variant,
+              ...(typeof msg.url === 'string' ? { url: msg.url } : {}) };
+          }
+        }
         const missedCompletion = detectMissedGenerationCompletion(msg);
+        if (page && msg.type === 'checkpoint') msg = pageCheckpointForJournal(msg, pageTelemetrySnapshot);
+        if (controller && PERSISTED_PENDING_TYPES.has(msg.type)) {
+          msg = state.pendingDispatchAuth.sign(msg);
+        }
         if (state.sessionStore && msg.id) {
           try {
             state.sessionStore.appendEvent(msg);
@@ -1138,7 +1618,7 @@ function parsePollTypes(value) {
 
 function handlePollGet(req, res, url) {
   const token = url.searchParams.get('token');
-  if (token !== state.token) {
+  if (!tokenMatches(token, state.token)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
@@ -1408,17 +1888,9 @@ function handlePollPost(req, res) {
       } catch { /* keep reply path best-effort; browser still needs SSE */ }
     }
     flushPendingPolls();
-    // Forward the reply to the browser via SSE
-    broadcast({
-      type: msg.type || 'done',
-      id: msg.id,
-      message: msg.message,
-      file: msg.file,
-      sourceFile: replyFileMeta.sourceFile,
-      previewFile: replyFileMeta.previewFile,
-      previewMode: replyFileMeta.previewMode,
-      data: msg.data,
-    });
+    // The agent's free-form message/data can contain unrendered source or
+    // compiler errors. Only a narrow browser-safe projection reaches SSE.
+    broadcast(pageSafeAgentReply(msg, pageSafeFileMetadata(replyFileMeta)));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   }).catch((error) => sendHttpInputError(req, res, error));
@@ -1455,22 +1927,18 @@ function cleanupSvelteComponentSessionsBeforeExit() {
 }
 
 /**
- * A previous run that died without its shutdown hook leaves preview component
- * dirs behind. Drop the ones whose session the store no longer considers
- * active; anything still active is mid-generation and must survive a restart.
+ * Old detached component sessions contain source-derived manifests and stubs
+ * that the inspected page's dev server can read directly. Preserve their
+ * generated work outside the dev-served project, but invalidate those active
+ * sessions rather than continuing to expose route source.
  */
-function sweepOrphanSvelteComponentSessionsOnStartup() {
-  try {
-    const activeIds = (state.sessionStore?.listActiveSessions() || [])
-      .map((snapshot) => snapshot?.id)
-      .filter(Boolean);
-    const result = sweepInactiveSvelteComponentSessions(activeIds, process.cwd());
-    if (result.removed.length > 0 || result.removedRoot) {
-      console.log('[impeccable] swept orphaned Svelte component sessions:', JSON.stringify(result));
-    }
-  } catch (err) {
-    console.warn('[impeccable] Svelte component session sweep failed:', err.message);
+function quarantineLegacySvelteSessionsOnStartup() {
+  const privateRoot = getLivePrivateDir(process.cwd());
+  const moved = quarantineLegacySvelteComponentSessions(process.cwd(), privateRoot);
+  for (const { source, destination, id } of moved) {
+    console.warn(`[impeccable] retired legacy Svelte ${id}; restart its preview or review the deferred decision. Generated work preserved: ${source} -> ${destination}`);
   }
+  return moved;
 }
 
 // Accept receipts are a short-lived idempotency record for a single accept.
@@ -1480,7 +1948,7 @@ const ACCEPT_RECEIPT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 function sweepStaleAcceptReceiptsOnStartup() {
   try {
-    const dir = path.join(getLiveDir(process.cwd()), 'accept-receipts');
+    const dir = path.join(getLivePrivateDir(process.cwd()), 'accept-receipts');
     if (!fs.existsSync(dir)) return;
     const cutoff = Date.now() - ACCEPT_RECEIPT_MAX_AGE_MS;
     let removed = 0;
@@ -1496,17 +1964,6 @@ function sweepStaleAcceptReceiptsOnStartup() {
     if (removed > 0) console.log(`[impeccable] removed ${removed} accept receipt(s) older than 14 days`);
   } catch (err) {
     console.warn('[impeccable] accept receipt retention sweep failed:', err.message);
-  }
-}
-
-function applyLegacyDeferredAcceptsOnStartup() {
-  try {
-    const result = applyDeferredSvelteComponentAccepts(process.cwd());
-    if (result.applied > 0 || result.failed > 0) {
-      console.log('[impeccable] applied legacy deferred Svelte component accepts:', JSON.stringify(result));
-    }
-  } catch (err) {
-    console.warn('[impeccable] legacy deferred Svelte component accept apply failed:', err.message);
   }
 }
 
@@ -1542,7 +1999,7 @@ Endpoints:
   /manual-edit-stash   Stage browser copy edits
   /manual-edit-commit  Apply staged browser copy edits
   /manual-edit-discard Discard staged browser copy edits
-  /source              Raw source file reader (no-HMR fallback)
+  /source              Controller-only inert source reader
   /status              Durable recovery status (token-protected)
   /health              Health check`);
   process.exit(0);
@@ -1552,7 +2009,7 @@ if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
   try {
     const { info } = readLiveServerInfo(process.cwd()) || {};
-    const res = await fetch(`http://localhost:${info.port}/stop?token=${info.token}`, {
+    const res = await fetch(`${liveHelperBase(info.port)}/stop`, {
       method: 'POST',
       headers: { 'X-Impeccable-Token': info.token },
     });
@@ -1593,6 +2050,31 @@ if (args.includes('stop')) {
 // print the connection JSON, then exit.  This keeps the startup command
 // simple (no shell backgrounding or chained commands).
 if (args.includes('--background')) {
+  // Do the fail-closed migration in the visible parent before spawning a
+  // detached child with ignored stdio. If ownership/path checks fail, the
+  // caller sees the exact error immediately instead of a generic 10s timeout.
+  const existing = readLiveServerInfo(process.cwd())?.info;
+  if (existing?.pid && isLiveServerPidReachable(existing.pid)) {
+    console.error(`Live server already running on port ${existing.port} (pid ${existing.pid}).`);
+    process.exit(1);
+  }
+  try {
+    const moved = migrateLegacyLivePrivateArtifacts(process.cwd());
+    quarantineLegacySvelteSessionsOnStartup();
+    readManualEditsBufferStrict(process.cwd());
+    if (livePrivateDirIsVolatile(process.cwd())) {
+      console.warn('[impeccable] private Live state uses OS temporary storage because the app root contains the user data directory; recovery after reboot or temp cleanup is not guaranteed.');
+    }
+    for (const { source, destination } of moved) {
+      console.warn(`[impeccable] private Live state migration: ${source} -> ${destination}`);
+    }
+  } catch (error) {
+    console.error(`[impeccable] live startup stopped: ${error.message}`);
+    process.exit(1);
+  }
+  if (manualApply.readTransaction()) {
+    console.warn('[impeccable] an interrupted copy-edit transaction needs review in the trusted controller; no automatic rollback was performed.');
+  }
   const childArgs = args.filter(a => a !== '--background');
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], {
     detached: true,
@@ -1636,20 +2118,28 @@ if (existingRecord?.info) {
 }
 
 state.token = randomUUID();
+state.pageToken = randomUUID();
+const migrated = migrateLegacyLivePrivateArtifacts(process.cwd());
+if (livePrivateDirIsVolatile(process.cwd())) {
+  console.warn('[impeccable] private Live state uses OS temporary storage; recovery after reboot or temp cleanup is not guaranteed.');
+}
+for (const { source, destination } of migrated) {
+  console.warn(`[impeccable] private Live state migration: ${source} -> ${destination}`);
+}
 state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
-manualApply.rollbackTransaction({
-  reason: 'manual_edit_server_start_recovered_abandoned_transaction',
-});
-applyLegacyDeferredAcceptsOnStartup();
-sweepOrphanSvelteComponentSessionsOnStartup();
+state.pendingDispatchAuth = createPendingDispatchAuth(process.cwd());
+readManualEditsBufferStrict(process.cwd());
+quarantineLegacySvelteSessionsOnStartup();
+if (manualApply.readTransaction()) {
+  console.warn('[impeccable] interrupted copy-edit transaction preserved for trusted-controller review; no source rollback was performed.');
+}
 sweepStaleAcceptReceiptsOnStartup();
 restorePendingEventsFromStore();
 manualApply.pruneStaleEvidence();
 const portArg = args.find(a => a.startsWith('--port='));
 state.port = portArg ? parseInt(portArg.split('=')[1], 10) : await findOpenPort();
-// Annotation screenshots live in the project root so the agent's Read tool
-// doesn't trip a per-file permission prompt. Sessioned by token so concurrent
-// projects (or quick restarts) don't collide.
+// Annotation screenshots are page-originated, never source journals. Session
+// them by token so concurrent projects (or quick restarts) do not collide.
 const annotRoot = getLiveAnnotationsDir(process.cwd());
 fs.mkdirSync(annotRoot, { recursive: true });
 state.sessionDir = fs.mkdtempSync(path.join(annotRoot, 'session-'));
@@ -1658,11 +2148,15 @@ const { detectScript, liveScriptParts } = loadBrowserScripts();
 httpServer = applyDefensiveServerTimeouts(http.createServer(createRequestHandler({ detectScript, liveScriptParts })));
 
 httpServer.listen(state.port, '127.0.0.1', () => {
-  writeLiveServerInfo(process.cwd(), { pid: process.pid, port: state.port, token: state.token });
-  const url = `http://localhost:${state.port}`;
-  console.log(`\nImpeccable live server running on ${url}`);
-  console.log(`Token: ${state.token}\n`);
-  console.log(`Script: ${url}/live.js`);
+  writeLiveServerInfo(process.cwd(), {
+    pid: process.pid,
+    port: state.port,
+    token: state.token,
+    pageToken: state.pageToken,
+  });
+  console.log(`\nImpeccable live server running on ${liveHelperBase(state.port)}`);
+  console.log(`Controller: ${liveControllerUrl(state.port, state.token)}\n`);
+  console.log(`Script: http://localhost:${state.port}/live.js`);
   console.log('Inject: managed by live-inject.mjs; Astro source tags use is:inline automatically.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });

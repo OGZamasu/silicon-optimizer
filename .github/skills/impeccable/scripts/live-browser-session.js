@@ -119,5 +119,25 @@
     };
   }
 
-  root.__IMPECCABLE_LIVE_SESSION__ = { createLiveBrowserSessionState };
+  // Source-preview fallback may reload a route once after HMR had a chance to
+  // land. Keep the attempt in tab-scoped storage so a reload cannot loop when
+  // a framework still fails to render the wrapper. Never fall back to an
+  // in-memory marker: it would be erased by the very reload it gates.
+  function createSourceReloadGate({ prefix, storage }) {
+    return {
+      decide({ id, completionMarker = 'completed', completed, variantCount = 0, expectedVariants = 0 }) {
+        const complete = Number(expectedVariants) > 0 && Number(variantCount) >= Number(expectedVariants);
+        if (!completed || complete || !/^[0-9a-f]{8}$/.test(String(id || ''))) return 'wait';
+        if (!storage) return 'manual';
+        const key = prefix + '-source-reload-' + id + '-' + String(completionMarker).slice(0, 64);
+        try {
+          if (storage.getItem(key)) return 'manual';
+          storage.setItem(key, '1');
+          return storage.getItem(key) === '1' ? 'reload' : 'manual';
+        } catch { return 'manual'; }
+      },
+    };
+  }
+
+  root.__IMPECCABLE_LIVE_SESSION__ = { createLiveBrowserSessionState, createSourceReloadGate };
 })(typeof window !== 'undefined' ? window : globalThis);

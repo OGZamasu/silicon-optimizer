@@ -1,5 +1,6 @@
-import Foundation
+import CryptoKit
 import Darwin
+import Foundation
 
 /// The package identity and entry point are fixed by the app, not by the current project.
 struct AgentPackage: Sendable {
@@ -75,17 +76,29 @@ enum AgentPackageInstallError: LocalizedError {
 
 struct InstalledAgentPackage: Sendable {
     let bin: URL
+    /// The verified tree `bin` lives in. It is kept between launches and shared by them; a
+    /// runtime never deletes it.
     let directory: URL
+    /// Whether this start reused a tree that verified, rather than running `npm ci`.
+    let reused: Bool
 }
 
-/// Reinstalls from the bundled integrity lock before every launch. The fresh directory
-/// prevents a previous agent run or a project-local package from becoming the next binary.
-/// A normal stop/exit removes it. Quitting the app cannot wait for that, and a crash never
-/// gets the chance, so each tree records the app process that built it and the next
-/// install removes trees whose process is gone — never one another running copy still uses.
+/// One verified tree per bundled lock. The first start installs it from the bundled
+/// integrity lock with a strict `npm ci` in a fresh directory, so neither a previous agent
+/// run nor a project-local package can become the binary, and records every file's size
+/// and SHA-256. Each later start checks the tree against that record — under a second for
+/// the largest — and uses it; any difference, or a different lock or Node line, installs it
+/// again. A start therefore costs a hash pass, not a 100–280 MB reinstall, and still fails
+/// closed on a tree that was changed.
+///
+/// Per-launch folders from before this, and installs that never finished, record the app
+/// process that made them and are removed once that process is gone.
 enum AgentPackageInstaller {
-    /// Names the process that owns an installed tree, as a decimal pid.
+    /// Names the process that owns an unfinished install, as a decimal pid.
     static let ownerFileName = ".silicon-owner"
+    /// The record of a finished tree: every entry's size and SHA-256, and what it was
+    /// installed from.
+    static let manifestFileName = ".silicon-verified.json"
 
     static func install(
         _ package: AgentPackage, node: URL, sourceRoot: URL? = nil,
@@ -123,12 +136,60 @@ enum AgentPackageInstaller {
         )[0].appendingPathComponent("SiliconOptimizer/agent-packages", isDirectory: true)
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
         pruneAbandonedInstallations(in: root)
-        let staging = root.appendingPathComponent("\(package.id)-\(UUID().uuidString)",
-                                              isDirectory: true)
-        try manager.createDirectory(at: staging, withIntermediateDirectories: false)
+
+        // The tree is keyed by what decides its contents: the bundled manifest and lock, and
+        // the Node line whose ABI any native module was built or chosen for.
+        let lockDigest = sha256Hex(try Data(contentsOf: manifest) + Data(contentsOf: lock))
+        let nodeLine = nodeMajorVersion(node, in: root) ?? "unknown"
+        let key = String(sha256Hex(Data("\(lockDigest)\nnode \(nodeLine)\n".utf8)).prefix(16))
+        let tree = root.appendingPathComponent("\(package.id)-\(key)", isDirectory: true)
+        let expected = TreeIdentity(package: package.spec, lock: lockDigest, node: nodeLine)
+        defer { pruneStaleTrees(of: package, keeping: tree, in: root) }
+
+        if manager.fileExists(atPath: tree.path) {
+            if try verifyTree(tree, expected: expected) {
+                return InstalledAgentPackage(
+                    bin: try entryPoint(package, in: tree), directory: tree, reused: true
+                )
+            }
+            try discard(tree, in: root)
+        }
+
+        let staging = try installFresh(package, node: node, manifest: manifest, lock: lock, root: root)
         var installedSuccessfully = false
         defer {
             if !installedSuccessfully { try? manager.removeItem(at: staging) }
+        }
+        _ = try entryPoint(package, in: staging)
+        try manager.removeItem(at: staging.appendingPathComponent(ownerFileName))
+        try writeManifest(of: staging, identity: expected)
+        do {
+            try manager.moveItem(at: staging, to: tree)
+        } catch {
+            // Another copy of the app finished the same tree first. Use it if it verifies.
+            guard manager.fileExists(atPath: tree.path), try verifyTree(tree, expected: expected)
+            else { throw error }
+            return InstalledAgentPackage(
+                bin: try entryPoint(package, in: tree), directory: tree, reused: true
+            )
+        }
+        installedSuccessfully = true
+        return InstalledAgentPackage(
+            bin: try entryPoint(package, in: tree), directory: tree, reused: false
+        )
+    }
+
+    /// Runs the strict `npm ci` into a new owned directory and returns it.
+    private static func installFresh(
+        _ package: AgentPackage, node: URL, manifest: URL, lock: URL, root: URL
+    ) throws -> URL {
+        let manager = FileManager.default
+        let staging = root.appendingPathComponent("\(package.id)-\(UUID().uuidString)",
+                                              isDirectory: true)
+        try manager.createDirectory(at: staging, withIntermediateDirectories: false)
+        var succeeded = false
+        defer {
+            if !succeeded { try? manager.removeItem(at: staging) }
         }
         // Claimed before anything else lands in it, so a pruner in another launch never
         // mistakes this tree for one left behind.
@@ -159,6 +220,9 @@ enum AgentPackageInstaller {
         process.standardError = logHandle
         do {
             try process.run()
+            // A quit mid-install must not leave npm running; the registry's reaper sees it.
+            ChildProcessRegistry.register(pid: process.processIdentifier)
+            defer { ChildProcessRegistry.unregister(pid: process.processIdentifier) }
             let deadline = Date().addingTimeInterval(600)
             while process.isRunning && Date() < deadline && !Task<Never, Never>.isCancelled {
                 Thread.sleep(forTimeInterval: 0.1)
@@ -188,21 +252,179 @@ enum AgentPackageInstaller {
         }
         try manager.removeItem(at: log)
         try manager.removeItem(at: globalConfig)
-
-        let bin = staging.appendingPathComponent(package.binPath)
-        let resolved = bin.resolvingSymlinksInPath().standardizedFileURL.path
-        guard resolved.hasPrefix(staging.standardizedFileURL.path + "/"),
-              (try? bin.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
-              manager.isReadableFile(atPath: bin.path)
-        else { throw AgentPackageInstallError.missingBin(package.name) }
-        installedSuccessfully = true
-        return InstalledAgentPackage(bin: bin, directory: staging)
+        succeeded = true
+        return staging
     }
 
-    /// Removes installed trees nobody can be running: their owner process has exited, or
-    /// they never got an owner and are over an hour old (a launch that died while creating
-    /// one). A live owner — this app, or another copy of it — keeps its trees; a reused pid
-    /// only postpones a removal to a later install. The shared npm cache is not a tree.
+    /// The package's entry point, which must be a regular file inside `tree` — both sides
+    /// resolved, so a symlinked Application Support compares like with like.
+    private static func entryPoint(_ package: AgentPackage, in tree: URL) throws -> URL {
+        let bin = tree.appendingPathComponent(package.binPath)
+        let resolvedTree = tree.resolvingSymlinksInPath().standardizedFileURL.path
+        let resolvedBin = bin.resolvingSymlinksInPath().standardizedFileURL.path
+        guard resolvedBin.hasPrefix(resolvedTree + "/"),
+              (try? bin.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+              FileManager.default.isReadableFile(atPath: bin.path)
+        else { throw AgentPackageInstallError.missingBin(package.name) }
+        return bin
+    }
+
+    // MARK: - The verified tree
+
+    /// What a tree was installed from; a tree for anything else is not reused.
+    struct TreeIdentity: Codable, Equatable {
+        var package: String
+        var lock: String
+        var node: String
+    }
+
+    private struct TreeManifest: Codable {
+        struct Entry: Codable, Equatable {
+            var size: Int64?
+            var sha256: String?
+            var link: String?
+            /// Permission bits: an executable bit is as much a part of the tree as bytes.
+            var mode: Int?
+        }
+        var identity: TreeIdentity
+        var entries: [String: Entry]
+    }
+
+    /// Records every file (size, permissions and SHA-256) and symlink (target) under `tree`.
+    static func writeManifest(of tree: URL, identity: TreeIdentity) throws {
+        let record = TreeManifest(identity: identity, entries: try entries(of: tree))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(record).write(to: tree.appendingPathComponent(manifestFileName))
+    }
+
+    /// Whether `tree` is exactly what its record says and the record is for `expected`:
+    /// the same entries, no more and no fewer, each the same size and bytes. Anything that
+    /// cannot be read counts as a difference.
+    static func verifyTree(_ tree: URL, expected: TreeIdentity) throws -> Bool {
+        guard let data = try? Data(contentsOf: tree.appendingPathComponent(manifestFileName)),
+              let record = try? JSONDecoder().decode(TreeManifest.self, from: data),
+              record.identity == expected
+        else { return false }
+        // Sizes and links first: cheap, and a different set of entries fails before any
+        // hashing starts.
+        guard let found = try? entries(of: tree, hashing: false),
+              found.count == record.entries.count
+        else { return false }
+        for (path, entry) in found {
+            guard let recorded = record.entries[path],
+                  recorded.size == entry.size, recorded.link == entry.link,
+                  recorded.mode == entry.mode
+            else { return false }
+        }
+        for (path, recorded) in record.entries where recorded.sha256 != nil {
+            try Task.checkCancellation()
+            guard let actual = try? sha256Hex(of: tree.appendingPathComponent(path)),
+                  actual == recorded.sha256
+            else { return false }
+        }
+        return true
+    }
+
+    /// Every entry under `root` except the manifest, keyed by relative path. Anything but a
+    /// regular file, a symlink or a directory makes the tree unusable.
+    private static func entries(
+        of root: URL, hashing: Bool = true
+    ) throws -> [String: TreeManifest.Entry] {
+        let manager = FileManager.default
+        let base = root.standardizedFileURL.path + "/"
+        // An unreadable directory ends the walk early; that must fail the tree, not
+        // shorten its record.
+        final class Failure: @unchecked Sendable { var happened = false }
+        let failure = Failure()
+        guard let enumerator = manager.enumerator(
+            at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey,
+                                                    .isDirectoryKey, .fileSizeKey],
+            options: [], errorHandler: { _, _ in failure.happened = true; return false }
+        ) else { throw CocoaError(.fileReadUnknown) }
+        var result: [String: TreeManifest.Entry] = [:]
+        for case let url as URL in enumerator {
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(base) else { throw CocoaError(.fileReadUnknown) }
+            let relative = String(path.dropFirst(base.count))
+            if relative == manifestFileName { continue }
+            let values = try url.resourceValues(
+                forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey, .fileSizeKey]
+            )
+            if values.isSymbolicLink == true {
+                result[relative] = .init(
+                    link: try manager.destinationOfSymbolicLink(atPath: url.path)
+                )
+            } else if values.isRegularFile == true {
+                let permissions = try manager.attributesOfItem(atPath: url.path)[.posixPermissions]
+                result[relative] = .init(
+                    size: Int64(values.fileSize ?? 0),
+                    sha256: hashing ? try sha256Hex(of: url) : nil,
+                    mode: (permissions as? NSNumber)?.intValue
+                )
+            } else if values.isDirectory != true {
+                throw CocoaError(.fileReadUnknown)
+            }
+        }
+        if failure.happened { throw CocoaError(.fileReadUnknown) }
+        if !hashing {
+            // Presence of a hash is compared from the record's side.
+            return result.mapValues { .init(size: $0.size, sha256: nil, link: $0.link, mode: $0.mode) }
+        }
+        return result
+    }
+
+    private static func sha256Hex(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Moves a tree that failed verification out of the way before deleting it, so a
+    /// half-deleted tree is never found under the verified name.
+    private static func discard(_ tree: URL, in root: URL) throws {
+        let aside = root.appendingPathComponent("discarded-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.moveItem(at: tree, to: aside)
+        try? FileManager.default.removeItem(at: aside)
+    }
+
+    /// Removes this package's trees for other locks or Node lines — an app update or a Node
+    /// switch left them — and any discarded tree a crash interrupted.
+    private static func pruneStaleTrees(of package: AgentPackage, keeping tree: URL, in root: URL) {
+        let manager = FileManager.default
+        guard let names = try? manager.contentsOfDirectory(atPath: root.path) else { return }
+        let prefix = "\(package.id)-"
+        for name in names where name != tree.lastPathComponent {
+            let isOldTree = name.hasPrefix(prefix) && name.count == prefix.count + 16
+                && name.dropFirst(prefix.count).allSatisfy { $0.isHexDigit && !$0.isUppercase }
+            if isOldTree || name.hasPrefix("discarded-") {
+                try? manager.removeItem(at: root.appendingPathComponent(name))
+            }
+        }
+    }
+
+    /// The Node's major version, which fixes the ABI of any native module in the tree.
+    private static func nodeMajorVersion(_ node: URL, in directory: URL) -> String? {
+        guard let result = try? probeVersion(node, in: directory, environment: [
+            "HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        ]), result.status == 0, result.output.hasPrefix("v"),
+              let major = result.output.dropFirst().split(separator: ".").first
+        else { return nil }
+        return String(major)
+    }
+
+    /// Removes per-launch trees and unfinished installs nobody can be using: their owner
+    /// process has exited, or they never got an owner and are over an hour old (a launch
+    /// that died while creating one). A live owner — this app, or another copy of it —
+    /// keeps its trees; a reused pid only postpones a removal. The npm cache is not a tree.
     static func pruneAbandonedInstallations(in root: URL, now: Date = Date()) {
         let manager = FileManager.default
         guard let entries = try? manager.contentsOfDirectory(
@@ -225,7 +447,7 @@ enum AgentPackageInstaller {
         }
     }
 
-    /// `<package id>-<UUID>`, the only shape `installSynchronously` creates.
+    /// `<package id>-<UUID>`: an install in progress, or a per-launch tree from before.
     private static func isInstallationName(_ name: String) -> Bool {
         guard name.count > 37 else { return false }
         return name.dropLast(36).hasSuffix("-") && UUID(uuidString: String(name.suffix(36))) != nil
@@ -248,7 +470,7 @@ enum AgentPackageInstaller {
                 cache: directory.appendingPathComponent("cache", isDirectory: true)
             )
             let npm = node.deletingLastPathComponent().appendingPathComponent("npm")
-            let result = try probeNpmVersion(npm, in: directory, environment: environment)
+            let result = try probeVersion(npm, in: directory, environment: environment)
             return result.status == 0 && isAuditedNpmVersion(result.output)
         } catch {
             return false
@@ -276,7 +498,7 @@ enum AgentPackageInstaller {
     private static func requireAuditedNpmVersion(
         _ npm: URL, in directory: URL, environment: [String: String]
     ) throws {
-        let result = try probeNpmVersion(npm, in: directory, environment: environment)
+        let result = try probeVersion(npm, in: directory, environment: environment)
         guard result.status == 0, isAuditedNpmVersion(result.output) else {
             throw AgentPackageInstallError.npmTooOld(
                 result.output.isEmpty ? "unknown" : result.output
@@ -294,14 +516,15 @@ enum AgentPackageInstaller {
         return (major, minor, patch) >= (11, 19, 0)
     }
 
-    private static func probeNpmVersion(
-        _ npm: URL, in directory: URL, environment: [String: String]
+    /// `<executable> --version`, bounded, in `directory`, with only `environment`.
+    private static func probeVersion(
+        _ executable: URL, in directory: URL, environment: [String: String]
     ) throws -> (output: String, status: Int32) {
-        let log = directory.appendingPathComponent("npm-version.log")
+        let log = directory.appendingPathComponent("version-\(UUID().uuidString).log")
         try Data().write(to: log)
         let handle = try FileHandle(forWritingTo: log)
         let process = Process()
-        process.executableURL = npm
+        process.executableURL = executable
         process.arguments = ["--version"]
         process.currentDirectoryURL = directory
         process.environment = environment

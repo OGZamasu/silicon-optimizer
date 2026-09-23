@@ -72,11 +72,21 @@ struct PrismRuntimeTests {
             size: Int64(archive.count), sha256: Self.sha256(archive)
         )
 
+        // An install from before archives were pinned is already there; the fetch replaces it.
         let root = scratch.appendingPathComponent("root", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("bin"), withIntermediateDirectories: true
+        )
+        try Data(#"{"tag":"prism-test","asset":"\#(pick.name)","installedAt":0}"#.utf8)
+            .write(to: root.appendingPathComponent("prism.json"))
+        #expect(PrismRuntime.needsVerifiedRefetch(root: root, expected: pick))
+        #expect(PrismRuntime.managedInstallation(root: root, expected: pick) == nil)
+
         let stages = StageLog()
         let installation = try await PrismRuntime.install(
             root: root, pick: pick
         ) { stages.add($0.stage) }
+        #expect(!PrismRuntime.needsVerifiedRefetch(root: root, expected: pick))
 
         #expect(installation.kind == .llamaCppPrism)
         #expect(installation.hasPrismTernary)
@@ -148,6 +158,29 @@ struct PrismRuntimeTests {
         #expect(!FileManager.default.fileExists(atPath: marker.path))
         #expect(!stages.all.contains { $0.contains("Unpacking") })
         #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// A copy fetched before archives were pinned, or for another release, is replaced at
+    /// launch; a verified copy, or none at all, is left alone.
+    @Test func onlyAnUnverifiedEarlierFetchIsFetchedAgain() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prism-stale-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pick = PrismRuntime.pinnedPick()
+        let record = root.appendingPathComponent("prism.json")
+        func write(_ json: String) throws { try Data(json.utf8).write(to: record) }
+
+        #expect(!PrismRuntime.needsVerifiedRefetch(root: root), "never fetched: nothing to replace")
+        // What every install before this change wrote: the pinned tag, no digest.
+        try write(#"{"tag":"\#(pick.tag)","asset":"\#(pick.name)","installedAt":0}"#)
+        #expect(PrismRuntime.needsVerifiedRefetch(root: root))
+        try write(#"{"tag":"prism-b10690-0000000","asset":"llama-prism-b10690-0000000-bin-macos-arm64.tar.gz","archiveSHA256":"\#(pick.sha256)","installedAt":0}"#)
+        #expect(PrismRuntime.needsVerifiedRefetch(root: root), "another release")
+        try write("not json")
+        #expect(PrismRuntime.needsVerifiedRefetch(root: root))
+        try write(#"{"tag":"\#(pick.tag)","asset":"\#(pick.name)","archiveSHA256":"\#(pick.sha256)","installedAt":0}"#)
+        #expect(!PrismRuntime.needsVerifiedRefetch(root: root), "the verified install stays")
     }
 
     @Test func refusesLegacyManagedCopyBeforeProbingIt() throws {

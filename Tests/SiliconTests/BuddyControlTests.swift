@@ -1331,6 +1331,11 @@ actor BuddyTestHost: ControlHost {
     private(set) var cancelledStreams = 0
     private(set) var emitted = 0
     private(set) var eventUpdatesRequested = 0
+    private(set) var installRequests: [ControlAPI.LoadRequest] = []
+    /// Whether each call that could reach a paid lane was made with them open — what
+    /// `PaidLanes.allowed` read inside the host, where the app's Jev door reads it.
+    private(set) var paidLanesOnDecide: [Bool] = []
+    private(set) var paidLanesOnChat: [Bool] = []
     private var stored: [ControlAPI.ConversationDetail] = []
     private var answering: Set<String> = []
     /// Where `GET /swarm` gets its exposure block, when a test cares. The app reads it off
@@ -1407,7 +1412,8 @@ actor BuddyTestHost: ControlHost {
     func chatStream(
         _ request: ControlAPI.ChatRequest
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
-        try scripted()
+        paidLanesOnChat.append(PaidLanes.allowed)
+        return try scripted()
     }
 
     func conversationList() async -> [ControlAPI.ConversationSummary] {
@@ -1491,17 +1497,23 @@ actor BuddyTestHost: ControlHost {
         throw BuddyTestError.unexpectedRoute
     }
     func install(_ request: ControlAPI.LoadRequest) async throws -> String {
-        throw BuddyTestError.unexpectedRoute
+        installRequests.append(request)
+        return "install requested"
     }
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status {
         throw BuddyTestError.unexpectedRoute
     }
     func chat(_ request: ControlAPI.ChatRequest) async throws -> ControlAPI.ChatResponse {
-        .init(content: "ok", reasoning: nil, promptTokens: 1,
-              generatedTokens: 1, tokensPerSecond: 1)
+        paidLanesOnChat.append(PaidLanes.allowed)
+        return .init(content: "ok", reasoning: nil, promptTokens: 1,
+                     generatedTokens: 1, tokensPerSecond: 1)
     }
     func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
-        throw BuddyTestError.unexpectedRoute
+        paidLanesOnDecide.append(PaidLanes.allowed)
+        return .init(
+            model: "fixture", usage: .init(inputTokens: 0, outputTokens: 0), answers: [:],
+            provider: "local"
+        )
     }
 
     /// Answered rather than trapped: the scope test really calls both, and `POST /jev` has

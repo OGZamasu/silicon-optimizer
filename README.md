@@ -288,6 +288,16 @@ There are three credentials, and each one is honoured in exactly one place:
 | **Swarm token** — shared, from `swarm.json` | Yes | Only while swarm access is on |
 | **Device token** — 32 bytes, minted at pairing | **No**, whatever it says | Only while Silicon Buddy is on, and only within the device's scope |
 
+A shared swarm bearer is for peer discovery and direct jobs: chat and decisions, image,
+mesh and video generation, uploads, and fetching a result by its media id. It does not
+grant access to the owner's conversations, model installs or loading, or the Mac's global
+video queue, and it never spends the owner's money: `/decide` with `provider: "typesafe"`
+is refused, `auto` answers it from the free lanes only, no Jev call is made on its behalf
+(verification, routing or the decide cascade), and a flagged answer is never re-run on a
+cloud model for it. The peer event stream remains available for status, but
+omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
+require this Mac's local control token or an appropriately paired device.
+
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;
 the control token being refused on the tailnet is the same rule from the other side.
@@ -399,8 +409,8 @@ resolve a paired phone's private uploads. Local scripts and MCP clients can stil
 paths using the control token from the private handshake file.
 
 The same rule applies to `POST /install`'s optional `directory`: only the local control
-token may choose a destination. Devices and swarm clients omit it to use the library
-configured on the Mac.
+token may choose a destination. A paired device omits it to use the library configured on
+the Mac; a swarm client cannot install at all.
 
 **Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
 knew about each peer and used to keep to itself: platform, GPU or chip, memory used and
@@ -506,8 +516,8 @@ by the places that change it, so nothing can be forgotten into silence.
 
 **Full control only, and never a node — on the routes and on the stream.** Every one of
 these routes runs commands on this Mac, so a chat-only device is refused with the same 403
-it gets for `POST /load`. So is the **swarm token**, which is a credential everywhere else on
-this server: a node is a machine with a token in a config file, not a person with a phone in
+it gets for `POST /load`. So is the **swarm token**, which is a credential for peer discovery
+and direct jobs: a node is a machine with a token in a config file, not a person with a phone in
 their hand. Neither is sent an `agent` frame on `/events` either — a transcript carries the
 commands an agent ran and what they printed, which is exactly what those two were not given
 — and while nobody who may see them is subscribed, the transcripts are not even read. On the
@@ -1010,7 +1020,6 @@ nothing at all, so the previous calibration keeps working.
 > the run reports how *both* lanes did against those labels beside the agreement rate. High
 > agreement with two poor label scores is the shape to watch for. Treat the floors as a
 > measurement of one model against another on forty cases, which is what they are.
->>>>>>> be36c32 (Calibrate the local decision lane, and make `auto` a cascade)
 
 ### Model routing
 

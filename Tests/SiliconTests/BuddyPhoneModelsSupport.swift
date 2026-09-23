@@ -62,6 +62,16 @@ actor PauseGate {
 
 // MARK: - A store over a temporary library
 
+extension PhoneModelStore.Volumes {
+    /// The live drives with a terabyte free on each, for a store a test builds by hand:
+    /// what fits is then the test's business rather than the build machine's.
+    static let roomToSpare = PhoneModelStore.Volumes(
+        missingDrive: { PhoneModelStore.missingDrive(for: $0) },
+        availableCapacity: { _ in PhoneModelFixture.roomToSpare },
+        volumeID: { PhoneModelStore.volumeID(of: $0) }
+    )
+}
+
 /// A phone-model store and service over a temporary model library, fed by a loopback
 /// stand-in for Hugging Face that serves random bytes under the real pinned paths. The
 /// catalogue is the real one with each file shrunk to a few hundred kilobytes — same ids,
@@ -88,6 +98,13 @@ struct PhoneModelFixture: Sendable {
     var checkGate = SharedBox<PauseGate?>(nil)
     /// Folders the test has put on a drive of their own, by path prefix.
     var volumeOf = SharedBox<[String: Int64]>([:])
+    /// Free bytes on every drive, as the store and its downloader read them. A terabyte
+    /// unless a test says otherwise: the files here are a few hundred kilobytes, and
+    /// whether they fit beside the 10 GiB reserve must not depend on how full the disk of
+    /// the Mac running the suite happens to be.
+    var room = SharedBox<Int64?>(PhoneModelFixture.roomToSpare)
+
+    static let roomToSpare: Int64 = 1 << 40
 
     var library: URL? {
         get { libraryBox.value }
@@ -204,6 +221,7 @@ struct PhoneModelFixture: Sendable {
         let asked = fixture.roomAsked
         let check = spaceCheck
         let volumeOf = fixture.volumeOf
+        let room = fixture.room
         let gate = fixture.checkGate
         let hooks = PhoneModelStore.Hooks(beforeCheck: { _ in await gate.value?.wait() })
         fixture.store = PhoneModelStore(
@@ -222,7 +240,7 @@ struct PhoneModelFixture: Sendable {
                     if unplugged.value.contains(where: { path.hasPrefix($0) }) { return "Old Drive" }
                     return PhoneModelStore.missingDrive(for: folder)
                 },
-                availableCapacity: { PhoneModelStore.availableCapacity(at: $0) },
+                availableCapacity: { _ in room.value },
                 volumeID: { url in
                     let path = url.standardizedFileURL.path
                     if let own = volumeOf.value.first(where: { path.hasPrefix($0.key) }) {

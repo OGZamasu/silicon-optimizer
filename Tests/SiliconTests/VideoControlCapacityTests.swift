@@ -61,7 +61,7 @@ struct VideoControlCapacityTests {
         defer { session.invalidateAndCancel() }
         var pending: [Task<Int, any Error>] = []
         do {
-            try await server.start()
+            try await server.start(swarmToken: "swarm-capacity-test-token")
             try await waitUntil { FileManager.default.fileExists(atPath: handshakeURL.path) }
             let handshake = try JSONDecoder().decode(ControlAPI.Handshake.self, from: Data(contentsOf: handshakeURL))
             let client = TestControlClient(session: session, port: handshake.port, token: handshake.token)
@@ -83,6 +83,24 @@ struct VideoControlCapacityTests {
                 }
                 #expect(overflow.count == 56 && overflow.allSatisfy { $0 == 429 })
                 #expect(await host.accepted == (wave + 1) * maximum)
+                if wave == 0 {
+                    // The shared peer bearer cannot use the owner-only async queue.
+                    // Its saturation response must not recommend those denied routes.
+                    var peerRequest = URLRequest(url: URL(
+                        string: "http://127.0.0.1:\(handshake.port)/video/generate"
+                    )!)
+                    peerRequest.httpMethod = "POST"
+                    peerRequest.httpBody = Data(#"{"prompt":"peer overflow"}"#.utf8)
+                    peerRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    peerRequest.setValue(
+                        "Bearer swarm-capacity-test-token", forHTTPHeaderField: "Authorization"
+                    )
+                    let (body, response) = try await session.data(for: peerRequest)
+                    #expect((response as? HTTPURLResponse)?.statusCode == 429)
+                    let message = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body).error
+                    #expect(!message.contains("/video/queue"))
+                    #expect(message.contains("Retry this direct request later"))
+                }
                 #expect(try await client.status("/health", authenticated: false) == 200)
                 #expect(try await client.status("/status") == 200)
                 #expect(try await client.status("/video/queue") == 200)

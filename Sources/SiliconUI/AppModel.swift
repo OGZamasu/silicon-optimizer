@@ -104,6 +104,23 @@ public final class AppModel {
     var pairingRequest: PendingPairing?
     var pairingDelivered = false
     var pairingPollTask: Task<Void, Never>?
+    enum PairingApprovalState: Equatable {
+        case idle
+        case minting(String)
+        case cancelling(String)
+        case committing(String)
+        case committed(String)
+    }
+    var pairingApprovalState: PairingApprovalState = .idle
+    var pairingApprovalTask: Task<Void, Never>?
+    var pairingStopTask: Task<Void, Never>?
+    var pairingApprovalAdmin: String?
+    struct PairingCleanupNeeded {
+        var clientName: String
+        var peers: [SwarmPeer]
+        var admin: String?
+    }
+    var pairingCleanupNeeded: PairingCleanupNeeded?
     /// The code shown on the joiner's screen while awaiting the owner's decision.
     var joinCode: String?
 
@@ -1074,6 +1091,9 @@ public final class AppModel {
         public var enabled: Bool?
         public var settings: [String: String] = [:]
         public var supportedParameters: [String] = []
+        /// Per-job operations the node offers for this lane, such as `cancel`. Absent on
+        /// older nodes, which is read as "not offered" — never guessed.
+        public var supportedJobActions: [String] = []
     }
 
     /// One GPU job on a peer, as its queue reports it (hub #128). `running` jobs carry
@@ -1531,7 +1551,8 @@ public final class AppModel {
                     description: entry["description"] as? String,
                     enabled: entry["enabled"] as? Bool,
                     settings: settings,
-                    supportedParameters: entry["supported_parameters"] as? [String] ?? []
+                    supportedParameters: entry["supported_parameters"] as? [String] ?? [],
+                    supportedJobActions: entry["supported_job_actions"] as? [String] ?? []
                 )
             }
         }
@@ -2625,6 +2646,11 @@ public final class AppModel {
         if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
         reapAbandonedServers()
         selector = RuntimeSelector.discover()
+        // A PrismML fork fetched before its archive was pinned is no longer run; replace it
+        // with the reviewed one (12 MB, digest-checked) so installed ternary models load.
+        if PrismRuntime.needsVerifiedRefetch() && !hasPrismTernaryRuntime {
+            installPrismRuntime()
+        }
         imageRuntime = MFluxRuntime.locate()
         RuntimeLocator.customPaths = settings.customRuntimePaths
 

@@ -594,8 +594,11 @@ public actor PhoneModelStore {
             projector: nil,
             revision: entry.commit
         )
+        // The downloader's own check reads free space through `volumes` too, like every
+        // other check this store makes.
         let downloader = ModelDownloader(
-            publicFilesFrom: source(), redirects: HuggingFaceClient.isHubRedirect
+            publicFilesFrom: source(), redirects: HuggingFaceClient.isHubRedirect,
+            availableCapacity: volumes.availableCapacity
         )
         _ = try await downloader.download(resolution, to: root) { progress.note($0) }
         try Task.checkCancellation()
