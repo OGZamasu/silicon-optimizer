@@ -122,7 +122,11 @@ private final class CloudAudioStubProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
-@Suite("Cloud audio cancellation", .serialized, .redirectedConversationStore)
+@Suite(
+    "Cloud audio cancellation", .serialized, .redirectedConversationStore,
+    // Every wait in here has its own deadline; this bounds one that regresses into a hang.
+    .timeLimit(.minutes(2))
+)
 struct CloudAudioCancellationTests {
     /// The runtime the app would build, except that the provider is a URLProtocol stub and
     /// the artifact host is the local TLS fixture reached through the real transport.
@@ -254,6 +258,78 @@ struct CloudAudioCancellationTests {
         #expect(leftovers.isEmpty)
     }
 
+    // MARK: - Cancel stops its own job, not the transcription beside it
+
+    /// A harmless child standing in for a voice model, run through `VoiceRuntime`'s own
+    /// plumbing: it reports a stage, then waits to be stopped.
+    private func standIn(
+        _ model: AppModel, stage: String, started: StageLatch
+    ) -> Task<String, Error> {
+        Task {
+            try await model.voiceRuntime.run(
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "echo 'stage: \(stage)'; exec sleep 30"],
+                onStage: { if $0 == stage { started.open() } }
+            )
+        }
+    }
+
+    /// Whether a task is still going after the time a wrongly aimed `terminate` needs to
+    /// land and the runtime's 200 ms wait loop needs to notice.
+    private func stillRunning(_ task: Task<String, Error>) async -> Bool {
+        let finished = StageLatch()
+        let watcher = Task { _ = try? await task.value; finished.open() }
+        try? await Task.sleep(for: .seconds(1))
+        watcher.cancel()
+        return !finished.isOpen
+    }
+
+    @Test @MainActor func cancellingACloudJobLeavesATranscriptionRunning() async throws {
+        let server = try FixtureTLSHTTPServer()
+        CloudAudioStubState.shared.reset(
+            holding: .poll, artifactOrigin: "https://cdn.example.com:\(server.port)"
+        )
+        let directory = server.directory.appendingPathComponent("voice")
+        let model = try model(directory: directory, server: server)
+        let transcribing = StageLatch()
+        let transcription = standIn(model, stage: "transcribing", started: transcribing)
+        defer { transcription.cancel() }
+        #expect(await pollUntil { transcribing.isOpen })
+
+        model.speak()
+        #expect(await pollUntil { CloudAudioStubState.shared.hasStarted(.poll) })
+        model.cancelVoice()
+        #expect(await waitUntil { !model.isSpeaking })
+        #expect(model.voiceError == "Cancelled.")
+        #expect(await stillRunning(transcription), "the transcription was not the cloud job")
+    }
+
+    @Test @MainActor func cancellingALocalJobStopsItAndNotTheTranscription() async throws {
+        let server = try FixtureTLSHTTPServer()
+        let model = try model(directory: server.directory, server: server)
+        let speaking = StageLatch()
+        let transcribing = StageLatch()
+        model.startLocalVoiceJob {
+            _ = try await model.voiceRuntime.run(
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "echo 'stage: speaking'; exec sleep 30"],
+                onStage: { if $0 == "speaking" { speaking.open() } }
+            )
+            throw VoiceRuntimeError.failed("the stand-in makes no audio")
+        }
+        #expect(await pollUntil { speaking.isOpen })
+        // Started second, so it is the process `VoiceRuntime.cancel()` would have hit.
+        let transcription = standIn(model, stage: "transcribing", started: transcribing)
+        defer { transcription.cancel() }
+        #expect(await pollUntil { transcribing.isOpen })
+
+        model.cancelVoice()
+        #expect(await waitUntil { !model.isSpeaking }, "the speech job itself stopped")
+        #expect(model.voiceError == "Cancelled.")
+        #expect(model.speechResults.isEmpty)
+        #expect(await stillRunning(transcription), "the transcription was not the speech job")
+    }
+
     @Test func cancellingAnOlderOverlappingJobLeavesTheNewerOneAlone() async throws {
         let server = try FixtureTLSHTTPServer()
         CloudAudioStubState.shared.enableOverlappingReplies(
@@ -294,4 +370,12 @@ struct CloudAudioCancellationTests {
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         #expect(files == [newer.audio.lastPathComponent])
     }
+}
+
+/// Opens once and stays open; read from any thread.
+private final class StageLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened = false
+    var isOpen: Bool { lock.withLock { opened } }
+    func open() { lock.withLock { opened = true } }
 }
