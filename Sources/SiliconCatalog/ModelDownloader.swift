@@ -207,6 +207,7 @@ public actor ModelDownloader {
         fileIndex: Int,
         fileCount: Int,
         meter: RateMeter,
+        mayResume: Bool = true,
         onProgress: @Sendable @escaping (Progress) -> Void
     ) async throws {
         let partial = destination.appendingPathExtension("part")
@@ -216,7 +217,26 @@ public actor ModelDownloader {
         }
         // A partial prefix from another file cannot be authenticated without a digest.
         // Start a fresh transfer instead of combining that prefix with a 206 response.
-        if file.sha256 == nil && existingBytes > 0 {
+        if (file.sha256 == nil || !mayResume) && existingBytes > 0 {
+            try FileManager.default.removeItem(at: partial)
+            existingBytes = 0
+        }
+        // A partial as long as the file is a transfer that finished but whose checksum was
+        // interrupted — a cancel then keeps it. Asking for `bytes=<size>-` would get a 416 from
+        // the Hub on every attempt, so it is checked now: moved into place if right, fetched
+        // afresh if not. One longer than the file is a prefix of nothing.
+        if file.size > .zero, existingBytes >= file.size.rawValue {
+            if existingBytes == file.size.rawValue, let expected = file.sha256,
+               try sha256(of: partial, checkingCancellation: true) == expected {
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: partial, to: destination)
+                onProgress(Progress(
+                    bytesReceived: alreadyCompleted + file.size, bytesExpected: grandTotal,
+                    bytesPerSecond: 0, currentFile: (file.path as NSString).lastPathComponent,
+                    fileIndex: fileIndex, fileCount: fileCount
+                ))
+                return
+            }
             try FileManager.default.removeItem(at: partial)
             existingBytes = 0
         }
@@ -258,6 +278,12 @@ public actor ModelDownloader {
                 switch event {
                 case .response(let http):
                     sawResponse = true
+                    // The server cannot serve the rest of what is on disk: whatever that
+                    // partial is, it is not a prefix of this file. Start over, once.
+                    if http.statusCode == 416 && existingBytes > 0 && mayResume {
+                        streamer.cancel()
+                        throw RangeNotSatisfiable()
+                    }
                     guard (200..<300).contains(http.statusCode) else {
                         streamer.cancel()
                         throw HuggingFaceClient.ClientError.badResponse(http.statusCode)
@@ -297,6 +323,15 @@ public actor ModelDownloader {
                     }
                 }
             }
+        } catch is RangeNotSatisfiable {
+            try? handle.close()
+            try await downloadFile(
+                file, from: repository, at: revision, to: destination,
+                alreadyCompleted: alreadyCompleted, grandTotal: grandTotal,
+                fileIndex: fileIndex, fileCount: fileCount, meter: meter, mayResume: false,
+                onProgress: onProgress
+            )
+            return
         } catch {
             // The partial file is deliberately kept so the next attempt can resume from it.
             try? handle.synchronize()
@@ -341,6 +376,8 @@ public actor ModelDownloader {
             fileIndex: fileIndex, fileCount: fileCount
         ))
     }
+
+    private struct RangeNotSatisfiable: Error {}
 
     // MARK: - Verification
 
