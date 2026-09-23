@@ -315,6 +315,21 @@ test('private Live migration refuses a symlinked destination inside the app', (t
   }
 });
 
+test('controller credential location rejects an inside-root ..private candidate', (t) => {
+  const root = tempDir(t);
+  fs.mkdirSync(path.join(root, '..private'));
+  const originalTmpdir = os.tmpdir;
+  const originalHomedir = os.homedir;
+  try {
+    os.tmpdir = () => path.join(root, '..private');
+    os.homedir = () => root;
+    assert.throws(() => getLiveControllerPath(root), /No private credential directory outside/);
+  } finally {
+    os.tmpdir = originalTmpdir;
+    os.homedir = originalHomedir;
+  }
+});
+
 test('private Live migration quarantines an app-root journal that conflicts with private state', (t) => {
   const root = tempDir(t);
   const privateDir = getLivePrivateDirPath(root);

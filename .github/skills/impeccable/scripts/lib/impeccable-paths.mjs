@@ -64,8 +64,11 @@ export function getLiveControllerPath(cwd = process.cwd(), options = {}) {
   // directory that the inspected project's dev server could serve.
   const outside = [os.tmpdir(), os.homedir()]
     .map((candidate) => { try { return fs.realpathSync(candidate); } catch { return null; } })
-    .find((candidate) => candidate && (path.relative(root, candidate).startsWith('..')
-      || path.isAbsolute(path.relative(root, candidate))));
+    .find((candidate) => {
+      if (!candidate) return false;
+      const relative = path.relative(root, candidate);
+      return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    });
   if (!outside) throw new Error('No private credential directory outside the project root');
   return path.join(outside, `impeccable-live-${uid}`, `${digest}.controller.json`);
 }
