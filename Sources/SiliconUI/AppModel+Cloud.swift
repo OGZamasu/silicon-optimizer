@@ -369,15 +369,30 @@ extension AppModel {
 
         let request = makeRequest(model, settings.resolvedVoiceOutputDirectory)
         let fallbackStage = "Working on \(provider.displayName)"
-        Task {
-            defer { endVoiceJob() }
+        let jobID = UUID()
+        cloudAudioJobID = jobID
+        cloudAudioTask = Task {
+            defer {
+                if cloudAudioJobID == jobID {
+                    cloudAudioTask = nil
+                    cloudAudioJobID = nil
+                    endVoiceJob()
+                }
+            }
             do {
                 let result = try await cloudAudioRuntime.generate(
-                    request, base: base, apiKey: key
+                    request, base: base, apiKey: key, jobID: jobID
                 ) { progress in
                     Task { @MainActor in
+                        guard self.cloudAudioJobID == jobID,
+                              self.cloudAudioTask?.isCancelled == false
+                        else { return }
                         self.setVoiceStage(progress.line(fallback: fallbackStage))
                     }
+                }
+                guard !Task.isCancelled else {
+                    try? FileManager.default.removeItem(at: result.audio)
+                    throw CloudAudioError.cancelled
                 }
                 speechResults.insert(
                     SpeechResult(
@@ -386,7 +401,9 @@ extension AppModel {
                     at: 0
                 )
             } catch {
-                voiceError = error.localizedDescription
+                voiceError = Task.isCancelled
+                    ? CloudAudioError.cancelled.localizedDescription
+                    : error.localizedDescription
             }
         }
     }
