@@ -45,7 +45,7 @@ struct SwarmPairingPieceTests {
     @Test("the tailscale CGNAT range and nothing else")
     func cidrCheck() {
         #expect(SwarmPairing.isTailnetIPv4("100.64.0.1"))
-        #expect(SwarmPairing.isTailnetIPv4("100.118.191.121"))
+        #expect(SwarmPairing.isTailnetIPv4("100.64.0.9"))
         #expect(SwarmPairing.isTailnetIPv4("100.127.255.254"))
         #expect(!SwarmPairing.isTailnetIPv4("100.128.0.1"))
         #expect(!SwarmPairing.isTailnetIPv4("100.63.0.1"))
@@ -60,7 +60,7 @@ struct SwarmPairingPieceTests {
         {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.100.10.5"]},
          "Peer": {
           "key1": {"HostName": "windows-node", "Online": true,
-                   "TailscaleIPs": ["100.118.191.121", "fd7a::1"]},
+                   "TailscaleIPs": ["100.64.0.9", "fd7a::1"]},
           "key2": {"HostName": "sams-mac", "Online": false,
                    "TailscaleIPs": ["100.90.10.2"]},
           "key3": {"HostName": "no-v4", "Online": true, "TailscaleIPs": ["fd7a::2"]}
@@ -71,7 +71,7 @@ struct SwarmPairingPieceTests {
         #expect(peers.count == 2)
         #expect(peers[0].hostName == "sams-mac")
         #expect(peers[0].online == false)
-        #expect(peers[1].ip == "100.118.191.121")
+        #expect(peers[1].ip == "100.64.0.9")
         #expect(peers[1].online == true)
 
         let stopped = Data(status.replacingOccurrences(
@@ -90,7 +90,7 @@ struct SwarmPairingPieceTests {
         let received = SwarmConfig(
             swarmToken: "the-swarm-token",
             peers: [
-                SwarmPeer(name: "silicon-node", baseURL: "http://100.118.191.121:8790"),
+                SwarmPeer(name: "silicon-node", baseURL: "http://100.64.0.9:8790"),
                 SwarmPeer(name: "old-node", baseURL: "http://100.2.2.2:2"),
             ]
         )
@@ -116,7 +116,7 @@ struct SwarmPairingFlowTests {
     func approvedFlow() async throws {
         let release = SwarmConfig(
             swarmToken: nil,
-            peers: [SwarmPeer(name: "silicon-node", baseURL: "http://100.118.191.121:8790",
+            peers: [SwarmPeer(name: "silicon-node", baseURL: "http://100.64.0.9:8790",
                               token: "client-tok-abc")]
         )
         let server = PairingServer(hostName: "Owner Mac")
