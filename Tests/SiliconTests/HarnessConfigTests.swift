@@ -272,12 +272,98 @@ struct HarnessConfigTests {
         #expect(HarnessRuntime.parseNodeVersion("") == nil)
 
         // The comparison that decides old-versus-new must be lexicographic by component:
-        // v20.10 is older than the v20.12 floor, v24 is newer.
-        let floor = HarnessRuntime.minimumNodeVersion
+        // v20.10 is older than the locked graph's v22.19 floor, v24 is newer.
+        let floor = HarnessRuntime.harnessMinimumNodeVersion
         let old = HarnessRuntime.parseNodeVersion("v20.10.0")!
         let new = HarnessRuntime.parseNodeVersion("v24.19.0")!
         #expect(old < (floor.major, floor.minor, floor.patch))
         #expect(new > (floor.major, floor.minor, floor.patch))
+    }
+
+    @Test func verifiedSidecarsUseNpmCompatibleNodeWithoutChangingDefaultDiscovery() throws {
+        #expect(!HarnessRuntime.supportsNpm11((20, 16, 9)))
+        #expect(HarnessRuntime.supportsNpm11((20, 17, 0)))
+        #expect(!HarnessRuntime.supportsNpm11((21, 9, 0)))
+        #expect(!HarnessRuntime.supportsNpm11((22, 8, 9)))
+        #expect(HarnessRuntime.supportsNpm11((22, 9, 0)))
+        #expect(HarnessRuntime.supportsNpm11((23, 0, 0)))
+        #expect(CodexRuntime.minimumNodeVersion == (20, 17, 0))
+        #expect(QwenCodeRuntime.minimumNodeVersion == (22, 9, 0))
+
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory.appendingPathComponent(
+            "silicon-node-discovery-\(UUID().uuidString)", isDirectory: true
+        )
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: directory) }
+        let node = directory.appendingPathComponent("node")
+        let npx = directory.appendingPathComponent("npx")
+        try "#!/bin/sh\nexit 0\n".write(to: npx, atomically: true, encoding: .utf8)
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: npx.path)
+
+        func setNodeVersion(_ version: String) throws {
+            try "#!/bin/sh\necho v\(version)\n".write(
+                to: node, atomically: true, encoding: .utf8
+            )
+            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
+        }
+
+        try setNodeVersion("20.12.0")
+        #expect(HarnessRuntime.locateNode(customPath: node.path).node?.path == node.path)
+        #expect(HarnessRuntime.locateNode(
+            customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
+            requiresNpm11: true
+        ).node?.path != node.path)
+
+        let npm = directory.appendingPathComponent("npm")
+        try "#!/bin/sh\necho 11.19.0\n".write(to: npm, atomically: true, encoding: .utf8)
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: npm.path)
+        try setNodeVersion("21.0.0")
+        #expect(HarnessRuntime.locateNode(
+            customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
+            requiresNpm11: true
+        ).node?.path != node.path)
+        try setNodeVersion("20.17.0")
+        #expect(HarnessRuntime.locateNode(
+            customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
+            requiresNpm11: true
+        ).node?.path == node.path)
+
+        func candidate(_ name: String, nodeVersion: String, npmVersion: String) throws -> URL {
+            let candidateDirectory = directory.appendingPathComponent(name, isDirectory: true)
+            try manager.createDirectory(at: candidateDirectory, withIntermediateDirectories: true)
+            let candidateNode = candidateDirectory.appendingPathComponent("node")
+            let candidateNpm = candidateDirectory.appendingPathComponent("npm")
+            try "#!/bin/sh\necho v\(nodeVersion)\n".write(
+                to: candidateNode, atomically: true, encoding: .utf8
+            )
+            try "#!/bin/sh\necho \(npmVersion)\n".write(
+                to: candidateNpm, atomically: true, encoding: .utf8
+            )
+            for executable in [candidateNode, candidateNpm] {
+                try manager.setAttributes(
+                    [.posixPermissions: 0o755], ofItemAtPath: executable.path
+                )
+            }
+            return candidateNode
+        }
+
+        let newerNodeWithOldNpm = try candidate(
+            "newer-old-npm", nodeVersion: "26.0.0", npmVersion: "10.9.3"
+        )
+        let olderCompatiblePair = try candidate(
+            "older-good-npm", nodeVersion: "24.0.0", npmVersion: "11.19.0"
+        )
+        let chosen = HarnessRuntime.pick(
+            from: [newerNodeWithOldNpm.path, olderCompatiblePair.path],
+            includingRejected: nil, minimumVersion: CodexRuntime.minimumNodeVersion,
+            requiresNpm11: true
+        )
+        #expect(chosen.node?.path == olderCompatiblePair.path)
+        #expect(HarnessRuntime.locateNode(
+            customPath: newerNodeWithOldNpm.path,
+            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
+        ).node?.path != newerNodeWithOldNpm.path)
     }
 
     @Test func insertsAProvidersKeyWhenTheSectionExistsWithoutOne() {

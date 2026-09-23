@@ -185,6 +185,19 @@ if [[ -x "$BUNDLE/Contents/Resources/bin/node" ]]; then
     fi
 fi
 
+# The four agent launchers install from these committed integrity locks. Copy only the
+# manifests, never a developer machine's node_modules or npm cache.
+for package in harness qwen codex pi; do
+    source="Resources/agent-packages/$package"
+    [[ -f "$source/package.json" && -f "$source/package-lock.json" ]] || {
+        echo "ERROR: missing locked $package agent package" >&2
+        exit 1
+    }
+    destination="$BUNDLE/Contents/Resources/agent-packages/$package"
+    mkdir -p "$destination"
+    cp "$source/package.json" "$source/package-lock.json" "$destination/"
+done
+
 # The MCP bridge rides along so the Codex engine can offer the app's tools without a
 # separate install step. install-mcp.sh remains the way to give Claude and ChatGPT a copy.
 MCP_BINARY="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/silicon-mcp"

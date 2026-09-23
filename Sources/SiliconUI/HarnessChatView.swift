@@ -148,7 +148,7 @@ struct HarnessChatView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 34))
                 .foregroundStyle(.orange)
-            Text("The harness could not start")
+            Text("The harness is not running")
                 .font(.title3.weight(.semibold))
             Text(message)
                 .font(.callout)

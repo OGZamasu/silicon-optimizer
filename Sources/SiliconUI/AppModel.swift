@@ -77,6 +77,7 @@ public final class AppModel {
     /// State of the DeepSeek Harness sidecar that serves the agentic chat.
     public internal(set) var harnessState: RuntimeState = .idle
     var harnessRuntime: HarnessRuntime?
+    var harnessLifecycleGeneration = 0
     /// Ports for this app session, resolved once from the persisted choice after checking it
     /// is still free — a crashed predecessor can leave a squatter on it.
     var resolvedHarnessPorts: (web: Int, inference: Int)?
@@ -156,6 +157,7 @@ public final class AppModel {
     /// State of the Qwen Code sidecar behind the Chat tab's Qwen engine.
     public internal(set) var qwenState: RuntimeState = .idle
     var qwenRuntime: QwenCodeRuntime?
+    var qwenLifecycleGeneration = 0
     var resolvedQwenPort: Int?
     var qwenProcessID: Int32?
     var qwenTerminationRegistered = false
