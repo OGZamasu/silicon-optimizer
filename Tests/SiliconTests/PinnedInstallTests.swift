@@ -416,6 +416,7 @@ struct PinnedInstallTests {
         let wheels = root.appendingPathComponent("wheels")
         try FileManager.default.createDirectory(at: wheels, withIntermediateDirectories: true)
         let reviewed = try wheel(named: "reviewedpkg", in: wheels)
+        let dependent = try wheel(named: "dependentpkg", requires: ["reviewedpkg"], in: wheels)
         let venv = root.appendingPathComponent("venv")
         let offline = ["UV_OFFLINE": "1", "UV_NO_CONFIG": "1", "UV_PYTHON_DOWNLOADS": "never",
                        "UV_CACHE_DIR": root.appendingPathComponent("cache").path]
@@ -436,10 +437,21 @@ struct PinnedInstallTests {
         let changed = try Self.run([install], environment: offline)
         #expect(changed.status != 0)
         #expect(changed.output.lowercased().contains("hash"), "\(changed.output)")
+        func imports(_ module: String) throws -> Bool {
+            try Self.run([PinnedInstall.Command(label: "import", executable: python,
+                                                arguments: ["-c", "import \(module)"])]).status == 0
+        }
+        #expect(try !imports("reviewedpkg"))
+
+        // A dependency the lock does not name cannot slip in beside a pinned package.
+        try lock([("dependentpkg", Self.sha256(try Data(contentsOf: dependent)))], at: lockFile)
+        #expect(try Self.run([install], environment: offline).status != 0)
+        #expect(try !imports("dependentpkg"))
 
         try lock([("reviewedpkg", Self.sha256(try Data(contentsOf: reviewed)))], at: lockFile)
         let clean = try Self.run([install], environment: offline)
         #expect(clean.status == 0, "\(clean.output)")
+        #expect(try imports("reviewedpkg"))
     }
 
     // MARK: - Fixtures

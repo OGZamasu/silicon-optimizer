@@ -101,8 +101,10 @@ commit, fetched by id and checked before anything in it runs, and only the hash-
 packages in [`Resources/pinned-installs`](Resources/pinned-installs); LivePortrait's and
 Deep-Live-Cam's weights come from a reviewed Hub revision and are kept only if their SHA-256
 matches. OpenMontage's Remotion step runs `npm ci` against that commit's lockfile. An existing
-`~/OpenMontage` is never pulled or reinstalled; setup checks it and stops if it is another
-revision. Moving a pin is a review: `Scripts/lock-media-installers.sh` rebuilds the locks.
+`~/OpenMontage` is never pulled and its Remotion packages are left alone; setup checks it and
+stops if it is another revision. A rerun leaves Python packages already installed at the locked
+version as they are, so an environment made by an older, unpinned install keeps any extras it
+had. Moving a pin is a review: `Scripts/lock-media-installers.sh` rebuilds the locks.
 
 The node has a persistent queue, authenticated loopback access, and verified MP4 output
 with model metadata. The [batch example](Resources/video-node/examples/README.md) includes

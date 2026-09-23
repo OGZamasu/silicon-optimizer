@@ -56,7 +56,7 @@ public actor PortraitAnimator {
             return Installation(
                 isInstalled: false,
                 detail: "Photoreal animation isn't set up yet. It installs LivePortrait "
-                    + "and about 2 GB of weights."
+                    + "and about 660 MB of weights."
             )
         }
         guard manager.fileExists(atPath: weights.path) else {
