@@ -12,7 +12,8 @@ public actor PiRuntime {
 
     /// Pinned like every other sidecar: a version we've actually driven. `pi update`
     /// inside someone's terminal must not change what the app embeds.
-    public static let packageSpec = "@earendil-works/pi-coding-agent@0.84.2"
+    public static let packageSpec = AgentPackage.pi.spec
+    public static let minimumNodeVersion = (major: 22, minor: 19, patch: 0)
 
     public static var workspaceDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -34,6 +35,9 @@ public actor PiRuntime {
     }
 
     private var process: Process?
+    private var installedPackage: InstalledAgentPackage?
+    private var installationTask: Task<InstalledAgentPackage, any Error>?
+    private var startupGeneration = 0
     private var stdinHandle: FileHandle?
     private var eventContinuation: AsyncStream<String>.Continuation?
 
@@ -122,27 +126,48 @@ public actor PiRuntime {
         gatewayPort: Int, gatewayToken: String, mcpServerPath: String?, nodePath: String,
         onState: @escaping @Sendable (State) -> Void
     ) async -> AsyncStream<String>? {
-        await stop()
+        let generation = await stopAndGetGeneration()
+        guard generation == startupGeneration else { return nil }
 
-        let discovery = HarnessRuntime.locateNode(customPath: nodePath)
+        let discovery = HarnessRuntime.locateNode(
+            customPath: nodePath, minimumVersion: Self.minimumNodeVersion,
+            requiresNpm11: true
+        )
         guard let node = discovery.node else {
-            let floor = HarnessRuntime.minimumNodeVersion
+            let floor = Self.minimumNodeVersion
             onState(.failed(message:
-                "Pi needs Node.js \(floor.major).\(floor.minor) or newer and none was "
-                + "found. Install one with `brew install node`, or switch engines in "
-                + "Settings."))
+                "Pi needs Node.js \(floor.major).\(floor.minor) or newer with npm 11.19 "
+                + "or newer; no compatible Node/npm pair was found. Install one with "
+                + "`brew install node`, or switch engines in Settings."))
             return nil
         }
 
         let workspace = Self.workspaceDirectory
         onState(.starting(stage:
-            "Starting Pi… the first run downloads it and can take a few minutes."))
+            "Verifying Pi… the first run downloads it and can take a few minutes."))
+
+        let installed: InstalledAgentPackage
+        do {
+            let task = Task { try await AgentPackageInstaller.install(.pi, node: node) }
+            installationTask = task
+            installed = try await task.value
+        } catch {
+            if generation == startupGeneration { installationTask = nil }
+            guard generation == startupGeneration else { return nil }
+            onState(.failed(message: error.localizedDescription))
+            return nil
+        }
+        if generation == startupGeneration { installationTask = nil }
+        guard generation == startupGeneration else {
+            try? FileManager.default.removeItem(at: installed.directory)
+            return nil
+        }
+        installedPackage = installed
 
         let process = Process()
-        let npx = node.deletingLastPathComponent().appendingPathComponent("npx")
-        process.executableURL = npx
+        process.executableURL = node
         process.arguments = [
-            "--yes", Self.packageSpec,
+            installed.bin.path,
             "--mode", "rpc",
             // Trust our own workspace for this run without writing the user's
             // trust store.
@@ -182,7 +207,10 @@ public actor PiRuntime {
         do {
             try process.run()
         } catch {
-            onState(.failed(message: "Could not launch Pi: \(error.localizedDescription)"))
+            await stop()
+            if startupGeneration == generation + 1 {
+                onState(.failed(message: "Could not launch Pi: \(error.localizedDescription)"))
+            }
             return nil
         }
         ChildProcessRegistry.register(pid: process.processIdentifier)
@@ -212,13 +240,15 @@ public actor PiRuntime {
                     continuation.yield(clean)
                 }
                 let tail = await stderrTask.value
-                if monitored.isRunning == false, monitored.terminationStatus != 0 {
+                if generation == self.startupGeneration,
+                   monitored.isRunning == false, monitored.terminationStatus != 0 {
                     let detail = tail.suffix(3).joined(separator: "\n")
                     onState(.failed(message:
                         "Pi exited (\(monitored.terminationStatus))."
                         + (detail.isEmpty ? "" : "\n\(detail)")))
                 }
                 continuation.finish()
+                self.cleanupExitedProcess(monitored, generation: generation)
             }
         }
 
@@ -236,13 +266,46 @@ public actor PiRuntime {
     }
 
     public func stop() async {
+        _ = await stopAndGetGeneration()
+    }
+
+    private func stopAndGetGeneration() async -> Int {
+        startupGeneration &+= 1
+        let generation = startupGeneration
+        installationTask?.cancel()
+        installationTask = nil
         eventContinuation?.finish()
         eventContinuation = nil
         stdinHandle = nil
-        if let process, process.isRunning {
-            process.terminate()
-            ChildProcessRegistry.unregister(pid: process.processIdentifier)
-        }
+        let stoppedProcess = process
+        let stoppedPackage = installedPackage
         process = nil
+        installedPackage = nil
+        if let stoppedProcess {
+            if stoppedProcess.isRunning {
+                stoppedProcess.terminate()
+                for _ in 0..<50 where stoppedProcess.isRunning {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                if stoppedProcess.isRunning {
+                    kill(stoppedProcess.processIdentifier, SIGKILL)
+                }
+            }
+            ChildProcessRegistry.unregister(pid: stoppedProcess.processIdentifier)
+        }
+        if let stoppedPackage {
+            try? FileManager.default.removeItem(at: stoppedPackage.directory)
+        }
+        return generation
+    }
+
+    private func cleanupExitedProcess(_ ended: Process, generation: Int) {
+        guard generation == startupGeneration, process === ended else { return }
+        ChildProcessRegistry.unregister(pid: ended.processIdentifier)
+        process = nil
+        if let installedPackage {
+            try? FileManager.default.removeItem(at: installedPackage.directory)
+            self.installedPackage = nil
+        }
     }
 }

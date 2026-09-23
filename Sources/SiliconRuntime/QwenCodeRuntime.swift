@@ -19,12 +19,20 @@ public actor QwenCodeRuntime {
 
     /// Pinned for the same reason the harness and Codex are: an untested version must
     /// never arrive silently under our generated configuration.
-    public static let packageSpec = "@qwen-code/qwen-code@0.21.14"
+    public static let packageSpec = AgentPackage.qwen.spec
+    public static let minimumNodeVersion = (major: 22, minor: 9, patch: 0)
 
     private var process: ServerProcess?
+    private var installedPackage: InstalledAgentPackage?
+    private var installationTask: Task<InstalledAgentPackage, any Error>?
+    private var startupGeneration = 0
     public private(set) var processIdentifier: Int32?
 
     public init() {}
+    init(testProcess: ServerProcess, testPID: Int32) {
+        process = testProcess
+        processIdentifier = testPID
+    }
 
     // MARK: - Locations
 
@@ -118,14 +126,19 @@ public actor QwenCodeRuntime {
         nodePath: String = "",
         onState: @escaping @Sendable (RuntimeState) -> Void
     ) async {
-        await stop()
+        let generation = await stopAndGetGeneration()
+        guard generation == startupGeneration else { return }
 
-        let discovery = HarnessRuntime.locateNode(customPath: nodePath)
+        let discovery = HarnessRuntime.locateNode(
+            customPath: nodePath, minimumVersion: Self.minimumNodeVersion,
+            requiresNpm11: true
+        )
         guard let node = discovery.node else {
-            let floor = HarnessRuntime.minimumNodeVersion
-            var message = "Qwen Code needs Node.js \(floor.major).\(floor.minor) or newer. "
-            if let path = discovery.rejectedPath, let version = discovery.rejectedVersion {
-                message += "Found \(version) at \(path), which is too old. "
+            let floor = Self.minimumNodeVersion
+            var message = "Qwen Code needs Node.js \(floor.major).\(floor.minor) or newer "
+                + "with npm 11.19 or newer. "
+            if let rejection = discovery.rejectionSentence {
+                message += rejection
             } else {
                 message += "None was found. "
             }
@@ -147,9 +160,26 @@ public actor QwenCodeRuntime {
         }
 
         onState(.starting(stage:
-            "Starting Qwen Code… the first run downloads it and can take a few minutes."))
+            "Verifying Qwen Code… the first run downloads it and can take a few minutes."))
 
-        let npx = node.deletingLastPathComponent().appendingPathComponent("npx")
+        let installed: InstalledAgentPackage
+        do {
+            let task = Task { try await AgentPackageInstaller.install(.qwen, node: node) }
+            installationTask = task
+            installed = try await task.value
+        } catch {
+            if generation == startupGeneration { installationTask = nil }
+            guard generation == startupGeneration else { return }
+            onState(.failed(message: error.localizedDescription))
+            return
+        }
+        if generation == startupGeneration { installationTask = nil }
+        guard generation == startupGeneration else {
+            try? FileManager.default.removeItem(at: installed.directory)
+            return
+        }
+        installedPackage = installed
+
         let process = ServerProcess()
         self.process = process
         // Loopback is auth-free for ordinary routes, so it is tempting to omit a token —
@@ -180,28 +210,44 @@ public actor QwenCodeRuntime {
                 }
             }
             try await process.start(
-                executable: npx,
-                arguments: ["--yes", Self.packageSpec, "serve", "--port", String(webPort)],
+                executable: node,
+                arguments: [installed.bin.path, "serve", "--port", String(webPort)],
                 environment: environment,
                 inheritEnvironment: false,
                 currentDirectory: workspace
             )
+            guard generation == startupGeneration else {
+                await process.terminate()
+                return
+            }
         } catch {
-            onState(.failed(message: error.localizedDescription))
+            guard generation == startupGeneration else { return }
+            await stop()
+            if startupGeneration == generation + 1 {
+                onState(.failed(message: error.localizedDescription))
+            }
             return
         }
-        processIdentifier = await process.pid
+        let pid = await process.pid
+        guard generation == startupGeneration else { return }
+        processIdentifier = pid
 
         let url = URL(string: "http://127.0.0.1:\(webPort)")!
-        if await waitUntilServing(url: url, process: process) {
+        let serving = await waitUntilServing(url: url, process: process)
+        guard generation == startupGeneration else { return }
+        if serving {
             onState(.ready(endpoint: Self.webShellURL(port: webPort, token: token)))
+            Task { await observeReadyProcess(process, generation: generation, onState: onState) }
         } else {
             let log = await process.log
+            guard generation == startupGeneration else { return }
             await stop()
-            onState(.failed(message:
-                "Qwen Code did not come up. Last output:\n"
-                + log.split(separator: "\n").suffix(6).joined(separator: "\n")
-            ))
+            if startupGeneration == generation + 1 {
+                onState(.failed(message:
+                    "Qwen Code did not come up. Last output:\n"
+                    + log.split(separator: "\n").suffix(6).joined(separator: "\n")
+                ))
+            }
         }
     }
 
@@ -229,8 +275,7 @@ public actor QwenCodeRuntime {
         return components.url!
     }
 
-    /// Polls the Web Shell until it answers; the generous deadline is for npx's
-    /// first-run download, not the server itself.
+    /// Polls the Web Shell until it answers.
     private func waitUntilServing(url: URL, process: ServerProcess) async -> Bool {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 2
@@ -249,9 +294,64 @@ public actor QwenCodeRuntime {
     }
 
     public func stop() async {
-        guard let process else { return }
-        await process.terminate()
+        _ = await stopAndGetGeneration()
+    }
+
+    private func stopAndGetGeneration() async -> Int {
+        startupGeneration &+= 1
+        let generation = startupGeneration
+        installationTask?.cancel()
+        installationTask = nil
+        let stoppedProcess = process
+        let stoppedPackage = installedPackage
         self.process = nil
+        installedPackage = nil
         processIdentifier = nil
+        if let stoppedProcess { await stoppedProcess.terminate() }
+        if let stoppedPackage {
+            try? FileManager.default.removeItem(at: stoppedPackage.directory)
+        }
+        return generation
+    }
+
+    func observeReadyProcess(
+        _ observed: ServerProcess, generation: Int,
+        pollInterval: Duration = .seconds(1),
+        onState: @escaping @Sendable (RuntimeState) -> Void
+    ) async {
+        while await observed.isRunning {
+            try? await Task.sleep(for: pollInterval)
+        }
+        await cleanupExitedProcess(observed, generation: generation, onState: onState)
+    }
+
+    private func cleanupExitedProcess(
+        _ ended: ServerProcess, generation: Int,
+        onState: @escaping @Sendable (RuntimeState) -> Void
+    ) async {
+        guard generation == startupGeneration, process === ended else { return }
+        // Foundation can report isRunning == false before its termination handler records
+        // the exit status. Give that callback a bounded chance to supply the diagnosis.
+        var termination = await ended.termination
+        var attempts = 0
+        while termination == nil && attempts < 50 {
+            attempts += 1
+            try? await Task.sleep(for: .milliseconds(20))
+            termination = await ended.termination
+        }
+        guard generation == startupGeneration, process === ended else { return }
+        process = nil
+        processIdentifier = nil
+        if let installedPackage {
+            try? FileManager.default.removeItem(at: installedPackage.directory)
+            self.installedPackage = nil
+        }
+        var message = "Qwen Code exited unexpectedly"
+        if let signal = termination?.signal {
+            message += " (signal \(signal))"
+        } else if let status = termination?.exitStatus {
+            message += " (exit status \(status))"
+        }
+        onState(.failed(message: message + ". Restart it to try again."))
     }
 }
