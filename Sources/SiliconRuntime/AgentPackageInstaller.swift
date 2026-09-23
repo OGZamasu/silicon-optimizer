@@ -105,22 +105,48 @@ enum AgentPackageInstaller {
         _ package: AgentPackage, node: URL, sourceRoot: URL? = nil,
         destinationRoot: URL? = nil, allowLocalArtifacts: Bool = false
     ) async throws -> InstalledAgentPackage {
-        let installation = Task.detached(priority: .userInitiated) {
-            try installSynchronously(
-                package, node: node, sourceRoot: sourceRoot,
-                destinationRoot: destinationRoot, allowLocalArtifacts: allowLocalArtifacts
-            )
-        }
+        let cancellation = InstallCancellation()
         return try await withTaskCancellationHandler {
-            try await installation.value
+            try await withCheckedThrowingContinuation { continuation in
+                // A thread of its own rather than a task. Everything below waits on child
+                // processes with a blocking poll — `node --version`, `npm --version`, then
+                // `npm ci` for up to ten minutes — and a thread of the cooperative pool held
+                // that long is one no other task in the process can have. On a loaded
+                // machine that was enough to make this install's own first steps start late.
+                let thread = Thread {
+                    continuation.resume(with: Result {
+                        try installSynchronously(
+                            package, node: node, sourceRoot: sourceRoot,
+                            destinationRoot: destinationRoot,
+                            allowLocalArtifacts: allowLocalArtifacts,
+                            isCancelled: cancellation.isCancelled
+                        )
+                    })
+                }
+                thread.name = "Agent package install"
+                thread.qualityOfService = .userInitiated
+                thread.start()
+            }
         } onCancel: {
-            installation.cancel()
+            cancellation.cancel()
         }
+    }
+
+    /// Whether the caller of an install has given up on it. The install runs on a thread,
+    /// where `Task.isCancelled` has no task to ask about, so this is what its polling loops
+    /// read instead.
+    private final class InstallCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() { lock.withLock { cancelled = true } }
+
+        @Sendable func isCancelled() -> Bool { lock.withLock { cancelled } }
     }
 
     private static func installSynchronously(
         _ package: AgentPackage, node: URL, sourceRoot: URL?,
-        destinationRoot: URL?, allowLocalArtifacts: Bool
+        destinationRoot: URL?, allowLocalArtifacts: Bool, isCancelled: () -> Bool
     ) throws -> InstalledAgentPackage {
         let manager = FileManager.default
         let manifests = sourceRoot ?? defaultSourceRoot()
@@ -141,7 +167,7 @@ enum AgentPackageInstaller {
         // The tree is keyed by what decides its contents: the bundled manifest and lock, and
         // the Node line whose ABI any native module was built or chosen for.
         let lockDigest = sha256Hex(try Data(contentsOf: manifest) + Data(contentsOf: lock))
-        let nodeLine = nodeMajorVersion(node, in: root) ?? "unknown"
+        let nodeLine = nodeMajorVersion(node, in: root, isCancelled: isCancelled) ?? "unknown"
         let key = String(sha256Hex(Data("\(lockDigest)\nnode \(nodeLine)\n".utf8)).prefix(16))
         let tree = root.appendingPathComponent("\(package.id)-\(key)", isDirectory: true)
         let expected = TreeIdentity(package: package.spec, lock: lockDigest, node: nodeLine)
@@ -156,7 +182,10 @@ enum AgentPackageInstaller {
             try discard(tree, in: root)
         }
 
-        let staging = try installFresh(package, node: node, manifest: manifest, lock: lock, root: root)
+        let staging = try installFresh(
+            package, node: node, manifest: manifest, lock: lock, root: root,
+            isCancelled: isCancelled
+        )
         var installedSuccessfully = false
         defer {
             if !installedSuccessfully { try? manager.removeItem(at: staging) }
@@ -182,7 +211,8 @@ enum AgentPackageInstaller {
 
     /// Runs the strict `npm ci` into a new owned directory and returns it.
     private static func installFresh(
-        _ package: AgentPackage, node: URL, manifest: URL, lock: URL, root: URL
+        _ package: AgentPackage, node: URL, manifest: URL, lock: URL, root: URL,
+        isCancelled: () -> Bool
     ) throws -> URL {
         let manager = FileManager.default
         let staging = root.appendingPathComponent("\(package.id)-\(UUID().uuidString)",
@@ -207,7 +237,9 @@ enum AgentPackageInstaller {
             node: node, home: staging, globalConfig: globalConfig,
             cache: root.appendingPathComponent("cache", isDirectory: true)
         )
-        try requireAuditedNpmVersion(npm, in: staging, environment: npmEnvironment)
+        try requireAuditedNpmVersion(
+            npm, in: staging, environment: npmEnvironment, isCancelled: isCancelled
+        )
         let log = staging.appendingPathComponent("npm-install.log")
         try Data().write(to: log)
         let logHandle = try FileHandle(forWritingTo: log)
@@ -225,7 +257,7 @@ enum AgentPackageInstaller {
             ChildProcessRegistry.register(pid: process.processIdentifier)
             defer { ChildProcessRegistry.unregister(pid: process.processIdentifier) }
             let deadline = Date().addingTimeInterval(600)
-            while process.isRunning && Date() < deadline && !Task<Never, Never>.isCancelled {
+            while process.isRunning && Date() < deadline && !isCancelled() {
                 Thread.sleep(forTimeInterval: 0.1)
             }
             if process.isRunning {
@@ -237,7 +269,7 @@ enum AgentPackageInstaller {
                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             }
             process.waitUntilExit()
-            if Task<Never, Never>.isCancelled { throw CancellationError() }
+            if isCancelled() { throw CancellationError() }
             if Date() >= deadline { throw AgentPackageInstallError.npmTimedOut(package.name) }
         } catch {
             try? logHandle.close()
@@ -413,10 +445,12 @@ enum AgentPackageInstaller {
     }
 
     /// The Node's major version, which fixes the ABI of any native module in the tree.
-    private static func nodeMajorVersion(_ node: URL, in directory: URL) -> String? {
+    private static func nodeMajorVersion(
+        _ node: URL, in directory: URL, isCancelled: () -> Bool
+    ) -> String? {
         guard let result = try? probeVersion(node, in: directory, environment: [
             "HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        ]), result.status == 0, result.output.hasPrefix("v"),
+        ], isCancelled: isCancelled), result.status == 0, result.output.hasPrefix("v"),
               let major = result.output.dropFirst().split(separator: ".").first
         else { return nil }
         return String(major)
@@ -471,7 +505,10 @@ enum AgentPackageInstaller {
                 cache: directory.appendingPathComponent("cache", isDirectory: true)
             )
             let npm = node.deletingLastPathComponent().appendingPathComponent("npm")
-            let result = try probeVersion(npm, in: directory, environment: environment)
+            let result = try probeVersion(
+                npm, in: directory, environment: environment,
+                isCancelled: { Task<Never, Never>.isCancelled }
+            )
             return result.status == 0 && isAuditedNpmVersion(result.output)
         } catch {
             return false
@@ -497,9 +534,12 @@ enum AgentPackageInstaller {
     /// Early npm 11 releases predate the audited lifecycle-script controls. Accept only
     /// the tested 11.19.0 policy behavior or a newer release, never just a major version.
     private static func requireAuditedNpmVersion(
-        _ npm: URL, in directory: URL, environment: [String: String]
+        _ npm: URL, in directory: URL, environment: [String: String],
+        isCancelled: () -> Bool
     ) throws {
-        let result = try probeVersion(npm, in: directory, environment: environment)
+        let result = try probeVersion(
+            npm, in: directory, environment: environment, isCancelled: isCancelled
+        )
         guard result.status == 0, isAuditedNpmVersion(result.output) else {
             throw AgentPackageInstallError.npmTooOld(
                 result.output.isEmpty ? "unknown" : result.output
@@ -519,7 +559,8 @@ enum AgentPackageInstaller {
 
     /// `<executable> --version`, bounded, in `directory`, with only `environment`.
     private static func probeVersion(
-        _ executable: URL, in directory: URL, environment: [String: String]
+        _ executable: URL, in directory: URL, environment: [String: String],
+        isCancelled: () -> Bool
     ) throws -> (output: String, status: Int32) {
         let log = directory.appendingPathComponent("version-\(UUID().uuidString).log")
         try Data().write(to: log)
@@ -535,7 +576,7 @@ enum AgentPackageInstaller {
         do {
             try process.run()
             let deadline = Date().addingTimeInterval(10)
-            while process.isRunning && Date() < deadline && !Task<Never, Never>.isCancelled {
+            while process.isRunning && Date() < deadline && !isCancelled() {
                 Thread.sleep(forTimeInterval: 0.1)
             }
             if process.isRunning {
@@ -555,7 +596,7 @@ enum AgentPackageInstaller {
         let output = String(decoding: (try? Data(contentsOf: log)) ?? Data(), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         try? FileManager.default.removeItem(at: log)
-        if Task<Never, Never>.isCancelled { throw CancellationError() }
+        if isCancelled() { throw CancellationError() }
         return (output, process.terminationStatus)
     }
 
