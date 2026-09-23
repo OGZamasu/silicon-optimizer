@@ -2105,10 +2105,11 @@ public actor ControlServer {
     public static let unknownQueueAction =
         "Use pause, resume, retry, remove, stop_following, cancel, or clear_finished."
 
-    /// Why the swarm secret, which may pause or retry the queue like any client, may not
-    /// cancel a render. Cancelling is the one verb that throws away GPU work already done,
-    /// and that secret is a node's credential in a config file, not a person deciding to.
-    /// The owner's own token and a full-scope phone keep it.
+    /// Why the swarm secret may not cancel a render. The route gate already keeps that
+    /// secret off the queue's controls; this stays as a backstop, because cancelling is the
+    /// one verb that throws away GPU work already done, and that secret is a node's
+    /// credential in a config file, not a person deciding to. The owner's own token and a
+    /// full-scope phone keep it.
     public static let cancelIsNotForPeers =
         "A swarm node may not cancel this Mac's renders. Cancel from the Mac, its control "
         + "token, or a phone paired with full control; a peer can use stop_following."

@@ -283,7 +283,7 @@ struct ContractExportTests {
         }
         #expect(control.errors[400] == ControlServer.unknownQueueAction)
         #expect(control.errorVariants.contains {
-            $0.0 == 403 && $0.1 == "swarm" && $0.2 == ControlServer.cancelIsNotForPeers
+            $0.0 == 403 && $0.1 == "swarm" && $0.2 == ControlServer.swarmRouteRefusal
         })
     }
 
@@ -2249,9 +2249,8 @@ struct ContractExportTests {
             ],
             response: .of(exampleVideoQueue),
             errors: [400: ControlServer.unknownQueueAction],
-            // A swarm peer may pause or retry, but `cancel` throws away GPU work, and a
-            // node's secret is not a person deciding to.
-            errorVariants: [(403, "swarm", ControlServer.cancelIsNotForPeers)]
+            // The queue's controls are the owner's: the swarm secret is refused every verb.
+            errorVariants: [(403, "swarm", ControlServer.swarmRouteRefusal)]
         ),
         Route(
             method: "POST", path: "/video/generate", auth: "device",

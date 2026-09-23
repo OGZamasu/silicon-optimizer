@@ -267,22 +267,20 @@ struct VideoCancelTests {
         #expect(VideoBatchQueue.cancelRefusal(queue.items[0])?.contains("already in progress") == true)
     }
 
-    /// Owner policy: the swarm secret may drive the queue like any client, but not throw
-    /// away a render. The Mac's own token and a full-scope phone keep the verb.
+    /// Owner policy: the swarm secret doesn't reach the queue's controls at all (the route
+    /// gate refuses it, #69), so it can't cancel a render either. The cancel-specific refusal
+    /// in the route stays as a backstop should queue control ever reopen to peers. The Mac's
+    /// own token and a full-scope phone keep the verb.
     @Test func aSwarmPeerMayNotCancelButTheOwnersCredentialsMay() async throws {
         let secret = "swarm-secret-for-the-cancel-fixture"
         try await withAgentServer(swarmToken: secret) { fixture in
             let full = try await fixture.pair(name: "Studio phone")
             let cancel = #"{"action":"cancel","id":"9C2F-0005"}"#
-            let (refused, body) = try await fixture.local.call(
-                "POST", "/video/queue/control", token: secret, body: cancel
-            )
-            #expect(refused == 403)
-            #expect(String(decoding: body, as: UTF8.self).contains("may not cancel"))
-            // The rest of the queue's verbs stay open to a peer.
-            #expect(try await fixture.local.status(
-                "POST", "/video/queue/control", token: secret, body: #"{"action":"pause"}"#
-            ) == 200)
+            for action in [cancel, #"{"action":"pause"}"#] {
+                #expect(try await fixture.local.status(
+                    "POST", "/video/queue/control", token: secret, body: action
+                ) == 403)
+            }
             #expect(try await fixture.local.status(
                 "POST", "/video/queue/control", token: fixture.local.token, body: cancel
             ) == 200)
