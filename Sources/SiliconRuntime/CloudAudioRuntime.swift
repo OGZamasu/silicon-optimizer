@@ -272,14 +272,12 @@ public actor CloudAudioRuntime {
         let destination = directory
             .appendingPathComponent("\(safeModel)-\(stamp).\(safeFormat.isEmpty ? "mp3" : safeFormat)")
         do {
-            return try await RemoteArtifactTransfer.download(
+            return try await PublicHTTPSArtifactTransfer.download(
                 from: url,
-                policy: .publicHTTPS,
                 to: destination,
                 maximumBytes: Self.maximumArtifactBytes,
                 budget: RemoteByteBudget(limit: Self.maximumArtifactBytes),
-                timeout: 600,
-                allowedContentTypes: ["audio/*", "application/octet-stream"]
+                timeout: 600
             )
         } catch let error as RemoteTransferError {
             throw CloudAudioError.submitFailed(502, error.localizedDescription)
