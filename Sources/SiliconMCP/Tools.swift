@@ -1303,6 +1303,9 @@ enum Tools {
             lines.append("  Experts:         \(bytes(plan.expertsBytes))")
         }
         lines.append("  KV cache:        \(bytes(plan.kvCacheBytes))")
+        if let state = plan.recurrentStateBytes, state > 0 {
+            lines.append("  Recurrent state: \(bytes(state))")
+        }
         lines.append("  Compute buffers: \(bytes(plan.computeBytes))")
         if plan.streamedFromDiskBytes > 0 {
             lines.append("  Streamed from disk: \(bytes(plan.streamedFromDiskBytes))")
