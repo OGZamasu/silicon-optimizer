@@ -205,6 +205,24 @@ public enum PrismRuntime {
         )
     }
 
+    /// Whether the app fetched this runtime before and can no longer use that copy: a record
+    /// from before archives were pinned and checked (no digest — every install until this
+    /// change), or one for a release other than the pinned one. Such a copy is never run;
+    /// the app fetches the reviewed archive in its place, so installed ternary models keep
+    /// loading without anyone having to find the Fetch button. No record, no fetch: a Mac
+    /// that never needed the fork, or whose owner removed it, is left alone.
+    public static func needsVerifiedRefetch(root: URL = defaultRoot) -> Bool {
+        needsVerifiedRefetch(root: root, expected: pinnedPick())
+    }
+
+    static func needsVerifiedRefetch(root: URL, expected: Pick) -> Bool {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("prism.json"))
+        else { return false }
+        guard let record = try? JSONDecoder().decode(Record.self, from: data) else { return true }
+        return record.tag != expected.tag || record.asset != expected.name
+            || record.archiveSHA256 != expected.sha256
+    }
+
     public static func remove(root: URL = defaultRoot) throws {
         if FileManager.default.fileExists(atPath: root.path) {
             try FileManager.default.removeItem(at: root)

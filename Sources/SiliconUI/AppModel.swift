@@ -2646,6 +2646,11 @@ public final class AppModel {
         if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
         reapAbandonedServers()
         selector = RuntimeSelector.discover()
+        // A PrismML fork fetched before its archive was pinned is no longer run; replace it
+        // with the reviewed one (12 MB, digest-checked) so installed ternary models load.
+        if PrismRuntime.needsVerifiedRefetch() && !hasPrismTernaryRuntime {
+            installPrismRuntime()
+        }
         imageRuntime = MFluxRuntime.locate()
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
