@@ -35,7 +35,6 @@ public actor PiRuntime {
     }
 
     private var process: Process?
-    private var installedPackage: InstalledAgentPackage?
     private var installationTask: Task<InstalledAgentPackage, any Error>?
     private var startupGeneration = 0
     private var stdinHandle: FileHandle?
@@ -136,9 +135,9 @@ public actor PiRuntime {
         guard let node = discovery.node else {
             let floor = Self.minimumNodeVersion
             onState(.failed(message:
-                "Pi needs Node.js \(floor.major).\(floor.minor) or newer with npm 11.19 "
-                + "or newer; no compatible Node/npm pair was found. Install one with "
-                + "`brew install node`, or switch engines in Settings."))
+                "Pi needs Node.js \(floor.major).\(floor.minor) or newer with npm 11.19 or newer. "
+                + (discovery.rejectionSentence ?? "None was found. ")
+                + "Install one with `brew install node`, or switch engines in Settings."))
             return nil
         }
 
@@ -158,11 +157,7 @@ public actor PiRuntime {
             return nil
         }
         if generation == startupGeneration { installationTask = nil }
-        guard generation == startupGeneration else {
-            try? FileManager.default.removeItem(at: installed.directory)
-            return nil
-        }
-        installedPackage = installed
+        guard generation == startupGeneration else { return nil }
 
         let process = Process()
         process.executableURL = node
@@ -278,9 +273,7 @@ public actor PiRuntime {
         eventContinuation = nil
         stdinHandle = nil
         let stoppedProcess = process
-        let stoppedPackage = installedPackage
         process = nil
-        installedPackage = nil
         if let stoppedProcess {
             if stoppedProcess.isRunning {
                 stoppedProcess.terminate()
@@ -293,9 +286,6 @@ public actor PiRuntime {
             }
             ChildProcessRegistry.unregister(pid: stoppedProcess.processIdentifier)
         }
-        if let stoppedPackage {
-            try? FileManager.default.removeItem(at: stoppedPackage.directory)
-        }
         return generation
     }
 
@@ -303,9 +293,5 @@ public actor PiRuntime {
         guard generation == startupGeneration, process === ended else { return }
         ChildProcessRegistry.unregister(pid: ended.processIdentifier)
         process = nil
-        if let installedPackage {
-            try? FileManager.default.removeItem(at: installedPackage.directory)
-            self.installedPackage = nil
-        }
     }
 }

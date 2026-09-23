@@ -16,7 +16,29 @@ struct AgentPackageInstallerTests {
         let node: URL
     }
 
-    private func fixture(checkInstallEnvironment: Bool = false) throws -> Fixture {
+    /// A local package whose own postinstall writes `marker` — a dependency install script
+    /// that no allowlist names.
+    private func scriptedDependency(in root: URL, marker: URL, node: URL) throws -> URL {
+        let source = root.appendingPathComponent("scripted-dep", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "name": "scripted-dep", "version": "1.0.0",
+            "scripts": ["postinstall": "node -e \"require('fs').writeFileSync('\(marker.path)','ran')\""],
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            .write(to: source.appendingPathComponent("package.json"))
+        try "module.exports = 1\n".write(
+            to: source.appendingPathComponent("index.js"), atomically: true, encoding: .utf8
+        )
+        let npm = node.deletingLastPathComponent().appendingPathComponent("npm")
+        _ = try run(npm, ["pack", "--pack-destination", root.path, "--ignore-scripts",
+                      "--offline", "--no-audit", "--no-fund"], in: source, node: node)
+        return root.appendingPathComponent("scripted-dep-1.0.0.tgz")
+    }
+
+    private func fixture(
+        checkInstallEnvironment: Bool = false, scriptMarker: URL? = nil
+    ) throws -> Fixture {
         let node = try #require(HarnessRuntime.locateNode(
             minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
         ).node)
@@ -33,10 +55,14 @@ struct AgentPackageInstallerTests {
         for directory in [packageBin, manifestDirectory, destinationRoot, project] {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        let packageManifest: [String: Any] = [
+        var packageManifest: [String: Any] = [
             "name": "fixture-agent", "version": "1.0.0",
             "bin": ["fixture-agent": "bin/agent.js"],
         ]
+        if let scriptMarker {
+            let dependency = try scriptedDependency(in: root, marker: scriptMarker, node: node)
+            packageManifest["dependencies"] = ["scripted-dep": dependency.absoluteString]
+        }
         try JSONSerialization.data(
             withJSONObject: packageManifest, options: [.prettyPrinted, .sortedKeys]
         ).write(to: packageSource.appendingPathComponent("package.json"))
@@ -216,20 +242,139 @@ struct AgentPackageInstallerTests {
             .appendingPathComponent("install-script-ran").path))
     }
 
-    @Test func eachLaunchGetsItsOwnVerifiedDirectory() async throws {
+    /// The allowlist is the one control between a locked dependency's install script and
+    /// this Mac. A dependency with a script no allowlist names stops the install, and the
+    /// script never runs.
+    @Test func aDependencyInstallScriptOffTheAllowlistStopsTheInstall() async throws {
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "silicon-script-marker-\(UUID().uuidString)"
+        )
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let fixture = try fixture(scriptMarker: scratch)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let lock = try String(
+            contentsOf: fixture.sourceRoot.appendingPathComponent("fixture/package-lock.json"),
+            encoding: .utf8
+        )
+        #expect(lock.contains("\"hasInstallScript\": true"), "the fixture must carry a dependency script")
+
+        do {
+            _ = try await AgentPackageInstaller.install(
+                fixture.package, node: fixture.node, sourceRoot: fixture.sourceRoot,
+                destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
+            )
+            Issue.record("an install script no allowlist names was allowed to install")
+        } catch AgentPackageInstallError.npmFailed(_, _, let detail) {
+            #expect(detail.contains("allowScripts") || detail.contains("install scripts"), "\(detail)")
+        }
+        #expect(!FileManager.default.fileExists(atPath: scratch.path), "the script ran")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: fixture.destinationRoot.path)
+        #expect(!entries.contains { $0.hasPrefix("fixture-") })
+    }
+
+    /// A start after the first uses the verified tree as it is: no npm at all (the npm here
+    /// fails if it is called), the same directory, and per-launch folders from before are gone.
+    @Test func aVerifiedTreeIsReusedWithoutRunningNpmAgain() async throws {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let first = try await AgentPackageInstaller.install(
             fixture.package, node: fixture.node, sourceRoot: fixture.sourceRoot,
             destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
         )
+        #expect(!first.reused)
+
+        // What the per-launch design left behind: a tree whose app has quit.
+        let exited = Process()
+        exited.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try exited.run()
+        exited.waitUntilExit()
+        let leftover = fixture.destinationRoot.appendingPathComponent("fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+        try Data("\(exited.processIdentifier)\n".utf8)
+            .write(to: leftover.appendingPathComponent(AgentPackageInstaller.ownerFileName))
+
+        let (fakeNode, npmCalled) = try failingNpm(beside: fixture)
+        let second = try await AgentPackageInstaller.install(
+            fixture.package, node: fakeNode, sourceRoot: fixture.sourceRoot,
+            destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
+        )
+        #expect(second.reused)
+        #expect(second.directory == first.directory)
+        #expect(second.bin == first.bin)
+        #expect(!FileManager.default.fileExists(atPath: npmCalled.path), "npm ran for a verified tree")
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
+    }
+
+    /// A tree that differs from its record in any way — changed bytes, an added file, a
+    /// missing one — is installed again from the lock before anything in it runs.
+    @Test(arguments: ["changed", "added", "removed"])
+    func aChangedTreeIsInstalledAgain(_ change: String) async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let first = try await AgentPackageInstaller.install(
+            fixture.package, node: fixture.node, sourceRoot: fixture.sourceRoot,
+            destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
+        )
+        let original = try Data(contentsOf: first.bin)
+        let package = first.directory.appendingPathComponent("node_modules/fixture-agent")
+        switch change {
+        case "changed":
+            var bytes = original
+            bytes[bytes.startIndex] ^= 0x01  // same size, different bytes
+            try bytes.write(to: first.bin)
+        case "added":
+            try "process.exit(0)\n".write(
+                to: package.appendingPathComponent("planted.js"), atomically: true, encoding: .utf8
+            )
+        default:
+            try FileManager.default.removeItem(at: package.appendingPathComponent("package.json"))
+        }
+
         let second = try await AgentPackageInstaller.install(
             fixture.package, node: fixture.node, sourceRoot: fixture.sourceRoot,
             destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
         )
-        #expect(first.directory != second.directory)
-        #expect(FileManager.default.fileExists(atPath: first.bin.path))
+        #expect(!second.reused)
+        #expect(try Data(contentsOf: second.bin) == original)
+        #expect(!FileManager.default.fileExists(atPath: package.appendingPathComponent("planted.js").path))
+        #expect(FileManager.default.fileExists(atPath: package.appendingPathComponent("package.json").path))
+    }
+
+    /// A different bundled lock — an app update — gets its own tree; the old one is removed.
+    @Test func aDifferentLockGetsANewTreeAndTheOldOneGoes() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let first = try await AgentPackageInstaller.install(
+            fixture.package, node: fixture.node, sourceRoot: fixture.sourceRoot,
+            destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
+        )
+        let lock = fixture.sourceRoot.appendingPathComponent("fixture/package-lock.json")
+        let document = try JSONSerialization.jsonObject(with: Data(contentsOf: lock))
+        try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys]).write(to: lock)
+
+        let second = try await AgentPackageInstaller.install(
+            fixture.package, node: fixture.node, sourceRoot: fixture.sourceRoot,
+            destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
+        )
+        #expect(!second.reused)
+        #expect(second.directory != first.directory)
+        #expect(!FileManager.default.fileExists(atPath: first.directory.path))
         #expect(FileManager.default.fileExists(atPath: second.bin.path))
+    }
+
+    /// A Node beside an npm that records being called and fails.
+    private func failingNpm(beside fixture: Fixture) throws -> (node: URL, marker: URL) {
+        let fakeBin = fixture.root.appendingPathComponent("failing-npm-bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
+        let fakeNode = fakeBin.appendingPathComponent("node")
+        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let marker = fixture.root.appendingPathComponent("npm-was-called")
+        let fakeNpm = fakeBin.appendingPathComponent("npm")
+        try "#!/bin/sh\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
+            to: fakeNpm, atomically: true, encoding: .utf8
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeNpm.path)
+        return (fakeNode, marker)
     }
 
     @Test(arguments: ["10.9.3", "11.0.0", "11.18.9"])
@@ -281,7 +426,7 @@ struct AgentPackageInstallerTests {
                 destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
             )
         }
-        for _ in 0..<100 where !FileManager.default.fileExists(atPath: marker.path) {
+        for _ in 0..<500 where !FileManager.default.fileExists(atPath: marker.path) {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(FileManager.default.fileExists(atPath: marker.path))
@@ -427,7 +572,7 @@ struct BundledAgentPackageLockTests {
 
     /// Node 22 ships npm 10: that Node is new enough and its npm is not, and the message
     /// has to say which one to update.
-    @Test func aNodeRejectedForItsNpmSaysToUpdateNpm() throws {
+    @Test func aNodeRejectedForItsNpmSaysWhatToDo() throws {
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.appendingPathComponent(
             "silicon-npm-rejection-\(UUID().uuidString)", isDirectory: true
@@ -445,12 +590,18 @@ struct BundledAgentPackageLockTests {
         }
 
         let oldNpm = try candidate("old-npm", node: "22.22.0", npm: "10.9.8")
-        let npmRejected = HarnessRuntime.pick(
+        var npmRejected = HarnessRuntime.pick(
             from: [oldNpm], includingRejected: nil,
             minimumVersion: HarnessRuntime.harnessMinimumNodeVersion, requiresNpm11: true
         )
         #expect(npmRejected.node == nil)
         #expect(npmRejected.rejectedForNpm)
+        // This one lives in a folder nobody installs Node into: another tool's. Its npm is
+        // not the user's to upgrade, so the message points at Settings instead.
+        #expect(npmRejected.rejectionSentence?.contains("Settings") == true)
+        #expect(npmRejected.rejectionSentence?.contains("npm install -g") == false)
+        // The same rejection for a Homebrew Node says how to update its npm.
+        npmRejected.rejectedPath = "/opt/homebrew/bin/node"
         #expect(npmRejected.rejectionSentence?.contains("npm install -g npm@11") == true)
 
         let oldNode = try candidate("old-node", node: "20.10.0", npm: "11.19.0")
@@ -461,5 +612,68 @@ struct BundledAgentPackageLockTests {
         #expect(nodeRejected.node == nil)
         #expect(!nodeRejected.rejectedForNpm)
         #expect(nodeRejected.rejectionSentence?.contains("incompatible") == true)
+    }
+
+    @Test func onlyAUsersOwnNodeIsCalledGeneralPurpose() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        #expect(HarnessRuntime.isGeneralPurposeNode("/opt/homebrew/bin/node"))
+        #expect(HarnessRuntime.isGeneralPurposeNode("/usr/local/bin/node"))
+        #expect(HarnessRuntime.isGeneralPurposeNode("\(home)/.nvm/versions/node/v24.1.0/bin/node"))
+        #expect(HarnessRuntime.isGeneralPurposeNode("\(home)/.volta/bin/node"))
+        #expect(!HarnessRuntime.isGeneralPurposeNode("\(home)/.hermes/node/bin/node"))
+        #expect(!HarnessRuntime.isGeneralPurposeNode("/Applications/Some.app/Contents/Resources/node"))
+    }
+
+    /// The record a start checks against: exactly the tree's entries, sizes, bytes and links,
+    /// for this lock and Node line. Checked without npm, so it runs everywhere.
+    @Test func aTreeVerifiesOnlyAsRecorded() throws {
+        let manager = FileManager.default
+        let tree = manager.temporaryDirectory.appendingPathComponent(
+            "silicon-tree-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? manager.removeItem(at: tree) }
+        let module = tree.appendingPathComponent("node_modules/agent", isDirectory: true)
+        try manager.createDirectory(at: module, withIntermediateDirectories: true)
+        try "console.log(1)\n".write(to: module.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
+        try "{}\n".write(to: tree.appendingPathComponent("package-lock.json"), atomically: true, encoding: .utf8)
+        let bin = tree.appendingPathComponent("node_modules/.bin", isDirectory: true)
+        try manager.createDirectory(at: bin, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(atPath: bin.appendingPathComponent("agent").path,
+                                       withDestinationPath: "../agent/index.js")
+        let identity = AgentPackageInstaller.TreeIdentity(package: "agent@1.0.0", lock: "abc", node: "24")
+        try AgentPackageInstaller.writeManifest(of: tree, identity: identity)
+        #expect(try AgentPackageInstaller.verifyTree(tree, expected: identity))
+
+        var other = identity
+        other.lock = "def"
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: other), "another lock")
+        other = identity
+        other.node = "22"
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: other), "another Node line")
+
+        let index = module.appendingPathComponent("index.js")
+        try "console.log(2)\n".write(to: index, atomically: true, encoding: .utf8)
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "same size, other bytes")
+        try "console.log(1)\n".write(to: index, atomically: true, encoding: .utf8)
+        #expect(try AgentPackageInstaller.verifyTree(tree, expected: identity))
+
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: index.path)
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "a changed mode")
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: index.path)
+        #expect(try AgentPackageInstaller.verifyTree(tree, expected: identity))
+
+        try "x".write(to: module.appendingPathComponent("extra.js"), atomically: true, encoding: .utf8)
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "an added file")
+        try manager.removeItem(at: module.appendingPathComponent("extra.js"))
+
+        try manager.removeItem(at: bin.appendingPathComponent("agent"))
+        try manager.createSymbolicLink(atPath: bin.appendingPathComponent("agent").path,
+                                       withDestinationPath: "/tmp/elsewhere.js")
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "a moved link")
+        try manager.removeItem(at: bin.appendingPathComponent("agent"))
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "a missing entry")
+
+        try manager.removeItem(at: tree.appendingPathComponent(AgentPackageInstaller.manifestFileName))
+        #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "no record")
     }
 }

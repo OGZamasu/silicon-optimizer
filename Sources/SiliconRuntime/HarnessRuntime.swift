@@ -28,7 +28,6 @@ public actor HarnessRuntime {
     static let gatewayKeyVariable = "SILICON_GATEWAY_KEY"
 
     private var process: ServerProcess?
-    private var installedPackage: InstalledAgentPackage?
     private var installationTask: Task<InstalledAgentPackage, any Error>?
     private var startupGeneration = 0
     public private(set) var processIdentifier: Int32?
@@ -92,12 +91,32 @@ public actor HarnessRuntime {
         /// The sentence a failure message gives about the rejected candidate, if any.
         public var rejectionSentence: String? {
             guard let rejectedPath, let rejectedVersion else { return nil }
-            if rejectedForNpm {
+            guard rejectedForNpm else {
+                return "Found \(rejectedVersion) at \(rejectedPath), which is incompatible. "
+            }
+            // Updating npm inside a Node some other app keeps for itself would change that
+            // app, so that advice is only given for a Node that is the user's own.
+            if HarnessRuntime.isGeneralPurposeNode(rejectedPath) {
                 return "Found \(rejectedVersion) at \(rejectedPath), but the npm beside it is "
                     + "older than 11.19 — update it with `npm install -g npm@11`. "
             }
-            return "Found \(rejectedVersion) at \(rejectedPath), which is incompatible. "
+            return "Found \(rejectedVersion) at \(rejectedPath), but it belongs to another tool and "
+                + "its npm is older than 11.19. Set the Node.js path in Settings to a Node "
+                + "with npm 11.19 or newer. "
         }
+    }
+
+    /// A Node installed to be the user's Node — Homebrew, MacPorts, the nodejs.org installer or
+    /// a version manager — rather than one another app keeps privately (found through a
+    /// symlink into its own folder, say).
+    static func isGeneralPurposeNode(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let roots = ["/opt/homebrew/", "/usr/local/", "/opt/local/"] + [
+            ".nvm/", ".local/share/fnm/", ".fnm/", ".volta/", ".vite-plus/", ".asdf/",
+            ".local/share/mise/", ".nodenv/", "n/",
+        ].map { "\(home)/\($0)" }
+        return roots.contains { resolved.hasPrefix($0) }
     }
 
     /// Finds the newest usable Node.js the way a person would, because a GUI app inherits
@@ -134,6 +153,7 @@ public actor HarnessRuntime {
             "/usr/local/bin/node",
             "/opt/local/bin/node",
             "\(home)/.volta/bin/node",
+            "\(home)/.vite-plus/bin/node",
             "\(home)/.bun/bin/node",
             "\(home)/.local/bin/node",
         ]
@@ -153,27 +173,25 @@ public actor HarnessRuntime {
             candidates += path.split(separator: ":").map { "\($0)/node" }
         }
 
-        var discovery = pick(
+        let discovery = pick(
             from: candidates, includingRejected: customPath, minimumVersion: minimumVersion,
             requiresNpm11: requiresNpm11
         )
         if discovery.node != nil { return discovery }
 
-        // Last resort: ask the user's login shell, which sees their real PATH. Expensive, so
-        // only when nothing above qualified.
+        // Last resort: ask the user's login shells, which see their real PATH, for every node
+        // on it — not just the first, whose npm may be the one that is too old — and pick
+        // the newest that qualifies from everything seen. Expensive, so only when nothing
+        // above qualified.
         var shellCandidates: [String] = []
         for shellArguments in [["-l", "-c"], ["-i", "-l", "-c"]] {
-            if let found = shellLookup(arguments: shellArguments + ["command -v node"]) {
-                shellCandidates.append(found)
-            }
+            shellCandidates += shellLookup(arguments: shellArguments + ["whence -ap node"])
         }
-        let fromShell = pick(
-            from: shellCandidates, includingRejected: nil, minimumVersion: minimumVersion,
-            requiresNpm11: requiresNpm11
+        guard !shellCandidates.isEmpty else { return discovery }
+        return pick(
+            from: candidates + shellCandidates, includingRejected: customPath,
+            minimumVersion: minimumVersion, requiresNpm11: requiresNpm11
         )
-        if fromShell.node != nil { return fromShell }
-        if discovery.rejectedPath == nil { discovery = fromShell }
-        return discovery
     }
 
     static func pick(
@@ -276,7 +294,7 @@ public actor HarnessRuntime {
         return parseNodeVersion(output)
     }
 
-    private static func shellLookup(arguments: [String]) -> String? {
+    private static func shellLookup(arguments: [String]) -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = arguments
@@ -284,7 +302,7 @@ public actor HarnessRuntime {
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
+        guard (try? process.run()) != nil else { return [] }
 
         // An interactive shell with an exotic prompt setup can hang; give it a bounded wait
         // rather than trusting it.
@@ -294,15 +312,15 @@ public actor HarnessRuntime {
         }
         if process.isRunning {
             process.terminate()
-            return nil
+            return []
         }
         guard process.terminationStatus == 0,
               let data = try? pipe.fileHandleForReading.readToEnd(),
               let output = String(data: data, encoding: .utf8)
-        else { return nil }
-        let lines = output.split(separator: "\n").map(String.init)
-        // Interactive startup files may print banners; the path is the last line.
-        return lines.last { $0.hasPrefix("/") }
+        else { return [] }
+        // Interactive startup files may print banners; only paths to a node count.
+        return output.split(separator: "\n").map(String.init)
+            .filter { $0.hasPrefix("/") && $0.hasSuffix("/node") }
     }
 
     // MARK: - Provider configuration
@@ -704,11 +722,7 @@ public actor HarnessRuntime {
             return
         }
         if generation == startupGeneration { installationTask = nil }
-        guard generation == startupGeneration else {
-            try? FileManager.default.removeItem(at: installed.directory)
-            return
-        }
-        installedPackage = installed
+        guard generation == startupGeneration else { return }
 
         // The `--profile web` root form rather than the `web` subcommand: `--patch` is a
         // launcher flag, and the launcher only accepts it ahead of profile arguments.
@@ -807,14 +821,9 @@ public actor HarnessRuntime {
         installationTask?.cancel()
         installationTask = nil
         let stoppedProcess = process
-        let stoppedPackage = installedPackage
         self.process = nil
-        installedPackage = nil
         processIdentifier = nil
         if let stoppedProcess { await stoppedProcess.terminate() }
-        if let stoppedPackage {
-            try? FileManager.default.removeItem(at: stoppedPackage.directory)
-        }
         return generation
     }
 
@@ -846,10 +855,6 @@ public actor HarnessRuntime {
         guard generation == startupGeneration, process === ended else { return }
         process = nil
         processIdentifier = nil
-        if let installedPackage {
-            try? FileManager.default.removeItem(at: installedPackage.directory)
-            self.installedPackage = nil
-        }
         var message = "The harness exited unexpectedly"
         if let signal = termination?.signal {
             message += " (signal \(signal))"
