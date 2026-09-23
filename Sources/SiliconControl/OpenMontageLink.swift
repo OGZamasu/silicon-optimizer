@@ -161,8 +161,9 @@ public enum OpenMontageLink {
         }
     }
 
-    /// What `make setup` does, as steps this app runs itself — with the Python picked for
-    /// wheel coverage rather than recency, and npm from beside a Node this app trusts.
+    /// Setup steps the app runs itself — with the Python picked for wheel coverage rather
+    /// than recency, and npm from beside a Node this app trusts. An existing checkout's
+    /// Git revision and Remotion dependencies are not updated by this plan.
     public static func plan(in env: Environment) throws -> (steps: [Step], notes: [String]) {
         guard let git = env.git else { throw LinkError.noGit }
         guard let python = pickPython(from: env.pythons) else { throw LinkError.noPython }
@@ -171,14 +172,10 @@ public enum OpenMontageLink {
         let venvPython = checkout.appendingPathComponent(".venv/bin/python")
         var steps: [Step] = []
         var notes: [String] = []
+        let existingCheckout = FileManager.default.fileExists(
+            atPath: checkout.appendingPathComponent(".git").path)
 
-        if FileManager.default.fileExists(atPath: checkout.appendingPathComponent(".git").path) {
-            steps.append(Step(
-                label: "Updating OpenMontage",
-                executable: git, arguments: ["pull", "--ff-only", "--quiet"],
-                workingDirectory: checkout, optional: true
-            ))
-        } else {
+        if !existingCheckout {
             steps.append(Step(
                 label: "Downloading OpenMontage",
                 executable: git,
@@ -209,17 +206,22 @@ public enum OpenMontageLink {
             workingDirectory: checkout, optional: true
         ))
 
-        if let npm = env.npm {
+        if existingCheckout {
+            // `npm ci` removes node_modules, so leave a user-managed checkout's Remotion
+            // dependencies alone. The settings UI only offers setup before the clone.
+            notes.append("Existing Remotion dependencies were left unchanged in ~/OpenMontage.")
+        } else if let npm = env.npm {
             steps.append(Step(
                 label: "Installing Remotion, the composition engine",
-                executable: npm, arguments: ["install", "--silent", "--no-audit", "--no-fund"],
+                executable: npm, arguments: ["ci", "--silent", "--no-audit", "--no-fund"],
                 workingDirectory: checkout.appendingPathComponent("remotion-composer"),
                 optional: true
             ))
         } else {
             notes.append(
                 "npm wasn't found, so Remotion was skipped — OpenMontage falls back to FFmpeg. "
-                + "Install Node from nodejs.org and run Set up again to add it."
+                + "Install Node from nodejs.org, then run `npm ci` in "
+                + "~/OpenMontage/remotion-composer to add it."
             )
         }
 
