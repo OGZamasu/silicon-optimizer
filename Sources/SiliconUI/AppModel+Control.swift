@@ -745,6 +745,7 @@ extension AppModel: ControlHost {
             weightsBytes: plan.nonExpertWeights.rawValue,
             expertsBytes: plan.expertWeights.rawValue,
             kvCacheBytes: plan.kvCache.rawValue,
+            recurrentStateBytes: plan.recurrentState > .zero ? plan.recurrentState.rawValue : nil,
             computeBytes: plan.computeBuffers.rawValue,
             streamedFromDiskBytes: plan.streamedFromDisk.rawValue,
             suggestions: plan.remediations.map {
