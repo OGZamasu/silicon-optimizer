@@ -627,6 +627,11 @@ class LtxDeliverySizeTests(unittest.TestCase):
                 job_id = render.submit({"entry_id": "full-hd", "model": "ltx2-distilled",
                                         "prompt": "A sailboat at dusk.", "seconds": 5, "resolution": "1080p"})
             self.assertEqual(render.jobs[job_id]["delivery_plan"]["output_w"], 1920)
+            # Nothing is delivered yet, so only the plan is reported.
+            self.assertEqual(render.public_job(job_id)["delivery"], {
+                "requested": "1080p", "planned_width": 1920, "planned_height": 1080, "delivered": False,
+                "internal_width": 768, "internal_height": 448, "scaling": "upscaled",
+            })
             self._render(render, job_id, media_probe(1920, 1080))
             command = FakeLTXProcess.launched[0]
             self.assertEqual(command[command.index("--width") + 1], "768")
@@ -642,7 +647,8 @@ class LtxDeliverySizeTests(unittest.TestCase):
             self.assertEqual(sidecar["delivery_scaling"], "upscaled")
             public = render.public_job(job_id)
             self.assertEqual(public["delivery"], {
-                "requested": "1080p", "width": 1920, "height": 1080, "internal_width": 768,
+                "requested": "1080p", "planned_width": 1920, "planned_height": 1080, "delivered": True,
+                "width": 1920, "height": 1080, "internal_width": 768,
                 "internal_height": 448, "scaling": "upscaled", "matches_request": True,
             })
             self.assertNotIn("delivery_plan", public)
@@ -662,6 +668,13 @@ class LtxDeliverySizeTests(unittest.TestCase):
                 self._render(render, job_id, media_probe(1280, 720))
             self.assertFalse(Path(render.jobs[job_id]["output_path"]).exists())
             self.assertNotEqual(render.jobs[job_id]["status"], "done")
+            # A job that ended without a file claims no delivered size.
+            for status in ("failed", "queued", "running"):
+                render.jobs[job_id]["status"] = status
+                delivery = render.public_job(job_id)["delivery"]
+                self.assertIs(delivery["delivered"], False)
+                for key in ("width", "height", "matches_request"):
+                    self.assertNotIn(key, delivery)
 
     def test_an_unsupported_ltx_size_is_refused_before_anything_is_queued(self):
         with tempfile.TemporaryDirectory() as directory, isolated_node_paths(Path(directory)):
@@ -695,6 +708,7 @@ class LtxDeliverySizeTests(unittest.TestCase):
             # Reported honestly: 1080p was asked for, 1280x720 was delivered.
             delivery = render.public_job("legacy")["delivery"]
             self.assertEqual((delivery["requested"], delivery["width"], delivery["height"]), ("1080p", 1280, 720))
+            self.assertIs(delivery["delivered"], True)
             self.assertIs(delivery["matches_request"], False)
             self.assertEqual(render.public_job("legacy")["artifact"], "/v1/artifacts/legacy.mp4")
 

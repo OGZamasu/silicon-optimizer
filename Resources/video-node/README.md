@@ -102,10 +102,11 @@ MiniMax H3, Phosphene job ID, quality/length/upscale, Turbo, prompts, seed and
 output properties. LTX uses a smaller internal canvas and scales for delivery:
 1080p and 720p are rendered at 768×448, and 480p at 672×384, then scaled to
 1920×1080, 1280×720 and 854×480. A 1080p LTX clip therefore has the generated
-detail of the 720p one in a larger frame. Job status (`delivery`) and the
-sidecar (`requested_resolution`, `internal_resolution`, `output_resolution`,
-`delivery_scaling`) report the probed size and say it was upscaled rather than
-generated natively. An LTX size other than 360p, 480p, 720p or 1080p is refused
+detail of the 720p one in a larger frame, and the app says so beside the Size
+picker. Job status (`delivery`) reports the planned size and, once the job is
+done, the probed one; the sidecar (`requested_resolution`, `internal_resolution`,
+`output_resolution`, `delivery_scaling`) records the probed size. Both say it was
+upscaled rather than generated natively. An LTX size other than 360p, 480p, 720p or 1080p is refused
 at submission. Jobs finished by an older node, which delivered 1280×720 for a
 1080p LTX request, stay finished after an upgrade and report the 1280×720 they
 actually delivered; unfinished ones render at the requested size.

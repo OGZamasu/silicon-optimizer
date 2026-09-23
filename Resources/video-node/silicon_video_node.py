@@ -613,27 +613,42 @@ def job_delivery_plan(job: Dict[str, Any]) -> Dict[str, int]:
 
 
 def delivery_report(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Requested size versus the pixels actually planned or delivered.
+    """Requested size versus the pixels planned and, once done, delivered.
 
+    `width`/`height` and `matches_request` describe a validated file, so they
+    appear only when the job is done; until then only the plan is reported.
     `scaling` distinguishes an LTX canvas scaled up by ffmpeg from native
     generation; H3's canvas belongs to Phosphene, so it is not claimed here.
     """
     requested = str(job.get("resolution") or "720p")
     plan = job_delivery_plan(job)
-    width = job.get("delivered_width") or plan["output_w"]
-    height = job.get("delivered_height") or plan["output_h"]
-    report: Dict[str, Any] = {"requested": requested, "width": width, "height": height}
+    delivered = job.get("status") == "done"
+    report: Dict[str, Any] = {
+        "requested": requested,
+        "planned_width": plan["output_w"],
+        "planned_height": plan["output_h"],
+        "delivered": delivered,
+    }
+    if delivered:
+        # A done job's file was probed against this plan before it was published,
+        # or at load for one finished before sizes were recorded.
+        report["width"] = job.get("delivered_width") or plan["output_w"]
+        report["height"] = job.get("delivered_height") or plan["output_h"]
     if job.get("model") != "hailuo-h3":
         report["internal_width"] = plan["internal_w"]
         report["internal_height"] = plan["internal_h"]
         report["scaling"] = (
-            "upscaled" if (width, height) != (plan["internal_w"], plan["internal_h"]) else "native"
+            "upscaled" if (plan["output_w"], plan["output_h"]) != (plan["internal_w"], plan["internal_h"])
+            else "native"
         )
-        try:
-            current = resolution_plan(requested)
-            report["matches_request"] = (width, height) == (current["output_w"], current["output_h"])
-        except ValueError:
-            report["matches_request"] = False
+        if delivered:
+            try:
+                current = resolution_plan(requested)
+                report["matches_request"] = (
+                    (report["width"], report["height"]) == (current["output_w"], current["output_h"])
+                )
+            except ValueError:
+                report["matches_request"] = False
     return report
 
 
