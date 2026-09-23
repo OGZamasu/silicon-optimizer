@@ -116,6 +116,8 @@ public enum JevGuardrails {
     /// environment, opens a file or sends a transcript.
     /// - Parameter service: the Jev door to ask through. The app leaves it at the shared
     ///   one; a test hands over a service pointed at a loopback double.
+    /// - Parameter log: where the screening is remembered. The app's shared log, unless a
+    ///   test that counts what was remembered hands over one of its own.
     public static func screen(
         engine: Engine,
         request: String,
@@ -126,7 +128,8 @@ public enum JevGuardrails {
         recentTranscript: [String] = [],
         protecting: [String] = [],
         autoApproveArmed: Bool = false,
-        using service: JevService = .shared
+        using service: JevService = .shared,
+        log: GuardrailScreeningLog = .shared
     ) async -> GuardrailScreening {
         if let reason = await unavailableReason(from: service) {
             // Not recorded: the feature being off is not a screening that went wrong, and
@@ -162,13 +165,13 @@ public enum JevGuardrails {
                 response: response,
                 facts: prepared.facts
             )
-            record(screening, engine: engine)
+            log.record(screening, engine: engine)
             return screening
         } catch {
             // Including a refusal this call raced: the settings can change between the
             // check above and the request.
             let screening = GuardrailScreening.unavailable(reason: error.localizedDescription)
-            record(screening, engine: engine)
+            log.record(screening, engine: engine)
             return screening
         }
     }
@@ -205,36 +208,23 @@ public enum JevGuardrails {
 
     // MARK: - What is remembered
 
-    /// The last fifty screenings, for the UI and for `GET /jev/guardrails/recent`.
-    ///
-    /// Question ids, bands, the verdict and how long it took. Not the command, not the
-    /// arguments, not the request, not the directory, not the tool's name — nothing a person
-    /// or a model wrote. Two reasons. The commands an agent runs are the most sensitive
-    /// thing this app touches, and a buffer a phone can read is the wrong place to keep them;
-    /// and a screening's value in a list is the pattern — "six blocks, all `exfiltrates`" —
-    /// which the ids give you and the content does not.
-    ///
-    /// In memory only. It is not written to disk and does not survive a relaunch.
-    public private(set) static var recentScreenings: [ControlAPI.GuardrailScreeningRecord] = []
-
-    public static let maximumRecent = 50
-
-    /// Internal rather than private so a test can prove the cap without paying for fifty
-    /// screenings to reach it.
-    static func record(_ screening: GuardrailScreening, engine: Engine) {
-        recentScreenings.append(ControlAPI.GuardrailScreeningRecord(
-            at: ControlAPI.timestamp(Date()),
-            engine: engine.rawValue,
-            screening: screening.wire,
-            bands: screening.signals.mapValues(\.rawValue)
-        ))
-        if recentScreenings.count > maximumRecent {
-            recentScreenings.removeFirst(recentScreenings.count - maximumRecent)
-        }
+    /// The app's recent screenings. See `GuardrailScreeningLog`.
+    public static var recentScreenings: [ControlAPI.GuardrailScreeningRecord] {
+        GuardrailScreeningLog.shared.records
     }
 
-    /// For the tests, and for a "clear" button if one is ever wanted.
-    public static func forgetRecentScreenings() { recentScreenings.removeAll() }
+    public static let maximumRecent = GuardrailScreeningLog.maximum
+
+    /// Remembers a screening in the app's log, or in `log`. Internal rather than private so a
+    /// test can prove the cap without paying for fifty screenings to reach it.
+    static func record(
+        _ screening: GuardrailScreening, engine: Engine, in log: GuardrailScreeningLog = .shared
+    ) {
+        log.record(screening, engine: engine)
+    }
+
+    /// For a "clear" button if one is ever wanted.
+    public static func forgetRecentScreenings() { GuardrailScreeningLog.shared.forget() }
 
     /// What `GET /jev/guardrails/recent` answers.
     public static func recent(
@@ -246,4 +236,47 @@ public enum JevGuardrails {
             screenings: recentScreenings
         )
     }
+}
+
+/// The last fifty screenings, for the UI and for `GET /jev/guardrails/recent`.
+///
+/// Question ids, bands, the verdict and how long it took. Not the command, not the
+/// arguments, not the request, not the directory, not the tool's name — nothing a person
+/// or a model wrote. Two reasons. The commands an agent runs are the most sensitive
+/// thing this app touches, and a buffer a phone can read is the wrong place to keep them;
+/// and a screening's value in a list is the pattern — "six blocks, all `exfiltrates`" —
+/// which the ids give you and the content does not.
+///
+/// In memory only. It is not written to disk and does not survive a relaunch.
+///
+/// An instance rather than a static list so a test that counts screenings can keep its own.
+/// Every engine's screenings land in the app's shared one, and a suite elsewhere screening a
+/// Pi call made "nothing was remembered" fail in a suite that had screened nothing — which
+/// no amount of ordering inside that suite could prevent.
+@MainActor
+public final class GuardrailScreeningLog {
+
+    /// The app's.
+    public static let shared = GuardrailScreeningLog()
+
+    public static let maximum = 50
+
+    /// Oldest first.
+    public private(set) var records: [ControlAPI.GuardrailScreeningRecord] = []
+
+    public init() {}
+
+    func record(_ screening: GuardrailScreening, engine: JevGuardrails.Engine) {
+        records.append(ControlAPI.GuardrailScreeningRecord(
+            at: ControlAPI.timestamp(Date()),
+            engine: engine.rawValue,
+            screening: screening.wire,
+            bands: screening.signals.mapValues(\.rawValue)
+        ))
+        if records.count > Self.maximum {
+            records.removeFirst(records.count - Self.maximum)
+        }
+    }
+
+    public func forget() { records.removeAll() }
 }
