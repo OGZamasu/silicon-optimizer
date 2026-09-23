@@ -86,12 +86,17 @@ struct SwarmFileBoundaryTests {
                 "POST", "/install", token: fixture.local.token, body: body
             ) == 200)
             #expect(await fixture.host.installRequests.last?.directory == "/private/fixture-destination")
-            for token in [swarmToken, phone.token] {
-                #expect(try await fixture.phone.status(
-                    "POST", "/install", token: token, body: #"{"modelID":"fixture"}"#
-                ) == 200)
+            // A paired phone may still use the configured library. The swarm may not install
+            // at all — not even there — because it cannot load what it would fetch.
+            #expect(try await fixture.phone.status(
+                "POST", "/install", token: phone.token, body: #"{"modelID":"fixture"}"#
+            ) == 200)
+            for client in [fixture.local, fixture.phone] {
+                #expect(try await client.status(
+                    "POST", "/install", token: swarmToken, body: #"{"modelID":"fixture"}"#
+                ) == 403)
             }
-            #expect(await fixture.host.installRequests.count == 3)
+            #expect(await fixture.host.installRequests.count == 2)
             #expect(await fixture.host.installRequests.last?.directory == nil)
         }
     }
