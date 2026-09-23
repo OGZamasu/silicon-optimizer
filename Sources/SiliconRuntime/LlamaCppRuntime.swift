@@ -190,15 +190,18 @@ public actor LlamaCppRuntime: InferenceRuntime {
     /// Stops the server, saying why — which is what lets a load that was interrupted report
     /// an unload as an unload and a replacement as a replacement.
     public func stop(because request: StopRequest) async {
-        guard server != nil else {
+        guard let server else {
             if case .idle = state {} else { transition(to: .idle) }
             return
         }
         transition(to: .stopping)
-        lastServerLog = await server?.log ?? lastServerLog
-        await server?.terminate(because: request)
-        server = nil
-        client = nil
+        // The process is captured: reading a finished process's log can wait up to two
+        // seconds for its last line, and a load started across either await takes the slot
+        // with a process of its own, which is not this stop's to end.
+        lastServerLog = await server.log
+        await server.terminate(because: request)
+        release(server)
+        guard self.server == nil else { return }
         loadProgress = 0
         transition(to: .idle)
     }
