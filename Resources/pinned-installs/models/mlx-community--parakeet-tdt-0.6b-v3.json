@@ -1,0 +1,26 @@
+{
+  "repository": "mlx-community/parakeet-tdt-0.6b-v3",
+  "revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "f320f1292511f34ec47f513755fe20fd01dbfc09a925d42730e66059a6e1ef4c",
+      "size": 244093
+    },
+    {
+      "path": "model.safetensors",
+      "sha256": "05e01c7f396c298cf7d23f61da7b504adeab698f0aaeafd9c82d198625464592",
+      "size": 2508288736
+    },
+    {
+      "path": "tokenizer.model",
+      "sha256": "eacec2b0a77f336d4a2ca4a25a7047575d3c2b74de47e997f4c205126ed3135e",
+      "size": 360916
+    },
+    {
+      "path": "vocab.txt",
+      "sha256": "3cde1409fd78783a79b29ed4d32da57c746993856f7c8263bcb905d2e5839db7",
+      "size": 46772
+    }
+  ]
+}

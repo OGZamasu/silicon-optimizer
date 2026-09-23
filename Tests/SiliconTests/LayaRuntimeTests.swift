@@ -536,6 +536,21 @@ struct LayaInstallTests {
     /// wherever `--dest` says, exactly as `pip download --no-deps` would; `install` only
     /// leaves a marker beside itself — which is how the mismatch test below proves that
     /// step never ran on a wheel that failed verification.
+    /// Stands in for an environment's Python: `-m pip install` leaves the same marker the
+    /// fake pip does, and anything else fails.
+    private func writeFakePython(at url: URL) throws {
+        let source = """
+            #!/bin/sh
+            if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "install" ]; then
+                echo installed >> "$(dirname "$0")/pip-install.marker"
+                exit 0
+            fi
+            exit 1
+            """
+        try source.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
     private func writeFakePip(at url: URL, wheelContents: String) throws {
         let source = """
             #!/usr/bin/python3
@@ -744,8 +759,8 @@ struct LayaInstallTests {
     /// mismatch is caught — clearly, and before `pip install` ever runs — rather than
     /// discovered later with `laya_mlx` already on disk.
     ///
-    /// If the comparison in `downloadAndVerifyWheel` is deleted, this wheel is handed
-    /// straight to `pip install`, the marker below is written, and this test fails on that
+    /// If the comparison in `downloadAndVerifyWheel` is deleted, the install goes on to
+    /// `python -m pip install`, the marker below is written, and this test fails on that
     /// assertion rather than only on the thrown error's type.
     @Test func aWrongWheelDigestFailsTheInstallBeforeAnythingIsInstalled() async throws {
         let library = scratch()
@@ -753,13 +768,13 @@ struct LayaInstallTests {
         let environment = LayaRuntime.environmentDirectory(library: library)
         let bin = environment.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        // A real interpreter (symlinked, not copied — see the note on the sidecar restart
-        // test above) so `install()` gets past "no environment yet" and reaches the wheel
-        // download this test is actually about.
-        try FileManager.default.createSymbolicLink(
-            at: bin.appendingPathComponent("python3"),
-            withDestinationURL: URL(fileURLWithPath: "/usr/bin/python3")
+        // An environment of a Python the locks cover, so `install()` gets past choosing a
+        // lock and reaches the wheel download this test is actually about. Its interpreter
+        // only records a `pip install` — nothing here may install anything for real.
+        try "home = /x\nversion = 3.13.7\n".write(
+            to: environment.appendingPathComponent("pyvenv.cfg"), atomically: true, encoding: .utf8
         )
+        try writeFakePython(at: bin.appendingPathComponent("python3"))
         try writeFakePip(at: bin.appendingPathComponent("pip"), wheelContents: "not the pinned wheel")
 
         let runtime = LayaRuntime()

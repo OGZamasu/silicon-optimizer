@@ -1,0 +1,46 @@
+{
+  "repository": "prince-canuma/Kokoro-82M",
+  "revision": "e02c9eada7ce7416798af36b190a8a2dd2ecd566",
+  "files": [
+    {
+      "path": "voices/af_bella.safetensors",
+      "sha256": "a18024b9332f5ff217c7f604cbe94449a3ca51c3b8d85500e31cd3cbdc4ef6ce",
+      "size": 522339
+    },
+    {
+      "path": "voices/af_heart.safetensors",
+      "sha256": "4e40b08984cd84a86b4d07960939bd85bb6b3747dd747b7de48dca3aaeab37ca",
+      "size": 522339
+    },
+    {
+      "path": "voices/af_nicole.safetensors",
+      "sha256": "769ee38efeb131196eaab5ed43592b315bba829881d4aee7411872efa6cf05c6",
+      "size": 522339
+    },
+    {
+      "path": "voices/af_sky.safetensors",
+      "sha256": "7c8fafbc903f96ec8779adb0757ad36038bad5b66910d122260f90751b3ff007",
+      "size": 522339
+    },
+    {
+      "path": "voices/am_adam.safetensors",
+      "sha256": "1dff8c742132e77fcee65886ede701eeed36de8d36a055f07c1bd2598c9228ce",
+      "size": 522339
+    },
+    {
+      "path": "voices/am_michael.safetensors",
+      "sha256": "19a8661430456e2bbf0a68b52fa9b49678bb0fb7418619f868df77921f5aa43c",
+      "size": 522339
+    },
+    {
+      "path": "voices/bf_emma.safetensors",
+      "sha256": "ed92055e1ed96f2a0b4a52b76956dcfd76627bd548c33801743a62c0817dec01",
+      "size": 522339
+    },
+    {
+      "path": "voices/bm_george.safetensors",
+      "sha256": "a3a6682cde622e7aee35597b91947fa018f78be101a97587a100effe227e5a21",
+      "size": 522339
+    }
+  ]
+}

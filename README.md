@@ -106,6 +106,20 @@ stops if it is another revision. A rerun leaves Python packages already installe
 version as they are, so an environment made by an older, unpinned install keeps any extras it
 had. Moving a pin is a review: `Scripts/lock-media-installers.sh` rebuilds the locks.
 
+The app's other one-click setups are held to the same rule. MFLUX, the voice tools, face
+tracking and Laya install only their hash-locked packages, at the versions known to work
+together; LuxTTS and its LinaCodec are fetched by commit and checked, and LinaCodec (a git
+dependency pip cannot hash) is installed from that checked checkout with no index and no
+dependencies. Tracking's MediaPipe models come from their numbered release, digest-checked.
+Each builds its environment on a Homebrew or python.org Python its locks cover — never macOS's
+own 3.9 — and says which to install when there is none. The voice models run offline: before a
+run the app puts the reviewed files of every Hugging Face repository the model reads (its own,
+and the tokenizers, codecs and voices its library names inside itself) into the engine cache at
+a pinned commit, each checked against its SHA-256 — reusing a copy an earlier download left when
+it matches — so nothing a model loads comes from a moving `main`. CSM without a reference speaks
+with the stock prompt from its own pinned repository rather than the gated `sesame/csm-1b`.
+`Scripts/pin-hub-models.sh` rebuilds those manifests.
+
 The node has a persistent queue, authenticated loopback access, and verified MP4 output
 with model metadata. The [batch example](Resources/video-node/examples/README.md) includes
 twenty honey-badger prompts, resumable submission, explicit retries, and a local review
@@ -833,8 +847,9 @@ Hugging Face cache every other Python engine here uses, with `HF_HOME` pointed a
 Everything is pinned:
 
 - `laya-mlx==0.1.0` (there are no upstream git tags; the wheel's sha256 is the only pin
-  there is), which brings `mlx>=0.32.2,<0.33`. Python 3.11 or newer — macOS ships 3.9, so
-  the installer looks for a Homebrew 3.11+ and says so if it finds none.
+  there is), which brings `mlx>=0.32.2,<0.33`; it and every dependency install from a
+  hash-locked set in `Resources/pinned-installs/laya`. Python 3.11 to 3.14 — macOS ships 3.9,
+  so the installer looks for a Homebrew one and says so if it finds none.
 - Checkpoints, by **full commit sha** rather than a branch: `aac6fef/laya-mlx` (English,
   ModernBERT-large, 421M, 512 tokens of context, the default), `aac6fef/laya-multilingual-mlx`
   (mmBERT-base, 322M, 1024 tokens, the fastest and smallest) and

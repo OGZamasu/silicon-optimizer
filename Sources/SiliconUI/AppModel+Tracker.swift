@@ -78,8 +78,8 @@ extension AppModel {
         Task { await runtime.stop() }
     }
 
-    /// Sets up MediaPipe in its own environment and fetches the landmarker model from
-    /// Google's own hosting for it.
+    /// Sets up MediaPipe in its own environment — hash-locked packages, and the landmarker
+    /// models from Google's own hosting, digest-checked (`TrackerRuntime.installPlan`).
     public func installTracker() {
         guard let bundled = Bundle.main.url(forResource: "tracker", withExtension: "py")
             ?? Bundle.main.resourceURL?.appendingPathComponent("tracker.py")
@@ -87,58 +87,15 @@ extension AppModel {
             trackerError = "The tracker script is missing from the app."
             return
         }
-        let environment = TrackerRuntime.environment
-        var steps: [RepairStep] = []
-
-        if !FileManager.default.isExecutableFile(atPath: TrackerRuntime.python.path) {
-            steps.append(RepairStep(
-                executable: URL(fileURLWithPath: Self.faceCamPython),
-                arguments: ["-m", "venv", environment.path],
-                currentDirectory: nil,
-                label: "Making its Python environment —"
-            ))
+        let steps: [RepairStep]
+        do {
+            steps = try TrackerRuntime.installPlan(
+                basePython: PinnedInstall.basePython(for: PinnedInstall.trackerPythons)
+            ).map(RepairStep.init)
+        } catch {
+            failRepair(id: "tracker-install", message: error.localizedDescription)
+            return
         }
-        steps.append(RepairStep(
-            executable: environment.appendingPathComponent("bin/pip"),
-            arguments: [
-                "install", "--upgrade",
-                // Pinned to the line that actually runs here: the 1.x wheels abort
-                // inside the landmarker graph on this machine.
-                "mediapipe==0.10.35", "python-osc", "opencv-python",
-            ],
-            currentDirectory: nil,
-            label: "Installing MediaPipe —"
-        ))
-        steps.append(RepairStep(
-            executable: URL(fileURLWithPath: "/usr/bin/curl"),
-            arguments: [
-                "-sL", "--create-dirs",
-                "-o", TrackerRuntime.model.path,
-                TrackerRuntime.modelURL,
-            ],
-            currentDirectory: nil,
-            label: "Fetching the face model —"
-        ))
-        steps.append(RepairStep(
-            executable: URL(fileURLWithPath: "/usr/bin/curl"),
-            arguments: [
-                "-sL", "--create-dirs",
-                "-o", TrackerRuntime.poseModel.path,
-                TrackerRuntime.poseModelURL,
-            ],
-            currentDirectory: nil,
-            label: "Fetching the body model —"
-        ))
-        steps.append(RepairStep(
-            executable: URL(fileURLWithPath: "/usr/bin/curl"),
-            arguments: [
-                "-sL", "--create-dirs",
-                "-o", TrackerRuntime.handModel.path,
-                TrackerRuntime.handModelURL,
-            ],
-            currentDirectory: nil,
-            label: "Fetching the hand model —"
-        ))
 
         runRepair(id: "tracker-install", steps: steps) { [weak self] in
             try? TrackerRuntime.installScript(from: bundled)

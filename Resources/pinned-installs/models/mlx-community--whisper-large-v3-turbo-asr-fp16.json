@@ -1,0 +1,66 @@
+{
+  "repository": "mlx-community/whisper-large-v3-turbo-asr-fp16",
+  "revision": "624c19c9af5603fa73b83bce14d4aeea96156d18",
+  "files": [
+    {
+      "path": "added_tokens.json",
+      "sha256": "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0",
+      "size": 34648
+    },
+    {
+      "path": "config.json",
+      "sha256": "47ef28115e4b7e08c604546cc98eb1ead8ff72152cfaeb5d7bcb7ef1640a5bdd",
+      "size": 1301
+    },
+    {
+      "path": "generation_config.json",
+      "sha256": "cce11bfe3aaa6ae9e072ea2637caaec8795e68d9b67e655a5af16ee509681a4c",
+      "size": 3772
+    },
+    {
+      "path": "merges.txt",
+      "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6",
+      "size": 493869
+    },
+    {
+      "path": "model.safetensors",
+      "sha256": "a76ee3af9c01b616ab7caf1eed663dceb7d68e9dc62c990dac48112db6e57e34",
+      "size": 1613977443
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "sha256": "9cf894da1061ccc1657c6dabf1fa19dfcf1f0603df4194ab4fb913a554da789d",
+      "size": 37633
+    },
+    {
+      "path": "normalizer.json",
+      "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd",
+      "size": 52666
+    },
+    {
+      "path": "preprocessor_config.json",
+      "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+      "size": 340
+    },
+    {
+      "path": "special_tokens_map.json",
+      "sha256": "baea4ea09372eb4fca86b4e4346139fd73cb807d5087e9de0948e971739c3e74",
+      "size": 2186
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+      "size": 2710337
+    },
+    {
+      "path": "tokenizer_config.json",
+      "sha256": "844b642c73a91359722f47b35705f7174686df33d252695d8572cf9ac03a6389",
+      "size": 282843
+    },
+    {
+      "path": "vocab.json",
+      "sha256": "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387",
+      "size": 1036558
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import Foundation
 import SiliconCatalog
 import SiliconCore
+import SiliconControl
 import SiliconPlanner
 
 /// Drives `mflux-generate`.
@@ -38,6 +39,26 @@ public actor MFluxRuntime: ImageRuntime {
 
     public nonisolated static func locate() -> RuntimeInstallation? {
         RuntimeLocator.locateMFlux()
+    }
+
+    /// The install, as commands: the shared environment (made with the newest Python the
+    /// locks cover, so the voice tools fit in it later) and MFLUX's hash-locked packages,
+    /// wheels only. An environment someone already made is kept, and decides the lock.
+    public nonisolated static func installPlan(
+        basePython: URL?, locks: URL = PinnedInstall.defaultLockRoot(),
+        environment: URL = VoiceRuntime.environment
+    ) throws -> [PinnedInstall.Command] {
+        let (python, version, commands) = try PinnedInstall.environment(
+            environment, tool: "MFLUX", supported: PinnedInstall.mfluxPythons,
+            basePython: basePython
+        )
+        return commands + [PinnedInstall.pipInstall(
+            python: python,
+            lock: PinnedInstall.lock(
+                "mflux", directory: PinnedInstall.mlxEnvironmentLocks, python: version, in: locks
+            ),
+            label: "Installing MFLUX", onlyBinary: true
+        )]
     }
 
     /// Environment for the mflux child process.

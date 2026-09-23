@@ -1,0 +1,31 @@
+{
+  "repository": "YatharthS/LuxTTS",
+  "revision": "527f245a276a0eb42ea103a7a512bcfd771eb9b6",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "6aa1712ffa270a6f01885bdb51b2f466cf758e9489f62146faeb4113fc27dfaf",
+      "size": 697
+    },
+    {
+      "path": "model.pt",
+      "sha256": "745855037478eb888cfa7a3603c1aa9f663f22a72d94cc1c37787228ff422095",
+      "size": 491318136
+    },
+    {
+      "path": "tokens.txt",
+      "sha256": "ce98c1afc5f7a20c2484dffdd68a1fff0a4a2cc707328833750c4476c37cdbda",
+      "size": 2570
+    },
+    {
+      "path": "vocoder/config.yaml",
+      "sha256": "6e1e33478a524cb6ebd42ff922acb170b418234b66729fce3429f2189369dd75",
+      "size": 752
+    },
+    {
+      "path": "vocoder/vocos.bin",
+      "sha256": "116b9875a0369d6a0156d752b4548121fe75fdc81d39943e81c46ac9bfa72d11",
+      "size": 63972079
+    }
+  ]
+}

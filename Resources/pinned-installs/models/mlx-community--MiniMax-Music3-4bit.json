@@ -1,0 +1,46 @@
+{
+  "repository": "mlx-community/MiniMax-Music3-4bit",
+  "revision": "c7ea32923b245fe5afc22d740a1936ad2ac590f3",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "727639e9099a5b9699b213bd2efa7058526089c6b0d924fa1117cf3f56bf98ce",
+      "size": 1609
+    },
+    {
+      "path": "model-00001-of-00002.safetensors",
+      "sha256": "d660e5da8b62092edf101cb661ba66cbb1efefad71ac3496a96f8eff8e94225b",
+      "size": 5352618277
+    },
+    {
+      "path": "model-00002-of-00002.safetensors",
+      "sha256": "156e2ef0cc941103da98537c90d1695f1b77330c72f806649fa0ecf1cdc2d048",
+      "size": 3846523021
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "sha256": "2a2ad235763ad26a9c8446ccdb68a84e4de91e698f2a8896b318a690de0ae68b",
+      "size": 192315
+    },
+    {
+      "path": "scheduler/scheduler_config.json",
+      "sha256": "b544466124aab333da4874417da0168610067e9c9ff95fcb63d749e4bf891d99",
+      "size": 483
+    },
+    {
+      "path": "tokenizer/chat_template.jinja",
+      "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+      "size": 4168
+    },
+    {
+      "path": "tokenizer/tokenizer.json",
+      "sha256": "b1537fa9e59a537276ecbc2e12d0438edff635a1f4a4948e679774b5feb3e610",
+      "size": 11423801
+    },
+    {
+      "path": "tokenizer/tokenizer_config.json",
+      "sha256": "1689852cc9c45010de040c8302a8acdc0d2c4c6c740dd7e9dd0a8c704e16eada",
+      "size": 377
+    }
+  ]
+}
