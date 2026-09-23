@@ -278,6 +278,14 @@ There are three credentials, and each one is honoured in exactly one place:
 | **Swarm token** — shared, from `swarm.json` | Yes | Only while swarm access is on |
 | **Device token** — 32 bytes, minted at pairing | **No**, whatever it says | Only while Silicon Buddy is on, and only within the device's scope |
 
+A shared swarm bearer is for peer discovery and direct jobs: chat and decisions, image,
+mesh and video generation, uploads, and fetching a result by its media id. It may request
+catalog model installs into the Mac's active model library, but cannot choose another
+download directory. It does not grant access to the owner's conversations, model loading,
+or the Mac's global video queue. The peer event stream remains available for status, but
+omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
+require this Mac's local control token or an appropriately paired device.
+
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;
 the control token being refused on the tailnet is the same rule from the other side.
@@ -496,8 +504,8 @@ by the places that change it, so nothing can be forgotten into silence.
 
 **Full control only, and never a node — on the routes and on the stream.** Every one of
 these routes runs commands on this Mac, so a chat-only device is refused with the same 403
-it gets for `POST /load`. So is the **swarm token**, which is a credential everywhere else on
-this server: a node is a machine with a token in a config file, not a person with a phone in
+it gets for `POST /load`. So is the **swarm token**, which is a credential for peer discovery
+and direct jobs: a node is a machine with a token in a config file, not a person with a phone in
 their hand. Neither is sent an `agent` frame on `/events` either — a transcript carries the
 commands an agent ran and what they printed, which is exactly what those two were not given
 — and while nobody who may see them is subscribed, the transcripts are not even read. On the

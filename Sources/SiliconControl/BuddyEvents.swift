@@ -86,6 +86,16 @@ public enum BuddyEvent: Sendable {
     /// Sent only to this Mac's own token and full-control devices.
     var needsFullScope: Bool { describesAgentSession || describesPhoneModel }
 
+    /// Queue entries, conversation verdicts, and the owner's model download activity
+    /// belong to their devices. A shared peer bearer cannot use the corresponding owner
+    /// controls, so the event stream must not recover those details either.
+    var hiddenFromPeers: Bool {
+        switch self {
+        case .job, .verdict, .download: true
+        default: false
+        }
+    }
+
     /// The same frame with what only a full-control audience may see taken out, or nil when
     /// there is nothing to take out — which is every frame but a failed load's `status`.
     var withoutPrivilegedDetail: BuddyEvent? {
@@ -106,8 +116,8 @@ public actor BuddyEventHub {
     /// Who a subscription is for, which decides what it is sent.
     ///
     /// A security boundary rather than bookkeeping. `/events` is open to every credential
-    /// this server honours, and most of what it carries — the loaded model, a download, a
-    /// render — is fine for all of them. An agent session is not: a transcript carries the
+    /// this server honours, but owner activity frames do not go to peers. An agent
+    /// session does not go to peers or chat-only devices either: a transcript carries the
     /// commands an agent ran and what they printed, and an approval names what it is about
     /// to do. A device paired for chat was deliberately given less than that, and the
     /// swarm secret is a node's credential, not a person's; neither may call the agent
@@ -223,11 +233,11 @@ public actor BuddyEventHub {
             var narrowedFrame: BuddyEvent.Frame?
             let narrowed = event.withoutPrivilegedDetail
             for (id, listener) in listeners where chosen(id) {
-                // The filter that keeps a transcript — and what the Mac is fetching for the
-                // owner's phone — away from a chat-only phone and from the swarm. Everything
-                // else goes to everyone, as it always has.
+                // Role filtering also applies to this side channel: peers cannot see
+                // owner activity by holding the event stream.
                 let audience = audiences[id]
                 if event.needsFullScope, audience?.seesAgentSessions != true { continue }
+                if event.hiddenFromPeers, audience == .peer { continue }
 
                 let full = audience?.seesRuntimeLogs ?? false
                 if let narrowed, !full {

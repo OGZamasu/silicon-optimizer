@@ -1290,7 +1290,7 @@ extension AppModel {
         // queue. Reject before accepting anything; the async queue API can append
         // to a paused queue intentionally. Never resume it on the caller's behalf.
         guard !videoBatchQueue.isPaused else {
-            throw ControlHostError.badRequest("The video queue is paused. Resume it first, or use /video/queue to save clips for later. No clip was added.")
+            throw ControlHostError.badRequest("The video queue is paused. Ask the owner to resume it, or use /video/queue if you have access. No clip was added.")
         }
 
         let videoRequest = VideoRequest(
