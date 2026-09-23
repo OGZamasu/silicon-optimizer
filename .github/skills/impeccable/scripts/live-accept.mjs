@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './lib/is-generated.mjs';
-import { getLiveDir, safeSessionId } from './lib/impeccable-paths.mjs';
+import { getLivePrivateDir, safeSessionId } from './lib/impeccable-paths.mjs';
 import { resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
 import { readBuffer as readManualEditsBuffer, writeBuffer as writeManualEditsBuffer } from './live/manual-edits-buffer.mjs';
 import { NEVER_SOURCE_DIRS, findSourceFile } from './live/source-search.mjs';
@@ -90,7 +90,7 @@ Required:
   --id SESSION_ID    Session ID of the variant wrapper
 
 Options:
-  --page-url URL     Current browser page URL; scopes staged copy-edit cleanup
+  --page-url URL     Current browser page URL (accepted for compatibility)
   --defer-source-write
                      Deprecated compatibility flag. Svelte component accepts
                      now write the real source immediately.
@@ -103,7 +103,6 @@ Output (JSON):
   const id = argVal(args, '--id');
   const variantNum = argVal(args, '--variant');
   const paramValuesRaw = argVal(args, '--param-values');
-  const pageUrl = argVal(args, '--page-url');
   const isDiscard = args.includes('--discard');
 
   if (!id) { console.error('Missing --id'); process.exit(1); }
@@ -253,7 +252,6 @@ Output (JSON):
       emitResult(operationFailure(err, { file: relFile }));
       return;
     }
-    const acceptedOriginalText = result.acceptedOriginalText || '';
     delete result.acceptedOriginalText;
     // Single-line attention-grabber when cleanup is required. The full
     // five-step checklist lives in reference/live.md (loaded once per
@@ -261,16 +259,8 @@ Output (JSON):
     if (result.carbonize) {
       result.todo = 'REQUIRED before next poll: carbonize cleanup in ' + relFile + '. See reference/live.md "Required after accept".';
     }
-    // Scrub stash entries whose text appeared inside the just-replaced
-    // original wrap block. The accept embodies those manual edits (wrap was
-    // buffer-aware), so only those scoped ops are redundant.
-    if (result.handled !== false) {
-      try {
-        scrubManualEditsAgainstOriginalBlock(acceptedOriginalText, process.cwd(), pageUrl);
-      } catch {
-        // Non-fatal; the buffer stays as-is and the user can discard later.
-      }
-    }
+    // Staged page edits were never part of this variant. Keep them pending
+    // until the trusted controller separately approves their exact batch.
     emitResult({ handled: true, file: relFile, ...result });
   }
 }
@@ -281,8 +271,8 @@ Output (JSON):
  * scrub dropped unrelated staged edits from other components/files whenever
  * their originalText wasn't present in the just-accepted file.
  *
- * Match both originalText and newText because live-wrap rewrites the original
- * preview block to reflect pending manual edits before variants are generated.
+ * Legacy direct-call helper only. Accept no longer invokes this: source-preview
+ * generation deliberately ignores page-staged edits until approved Apply.
  */
 function scrubManualEditsAgainstOriginalBlock(originalBlockText, cwd = process.cwd(), pageUrl = null) {
   const originalBlock = String(originalBlockText || '');
@@ -902,7 +892,7 @@ function findSessionFile(id, cwd) {
 // ---------------------------------------------------------------------------
 
 function acceptReceiptPath(cwd, id) {
-  return path.join(getLiveDir(cwd), 'accept-receipts', `${safeSessionId(id)}.json`);
+  return path.join(getLivePrivateDir(cwd), 'accept-receipts', `${safeSessionId(id)}.json`);
 }
 
 function readAcceptReceipt(cwd, id) {

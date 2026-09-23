@@ -152,7 +152,7 @@ export function validateEvent(msg) {
       return isValidId(msg.id) ? null : 'discard: missing or malformed id';
     case 'checkpoint':
       if (!isValidId(msg.id)) return 'checkpoint: missing or malformed id';
-      if (!Number.isInteger(msg.revision) || msg.revision < 0) return 'checkpoint: revision must be a non-negative integer';
+      if (!Number.isSafeInteger(msg.revision) || msg.revision < 0) return 'checkpoint: revision must be a non-negative safe integer';
       if (msg.paramValues !== undefined && (typeof msg.paramValues !== 'object' || msg.paramValues === null || Array.isArray(msg.paramValues))) {
         return 'checkpoint: paramValues must be an object';
       }

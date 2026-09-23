@@ -11,7 +11,7 @@
  *   repoRoot    the git boundary (falls back to appRoot outside git).
  *   contextRoot the nearest directory from appRoot up to repoRoot carrying
  *               PRODUCT.md / DESIGN.md (canonical spot or a fallback dir).
- *   sessionRoot <appRoot>/.impeccable/live — durable live state.
+ *   sessionRoot private per-app Live directory — durable live state.
  *
  * appRoot detection keys on dev-server config presence (vite/svelte/next/
  * astro/nuxt/... config files), not on monorepo brand markers. A nested
@@ -29,6 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { resolveProjectRoot } from '../context.mjs';
+import { getLivePrivateDirPath, readLiveServerInfo } from '../lib/impeccable-paths.mjs';
 
 const ROOTS_MANIFEST_VERSION = 1;
 const ROOTS_FILE = 'roots.json';
@@ -239,7 +240,7 @@ export function resolveRoots({ cwd = process.cwd(), targetPath = null } = {}) {
       appRoot,
       repoRoot: effectiveRepoRoot,
       contextRoot,
-      sessionRoot: path.join(appRoot, '.impeccable', 'live'),
+      sessionRoot: getLivePrivateDirPath(appRoot),
       productPath,
       designPath,
       resolvedFrom,
@@ -302,7 +303,7 @@ function hasLiveServer(appRoot) {
   let port;
   let token;
   try {
-    const info = JSON.parse(fs.readFileSync(path.join(appRoot, '.impeccable', 'live', 'server.json'), 'utf-8'));
+    const info = readLiveServerInfo(appRoot)?.info;
     if (!info || typeof info.pid !== 'number') return false;
     pid = info.pid;
     port = Number(info.port);
@@ -347,19 +348,24 @@ const TERMINAL_SESSION_PHASES = new Set(['completed', 'discarded']);
  * app that merely booted more recently.
  */
 function hasActiveDurableSession(appRoot) {
-  const dir = path.join(appRoot, '.impeccable', 'live', 'sessions');
-  let entries;
+  // Root selection is read-only. The old app-root location is considered only
+  // until the next helper migrates it; a stopped helper's private snapshots
+  // still choose the correct app in a multi-app repository.
+  let dirs;
   try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return false;
-  }
-  for (const name of entries) {
-    if (!name.endsWith('.snapshot.json')) continue;
-    try {
-      const snapshot = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf-8'));
-      if (snapshot?.phase && !TERMINAL_SESSION_PHASES.has(snapshot.phase)) return true;
-    } catch { /* skip unreadable snapshots */ }
+    dirs = [path.join(getLivePrivateDirPath(appRoot), 'sessions'),
+      path.join(appRoot, '.impeccable', 'live', 'sessions')];
+  } catch { return false; }
+  for (const dir of dirs) {
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      if (!name.endsWith('.snapshot.json')) continue;
+      try {
+        const snapshot = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf-8'));
+        if (snapshot?.phase && !TERMINAL_SESSION_PHASES.has(snapshot.phase)) return true;
+      } catch { /* skip unreadable snapshots */ }
+    }
   }
   return false;
 }

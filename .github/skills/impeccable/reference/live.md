@@ -2,7 +2,7 @@ Interactive live variant mode: select elements in the browser, pick a design act
 
 ## Prerequisites
 
-A running dev server with HMR (Vite, Next.js, Bun, etc.), OR a static HTML file open in the browser. If the dev server's default port is busy, the app is very likely ALREADY running; probe the default URL before spawning a second server.
+A running dev server with HMR (Vite, Next.js, Bun, etc.) is preferred. A static HTML file can also be used, but published source-preview variants may need one full page reload to appear; this can reset page/component-local state. If the dev server's default port is busy, the app is very likely ALREADY running; probe the default URL before spawning a second server.
 
 ## The contract (read once)
 
@@ -14,7 +14,7 @@ Execute in order. No step skipped, no step reordered. Every tool output in live 
 4. On `generate`: reuse `event.scaffold` when present; read the screenshot if present; load the action's reference; deliver variants; `--reply done`; poll again. Generate in this thread: you already hold the project's tokens and layout. The overlay preview IS the verification channel; do not screenshot, re-render, or QA variants between generate and accept. Apply craft-floor's contrast, spacing, and type floors by construction as you write; full verification runs once at accept on the chosen variant.
 5. On `steer`: read the message and `pageUrl`; do the work; `--reply steer_done`; poll again. No pickup ack.
 6. On `accept` / `discard`: the poll script runs `live-accept.mjs`, acknowledges delivery, and prints `_completionAck`. Plain accepts/discards are terminal immediately; carbonize accepts stay recoverable until `live-complete.mjs --id EVENT_ID` runs. Finish that cleanup before polling again.
-7. If interrupted, run `live-status.mjs` or `live-resume.mjs` before guessing. The journal under `.impeccable/live/sessions/` is canonical and replays unacknowledged work after a helper restart; the injected `live.js` re-attaches when the page reopens. Fall back to the direct-edit loop only when `live-resume.mjs` reports no active session, never because disconnects felt frequent.
+7. If interrupted, run `live-status.mjs` or `live-resume.mjs` before guessing. The private per-app journal replays post-upgrade authenticated work after a helper restart; pre-upgrade pending actions are retired and require a new trusted-controller decision. The injected `live.js` re-attaches when the page reopens. Fall back to the direct-edit loop only when `live-resume.mjs` reports no active session, never because disconnects felt frequent.
 8. On `exit`: run the cleanup at the bottom.
 
 Harness policy:
@@ -55,15 +55,15 @@ LOOP:
 node .github/skills/impeccable/scripts/live.mjs
 ```
 
-Output JSON: `{ ok, serverPort, serverToken, pageFiles, roots, hasProduct, product, productPath, hasDesign, design, designPath, hasSurfaceBrief, surfaceBrief }`. `roots` is the resolved root manifest; `projectRoot` mirrors `roots.appRoot`. The surface brief rides along; do not shell out to `surface-brief.mjs` separately. Precedence for generation: **DESIGN.md wins on visual decisions; PRODUCT.md wins on durable product and voice decisions; the surface brief wins on this surface's strategy.** When DESIGN.md is missing, identity is **not** absent; extract it from CSS variables, computed styles, and sibling components (Step 4 Phase A). Identity preservation is the default; departure requires the user's explicit redesign intent.
+Output JSON: `{ ok, serverPort, controllerUrl, pageFiles, roots, hasProduct, product, productPath, hasDesign, design, designPath, hasSurfaceBrief, surfaceBrief }`. `roots` is the resolved root manifest; `projectRoot` mirrors `roots.appRoot`. The surface brief rides along; do not shell out to `surface-brief.mjs` separately. Precedence for generation: **DESIGN.md wins on visual decisions; PRODUCT.md wins on durable product and voice decisions; the surface brief wins on this surface's strategy.** When DESIGN.md is missing, identity is **not** absent; extract it from CSS variables, computed styles, and sibling components (Step 4 Phase A). Identity preservation is the default; departure requires the user's explicit redesign intent.
 
-`serverPort`/`serverToken` belong to the small helper HTTP server (`/live.js`, SSE, `/poll`), not your dev server; the page URL is whatever origin serves a `pageFiles` entry.
+`serverPort` belongs to the small helper HTTP server, not your dev server; the page URL is whatever origin serves a `pageFiles` entry. Open `controllerUrl` only in a separate trusted local browser tab. It contains the controller credential in a URL fragment and must never be embedded in or forwarded to the inspected page. `live.mjs` injects a distinct page-only token for `/live.js` and SSE automatically. Agent polling obtains its controller credential from the private server record; do not pass `controllerUrl` to page code.
 
 If output is `{ ok: false, error: "config_missing" | "config_invalid", path }`, this project needs one-time configuration: read [live-setup.md](live-setup.md) and follow it. If the output carries a non-null `configDrift`, tell the user once which HTML files are uncovered and suggest adding them or switching `files` to a glob; never auto-edit the config.
 
 ## Recovery commands
 
-The append-only journal under `.impeccable/live/sessions/` is canonical durable state (not project source). When the chat was interrupted, polling was missed, the helper restarted, or the browser reloaded:
+The append-only journal is canonical durable state in an owner-only per-app directory outside the dev-served project, keyed to the app's absolute real path. Moving/renaming the app requires locating and manually relocating that private state; use the commands below for normal recovery. On upgrade, old `.impeccable/live/sessions/` records are moved there before the helper starts; a migration error stops startup and names the records to recover. If the app root contains the user data directory, the private state falls back to OS temporary storage and may not survive cleanup/reboot (the startup warning says so). When the chat was interrupted, polling was missed, the helper restarted, or the browser reloaded:
 
 ```bash
 node .github/skills/impeccable/scripts/live-status.mjs      # helper state, active sessions, queued events; works with the helper down
@@ -71,7 +71,7 @@ node .github/skills/impeccable/scripts/live-resume.mjs --id SESSION_ID   # activ
 node .github/skills/impeccable/scripts/live-complete.mjs --id SESSION_ID # canonical manual final acknowledgement after verified cleanup
 ```
 
-Server restart rule: start `live-server.mjs` again, then poll; startup requeues unacknowledged events, so never ask the user to click Go again unless `live-resume.mjs` says no active session exists.
+Server restart rule: start `live-server.mjs` again, then poll. It requeues only actions authenticated by the new trusted controller; legacy pending events are preserved in the journal but retired with a diagnostic. If `live-resume.mjs` reports one of those, ask the user to start a new action in the trusted controller.
 
 ## Handle `generate`
 
@@ -91,7 +91,7 @@ node .github/skills/impeccable/scripts/live-insert.mjs --id EVENT_ID --count EVE
   --element-id "ANCHOR_ID" --classes "class1,class2" --tag "section" --text "ANCHOR_TEXT"
 ```
 
-`--position` ← `event.insert.position`; anchor flags map exactly like wrap's. The scaffold has **no** `data-impeccable-variant="original"`; variants are net-new HTML+CSS at `insertLine`. On source-preview targets the scaffold carries `sourceWritten: false` with `wrapperBlock` and `replaceEndLine < replaceStartLine` (an insertion): splice variants into `wrapperBlock` at the marker and insert at `replaceStartLine` in ONE edit, exactly as the wrap section describes. Decide the visitor mode from the surface and load [craft-floor.md](craft-floor.md) before writing net-new markup. Svelte targets follow the same component flow as wrap below (`mode: "insert"` in the manifest): each variant is a real single-root component under `componentDir` with no `data-impeccable-*` attributes; never edit the route during generation; accept splices the chosen markup into `sourceFile` mechanically. For non-Svelte targets, accept/discard removes the wrapper; the anchor is untouched.
+`--position` ← `event.insert.position`; anchor flags map exactly like wrap's. The scaffold has **no** `data-impeccable-variant="original"`; variants are net-new HTML+CSS at `insertLine`. The scaffold carries `sourceWritten: false` with `wrapperBlock` and `replaceEndLine < replaceStartLine` (an insertion): splice variants into `wrapperBlock` at the marker and insert at `replaceStartLine` in ONE edit, exactly as the wrap section describes. Decide the visitor mode from the surface and load [craft-floor.md](craft-floor.md) before writing net-new markup. Svelte/SvelteKit also use this source-preview path: author Svelte-valid variant markup inside the wrapper, then let normal HMR display it. Accept/discard removes the wrapper; the anchor is untouched.
 
 ### Replace mode (default)
 
@@ -105,7 +105,7 @@ Annotation semantics: a comment's `{x, y}` is element-local and binds the text t
 
 When `event.scaffold` is present, the helper already found the source and computed the wrapper; treat it as the successful output and skip the command. `event.scaffoldAttempted` with `scaffoldError` means preflight could not finish; use the command below.
 
-**On source-preview targets `event.scaffold` carries `sourceWritten: false`.** The helper did NOT write the wrapper; it hands you `scaffold.wrapperBlock` plus the picked element's source range (`replaceStartLine`, `replaceEndLine`, 1-indexed). Write the wrapper **and** all variants in ONE edit: splice your variants into `wrapperBlock` at the "Variants: insert below this line" marker, then replace lines `[replaceStartLine, replaceEndLine]` with the result. A separate scaffold write reloads the framework before your variant write lands and strands the browser at 0/N. (`replaceEndLine < replaceStartLine` means insert mode: insert, remove nothing.) The `svelte-component` path never sets `sourceWritten`.
+**`event.scaffold` carries `sourceWritten: false`.** The helper did NOT write the wrapper; it hands you `scaffold.wrapperBlock` plus the picked element's source range (`replaceStartLine`, `replaceEndLine`, 1-indexed). Write the wrapper **and** all variants in ONE edit: splice your variants into `wrapperBlock` at the "Variants: insert below this line" marker, then replace lines `[replaceStartLine, replaceEndLine]` with the result. A separate scaffold write reloads the framework before your variant write lands and strands the browser at 0/N. (`replaceEndLine < replaceStartLine` means insert mode: insert, remove nothing.)
 
 ```bash
 node .github/skills/impeccable/scripts/live-wrap.mjs --id EVENT_ID --count EVENT_COUNT --element-id "ELEMENT_ID" --classes "class1,class2" --tag "div" --text "TEXT_SNIPPET"
@@ -115,16 +115,7 @@ Flag mapping (keep separate, never collapse into `--query`): `--element-id` ← 
 
 Success output: `{ file, insertLine, commentSyntax, styleMode, styleTag, cssSelectorPrefixExamples, cssAuthoring }` (plus the `sourceWritten: false` fields above on source-preview targets). Run directly with no preflight scaffold, it writes the wrapper itself and you splice variants at `insertLine`. `styleMode` controls how preview CSS must be authored. Treat it as a detected capability mode, not a framework guess: `scoped` means `@scope ([data-impeccable-variant="N"])` rules; `astro-global-prefixed` means explicit `[data-impeccable-variant="N"]` prefixes with the exact returned `styleTag`. Use `cssAuthoring` as the source of truth for the current file (styleTag, selector strategy, requirements, forbidden patterns); apply no framework-specific exception unless it says to.
 
-For Svelte/SvelteKit targets, `live-wrap.mjs` returns `previewMode: "svelte-component"` with `file` pointing at a temporary `node_modules/.impeccable-live/<id>/manifest.json`, `componentDir` holding the variant components, and `sourceFile` the real route. The scaffold is AST-based: control-flow blocks (`{#each}`, `{#if}`) survive intact and a free each-collection crosses the contract as ONE structured prop (kind `collection`). The payload includes `componentStubMarkup` (the prop-substituted markup already written into every stub), so do not read the manifest or stubs back. EDIT `v1.svelte`, `v2.svelte`, ... in place; never delete and recreate them; keep the stub's control flow and `propContract` prop names; never flatten a loop into literal items. The stub `<style>` arrives seeded with the source rules that currently style the selection; restyle or delete them freely. On accept, any seeded rule your variant does not re-declare is REMOVED from the source (the preview never applied it, so the user approved a design without it). Use semantic class selectors, no `@scope`, no `data-impeccable-*`. Reply with `--file` set to the manifest path; the browser mounts the compiled components so Svelte HMR does not reset page state. Accept merges the chosen component back mechanically (markup restored to route expressions, CSS reconciled, params baked, indentation preserved); you have no post-accept cleanup on this path. When the selection contains constructs a detached preview cannot support (component tags, `bind:`/`use:`, await blocks, inline scripts, spread attributes), wrap returns the normal source-preview wrapper with `previewFallback: { from: "svelte-component", reason }`; just follow the returned shape.
-
-**Params on component-preview paths go in a sidecar, never as an attribute** (Svelte parses `{` in attribute values as an expression). Declare them in `componentDir/params.json` keyed by variant number, using the schema from section 7:
-
-```json
-{ "1": [ {"id":"density","kind":"steps","default":"snug","label":"Density","options":[
-    {"value":"airy","label":"Airy"},{"value":"snug","label":"Snug"} ]} ] }
-```
-
-Author the component `<style>` against `var(--p-<id>, default)` for `range`/`toggle` and `[data-p-<id>="…"]` for `steps`, wrapped in `:global(...)` so runtime knob values on the mounted root reach your rules.
+Svelte/SvelteKit currently use the same source-preview/HMR scaffold as other routes. The old detached-component manifest exposed unrendered route source to inspected-page JavaScript, so do not create or publish component stubs/manifests under `node_modules/.impeccable-live`. Write valid Svelte markup and scoped CSS into the returned wrapper. HMR may reset component-local state; this is the explicit safety tradeoff until a page-safe preview contract is built. The old source-derived `/page-preview` recovery endpoint is disabled. If HMR misses completed variants, the browser may reload the route once, then gives manual recovery guidance instead of fetching source into the inspected page. Staged copy edits are not substituted into Generate scaffolds: they require a separate digest-reviewed Apply in the trusted controller.
 
 **Fallback errors.** Wrap refuses to write into non-source files (generated, untracked): accepting into one is silent data loss. Three shapes, all with `fallback: "agent-driven"` (see **Handle fallback**): `file_is_generated` (your `--file` points at a generated file), `element_not_in_source` with `generatedMatch` (element only exists generated), `element_not_found` (likely runtime-injected).
 
@@ -176,7 +167,7 @@ Sources in priority order: DESIGN.md's visual system fields; CSS custom properti
 
 ### 6. Deliver variants
 
-Complete HTML replacement of the original element per variant, not a CSS-only patch. Colocate preview CSS as a `<style>` tag inside the wrapper. **Atomic default:** CSS + all variants + parameter manifests in one edit at `insertLine`.
+Complete HTML replacement of the original element per variant, not a CSS-only patch. Colocate preview CSS as a `<style>` tag inside the wrapper. **Atomic default:** CSS + all variants + parameter declarations in one edit at `insertLine`.
 
 ```html
 <!-- Variants: insert below this line -->
@@ -224,7 +215,7 @@ Budget scales with the element's VISUAL weight (count visual children, not DOM d
 
 **Hard cap: four** per variant. For named sub-commands, the action reference's MUST params are non-negotiable when expressible; respect the cap, no duplicate knobs.
 
-**Declare** on the HTML/JSX path as a wrapper attribute (component-preview paths use `componentDir/params.json` instead, same schema, keyed by variant number; see the wrap section):
+**Declare** on the source-preview wrapper as an attribute:
 
 ```html
 <div data-impeccable-variant="1" data-impeccable-params='[
@@ -243,7 +234,7 @@ Three kinds: `range` (slider; drives `--p-<id>`; author `var(--p-color-amount, 0
 node .github/skills/impeccable/scripts/live-poll.mjs --reply EVENT_ID done --file RELATIVE_PATH
 ```
 
-`RELATIVE_PATH` is relative to project root; the browser fetches source directly if the dev server lacks HMR. Then poll again immediately.
+`RELATIVE_PATH` is relative to project root. The browser uses normal HMR; if the completed source-preview wrapper still has not appeared, it can perform one tab-scoped full route reload after a grace period. This keeps source bytes out of inspected-page JavaScript but may reset page/component-local state. A second miss shows manual-reload/trusted-controller guidance instead of looping. Then poll again immediately.
 
 ### Aborting an in-flight session
 
@@ -296,11 +287,11 @@ Event: `{pageUrl}`: fired once per route on first selection; the user is likely 
 
 ## Handle `manual_edit_apply`
 
-Event: `{id, pageUrl, batch: {entries}, evidencePath?, chunk?, repair?, deadlineMs}`.
+Event: `{id, pageUrl, batch: {entries}, evidencePath?, chunk?, repair?, deadlineMs}`. The batch is in the poll response. `evidencePath` is private outside the workspace; when extra candidate/source context is needed, run `node .github/skills/impeccable/scripts/live-poll.mjs --evidence EVENT_ID` to print it through the trusted helper. Do not try to open the private path with a workspace file tool.
 
 The user already clicked Apply. Do not ask what to do, discard, or redirect to Go. The parent live thread keeps the foreground poll loop and sends the final `/poll --reply --data`.
 
-When native subagents are available, delegate source edits to `impeccable_manual_edit_applier` / `impeccable-manual-edit-applier`. Pass cwd, scripts path, event id, page URL, chunk/deadline, `batch`, `evidencePath`, and the canonical JSON result schema. The subagent must not poll or reply. If unavailable, apply inline with the same contract.
+When native subagents are available, delegate source edits to `impeccable_manual_edit_applier` / `impeccable-manual-edit-applier`. Pass cwd, scripts path, event id, page URL, chunk/deadline, `batch`, any fetched evidence, and the canonical JSON result schema. The subagent must not poll or reply. If unavailable, apply inline with the same contract.
 
 If `repair` is present, the previous Apply changed source but final validation failed. Fix the current source and return the same canonical JSON result; do not roll files back yourself. The browser will ask the user before any rollback.
 

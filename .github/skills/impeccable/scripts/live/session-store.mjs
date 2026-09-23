@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLegacyLiveSessionsDir, getLiveSessionsDir, safeSessionId } from '../lib/impeccable-paths.mjs';
+import { getLiveSessionsDir, safeSessionId } from '../lib/impeccable-paths.mjs';
 import { COMPLETED_SESSION_PHASES, GENERATION_FENCED_SESSION_PHASES } from './vocabulary.mjs';
 
 const COMPLETED_PHASES = new Set(COMPLETED_SESSION_PHASES);
@@ -23,8 +23,11 @@ const META_NEXT_SEQ = '__nextSeq';
 
 export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) {
   const rootDir = getLiveSessionsDir(cwd);
-  const legacyRootDir = getLegacyLiveSessionsDir(cwd);
-  fs.mkdirSync(rootDir, { recursive: true });
+  fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+  const rootStat = fs.lstatSync(rootDir);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o077) !== 0) {
+    throw new Error(`Private Live session directory is not owner-only: ${rootDir}`);
+  }
 
   // Derived state per session, keyed by what the journal looked like when it was
   // derived. Publisher/complete helpers append from other processes, so the key
@@ -36,11 +39,7 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
   const derived = new Map();
 
   function getReadableJournalPath(id) {
-    const primary = getJournalPath(rootDir, id);
-    if (fs.existsSync(primary)) return primary;
-    const legacy = getJournalPath(legacyRootDir, id);
-    if (fs.existsSync(legacy)) return legacy;
-    return primary;
+    return getJournalPath(rootDir, id);
   }
 
   /**
@@ -90,17 +89,9 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
 
   return {
     rootDir,
-    legacyRootDir,
     appendEvent(event) {
       const normalized = normalizeEvent(event, sessionId);
       const journalPath = getJournalPath(rootDir, normalized.id);
-      const legacyJournalPath = getJournalPath(legacyRootDir, normalized.id);
-      if (!fs.existsSync(journalPath) && fs.existsSync(legacyJournalPath)) {
-        fs.copyFileSync(legacyJournalPath, journalPath);
-        // The readable path just moved from legacy to primary; anything derived
-        // against the old path describes a file this session no longer reads.
-        derived.delete(normalized.id);
-      }
       // Reuse the derived state when the journal has not changed under us, and
       // apply the new event on top of it. Correctness still comes from the
       // journal: any append from another process invalidates the entry above
@@ -114,13 +105,13 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         ts: new Date().toISOString(),
         event: normalized,
       };
-      fs.appendFileSync(journalPath, JSON.stringify(entry) + '\n');
+      fs.appendFileSync(journalPath, JSON.stringify(entry) + '\n', { mode: 0o600 });
       const next = applyEvent(prior.snapshot, entry);
       persist(normalized.id, next, prior.nextSeq + 1);
       return next;
     },
     /**
-     * True when a journal exists for the id in either root. appendEvent
+     * True when a private journal exists for the id. appendEvent
      * CREATES a journal for any id it is handed, so callers that should only
      * ever touch existing sessions (browser checkpoints, mount acks) check
      * here first — otherwise a stale id from another project's browser
@@ -128,8 +119,7 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
      */
     has(id) {
       if (!id || typeof id !== 'string') return false;
-      return fs.existsSync(getJournalPath(rootDir, id))
-        || fs.existsSync(getJournalPath(legacyRootDir, id));
+      return fs.existsSync(getJournalPath(rootDir, id));
     },
     /**
      * Read-only. `live-status` and `live-resume` call this against a session a
@@ -156,7 +146,7 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
     },
     listActiveSessions() {
       const ids = new Set();
-      for (const dir of [legacyRootDir, rootDir]) {
+      for (const dir of [rootDir]) {
         if (!fs.existsSync(dir)) continue;
         for (const name of fs.readdirSync(dir)) {
           if (name.endsWith('.jsonl')) ids.add(name.slice(0, -'.jsonl'.length));
@@ -230,6 +220,12 @@ function baseSnapshot(id) {
     sourceFile: null,
     previewFile: null,
     previewMode: null,
+    // Only agent-published paths may authorize the inspected page's narrow
+    // preview endpoint. Browser checkpoints can report paths for recovery but
+    // can never promote them into this provenance boundary.
+    publishedSourceFile: null,
+    publishedPreviewFile: null,
+    publishedPreviewMode: null,
     expectedVariants: 0,
     arrivedVariants: 0,
     visibleVariant: null,
@@ -338,6 +334,9 @@ function applyEvent(snapshot, entry) {
       next.mountedVariants = [];
       next.mountFailures = [];
       next.renderState = null;
+      next.publishedSourceFile = null;
+      next.publishedPreviewFile = null;
+      next.publishedPreviewMode = null;
       if (event.screenshotPath) upsertArtifact(next.annotationArtifacts, { type: 'screenshot', path: event.screenshotPath });
       break;
     case 'variant_plan':
@@ -382,6 +381,9 @@ function applyEvent(snapshot, entry) {
       next.sourceFile = event.sourceFile ?? event.file ?? next.sourceFile;
       next.previewFile = event.previewFile ?? next.previewFile;
       next.previewMode = event.previewMode ?? next.previewMode;
+      next.publishedSourceFile = event.sourceFile ?? event.file ?? next.publishedSourceFile;
+      next.publishedPreviewFile = event.previewFile ?? next.publishedPreviewFile;
+      next.publishedPreviewMode = event.previewMode ?? next.publishedPreviewMode;
       next.arrivedVariants = event.arrivedVariants ?? (next.expectedVariants || next.arrivedVariants || 0);
       next.pendingEventSeq = null;
       next.pendingEvent = null;
@@ -499,6 +501,9 @@ function applyEvent(snapshot, entry) {
       next.sourceFile = event.sourceFile ?? event.file ?? next.sourceFile;
       next.previewFile = event.previewFile ?? next.previewFile;
       next.previewMode = event.previewMode ?? next.previewMode;
+      next.publishedSourceFile = event.sourceFile ?? event.file ?? next.publishedSourceFile;
+      next.publishedPreviewFile = event.previewFile ?? next.publishedPreviewFile;
+      next.publishedPreviewMode = event.previewMode ?? next.publishedPreviewMode;
       next.message = event.message ?? next.message;
       next.pendingEventSeq = null;
       next.pendingEvent = null;
@@ -521,6 +526,9 @@ function applyEvent(snapshot, entry) {
       next.sourceFile = event.sourceFile ?? event.file ?? next.sourceFile;
       next.previewFile = event.previewFile ?? next.previewFile;
       next.previewMode = event.previewMode ?? next.previewMode;
+      next.publishedSourceFile = event.sourceFile ?? event.file ?? next.publishedSourceFile;
+      next.publishedPreviewFile = event.previewFile ?? next.publishedPreviewFile;
+      next.publishedPreviewMode = event.previewMode ?? next.publishedPreviewMode;
       next.pendingEventSeq = null;
       next.pendingEvent = null;
       break;
@@ -533,6 +541,16 @@ function applyEvent(snapshot, entry) {
       next.pendingEventSeq = null;
       next.pendingEvent = null;
       next.diagnostics.push({ error: 'agent_error', message: event.message || 'unknown agent error' });
+      break;
+    case 'pending_event_retired':
+      // Upgrade fence: old page-authored pending work is kept in the journal
+      // for recovery/audit, but cannot be replayed into a new trusted helper.
+      if (next.pendingEvent?.type !== event.retiredType) break;
+      next.pendingEventSeq = null;
+      next.pendingEvent = null;
+      next.phase = 'agent_error';
+      next.diagnostics.push({ error: 'untrusted_legacy_pending_action', type: event.retiredType,
+        message: 'Start a new action from the trusted controller.' });
       break;
     default:
       next.diagnostics.push({ error: 'unknown_event_type', type: event.type });
@@ -559,5 +577,5 @@ function writeSnapshot(snapshotPath, snapshot, meta) {
     [META_JOURNAL_BYTES]: meta?.journalBytes ?? -1,
     [META_NEXT_SEQ]: meta?.nextSeq ?? 1,
   };
-  fs.writeFileSync(snapshotPath, JSON.stringify(payload, null, 2) + '\n');
+  fs.writeFileSync(snapshotPath, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 });
 }

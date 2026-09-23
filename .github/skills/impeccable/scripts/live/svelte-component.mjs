@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   analyzeSvelteMarkup,
   buildPropsScriptV2,
@@ -43,12 +43,123 @@ export const LEGACY_SVELTE_COMPONENT_ROOT = '.impeccable/live/previews';
 export const SVELTE_RUNTIME_FILE = `${SVELTE_COMPONENT_ROOT}/__runtime.js`;
 export const SVELTE_PROBE_FILE = `${SVELTE_COMPONENT_ROOT}/__probe.js`;
 export const DEFERRED_ACCEPTS_FILE = '.impeccable/live/deferred-svelte-component-accepts.json';
+const SVELTE_RUNTIME_SOURCE = "export { mount, unmount } from 'svelte';\n";
+const SVELTE_PROBE_SOURCE = 'export const impeccableLivePreviewProbe = true;\n';
 
 const MUSTACHE_RE = /\{([^{}]+)\}/g;
 
 export function shouldUseSvelteComponentInjection(filePath) {
-  if (/^(0|false|no)$/i.test(process.env.IMPECCABLE_LIVE_SVELTE_COMPONENT || '')) return false;
-  return path.extname(filePath).toLowerCase() === '.svelte';
+  // Detached previews need a manifest containing unrendered route markup and
+  // expressions. Until a page-safe hydration contract exists, source-preview
+  // HMR is the only supported Svelte path; no environment flag may restore
+  // the unsafe page-visible manifest.
+  return false;
+}
+
+/**
+ * Retire prior-version detached sessions before serving a new controller.
+ * Their manifest and stub components include route source that Vite may serve
+ * directly from node_modules, even when this server denies /page-preview.
+ * The two reserved preview roots are not used by the source-preview flow.
+ * Move each whole generated root to private storage outside the app root:
+ * partial manifests, orphan files, and nested crash remnants then leave the
+ * dev-served tree atomically without parsing or traversing them.
+ */
+export function quarantineLegacySvelteComponentSessions(cwd, privateRoot) {
+  const realApp = fs.realpathSync(cwd);
+  const realFuturePath = (candidate) => {
+    let ancestor = path.resolve(candidate);
+    const missing = [];
+    while (!fs.existsSync(ancestor)) {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw new Error(`Cannot resolve quarantine path: ${candidate}`);
+      missing.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+    return path.join(fs.realpathSync(ancestor), ...missing);
+  };
+  const outsideApp = (candidate) => {
+    const relative = path.relative(realApp, candidate);
+    return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  };
+  if (!outsideApp(realFuturePath(privateRoot))) {
+    throw new Error(`Svelte quarantine must be outside the app root: ${privateRoot}`);
+  }
+  const candidates = [];
+  for (const rootRel of [SVELTE_COMPONENT_ROOT, LEGACY_SVELTE_COMPONENT_ROOT]) {
+    let component = realApp;
+    const segments = rootRel.split('/');
+    for (const segment of segments.slice(0, -1)) {
+      component = path.join(component, segment);
+      let stat;
+      try { stat = fs.lstatSync(component); } catch (error) {
+        if (error?.code === 'ENOENT') break;
+        throw error;
+      }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error(`Unsafe Svelte preview path component: ${component}`);
+      }
+    }
+    const root = path.join(cwd, rootRel);
+    let rootStat;
+    try { rootStat = fs.lstatSync(root); } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    if ((!rootStat.isDirectory() && !rootStat.isSymbolicLink())
+        || (typeof process.getuid === 'function' && rootStat.uid !== process.getuid())) {
+      throw new Error(`Unsafe Svelte preview root: ${root}`);
+    }
+    if (rootStat.isDirectory() && outsideApp(fs.realpathSync(root))) {
+      throw new Error(`Svelte preview root escapes the app: ${root}`);
+    }
+    // A symlink at the exact reserved root is renamed as a symlink (no
+    // traversal), removing its dev-server entry. Symlinked ancestors remain
+    // forbidden because they would re-root this path outside the app.
+    candidates.push({ source: root, rootRel, id: 'generated-root' });
+  }
+  for (const source of new Set([
+    deferredAcceptsPath(cwd), path.join(cwd, DEFERRED_ACCEPTS_FILE),
+  ])) {
+    let stat;
+    try { stat = fs.lstatSync(source); } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()
+        || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      throw new Error(`Unsafe legacy Svelte deferred-accept record: ${source}`);
+    }
+    candidates.push({ source, rootRel: null, id: 'deferred-accepts' });
+  }
+  if (candidates.length === 0) return [];
+  for (const dir of [privateRoot, path.join(privateRoot, 'legacy-svelte-quarantine')]) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!outsideApp(fs.realpathSync(dir))) {
+      throw new Error(`Svelte quarantine resolves inside the app root: ${dir}`);
+    }
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+        || (stat.mode & 0o077) !== 0
+        || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      throw new Error(`Svelte quarantine directory is not private: ${dir}`);
+    }
+  }
+  const quarantined = [];
+  for (const { source, rootRel, id } of candidates) {
+    const destination = path.join(privateRoot, 'legacy-svelte-quarantine',
+      `${rootRel === SVELTE_COMPONENT_ROOT ? 'node' : rootRel ? 'legacy' : 'record'}-${id}-${randomUUID()}${rootRel ? '' : '.json'}`);
+    // Same-filesystem rename preserves the entire prior session for recovery.
+    // EXDEV or any other failure aborts startup rather than serving raw source.
+    try {
+      fs.renameSync(source, destination);
+    } catch (error) {
+      const recovered = quarantined.map((item) => `${item.source} -> ${item.destination}`).join('; ');
+      throw new Error(`Svelte quarantine failed for ${source}; already preserved: ${recovered || 'none'}`, { cause: error });
+    }
+    quarantined.push({ source, destination, id });
+  }
+  return quarantined;
 }
 
 export function componentSessionDir(id, cwd = process.cwd()) {
@@ -63,7 +174,7 @@ export function ensureRuntimeHelper(cwd = process.cwd()) {
   const file = path.join(cwd, SVELTE_RUNTIME_FILE);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, `export { mount, unmount } from 'svelte';\n`, 'utf-8');
+    fs.writeFileSync(file, SVELTE_RUNTIME_SOURCE, 'utf-8');
   }
   // Attach-time probe: the browser imports this through the dev server before
   // the first mount. A 404 here means the resolved app root and the dev
@@ -71,7 +182,7 @@ export function ensureRuntimeHelper(cwd = process.cwd()) {
   // of a silent fall-back to the picker at first variant.
   const probe = path.join(cwd, SVELTE_PROBE_FILE);
   if (!fs.existsSync(probe)) {
-    fs.writeFileSync(probe, `export const impeccableLivePreviewProbe = true;\n`, 'utf-8');
+    fs.writeFileSync(probe, SVELTE_PROBE_SOURCE, 'utf-8');
   }
   return file;
 }

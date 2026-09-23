@@ -47,7 +47,8 @@ Prepare everything for live variant mode in a single command:
   - In monorepos, choose a child app first; --target <path> is the fallback/manual path
 
 On success, prints a JSON blob with:
-  { ok, serverPort, serverToken, pageFiles, projectRoot, repoRoot, targetPath, productPath, designPath }
+  { ok, serverPort, controllerUrl, pageFiles, projectRoot, repoRoot, targetPath, productPath, designPath }
+  controllerUrl is trusted local UI. Never embed it or its credential in the inspected page.
 
 On target_selection_required, prints:
   { ok: false, error: "target_selection_required", targetCandidates }
@@ -136,14 +137,14 @@ The agent should then:
   // 2. Start server (or reuse existing)
   const serverInfo = ensureServerRunning(activeCwd);
   if (!serverInfo) {
-    console.log(JSON.stringify({ ok: false, error: 'server_start_failed' }));
+    console.log(JSON.stringify({ ok: false, error: 'server_start_failed', detail: lastServerStartError || undefined }));
     process.exit(1);
   }
 
   // 3. Inject the script tag at the current port
   const injectOut = runScript(
     'live-inject.mjs',
-    ['--port', String(serverInfo.port), '--token', String(serverInfo.token)],
+    ['--port', String(serverInfo.port), '--token', String(serverInfo.pageToken)],
     { cwd: activeCwd },
   );
   const injectResult = safeParse(injectOut);
@@ -188,7 +189,7 @@ The agent should then:
   console.log(JSON.stringify({
     ok: true,
     serverPort: serverInfo.port,
-    serverToken: serverInfo.token,
+    controllerUrl: `http://localhost:${serverInfo.port}/control#token=${encodeURIComponent(serverInfo.token)}`,
     pageFiles: resolvedFiles,
     liveConfigPath: checkResult.path,
     configDrift: drift,
@@ -338,6 +339,7 @@ function safeParse(out) {
 /**
  * Return { pid, port, token } for the running live server, starting one if needed.
  */
+let lastServerStartError = null;
 function ensureServerRunning(cwd = process.cwd()) {
   // Try to reuse an existing server
   try {
@@ -345,14 +347,25 @@ function ensureServerRunning(cwd = process.cwd()) {
     if (existing && existing.pid) {
       try {
         process.kill(existing.pid, 0); // throws if dead
+        if (!existing.token || !existing.pageToken) {
+          console.error('An older Impeccable live server is running. Stop it and restart live mode to separate page and controller credentials.');
+          return null;
+        }
         return existing;
       } catch { /* stale PID file — the server script will clean it up */ }
     }
   } catch { /* no PID file */ }
 
   // Start a new server
-  const out = runScript('live-server.mjs', ['--background'], { cwd });
-  return safeParse(out);
+  try {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'live-server.mjs'), '--background'], {
+      encoding: 'utf-8', cwd, timeout: 15_000,
+    });
+    return safeParse(out);
+  } catch (error) {
+    lastServerStartError = String(error.stderr || error.stdout || error.message || '').trim().slice(0, 4000);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
