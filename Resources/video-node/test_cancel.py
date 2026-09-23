@@ -110,6 +110,11 @@ class CancellationTests(unittest.TestCase):
             self.assertEqual((status, answer["cancel"], answer["status"]), (200, "cancelled", "cancelled"))
         self.assertEqual(self.signals, [])
         self.assertEqual(render.public_job(job_id)["cancel"]["state"], "cancelled")
+        # A cancelled job delivered nothing, so it claims no delivered size.
+        delivery = render.public_job(job_id)["delivery"]
+        self.assertIs(delivery["delivered"], False)
+        self.assertNotIn("width", delivery)
+        self.assertNotIn("matches_request", delivery)
         # The worker skips it rather than starting a renderer.
         with patch.object(node.subprocess, "Popen") as popen:
             render.start()
