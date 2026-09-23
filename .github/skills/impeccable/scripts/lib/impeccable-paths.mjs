@@ -61,16 +61,20 @@ export function getLiveControllerPath(cwd = process.cwd(), options = {}) {
   const digest = createHash('sha256').update(root).digest('hex');
   const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
   // A project itself can live at the OS temp root. Never choose a credential
-  // directory that the inspected project's dev server could serve.
-  const outside = [os.tmpdir(), os.homedir()]
+  // directory that the inspected project's dev server could serve. Judge the
+  // directory the file lands in, not its parent: a project named exactly
+  // `impeccable-live-<uid>` under a candidate would otherwise hold its own
+  // controller credential.
+  const directory = [os.tmpdir(), os.homedir()]
     .map((candidate) => { try { return fs.realpathSync(candidate); } catch { return null; } })
+    .map((candidate) => candidate && path.join(candidate, `impeccable-live-${uid}`))
     .find((candidate) => {
       if (!candidate) return false;
       const relative = path.relative(root, candidate);
       return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
     });
-  if (!outside) throw new Error('No private credential directory outside the project root');
-  return path.join(outside, `impeccable-live-${uid}`, `${digest}.controller.json`);
+  if (!directory) throw new Error('No private credential directory outside the project root');
+  return path.join(directory, `${digest}.controller.json`);
 }
 
 function ensurePrivateControllerDirectory(filePath) {

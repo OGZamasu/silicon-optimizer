@@ -275,13 +275,29 @@ function recordPageApprovalOutcome(id, status, body) {
   timer.unref?.();
 }
 
+// Fields the helper and the poll client write for the agent, which trusts
+// them as plumbing: a scaffold names the file and lines to rewrite, and
+// `_instructions` is "the authoritative next step". Approval turns a page
+// proposal into a controller event, so the page must never author these.
+// `token` is the page credential echoed by sendEvent, not proposal content.
+const HELPER_AUTHORED_EVENT_FIELDS = new Set([
+  'scaffold', 'scaffoldAttempted', 'scaffoldDurationMs', 'scaffoldError',
+  'generationReadyAt', 'privateDispatchMac', 'token',
+]);
+
+function pageProposal(msg) {
+  return Object.fromEntries(Object.entries(msg)
+    .filter(([key]) => !key.startsWith('_') && !HELPER_AUTHORED_EVENT_FIELDS.has(key)));
+}
+
 function queuePageApproval(res, msg) {
   const approvalId = randomUUID();
+  const proposal = pageProposal(msg);
   // An Accept must not fall back to mutable checkpoint params after the user
   // has reviewed this exact proposal in the trusted controller.
-  const frozen = msg.type === 'accept' && msg.paramValues === undefined
-    ? { ...msg, paramValues: {} }
-    : msg;
+  const frozen = proposal.type === 'accept' && proposal.paramValues === undefined
+    ? { ...proposal, paramValues: {} }
+    : proposal;
   const bytes = Buffer.byteLength(JSON.stringify(frozen));
   if (bytes > MAX_PAGE_APPROVAL_BYTES) {
     res.writeHead(413, { 'Content-Type': 'application/json' });
@@ -1597,7 +1613,7 @@ function parsePollTypes(value) {
 
 function handlePollGet(req, res, url) {
   const token = url.searchParams.get('token');
-  if (token !== state.token) {
+  if (!tokenMatches(token, state.token)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;

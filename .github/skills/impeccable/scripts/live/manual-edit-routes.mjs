@@ -1,4 +1,5 @@
 import { validateEvent } from './event-validation.mjs';
+import { tokenMatches } from '../lib/http-security.mjs';
 import {
   countByPage as countPendingByPage,
   readBuffer as readManualEditsBuffer,
@@ -79,7 +80,7 @@ export function createManualEditRoutes({
 
     if (p === '/manual-edit-stash' && req.method === 'GET') {
       const token = url.searchParams.get('token');
-      if (token !== getToken()) { res.writeHead(401); res.end('Unauthorized'); return true; }
+      if (!tokenMatches(token, getToken())) { res.writeHead(401); res.end('Unauthorized'); return true; }
       const pageUrl = url.searchParams.get('pageUrl') || '';
       const { totalCount, perPage } = countPendingByPage(projectCwd());
       const buffer = readManualEditsBuffer(projectCwd());
