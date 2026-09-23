@@ -137,7 +137,7 @@ public enum CodexEvent: Sendable {
 /// Manages the Codex sidecar: OpenAI's open-source agent harness, spoken to over its
 /// app-server protocol — newline-delimited JSON-RPC 2.0 on stdio.
 ///
-/// Same isolation story as the DeepSeek Harness: a pinned version launched through npx,
+/// Same isolation story as the DeepSeek Harness: a verified package in an app-private tree,
 /// under an app-private `CODEX_HOME`, so nothing here collides with a codex the user runs
 /// themselves. The model side needs no OpenAI account: the generated config points Codex at
 /// this app's own model gateway as a custom provider.
@@ -146,7 +146,9 @@ public actor CodexRuntime {
     /// Pinned: Codex ships fast and changes its protocol; an untested version must never
     /// arrive silently. Bump deliberately and retest the app-server handshake, approvals,
     /// and the gateway's Responses translation against it.
-    public static let packageSpec = "@openai/codex@0.148.0"
+    public static let packageSpec = AgentPackage.codex.spec
+    /// The earliest Node supported by the audited npm installer; Node 21 is excluded.
+    public static let minimumNodeVersion = (major: 20, minor: 17, patch: 0)
 
     /// The provider id inside the generated Codex config. Permanent once chosen: Codex
     /// threads store model ids against it.
@@ -154,6 +156,9 @@ public actor CodexRuntime {
     public static let gatewayKeyVariable = "SILICON_GATEWAY_KEY"
 
     private var process: Process?
+    private var installedPackage: InstalledAgentPackage?
+    private var installationTask: Task<InstalledAgentPackage, any Error>?
+    private var startupGeneration = 0
     private var stdinPipe: Pipe?
     private var readTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
@@ -277,15 +282,18 @@ public actor CodexRuntime {
         trustedProjectPath: String? = nil,
         onState: @escaping @Sendable (RuntimeState) -> Void
     ) async -> AsyncStream<CodexEvent>? {
-        await stop()
+        let generation = await stopAndGetGeneration()
+        guard generation == startupGeneration else { return nil }
 
-        let discovery = HarnessRuntime.locateNode(customPath: nodePath)
+        let discovery = HarnessRuntime.locateNode(
+            customPath: nodePath, minimumVersion: Self.minimumNodeVersion,
+            requiresNpm11: true
+        )
         guard let node = discovery.node else {
-            let floor = HarnessRuntime.minimumNodeVersion
-            var message = "Codex is launched through npm, which needs Node.js "
-                + "\(floor.major).\(floor.minor) or newer. "
+            var message = "Codex needs Node.js 20.17 or newer within the 20.x line, "
+                + "or Node.js 22.9 or newer, with npm 11.19 or newer. "
             if let path = discovery.rejectedPath, let version = discovery.rejectedVersion {
-                message += "Found \(version) at \(path), which is too old. "
+                message += "Found \(version) at \(path), which is incompatible. "
             } else {
                 message += "None was found. "
             }
@@ -308,12 +316,29 @@ public actor CodexRuntime {
         }
 
         onState(.starting(stage:
-            "Starting Codex… the first run downloads it and can take a few minutes."))
+            "Verifying Codex… the first run downloads it and can take a few minutes."))
 
-        let npx = node.deletingLastPathComponent().appendingPathComponent("npx")
+        let installed: InstalledAgentPackage
+        do {
+            let task = Task { try await AgentPackageInstaller.install(.codex, node: node) }
+            installationTask = task
+            installed = try await task.value
+        } catch {
+            if generation == startupGeneration { installationTask = nil }
+            guard generation == startupGeneration else { return nil }
+            onState(.failed(message: error.localizedDescription))
+            return nil
+        }
+        if generation == startupGeneration { installationTask = nil }
+        guard generation == startupGeneration else {
+            try? FileManager.default.removeItem(at: installed.directory)
+            return nil
+        }
+        installedPackage = installed
+
         let process = Process()
-        process.executableURL = npx
-        process.arguments = ["--yes", Self.packageSpec, "app-server"]
+        process.executableURL = node
+        process.arguments = [installed.bin.path, "app-server"]
         process.environment = [
             "CODEX_HOME": home.path,
             "PATH": "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin",
@@ -337,8 +362,11 @@ public actor CodexRuntime {
         do {
             try process.run()
         } catch {
-            onState(.failed(message: error.localizedDescription))
-            eventContinuation = nil
+            let message = error.localizedDescription
+            await stop()
+            if startupGeneration == generation + 1 {
+                onState(.failed(message: message))
+            }
             return nil
         }
         self.process = process
@@ -347,7 +375,7 @@ public actor CodexRuntime {
         ChildProcessRegistry.register(pid: process.processIdentifier)
 
         process.terminationHandler = { [weak self] _ in
-            Task { await self?.handleTermination() }
+            Task { await self?.handleTermination(generation: generation) }
         }
 
         // Plain readabilityHandler reading, not FileHandle.bytes: AsyncBytes on these pipes
@@ -368,8 +396,7 @@ public actor CodexRuntime {
             }
         }
 
-        // The handshake proves the binary is really up — npx may spend minutes
-        // downloading first — and unlocks every other method.
+        // The handshake proves the verified binary is up and unlocks every other method.
         do {
             _ = try await send(method: "initialize", params: [
                 "clientInfo": [
@@ -379,41 +406,72 @@ public actor CodexRuntime {
                 ],
                 "capabilities": ["experimentalApi": true],
             ], timeout: 600)
+            guard generation == startupGeneration else { return nil }
             notify(method: "initialized", params: .object([:]))
         } catch {
-            onState(.failed(message:
-                "Codex did not answer the handshake: \(error.localizedDescription)"
-                + diagnosticSuffix()))
+            guard generation == startupGeneration else { return nil }
+            let message = "Codex did not answer the handshake: \(error.localizedDescription)"
+                + diagnosticSuffix()
             await stop()
+            if startupGeneration == generation + 1 {
+                onState(.failed(message: message))
+            }
             return nil
         }
 
+        guard generation == startupGeneration else { return nil }
         onState(.ready(endpoint: URL(string: "codex://app-server")!))
         return events
     }
 
     public func stop() async {
+        _ = await stopAndGetGeneration()
+    }
+
+    private func stopAndGetGeneration() async -> Int {
+        startupGeneration &+= 1
+        let generation = startupGeneration
+        installationTask?.cancel()
+        installationTask = nil
         readTask?.cancel()
         stderrTask?.cancel()
         readTask = nil
         stderrTask = nil
-        if let process, process.isRunning {
-            process.terminationHandler = nil
-            process.terminate()
-            ChildProcessRegistry.unregister(pid: process.processIdentifier)
-        }
+        let stoppedProcess = process
+        let stoppedPackage = installedPackage
+        let stoppedPending = pending
+        pending.removeAll()
+        let stoppedContinuation = eventContinuation
+        eventContinuation = nil
+        installedPackage = nil
         process = nil
         stdinPipe = nil
         processIdentifier = nil
-        for (_, continuation) in pending {
+        if let stoppedProcess {
+            stoppedProcess.terminationHandler = nil
+            if stoppedProcess.isRunning {
+                stoppedProcess.terminate()
+                for _ in 0..<50 where stoppedProcess.isRunning {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                if stoppedProcess.isRunning {
+                    kill(stoppedProcess.processIdentifier, SIGKILL)
+                }
+            }
+            ChildProcessRegistry.unregister(pid: stoppedProcess.processIdentifier)
+        }
+        if let stoppedPackage {
+            try? FileManager.default.removeItem(at: stoppedPackage.directory)
+        }
+        for (_, continuation) in stoppedPending {
             continuation.resume(throwing: CodexError.stopped)
         }
-        pending.removeAll()
-        eventContinuation?.finish()
-        eventContinuation = nil
+        stoppedContinuation?.finish()
+        return generation
     }
 
-    private func handleTermination() {
+    private func handleTermination(generation: Int) {
+        guard generation == startupGeneration else { return }
         let message = recentStderr.suffix(4).joined(separator: "\n")
         eventContinuation?.yield(.terminated(message: message.isEmpty ? nil : message))
         eventContinuation?.finish()
@@ -427,6 +485,10 @@ public actor CodexRuntime {
         }
         process = nil
         processIdentifier = nil
+        if let installedPackage {
+            try? FileManager.default.removeItem(at: installedPackage.directory)
+            self.installedPackage = nil
+        }
     }
 
     private func noteStderr(_ line: String) {

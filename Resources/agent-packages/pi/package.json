@@ -1,0 +1,12 @@
+{
+  "name": "silicon-pi-sidecar",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2"
+  },
+  "allowScripts": {
+    "@google/genai@1.52.0": true,
+    "protobufjs@7.6.5": true
+  }
+}
