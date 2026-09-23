@@ -341,7 +341,7 @@ enum SiliconArtifactOutcome silicon_artifact_job_perform(SiliconArtifactJob *job
 #endif
 #define SET(option, value) do { if (curl_easy_setopt(curl, option, value) != CURLE_OK) goto done; } while (0)
     SET(CURLOPT_URL, job->url);
-    SET(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+    SET(CURLOPT_PROTOCOLS_STR, "https");
     SET(CURLOPT_FOLLOWLOCATION, 0L);
     SET(CURLOPT_PROXY, "");
     SET(CURLOPT_NETRC, CURL_NETRC_IGNORED);
