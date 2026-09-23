@@ -83,12 +83,52 @@ public actor CloudAudioRuntime {
     private static let log = Logger(subsystem: "dev.siliconoptimizer", category: "cloud-audio")
     private static let maximumArtifactURLs = 8
     private static let maximumArtifactBytes: Int64 = 256 * 1_024 * 1_024
-    private let session = URLSession(configuration: .default)
-    private var cancelled = false
+    private let session: URLSession
+    private let artifactDownload: ArtifactDownload
+    private var activeJobIDs = Set<UUID>()
+    private var cancelledJobIDs = Set<UUID>()
+    /// Each job's work, so cancelling a job stops the submission, poll or download that is in
+    /// flight instead of waiting for it to come back to a checkpoint.
+    private var work: [UUID: Task<CloudAudioResult, Error>] = [:]
 
-    public init() {}
+    /// Source URL, destination, byte limit, budget and timeout in; the published file out.
+    /// The app always uses the resolved-address transport, which is not URLSession, so a
+    /// test's URLProtocol stub cannot answer it and the tests hand in a local TLS fixture.
+    typealias ArtifactDownload = @Sendable (
+        URL, URL, Int64, RemoteByteBudget, TimeInterval
+    ) async throws -> URL
 
-    public func cancel() { cancelled = true }
+    public init() {
+        session = URLSession(configuration: .default)
+        artifactDownload = { url, destination, maximumBytes, budget, timeout in
+            try await PublicHTTPSArtifactTransfer.download(
+                from: url, to: destination, maximumBytes: maximumBytes, budget: budget,
+                timeout: timeout
+            )
+        }
+    }
+
+    init(session: URLSession, artifactDownload: @escaping ArtifactDownload) {
+        self.session = session
+        self.artifactDownload = artifactDownload
+    }
+
+    public func cancel() {
+        for jobID in activeJobIDs { cancel(jobID: jobID) }
+    }
+
+    /// A delayed cancellation must not stop the next job after the old one has finished.
+    public func cancel(jobID: UUID) {
+        guard activeJobIDs.contains(jobID) else { return }
+        cancelledJobIDs.insert(jobID)
+        work[jobID]?.cancel()
+    }
+
+    private func checkCancellation(jobID: UUID) throws {
+        if cancelledJobIDs.contains(jobID) || Task.isCancelled {
+            throw CloudAudioError.cancelled
+        }
+    }
 
     // MARK: - The wire, kept testable
 
@@ -163,9 +203,46 @@ public actor CloudAudioRuntime {
         _ request: CloudAudioRequest,
         base: URL,
         apiKey: String,
+        jobID: UUID = UUID(),
         onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> CloudAudioResult {
-        cancelled = false
+        guard activeJobIDs.insert(jobID).inserted else {
+            throw CloudAudioError.jobFailed("A cloud audio job already uses this identifier.")
+        }
+        defer {
+            activeJobIDs.remove(jobID)
+            cancelledJobIDs.remove(jobID)
+            work[jobID] = nil
+        }
+        let job = Task {
+            try await run(request, base: base, apiKey: apiKey, jobID: jobID, onProgress: onProgress)
+        }
+        work[jobID] = job
+        let result: CloudAudioResult
+        do {
+            result = try await withTaskCancellationHandler {
+                try await job.value
+            } onCancel: {
+                job.cancel()
+            }
+        } catch where cancelledJobIDs.contains(jobID) || job.isCancelled {
+            // URLSession, the transport or a checkpoint: whichever noticed first, a stopped
+            // job reports one thing.
+            throw CloudAudioError.cancelled
+        }
+        // A cancellation that arrived as the work finished still wins over its audio.
+        guard !cancelledJobIDs.contains(jobID), !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: result.audio)
+            throw CloudAudioError.cancelled
+        }
+        return result
+    }
+
+    private func run(
+        _ request: CloudAudioRequest, base: URL, apiKey: String, jobID: UUID,
+        onProgress: @escaping @Sendable (NodeJobProgress) -> Void
+    ) async throws -> CloudAudioResult {
+        try checkCancellation(jobID: jobID)
         let started = Date()
         onProgress(.stage(request.kind == .music ? "Sending the lyrics" : "Sending the text"))
 
@@ -182,6 +259,7 @@ public actor CloudAudioRuntime {
             for: submit, session: session, policy: .sameOrigin(base),
             credentialOrigin: base
         )
+        try checkCancellation(jobID: jobID)
         let submitStatus = (submitResponse as? HTTPURLResponse)?.statusCode ?? 502
         guard (200..<300).contains(submitStatus) else {
             throw CloudAudioError.submitFailed(
@@ -203,23 +281,32 @@ public actor CloudAudioRuntime {
         // Music is documented at 30–60 seconds and speech is quicker, but a queue is a queue;
         // the deadline is generous and the poll is loose enough not to hammer a paid API.
         let outcome = try await poll(
-            requestID: requestID, base: base, apiKey: apiKey, onProgress: onProgress
+            requestID: requestID, base: base, apiKey: apiKey, jobID: jobID,
+            onProgress: onProgress
         )
+        try checkCancellation(jobID: jobID)
 
         let urls = Self.audioURLs(inOutcome: outcome, base: base)
         guard let first = urls.first else { throw CloudAudioError.noAudioReturned }
 
         onProgress(.stage("Downloading"))
         let audio = try await download(
-            first, into: request.outputDirectory, model: request.model, format: request.format
+            first, into: request.outputDirectory, model: request.model,
+            format: request.format, jobID: jobID
         )
+        do {
+            try checkCancellation(jobID: jobID)
+        } catch {
+            try? FileManager.default.removeItem(at: audio)
+            throw error
+        }
         return CloudAudioResult(
             audio: audio, modelName: request.model, elapsed: Date().timeIntervalSince(started)
         )
     }
 
     private func poll(
-        requestID: String, base: URL, apiKey: String,
+        requestID: String, base: URL, apiKey: String, jobID: UUID,
         onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> [String: Any] {
         let deadline = Date().addingTimeInterval(900)
@@ -230,7 +317,7 @@ public actor CloudAudioRuntime {
         }
 
         while Date() < deadline {
-            if cancelled { throw CloudAudioError.cancelled }
+            try checkCancellation(jobID: jobID)
 
             var poll = URLRequest(url: statusURL)
             poll.timeoutInterval = 30
@@ -238,10 +325,12 @@ public actor CloudAudioRuntime {
 
             // A single failed poll is a blip, not a failure: keep waiting rather than
             // throwing away a render that is probably still running.
-            if let (data, response) = try? await RemoteHTTP.data(
+            let answer = try? await RemoteHTTP.data(
                     for: poll, session: session, policy: .sameOrigin(base),
                     credentialOrigin: base
-               ),
+               )
+            try checkCancellation(jobID: jobID)
+            if let (data, response) = answer,
                let http = response as? HTTPURLResponse,
                (200..<300).contains(http.statusCode),
                let status = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
@@ -258,26 +347,26 @@ public actor CloudAudioRuntime {
             }
             try? await Task.sleep(for: .seconds(2))
         }
+        try checkCancellation(jobID: jobID)
         throw CloudAudioError.jobFailed("The provider did not finish within 15 minutes.")
     }
 
     private func download(
-        _ url: URL, into directory: URL, model: String, format: String
+        _ url: URL, into directory: URL, model: String, format: String, jobID: UUID
     ) async throws -> URL {
         let stamp = Int(Date().timeIntervalSince1970)
         let safeModel = String(model.map {
             $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-"
         }.prefix(80))
         let safeFormat = String(format.filter(\.isLetter).prefix(8)).lowercased()
-        let destination = directory
-            .appendingPathComponent("\(safeModel)-\(stamp).\(safeFormat.isEmpty ? "mp3" : safeFormat)")
+        let destination = directory.appendingPathComponent(
+            "\(safeModel)-\(stamp)-\(UUID().uuidString).\(safeFormat.isEmpty ? "mp3" : safeFormat)"
+        )
         do {
-            return try await PublicHTTPSArtifactTransfer.download(
-                from: url,
-                to: destination,
-                maximumBytes: Self.maximumArtifactBytes,
-                budget: RemoteByteBudget(limit: Self.maximumArtifactBytes),
-                timeout: 600
+            try checkCancellation(jobID: jobID)
+            return try await artifactDownload(
+                url, destination, Self.maximumArtifactBytes,
+                RemoteByteBudget(limit: Self.maximumArtifactBytes), 600
             )
         } catch let error as RemoteTransferError {
             throw CloudAudioError.submitFailed(502, error.localizedDescription)

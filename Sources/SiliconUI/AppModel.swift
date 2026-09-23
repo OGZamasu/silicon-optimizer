@@ -2055,7 +2055,9 @@ public final class AppModel {
 
     let voiceRuntime = VoiceRuntime()
     /// Its remote counterpart, used only for entries whose backend is `.cloud`.
-    let cloudAudioRuntime = CloudAudioRuntime()
+    let cloudAudioRuntime: CloudAudioRuntime
+    @ObservationIgnored var cloudAudioTask: Task<Void, Never>?
+    @ObservationIgnored var cloudAudioJobID: UUID?
     /// Which model the Music card composes with — local by default, and only ever a remote
     /// one if someone picked it.
     public var selectedMusicModel = VoiceCatalog.minimaxMusic.id
@@ -2147,6 +2149,11 @@ public final class AppModel {
     }
 
     public func cancelVoice() {
+        if let cloudAudioTask, let cloudAudioJobID {
+            cloudAudioTask.cancel()
+            voiceStage = "Stopping…"
+            Task { await cloudAudioRuntime.cancel(jobID: cloudAudioJobID) }
+        }
         Task { await voiceRuntime.cancel() }
     }
 
@@ -2592,6 +2599,7 @@ public final class AppModel {
     public init(
         videoQueue: VideoBatchQueue? = nil,
         videoRuntime: NodeVideoRuntime = NodeVideoRuntime(),
+        cloudAudioRuntime: CloudAudioRuntime = CloudAudioRuntime(),
         settings: Settings? = nil
     ) {
         self.profile = HardwareProbe.detect()
@@ -2601,6 +2609,7 @@ public final class AppModel {
         self.readsCredentialsFromKeychain = settings == nil
         self.settings = settings ?? Settings.load()
         self.videoRuntime = videoRuntime
+        self.cloudAudioRuntime = cloudAudioRuntime
         self.videoBatchQueue = videoQueue ?? VideoBatchQueue(
             storeURL: ControlAPI.handshakeURL.deletingLastPathComponent()
                 .appendingPathComponent("video-queue.json")
