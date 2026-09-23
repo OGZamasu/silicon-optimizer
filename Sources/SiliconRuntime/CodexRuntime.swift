@@ -156,7 +156,6 @@ public actor CodexRuntime {
     public static let gatewayKeyVariable = "SILICON_GATEWAY_KEY"
 
     private var process: Process?
-    private var installedPackage: InstalledAgentPackage?
     private var installationTask: Task<InstalledAgentPackage, any Error>?
     private var startupGeneration = 0
     private var stdinPipe: Pipe?
@@ -330,11 +329,7 @@ public actor CodexRuntime {
             return nil
         }
         if generation == startupGeneration { installationTask = nil }
-        guard generation == startupGeneration else {
-            try? FileManager.default.removeItem(at: installed.directory)
-            return nil
-        }
-        installedPackage = installed
+        guard generation == startupGeneration else { return nil }
 
         let process = Process()
         process.executableURL = node
@@ -438,12 +433,10 @@ public actor CodexRuntime {
         readTask = nil
         stderrTask = nil
         let stoppedProcess = process
-        let stoppedPackage = installedPackage
         let stoppedPending = pending
         pending.removeAll()
         let stoppedContinuation = eventContinuation
         eventContinuation = nil
-        installedPackage = nil
         process = nil
         stdinPipe = nil
         processIdentifier = nil
@@ -459,9 +452,6 @@ public actor CodexRuntime {
                 }
             }
             ChildProcessRegistry.unregister(pid: stoppedProcess.processIdentifier)
-        }
-        if let stoppedPackage {
-            try? FileManager.default.removeItem(at: stoppedPackage.directory)
         }
         for (_, continuation) in stoppedPending {
             continuation.resume(throwing: CodexError.stopped)
@@ -485,10 +475,6 @@ public actor CodexRuntime {
         }
         process = nil
         processIdentifier = nil
-        if let installedPackage {
-            try? FileManager.default.removeItem(at: installedPackage.directory)
-            self.installedPackage = nil
-        }
     }
 
     private func noteStderr(_ line: String) {

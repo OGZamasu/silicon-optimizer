@@ -23,7 +23,6 @@ public actor QwenCodeRuntime {
     public static let minimumNodeVersion = (major: 22, minor: 9, patch: 0)
 
     private var process: ServerProcess?
-    private var installedPackage: InstalledAgentPackage?
     private var installationTask: Task<InstalledAgentPackage, any Error>?
     private var startupGeneration = 0
     public private(set) var processIdentifier: Int32?
@@ -174,11 +173,7 @@ public actor QwenCodeRuntime {
             return
         }
         if generation == startupGeneration { installationTask = nil }
-        guard generation == startupGeneration else {
-            try? FileManager.default.removeItem(at: installed.directory)
-            return
-        }
-        installedPackage = installed
+        guard generation == startupGeneration else { return }
 
         let process = ServerProcess()
         self.process = process
@@ -303,14 +298,9 @@ public actor QwenCodeRuntime {
         installationTask?.cancel()
         installationTask = nil
         let stoppedProcess = process
-        let stoppedPackage = installedPackage
         self.process = nil
-        installedPackage = nil
         processIdentifier = nil
         if let stoppedProcess { await stoppedProcess.terminate() }
-        if let stoppedPackage {
-            try? FileManager.default.removeItem(at: stoppedPackage.directory)
-        }
         return generation
     }
 
@@ -342,10 +332,6 @@ public actor QwenCodeRuntime {
         guard generation == startupGeneration, process === ended else { return }
         process = nil
         processIdentifier = nil
-        if let installedPackage {
-            try? FileManager.default.removeItem(at: installedPackage.directory)
-            self.installedPackage = nil
-        }
         var message = "Qwen Code exited unexpectedly"
         if let signal = termination?.signal {
             message += " (signal \(signal))"
