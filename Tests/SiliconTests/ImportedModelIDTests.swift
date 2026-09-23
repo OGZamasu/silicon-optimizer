@@ -64,6 +64,64 @@ struct ImportedModelIDTests {
         }
     }
 
+    /// A load's ending names models too: the one a failure belongs to, each load this Mac
+    /// stopped, and the load that replaced it. Every one of them is the token for the swarm,
+    /// the same token `loadedModelID` gets, on both listeners and on `/events` — and the id
+    /// for a phone and for this Mac, which load by it.
+    @Test func theSwarmIsToldTheTokenInALoadsEndingToo() async throws {
+        let other = ModelLibrary.externalIDPrefix + NSHomeDirectory() + "/Models/gemma-local.gguf"
+        var ending = Self.status(loaded: Self.importedID)
+        ending.failure = .init(
+            reason: "exited", detail: "error loading model", runtime: "llama.cpp",
+            exitStatus: 1, at: "2026-09-19T11:04:38Z", modelID: other
+        )
+        ending.interruptedLoads = [
+            .init(modelID: other, reason: "replaced", replacedBy: Self.importedID,
+                  at: "2026-09-19T11:04:30Z"),
+            .init(modelID: "qwen3-4b", reason: "cancelled", at: "2026-09-19T11:04:20Z"),
+        ]
+        try await BuddyMediaFixture.withServer(swarmToken: Self.swarmToken) { fixture in
+            await fixture.host.setInstalled([Self.installed(Self.importedID)], status: ending)
+            let phone = try await fixture.pair()
+            let token = ImportedModelID.forPeers(Self.importedID)
+            let otherToken = ImportedModelID.forPeers(other)
+
+            for client in [fixture.phone, fixture.local] {
+                let status = try await Self.read(ControlAPI.Status.self, client, "/status")
+                let frame = try await Self.firstStatusFrame(client, token: Self.swarmToken)
+                let pushed = try JSONDecoder().decode(ControlAPI.Status.self, from: Data(frame.utf8))
+                for told in [status, pushed] {
+                    #expect(told.loadedModelID == token)
+                    #expect(told.failure?.modelID == otherToken)
+                    #expect(told.interruptedLoads?.map(\.modelID) == [otherToken, "qwen3-4b"])
+                    #expect(told.interruptedLoads?.map(\.replacedBy) == [token, nil])
+                    // Nothing else about the ending changes.
+                    #expect(told.failure?.reason == "exited")
+                    #expect(told.failure?.detail == nil)
+                    #expect(told.interruptedLoads?.map(\.reason) == ["replaced", "cancelled"])
+                }
+            }
+
+            // A phone and this Mac load by the id, so the ending names it as it is.
+            let phoneStatus = try await Self.decode(
+                ControlAPI.Status.self, fixture.phone.call("GET", "/status", token: phone.token)
+            )
+            let phoneFrame = try JSONDecoder().decode(
+                ControlAPI.Status.self,
+                from: Data(try await Self.firstStatusFrame(fixture.phone, token: phone.token).utf8)
+            )
+            let local = try await Self.decode(
+                ControlAPI.Status.self,
+                fixture.local.call("GET", "/status", token: fixture.local.token)
+            )
+            for told in [phoneStatus, phoneFrame, local] {
+                #expect(told.failure?.modelID == other)
+                #expect(told.interruptedLoads?.map(\.modelID) == [other, "qwen3-4b"])
+                #expect(told.interruptedLoads?.first?.replacedBy == Self.importedID)
+            }
+        }
+    }
+
     /// What `forPeers` does to a status: the id wherever it appears, the home folder in the
     /// state line, the runtime's log withheld — and nothing to a model that was downloaded.
     @Test func aPeersStatusNamesNoPathAndLeavesACatalogModelAlone() {
@@ -78,6 +136,16 @@ struct ImportedModelIDTests {
         #expect(peer.failure?.reason == "exited")
 
         #expect(Self.status(loaded: "qwen3-4b").forPeers.loadedModelID == "qwen3-4b")
+        // And in a load's ending, where a catalog model is left alone just the same.
+        var ended = Self.status(loaded: "qwen3-4b")
+        ended.failure = .init(reason: "exited", at: "now", modelID: Self.importedID)
+        ended.interruptedLoads = [.init(
+            modelID: "qwen3-4b", reason: "replaced", replacedBy: Self.importedID, at: "now"
+        )]
+        #expect(ended.forPeers.failure?.modelID == token)
+        #expect(ended.forPeers.interruptedLoads?.first?.modelID == "qwen3-4b")
+        #expect(ended.forPeers.interruptedLoads?.first?.replacedBy == token)
+        #expect(Self.status(loaded: "qwen3-4b").forPeers.interruptedLoads == nil)
         #expect(ImportedModelID.forPeers("qwen3-4b") == "qwen3-4b")
         // Stable for the same model, different for a different one.
         #expect(ImportedModelID.forPeers(Self.importedID) == token)
@@ -104,6 +172,42 @@ struct ImportedModelIDTests {
         #expect(try await loadedID(phone) == Self.importedID)
         #expect(try await loadedID(mac) == Self.importedID)
         for subscription in [peer, phone, mac] { await hub.cancel(subscription.id) }
+    }
+
+    /// The same, for the ids a load's ending carries.
+    @Test func theEventHubTellsOnlyThePeerTheTokenForALoadsEnding() async throws {
+        let hub = BuddyEventHub()
+        let peer = await hub.subscribe(as: .peer)
+        let chat = await hub.subscribe(as: .device(id: "phone", scope: .chat))
+        let mac = await hub.subscribe(as: .thisMac)
+        var ending = Self.status(loaded: "qwen3-4b")
+        ending.failure = .init(reason: "exited", detail: "log", at: "now", modelID: Self.importedID)
+        ending.interruptedLoads = [.init(
+            modelID: Self.importedID, reason: "replaced", replacedBy: "qwen3-4b", at: "now"
+        )]
+        await hub.post(.status(ending))
+
+        func told(
+            _ subscription: (id: UUID, stream: AsyncStream<BuddyEvent.Frame>)
+        ) async throws -> ControlAPI.Status {
+            var iterator = subscription.stream.makeAsyncIterator()
+            let frame = try #require(await iterator.next())
+            return try JSONDecoder().decode(ControlAPI.Status.self, from: frame.data)
+        }
+        let token = ImportedModelID.forPeers(Self.importedID)
+        let peerSaw = try await told(peer)
+        #expect(peerSaw.failure?.modelID == token)
+        #expect(peerSaw.interruptedLoads?.first?.modelID == token)
+        #expect(peerSaw.interruptedLoads?.first?.replacedBy == "qwen3-4b")
+        // A chat-scope phone loses the log and keeps the ids; this Mac keeps both.
+        let chatSaw = try await told(chat)
+        #expect(chatSaw.failure?.modelID == Self.importedID)
+        #expect(chatSaw.failure?.detail == nil)
+        #expect(chatSaw.interruptedLoads?.first?.modelID == Self.importedID)
+        let macSaw = try await told(mac)
+        #expect(macSaw.failure?.modelID == Self.importedID)
+        #expect(macSaw.failure?.detail == "log")
+        for subscription in [peer, chat, mac] { await hub.cancel(subscription.id) }
     }
 
     /// Two modules, one word: the library writes it, the control server looks for it.

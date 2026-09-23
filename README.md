@@ -314,7 +314,8 @@ omits owner queue jobs, model download progress, and conversation verdicts. Thos
 require this Mac's local control token or an appropriately paired device. A model you
 imported from your own disk has the file's path as its id; the swarm, which cannot load it,
 is told `external:` and a token instead, the same one on `/installed`, `/status` and
-`/events`, for as long as the app runs.
+`/events` — wherever a status names a model, a failed or stopped load's included — for as
+long as the app runs.
 
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;
