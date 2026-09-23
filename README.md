@@ -357,6 +357,15 @@ of posters costs one fetch each rather than one per scroll. Results are the one 
 responses this server lets a client keep — `Cache-Control: private, max-age=3600`, which is
 what makes the `ETag` worth having; everything else stays `no-store`.
 
+**Names, not paths.** Those answers still say which file a render made, but to a device or
+a swarm node they say it by name: an image's `path`, a mesh's `glbPath` and `objPath`, a
+clip's `file`, and a queue item's `file` and `outputDirectory` are the last component only.
+A path on this Mac names your account and how your disk is laid out, and neither caller can
+open one here anyway — it fetches by `mediaID`. A warning, detail, error or refusal that
+mentions one of the app's output, upload or poster folders names it the same way, and your
+home folder as `~`. This Mac's own control token — the MCP bridge and local scripts, which
+open those files — still gets absolute paths.
+
 **Scope is decided per id, not per route.** A full-control device may fetch anything it has
 an id for. A chat-only device may fetch the poster frames and is refused the renders
 themselves: a device paired for chat is one that was lent out or left at the office, and

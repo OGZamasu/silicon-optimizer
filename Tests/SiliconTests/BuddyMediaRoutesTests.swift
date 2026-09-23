@@ -681,7 +681,9 @@ struct BuddyMediaRoutesTests {
                     "GET", "/video/queue", token: paired.token
                 ).1
             )
-            #expect(stray.items.first?.file == elsewhere.path)
+            // Named, not located: a phone is told the file's name and never the folders
+            // above it. See `MacPathRedactionTests`.
+            #expect(stray.items.first?.file == "stray.mp4")
             #expect(stray.items.first?.mediaID == nil)
             #expect(stray.items.first?.mediaURL == nil)
         }
@@ -932,10 +934,18 @@ actor MediaTestHost: ControlHost {
     private(set) var installRequests: [ControlAPI.LoadRequest] = []
     /// The owner's pause button on the video queue, as a synchronous render meets it.
     private var videoQueuePaused = false
+    /// What a render says it wrote, when a test wants it to have written something.
+    private var imageOutput: String?
+    private var meshOutput: (glb: String?, obj: String?) = (nil, nil)
+    /// A sentence `POST /mesh/generate` fails with, when a test wants one.
+    private var meshFailure: String?
 
     init(roots: [String]) { self.roots = roots }
 
     func setVideoQueuePaused(_ paused: Bool) { videoQueuePaused = paused }
+    func setImageOutput(_ path: String?) { imageOutput = path }
+    func setMeshOutput(glb: String?, obj: String?) { meshOutput = (glb, obj) }
+    func setMeshFailure(_ sentence: String?) { meshFailure = sentence }
 
     func setQueueFile(_ path: String?) { queueFile = path }
     func forgetMesh() { lastMeshImagePath = nil }
@@ -969,7 +979,10 @@ actor MediaTestHost: ControlHost {
 
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse {
         lastMeshImagePath = request.imagePath
-        return .init(glbPath: nil, objPath: nil, elapsedSeconds: 1, model: "fixture")
+        if let meshFailure { throw ControlHostError.badRequest(meshFailure) }
+        return .init(
+            glbPath: meshOutput.glb, objPath: meshOutput.obj, elapsedSeconds: 1, model: "fixture"
+        )
     }
 
     func generateImage(
@@ -977,8 +990,8 @@ actor MediaTestHost: ControlHost {
     ) async throws -> ControlAPI.ImageResponse {
         lastImagePath = request.initImagePath
         return .init(
-            path: request.initImagePath ?? "", elapsedSeconds: 1, peakMemoryBytes: nil,
-            predictedPeakBytes: 1, model: "fixture"
+            path: imageOutput ?? request.initImagePath ?? "", elapsedSeconds: 1,
+            peakMemoryBytes: nil, predictedPeakBytes: 1, model: "fixture"
         )
     }
 

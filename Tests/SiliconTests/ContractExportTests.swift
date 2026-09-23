@@ -252,6 +252,29 @@ struct ContractExportTests {
         }.joined()
         #expect(!exported.lowercased().contains("swarm_token"))
         #expect(!exported.contains("/Users/you/Movies/Silicon/Lisbon/lisbon-0002.mp4/"))
+
+        // A device is told the names of the files a render made, never where they are on
+        // the Mac: a path names the owner's account, and a device fetches by id anyway.
+        func pathFields(in value: Any, under key: String? = nil) -> [String] {
+            if let object = value as? [String: Any] {
+                return object.flatMap { pathFields(in: $0.value, under: $0.key) }
+            }
+            if let array = value as? [Any] { return array.flatMap { pathFields(in: $0) } }
+            guard let key, let text = value as? String,
+                  ["path", "file", "glbPath", "objPath", "outputDirectory"].contains(key)
+            else { return [] }
+            return [text]
+        }
+        for route in Self.routes where route.auth == "device" {
+            let answers = [route.response].compactMap { $0 } + route.responseVariants.map { $0.1 }
+            for answer in answers {
+                let json = try? JSONSerialization.jsonObject(with: answer.encode())
+                for field in pathFields(in: json ?? [:]) {
+                    #expect(!field.hasPrefix("/") && !field.hasPrefix("~"),
+                            "\(route.method) \(route.path) hands a device \(field)")
+                }
+            }
+        }
     }
 
     /// The queue's verbs, and the two constants the phone was guessing.
@@ -1146,6 +1169,15 @@ struct ContractExportTests {
             "on every fetch, not remembered from when the id was issued. All of those are",
             "the same 404, and so is another device's upload id: \"that is not yours\" and",
             "\"that does not exist\" have to look alike, or the route is an oracle.",
+            "",
+            "A result names its files for a device, and never locates them: an image's",
+            "`path`, a mesh's `glbPath` and `objPath`, a clip's `file`, and a queue item's",
+            "`file` and `outputDirectory` are the file's or folder's own name — enough to show",
+            "and to read an extension off — because a path on the Mac names the owner's",
+            "account and a device could not open it anyway. Fetch by `mediaID`. A `warning`,",
+            "`detail`, `error` or refusal that mentions one of the Mac's folders names it by",
+            "its last component, or `~` for the home folder. The Mac's own control token",
+            "still gets absolute paths; the swarm secret gets names, like a device.",
             "",
             "`POST /uploads` is how a device names a picture without naming a path. Send the",
             "bytes with a `Content-Type` and an `X-Filename`, or a `multipart/form-data`",
@@ -2162,7 +2194,7 @@ struct ContractExportTests {
             summary: "Render an image, locally or on a paired node.",
             request: .of(exampleImageRequest),
             response: .of(ControlAPI.ImageResponse(
-                path: "/Users/you/Pictures/Silicon/lisbon-0001.png", elapsedSeconds: 11.4,
+                path: "lisbon-0001.png", elapsedSeconds: 11.4,
                 peakMemoryBytes: 13_958_643_712, predictedPeakBytes: 14_200_000_000,
                 model: "FLUX.2 klein",
                 mediaID: exampleImageMediaID,
@@ -2195,8 +2227,8 @@ struct ContractExportTests {
             summary: "Turn an image into a mesh.",
             request: .of(exampleMeshRequest),
             response: .of(ControlAPI.MeshResponse(
-                glbPath: "/Users/you/Models/kettle.glb",
-                objPath: "/Users/you/Models/kettle.obj",
+                glbPath: "kettle.glb",
+                objPath: "kettle.obj",
                 elapsedSeconds: 323.7, model: "Hunyuan3D 2",
                 mediaID: exampleMeshMediaID,
                 mediaURL: "/media/\(exampleMeshMediaID)",
@@ -2276,7 +2308,7 @@ struct ContractExportTests {
                 uploadID: exampleUploadID
             )),
             response: .of(ControlAPI.VideoResponse(
-                file: "/Users/you/Movies/Silicon/lisbon-0001.mp4", node: "silicon-node",
+                file: "lisbon-0001.mp4", node: "silicon-node",
                 model: "hailuo-h3", elapsedSeconds: 244.1,
                 mediaID: exampleClipMediaID,
                 mediaURL: "/media/\(exampleClipMediaID)",
@@ -2756,6 +2788,9 @@ struct ContractExportTests {
     /// Three items, because the optional fields are the whole difficulty of this shape and
     /// one running clip shows none of them.
     ///
+    /// As a device is sent it: `file` and `outputDirectory` are names, never paths on the
+    /// Mac — see `MacPathRedaction`.
+    ///
     /// A phone reads `file`, `error`, `mediaID` and the queue's `message` and has, until
     /// now, only ever seen them null in the export — so a generated client either declared
     /// them non-optional and crashed on the first failure, or guessed. Here the running
@@ -2771,7 +2806,7 @@ struct ContractExportTests {
                 prompt: "A tram climbing Alfama at dawn", scene: 1, variation: 1,
                 seed: 424_242, modelID: "hailuo-h3", seconds: 5, resolution: "720p",
                 h3Turbo: false, status: "running", nodeJobID: "job-1187", file: nil,
-                outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
+                outputDirectory: "Lisbon", error: nil,
                 uncertainSubmission: false, h3Steps: 30,
                 negativePrompt: "blurry, watermark, text overlay",
                 canCancel: false
@@ -2781,8 +2816,8 @@ struct ContractExportTests {
                 prompt: "The same tram, from the tracks", scene: 2, variation: 1,
                 seed: 424_243, modelID: "hailuo-h3", seconds: 5, resolution: "720p",
                 h3Turbo: false, status: "completed", nodeJobID: "job-1188",
-                file: "/Users/you/Movies/Silicon/Lisbon/lisbon-0002.mp4",
-                outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
+                file: "lisbon-0002.mp4",
+                outputDirectory: "Lisbon", error: nil,
                 uncertainSubmission: false, h3Steps: 30,
                 detail: "Hailuo H3 at 5 s — the prompt asks for fast motion.",
                 mediaID: exampleClipMediaID,
@@ -2794,7 +2829,7 @@ struct ContractExportTests {
                 prompt: "Alfama rooftops at first light", scene: 3, variation: 1,
                 seed: 424_244, modelID: "hailuo-h3", seconds: 5, resolution: "720p",
                 h3Turbo: false, status: "failed", nodeJobID: nil, file: nil,
-                outputDirectory: "/Users/you/Movies/Silicon/Lisbon",
+                outputDirectory: "Lisbon",
                 error: "silicon-node ran out of VRAM at the decode stage.",
                 uncertainSubmission: true, h3Steps: 30
             ),
@@ -2803,7 +2838,7 @@ struct ContractExportTests {
                 prompt: "The tram bell, close up", scene: 4, variation: 1,
                 seed: 424_245, modelID: "ltx2-distilled", seconds: 5, resolution: "720p",
                 h3Turbo: nil, status: "cancelled", nodeJobID: "job-1190", file: nil,
-                outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
+                outputDirectory: "Lisbon", error: nil,
                 uncertainSubmission: false, cancelState: "confirmed",
                 cancelDetail: "Cancelled; the renderer was stopped.", canCancel: false
             ),
@@ -2814,7 +2849,7 @@ struct ContractExportTests {
                 prompt: "Laundry lines over the Alfama steps", scene: 5, variation: 1,
                 seed: 424_246, modelID: "ltx2-distilled", seconds: 5, resolution: "720p",
                 h3Turbo: nil, status: "failed", nodeJobID: "job-1191", file: nil,
-                outputDirectory: "/Users/you/Movies/Silicon/Lisbon",
+                outputDirectory: "Lisbon",
                 error: "Stopped following. The node may still be rendering; use Reconnect / download to retrieve the same job, or check the node before rendering again.",
                 uncertainSubmission: false, canCancel: true
             ),

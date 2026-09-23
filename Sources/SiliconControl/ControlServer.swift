@@ -758,6 +758,12 @@ public actor ControlServer {
             }
         }
 
+        /// Whether this caller is told where on this Mac a file is. The Mac's own token
+        /// only — the one credential whose callers can open a path here, and the same one
+        /// `mayNamePaths` lets send one. Everyone else is told file names and media ids.
+        /// See `MacPathRedaction`.
+        var seesMacPaths: Bool { self == .control }
+
         /// New owner-facing routes are not made reachable from a legacy shared swarm
         /// credential merely by being added to the server's switch. Direct jobs remain
         /// usable; queue administration does not, and neither does `POST /install`: a peer
@@ -1496,12 +1502,12 @@ public actor ControlServer {
                                             as: caller)
                 ))
             case ("POST", "/image/generate"):
-                return try .encode(await media.decorated(
+                return try .encode(await shown(await media.decorated(
                     await host.generateImage(
                         try await resolvedImage(request.decode(ControlAPI.ImageRequest.self),
                                                 as: caller)
                     )
-                ))
+                ), to: caller))
             case ("GET", "/swarm"):
                 return try .encode(await host.swarm())
             case ("GET", "/v1/node"):
@@ -1514,17 +1520,21 @@ public actor ControlServer {
                 // The one thing a phone keeps doing, and so the right place to hang a
                 // sweep that would otherwise only ever run when something new arrives.
                 await sweepUploadsIfDue()
-                return try .encode(await media.decorated(await host.videoQueue()))
+                return try .encode(await shown(
+                    await media.decorated(await host.videoQueue()), to: caller
+                ))
             case ("POST", "/video/queue"):
-                return try .encode(await media.decorated(await host.enqueueVideos(
+                return try .encode(await shown(await media.decorated(await host.enqueueVideos(
                     try request.decode(ControlAPI.VideoQueueRequest.self)
-                )))
+                )), to: caller))
             case ("POST", "/video/queue/control"):
                 let control = try request.decode(ControlAPI.VideoQueueControl.self)
                 guard control.action != "cancel" || caller != .swarm else {
                     return .error(403, Self.cancelIsNotForPeers)
                 }
-                return try .encode(await media.decorated(await host.controlVideoQueue(control)))
+                return try .encode(await shown(
+                    await media.decorated(await host.controlVideoQueue(control)), to: caller
+                ))
             case ("POST", "/video/generate"):
                 guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
                     if caller == .swarm {
@@ -1535,13 +1545,13 @@ public actor ControlServer {
                 activeSynchronousVideos += 1
                 defer { activeSynchronousVideos -= 1 }
                 do {
-                    return try .encode(await media.decorated(
+                    return try .encode(await shown(await media.decorated(
                         await host.generateVideo(
                             try await resolvedVideo(
                                 request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
                             )
                         )
-                    ))
+                    ), to: caller))
                 } catch is ControlAPI.VideoQueuePaused where caller == .swarm {
                     // Like the 429 above: a peer cannot resume the queue or add to it, so it
                     // is not told to.
@@ -1553,12 +1563,12 @@ public actor ControlServer {
                                            as: caller)
                 ))
             case ("POST", "/mesh/generate"):
-                return try .encode(await media.decorated(
+                return try .encode(await shown(await media.decorated(
                     await host.generateMesh(
                         try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
                                                as: caller)
                     )
-                ))
+                ), to: caller))
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):
@@ -1654,10 +1664,26 @@ public actor ControlServer {
             // A host that knows what status it means gets to say so. Everything else is a
             // 400, which is right for "you asked wrong" and wrong for anything a client
             // could act on — which is why this branch exists.
-            return .error(error.status, error.localizedDescription)
+            return .error(error.status, await shown(error.localizedDescription, to: caller))
         } catch {
-            return .error(400, error.localizedDescription)
+            return .error(400, await shown(error.localizedDescription, to: caller))
         }
+    }
+
+    /// A render's answer, or the queue, as this caller may see it: the Mac's own token gets
+    /// the paths its scripts open, everyone else file names beside the media ids.
+    private func shown<Answer: MacPathBearing>(
+        _ answer: Answer, to caller: Caller
+    ) async -> Answer {
+        guard !caller.seesMacPaths else { return answer }
+        return answer.withoutMacPaths(MacPathRedaction(roots: await media.roots()))
+    }
+
+    /// A refusal as this caller may read it. The host writes its errors for the owner, and
+    /// "No image at …" quotes the folder it looked in.
+    private func shown(_ sentence: String, to caller: Caller) async -> String {
+        guard !caller.seesMacPaths, sentence.contains("/") else { return sentence }
+        return MacPathRedaction(roots: await media.roots()).scrub(sentence)
     }
 
     // MARK: - The Chat tab's agent sessions
