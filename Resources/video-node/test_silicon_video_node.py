@@ -2,6 +2,7 @@
 
 import contextlib
 import http.client
+import io
 import json
 import os
 import subprocess
@@ -19,9 +20,16 @@ import silicon_video_node as node
 
 class PhospheneMappingTests(unittest.TestCase):
     def test_h3_resolution_and_duration_mapping(self) -> None:
-        # H3 can request a 1080p delivery without changing the pre-existing
-        # LTX fallback for an unknown/1080p resolution.
-        self.assertEqual(node.resolution_plan("1080p")["output_h"], 720)
+        # Both engines deliver 1080p at 1920x1080. LTX gets there by scaling its
+        # 768x448 canvas, and an unknown size is refused instead of becoming 720p.
+        self.assertEqual(
+            node.resolution_plan("1080p"),
+            {"internal_w": 768, "internal_h": 448, "output_w": 1920, "output_h": 1080},
+        )
+        self.assertEqual(node.resolution_plan("1920x1080"), node.resolution_plan("1080p"))
+        for unknown in ("4k", "2160p", "1024x576", ""):
+            with self.subTest(unknown=unknown), self.assertRaisesRegex(ValueError, "360p, 480p, 720p, or 1080p"):
+                node.resolution_plan(unknown)
         self.assertEqual(node.h3_output_resolution_plan("1080p")["output_h"], 1080)
         self.assertEqual(
             node.phosphene_render_options("480p", 3),
@@ -557,6 +565,154 @@ class PortableNodeTests(unittest.TestCase):
             self.assertEqual(node.job_deadline(created), 1767268800.0)
 
 
+class FakeLTXProcess:
+    """Stands in for the ltx-2-mlx CLI: records its argv and writes a raw clip."""
+
+    launched = []
+
+    def __init__(self, command, **kwargs):
+        FakeLTXProcess.launched.append(command)
+        Path(command[command.index("--output") + 1]).write_bytes(b"raw-ltx-frames" * 400)
+        self.stdout = io.StringIO("Stage 1 denoising\nsaving\n")
+        self.pid = -1
+
+    def wait(self, timeout=None):
+        return 0
+
+    def poll(self):
+        return 0
+
+
+def media_probe(width, height, seconds=5):
+    return {"duration": seconds + 0.04, "video_duration": seconds + 0.04, "width": width,
+            "height": height, "codec": "h264", "frame_rate": "24/1",
+            "nb_frames": node.seconds_to_frames(seconds), "audio": True}
+
+
+class LtxDeliverySizeTests(unittest.TestCase):
+    """LTX 1080p is delivered at 1920x1080, said to be upscaled, and old state is kept."""
+
+    def setUp(self):
+        FakeLTXProcess.launched = []
+        self.transcodes = []
+
+    def _render(self, render, job_id, probe):
+        def ffmpeg(command, **kwargs):
+            self.transcodes.append(command)
+            Path(command[-1]).write_bytes(b"review-mp4" * 600)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with patch.object(node.subprocess, "Popen", FakeLTXProcess), patch.object(
+            node.subprocess, "run", side_effect=ffmpeg
+        ), patch.object(node, "executable", side_effect=lambda name: name), patch.object(
+            node, "probe_media", return_value=probe
+        ):
+            render._run_job(job_id)
+
+    def _legacy_job(self, root, status, **extra):
+        # Exactly what a node before 1080p delivery saved: no delivery_plan.
+        output = root / "artifacts/legacy/legacy.mp4"
+        return {"id": "legacy", "status": status, "stage": "complete", "model": "ltx2-distilled",
+                "prompt": "A sailboat at dusk.", "seed": 11, "seconds": 5, "resolution": "1080p",
+                "frames": node.seconds_to_frames(5), "output_name": "legacy.mp4",
+                "output_path": str(output), "raw_path": str(root / "artifacts/legacy.raw.mp4"),
+                "candidate_path": str(output.parent / ".legacy.candidate.mp4"),
+                "log_path": str(root / "state/logs/legacy.log"), "poster_path": None,
+                "image_path": None, "fingerprint_version": 2, "request_fingerprint": "legacy",
+                "created_at": node.utc_now(), "deadline_epoch": time.time() + 3600, **extra}
+
+    def test_a_1080p_request_is_delivered_at_1920x1080_and_reported_as_upscaled(self):
+        with tempfile.TemporaryDirectory() as directory, isolated_node_paths(Path(directory)):
+            render = node.RenderQueue()
+            with patch.object(node, "model_readiness", return_value={"ready": True, "reason": "", "missing": []}):
+                job_id = render.submit({"entry_id": "full-hd", "model": "ltx2-distilled",
+                                        "prompt": "A sailboat at dusk.", "seconds": 5, "resolution": "1080p"})
+            self.assertEqual(render.jobs[job_id]["delivery_plan"]["output_w"], 1920)
+            self._render(render, job_id, media_probe(1920, 1080))
+            command = FakeLTXProcess.launched[0]
+            self.assertEqual(command[command.index("--width") + 1], "768")
+            self.assertEqual(command[command.index("--height") + 1], "448")
+            self.assertIn("scale=1920:1080", self.transcodes[0][self.transcodes[0].index("-vf") + 1])
+            saved = render.jobs[job_id]
+            self.assertEqual(saved["status"], "done")
+            self.assertEqual((saved["delivered_width"], saved["delivered_height"]), (1920, 1080))
+            sidecar = json.loads(Path(saved["output_path"]).with_suffix(".json").read_text())
+            self.assertEqual(sidecar["requested_resolution"], "1080p")
+            self.assertEqual(sidecar["output_resolution"], "1920x1080")
+            self.assertEqual(sidecar["internal_resolution"], "768x448")
+            self.assertEqual(sidecar["delivery_scaling"], "upscaled")
+            public = render.public_job(job_id)
+            self.assertEqual(public["delivery"], {
+                "requested": "1080p", "width": 1920, "height": 1080, "internal_width": 768,
+                "internal_height": 448, "scaling": "upscaled", "matches_request": True,
+            })
+            self.assertNotIn("delivery_plan", public)
+            # A restart recognises the finished 1920x1080 artifact.
+            with patch.object(node, "probe_media", return_value=media_probe(1920, 1080)):
+                restarted = node.RenderQueue()
+            self.assertEqual(restarted.jobs[job_id]["status"], "done")
+            self.assertTrue(restarted.pending.empty())
+
+    def test_a_render_that_is_not_the_requested_size_is_never_published(self):
+        with tempfile.TemporaryDirectory() as directory, isolated_node_paths(Path(directory)):
+            render = node.RenderQueue()
+            with patch.object(node, "model_readiness", return_value={"ready": True, "reason": "", "missing": []}):
+                job_id = render.submit({"entry_id": "short", "model": "ltx2-distilled",
+                                        "prompt": "A sailboat at dusk.", "seconds": 5, "resolution": "1080p"})
+            with self.assertRaisesRegex(RuntimeError, "size=1280x720"):
+                self._render(render, job_id, media_probe(1280, 720))
+            self.assertFalse(Path(render.jobs[job_id]["output_path"]).exists())
+            self.assertNotEqual(render.jobs[job_id]["status"], "done")
+
+    def test_an_unsupported_ltx_size_is_refused_before_anything_is_queued(self):
+        with tempfile.TemporaryDirectory() as directory, isolated_node_paths(Path(directory)):
+            render = node.RenderQueue()
+            with patch.object(node, "model_readiness") as readiness:
+                with self.assertRaisesRegex(ValueError, "360p, 480p, 720p, or 1080p"):
+                    render.submit({"model": "ltx2-distilled", "prompt": "A sailboat.", "seconds": 5,
+                                   "resolution": "4k"})
+            readiness.assert_not_called()
+            self.assertEqual(render.jobs, {})
+            self.assertTrue(render.pending.empty())
+
+    def test_a_finished_legacy_1080p_request_with_720p_output_is_not_rendered_again(self):
+        with tempfile.TemporaryDirectory() as directory, isolated_node_paths(Path(directory)):
+            root = Path(directory)
+            job = self._legacy_job(root, "done", progress=1.0)
+            output = Path(job["output_path"])
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"legacy-720p-clip" * 400)
+            output.with_suffix(".json").write_text(json.dumps(
+                {"id": "legacy", "prompt": job["prompt"], "seed": 11, "model": "dgrauet/ltx-2.3-mlx-q4",
+                 "output_resolution": "1280x720"}))
+            node.STATE_DIR.mkdir()
+            node.STATE_FILE.write_text(json.dumps({"legacy": job}))
+            for _ in range(2):  # the pinned plan must survive a second restart too
+                with patch.object(node, "probe_media", return_value=media_probe(1280, 720)):
+                    render = node.RenderQueue()
+                self.assertEqual(render.jobs["legacy"]["status"], "done")
+                self.assertTrue(render.pending.empty())
+            self.assertEqual(json.loads(node.STATE_FILE.read_text())["legacy"]["delivery_plan"]["output_h"], 720)
+            # Reported honestly: 1080p was asked for, 1280x720 was delivered.
+            delivery = render.public_job("legacy")["delivery"]
+            self.assertEqual((delivery["requested"], delivery["width"], delivery["height"]), ("1080p", 1280, 720))
+            self.assertIs(delivery["matches_request"], False)
+            self.assertEqual(render.public_job("legacy")["artifact"], "/v1/artifacts/legacy.mp4")
+
+    def test_an_unfinished_legacy_1080p_job_renders_at_the_size_it_asked_for(self):
+        with tempfile.TemporaryDirectory() as directory, isolated_node_paths(Path(directory)):
+            root = Path(directory)
+            node.STATE_DIR.mkdir()
+            node.STATE_FILE.write_text(json.dumps({"legacy": self._legacy_job(root, "running", progress=0.4)}))
+            render = node.RenderQueue()
+            self.assertEqual(render.pending.get_nowait(), "legacy")
+            self._render(render, "legacy", media_probe(1920, 1080))
+            self.assertIn("scale=1920:1080", self.transcodes[0][self.transcodes[0].index("-vf") + 1])
+            saved = json.loads(node.STATE_FILE.read_text())["legacy"]
+            self.assertEqual(saved["status"], "done")
+            self.assertEqual(saved["delivery_plan"]["output_w"], 1920)
+            self.assertEqual((saved["delivered_width"], saved["delivered_height"]), (1920, 1080))
+
+
 class NodeHTTPIntegrationTests(unittest.TestCase):
     def test_h3_http_submit_poll_provenance_and_authenticated_artifact(self):
         """Exercise both real HTTP contracts; only MLX/ffmpeg/media probing are mocked."""
@@ -612,6 +768,7 @@ class NodeHTTPIntegrationTests(unittest.TestCase):
                     with patch.object(node, "hardware_profile", return_value={"chip": "test", "memory_gb": 36}):
                         advertisement = json.loads(request("GET", "/v1/node")[1])
                     self.assertIn("h3_steps", advertisement["capabilities"][1]["supported_parameters"])
+                    self.assertEqual(advertisement["capabilities"][0]["supported_resolutions"], ["360p", "480p", "720p", "1080p"])
                     payload = {"entry_id": "http-h3", "model": "hailuo-h3", "prompt": "A sailboat crosses a lake.", "seconds": 10, "resolution": "480p", "seed": 7, "h3_turbo": False, "h3_steps": 30, "h3_chain_prompts": ["The sailboat moves.", "It reaches the shore."]}
                     encoded = json.dumps(payload).encode()
                     self.assertEqual(request("POST", "/v1/text-to-video", encoded)[0], 202)
