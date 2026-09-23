@@ -1289,9 +1289,7 @@ extension AppModel {
         // A synchronous caller cannot wait indefinitely for a manually paused
         // queue. Reject before accepting anything; the async queue API can append
         // to a paused queue intentionally. Never resume it on the caller's behalf.
-        guard !videoBatchQueue.isPaused else {
-            throw ControlHostError.badRequest("The video queue is paused. Ask the owner to resume it, or use /video/queue if you have access. No clip was added.")
-        }
+        guard !videoBatchQueue.isPaused else { throw ControlAPI.VideoQueuePaused() }
 
         let videoRequest = VideoRequest(
             entryID: entry.id,

@@ -1504,13 +1504,19 @@ public actor ControlServer {
                 }
                 activeSynchronousVideos += 1
                 defer { activeSynchronousVideos -= 1 }
-                return try .encode(await media.decorated(
-                    await host.generateVideo(
-                        try await resolvedVideo(
-                            request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
+                do {
+                    return try .encode(await media.decorated(
+                        await host.generateVideo(
+                            try await resolvedVideo(
+                                request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
+                            )
                         )
-                    )
-                ))
+                    ))
+                } catch is ControlAPI.VideoQueuePaused where caller == .swarm {
+                    // Like the 429 above: a peer cannot resume the queue or add to it, so it
+                    // is not told to.
+                    return .error(400, ControlAPI.VideoQueuePaused.forPeers)
+                }
             case ("POST", "/mesh/plan"):
                 return try .encode(await host.planMesh(
                     try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
