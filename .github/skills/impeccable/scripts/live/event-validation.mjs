@@ -48,6 +48,9 @@ function validateAnnotationFields(msg) {
 }
 
 function validateInsertGenerate(msg) {
+  // The browser sends no action for inserts, but the agent's instructions
+  // name the action's reference file, so only a known action may ride along.
+  if (msg.action !== undefined && !VISUAL_ACTIONS.includes(msg.action)) return 'generate: invalid action';
   if (!msg.insert || typeof msg.insert !== 'object') return 'generate: insert mode requires insert object';
   if (!INSERT_POSITIONS.has(msg.insert.position)) return 'generate: insert.position must be before or after';
   const anchor = msg.insert.anchor;
@@ -152,7 +155,7 @@ export function validateEvent(msg) {
       return isValidId(msg.id) ? null : 'discard: missing or malformed id';
     case 'checkpoint':
       if (!isValidId(msg.id)) return 'checkpoint: missing or malformed id';
-      if (!Number.isInteger(msg.revision) || msg.revision < 0) return 'checkpoint: revision must be a non-negative integer';
+      if (!Number.isSafeInteger(msg.revision) || msg.revision < 0) return 'checkpoint: revision must be a non-negative safe integer';
       if (msg.paramValues !== undefined && (typeof msg.paramValues !== 'object' || msg.paramValues === null || Array.isArray(msg.paramValues))) {
         return 'checkpoint: paramValues must be an object';
       }

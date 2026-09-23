@@ -52,10 +52,11 @@ public struct MemoryPlanner: Sendable {
     ///
     /// Two tensors (K and V) per layer, each `n_kv_heads x head_dim` wide. Grouped-query
     /// attention is why modern models can afford 128K context: `head_count_kv` is often an
-    /// eighth of `head_count`.
+    /// eighth of `head_count`. A hybrid model's linear-attention blocks keep no cache at all,
+    /// so only its full-attention blocks count — sixteen of Qwen3.8's sixty-five.
     public static func kvBytesPerToken(_ shape: ModelShape, precision: KVCachePrecision) -> Double {
         guard shape.isValidForPlanning else { return Self.maximumPlanBytes }
-        return 2 * Double(shape.blockCount) * Double(shape.headCountKV)
+        return 2 * Double(shape.kvLayerCount) * Double(shape.headCountKV)
             * Double(shape.headDimension) * precision.bytesPerElement
     }
 
@@ -66,6 +67,36 @@ public struct MemoryPlanner: Sendable {
             return Bytes(Int64.max)
         }
         return boundedBytes(kvBytesPerToken(shape, precision: precision) * Double(context))
+    }
+
+    // MARK: - Recurrent state
+
+    /// llama-server's slot count when it is not given one: `--parallel` defaults to auto,
+    /// which is four slots over one shared KV cache. The cache is shared; recurrent state is
+    /// not — each slot keeps its own.
+    public static let llamaServerDefaultSequences = 4
+
+    /// The fixed state a hybrid model's linear-attention blocks keep, whatever the context.
+    ///
+    /// One row per block per sequence, in f32 — llama.cpp allocates the recurrent cache at
+    /// that precision regardless of the KV cache type. Zero for a model without such blocks.
+    public static func recurrentStateBytes(_ shape: ModelShape, sequences: Int) -> Bytes {
+        guard let hybrid = shape.hybrid else { return .zero }
+        guard shape.isValidForPlanning, sequences > 0 else { return Bytes(Int64.max) }
+        return boundedBytes(
+            Double(hybrid.linearAttentionLayers) * Double(hybrid.recurrentStateElementsPerLayer)
+                * 4 * Double(sequences)
+        )
+    }
+
+    /// Sequences a load keeps recurrent state for: the slots it asks for, or else the
+    /// runtime's own default — four for llama-server, one for MLX, which serves one request
+    /// at a time.
+    static func stateSequences(
+        _ configuration: LoadConfiguration, quantization: Quantization
+    ) -> Int {
+        configuration.parallelSequences
+            ?? (quantization.isMLX ? 1 : Self.llamaServerDefaultSequences)
     }
 
     // MARK: - Compute buffers
@@ -169,10 +200,21 @@ public struct MemoryPlanner: Sendable {
         let kvCache = Self.kvCacheBytes(
             shape, context: configuration.contextLength, precision: configuration.kvCachePrecision
         )
+        let sequences = Self.stateSequences(configuration, quantization: quantization)
+        let recurrentState = Self.recurrentStateBytes(shape, sequences: sequences)
         let compute = Self.computeBufferBytes(shape, configuration: configuration)
+        if let hybrid = shape.hybrid, recurrentState != Bytes(Int64.max) {
+            notes.append(
+                "Only \(hybrid.fullAttentionLayers) of \(shape.blockCount) blocks keep a KV cache. "
+                + "The \(hybrid.linearAttentionLayers) linear-attention blocks hold a fixed "
+                + "\(recurrentState.formatted) of state instead (\(sequences) "
+                + (sequences == 1 ? "sequence" : "sequences") + "), whatever the context."
+            )
+        }
 
         let components = [
-            nonExpertWeights.rawValue, expertWeights.rawValue, kvCache.rawValue, compute.rawValue,
+            nonExpertWeights.rawValue, expertWeights.rawValue, kvCache.rawValue,
+            recurrentState.rawValue, compute.rawValue,
         ]
         var resident: Int64 = 0
         for component in components {
@@ -212,6 +254,7 @@ public struct MemoryPlanner: Sendable {
             nonExpertWeights: nonExpertWeights,
             expertWeights: expertWeights,
             kvCache: kvCache,
+            recurrentState: recurrentState,
             computeBuffers: compute,
             streamedFromDisk: streamed,
             budget: budget,
@@ -331,7 +374,8 @@ public struct MemoryPlanner: Sendable {
         if let moe = shape.moe, configuration.expertStreaming == nil {
             let perSlot = Self.weightBytes(Self.parametersPerExpertSlot(shape), quantization)
             // Pick the largest pool that fits the budget, leaving the rest of the plan intact.
-            let available = plan.budget - plan.nonExpertWeights - plan.kvCache - plan.computeBuffers
+            let available = plan.budget - plan.nonExpertWeights - plan.kvCache
+                - plan.recurrentState - plan.computeBuffers
             let affordable = perSlot.rawValue > 0
                 ? Int(available.rawValue / perSlot.rawValue) : 0
             let slots = max(8, min(moe.expertCount - 1, affordable))
@@ -365,7 +409,8 @@ public struct MemoryPlanner: Sendable {
         if let candidate = lowerOptions.first(where: { lower in
             let ratio = lower.bitsPerWeight / quantization.bitsPerWeight
             let newWeights = (plan.nonExpertWeights + plan.expertWeights) * ratio
-            return newWeights + plan.kvCache + plan.computeBuffers <= plan.budget
+            return newWeights + plan.kvCache + plan.recurrentState + plan.computeBuffers
+                <= plan.budget
         }) {
             let ratio = candidate.bitsPerWeight / quantization.bitsPerWeight
             let saving = (plan.nonExpertWeights + plan.expertWeights) * (1 - ratio)
@@ -388,7 +433,8 @@ public struct MemoryPlanner: Sendable {
            let smallest = lowerOptions.last {
             let ratio = smallest.bitsPerWeight / quantization.bitsPerWeight
             let floorWeights = (plan.nonExpertWeights + plan.expertWeights) * ratio
-            if floorWeights + plan.kvCache + plan.computeBuffers > plan.budget {
+            if floorWeights + plan.kvCache + plan.recurrentState + plan.computeBuffers
+                > plan.budget {
                 results.append(.init(
                     title: "This model is too large for this Mac",
                     detail: "Even at \(smallest.rawValue) the weights alone would need "

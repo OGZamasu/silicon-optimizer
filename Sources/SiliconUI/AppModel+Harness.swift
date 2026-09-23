@@ -118,6 +118,8 @@ extension AppModel {
         let ports = harnessPorts()
         let runtime = harnessRuntime ?? HarnessRuntime()
         harnessRuntime = runtime
+        harnessLifecycleGeneration &+= 1
+        let generation = harnessLifecycleGeneration
         harnessState = .starting(stage: "Looking for Node.js…")
         registerHarnessTermination()
         // The harness re-reads its settings per request, so polling the swarm now — in
@@ -133,32 +135,60 @@ extension AppModel {
                 webPort: ports.web, inferencePort: ports.inference, nodePath: nodePath,
                 advertising: advertised, gatewayPort: gateway, gatewayToken: gatewayToken
             ) { [weak self] state in
-                Task { @MainActor in self?.harnessState = state }
+                Task { @MainActor in self?.applyHarnessRuntimeState(state, generation: generation) }
             }
             let pid = await runtime.processIdentifier
-            await MainActor.run { [weak self] in self?.harnessProcessID = pid }
+            await MainActor.run { [weak self] in
+                self?.applyHarnessProcessID(pid, generation: generation)
+            }
+        }
+    }
+
+    func applyHarnessRuntimeState(_ state: RuntimeState, generation: Int) {
+        guard harnessLifecycleGeneration == generation else { return }
+        // An exit is terminal for this attempt. Independent MainActor callback tasks can
+        // arrive out of order, so an older ready/starting event must not revive it.
+        if case .failed = harnessState { return }
+        if case .ready = harnessState, case .starting = state { return }
+        harnessState = state
+        if case .failed = state { harnessProcessID = nil }
+    }
+
+    func applyHarnessProcessID(_ pid: Int32?, generation: Int) {
+        guard harnessLifecycleGeneration == generation else { return }
+        switch harnessState {
+        case .starting, .ready: harnessProcessID = pid
+        case .idle, .stopping, .failed: break
         }
     }
 
     public func stopHarness() {
         guard let runtime = harnessRuntime else { return }
-        harnessState = .stopping
-        harnessProcessID = nil
-        Task {
-            await runtime.stop()
-            await MainActor.run { [weak self] in self?.harnessState = .idle }
-        }
-    }
-
-    public func restartHarness() {
-        guard let runtime = harnessRuntime else { return startHarnessIfNeeded() }
+        harnessLifecycleGeneration &+= 1
+        let generation = harnessLifecycleGeneration
         harnessState = .stopping
         harnessProcessID = nil
         Task {
             await runtime.stop()
             await MainActor.run { [weak self] in
-                self?.harnessState = .idle
-                self?.startHarnessIfNeeded()
+                guard let self, self.harnessLifecycleGeneration == generation else { return }
+                self.harnessState = .idle
+            }
+        }
+    }
+
+    public func restartHarness() {
+        guard let runtime = harnessRuntime else { return startHarnessIfNeeded() }
+        harnessLifecycleGeneration &+= 1
+        let generation = harnessLifecycleGeneration
+        harnessState = .stopping
+        harnessProcessID = nil
+        Task {
+            await runtime.stop()
+            await MainActor.run { [weak self] in
+                guard let self, self.harnessLifecycleGeneration == generation else { return }
+                self.harnessState = .idle
+                self.startHarnessIfNeeded()
             }
         }
     }

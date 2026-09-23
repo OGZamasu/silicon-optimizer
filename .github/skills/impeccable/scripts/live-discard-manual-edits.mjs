@@ -2,7 +2,7 @@
 /**
  * CLI helper: discard pending manual edits from the buffer without applying.
  *
- * Reads .impeccable/live/pending-manual-edits.json, drops entries, writes back.
+ * Reads the owner-only private Live draft buffer, drops entries, writes back.
  * No source-file writes. Use this when the user wants to throw away unsaved
  * manual edits.
  *

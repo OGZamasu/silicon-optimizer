@@ -8,8 +8,9 @@
  */
 
 /**
- * When a token is supplied it rides as a `?token=...` query param so the
- * server's token-gated /live.js handler authorizes the fetch.
+ * Only the page-scoped token may be supplied here. The source URL is readable
+ * by every script in the inspected page and must never carry the controller
+ * credential.
  */
 export function buildLiveScriptSrc(port, token) {
   const base = 'http://localhost:' + port + '/live.js';

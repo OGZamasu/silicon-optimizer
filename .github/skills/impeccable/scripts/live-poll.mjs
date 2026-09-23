@@ -7,13 +7,14 @@
  *   node <scripts_path>/live-poll.mjs --timeout=600000        # Custom timeout (ms); default is long-poll friendly
  *   node <scripts_path>/live-poll.mjs --reply <id> done       # Reply "done" to event <id>
  *   node <scripts_path>/live-poll.mjs --reply <id> error "msg" # Reply with error
+ *   node <scripts_path>/live-poll.mjs --evidence <id>        # Read private manual-Apply evidence
  */
 
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { completionAckForAcceptResult, completionTypeForAcceptResult } from './live/completion.mjs';
-import { readLiveServerInfo } from './lib/impeccable-paths.mjs';
+import { liveHelperBase, readLiveServerInfo } from './lib/impeccable-paths.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
 import { instructionsForEvent } from './live/instructions.mjs';
 
@@ -249,7 +250,9 @@ export function buildAcceptScriptArgs(event) {
   const scriptArgs = event.type === 'discard'
     ? ['--id', String(event.id), '--discard']
     : ['--id', String(event.id), '--variant', String(event.variantId)];
-  if (event.pageUrl) scriptArgs.push('--page-url', String(event.pageUrl));
+  // No page-supplied free text rides here: live-accept matches flags anywhere
+  // in argv, so a pageUrl of "--discard" would turn an approved Accept into a
+  // discard. live-accept no longer reads --page-url anyway.
   if (event.type === 'accept' && event.paramValues && Object.keys(event.paramValues).length > 0) {
     scriptArgs.push('--param-values', JSON.stringify(event.paramValues));
   }
@@ -353,6 +356,7 @@ Modes:
   poll --reply <id> error "msg"    Reply with an error message
   poll --reply <id> done --data '<json>'
                                    Reply with a structured JSON result (manual_edit_apply)
+  poll --evidence <id>             Print private manual-Apply evidence through the trusted helper
 
 Options:
   --timeout=MS        One-shot poll timeout in ms (default: 600000). Ignored in --stream mode
@@ -371,7 +375,24 @@ Harness note:
   }
 
   const info = readServerInfo();
-  const base = `http://localhost:${info.port}`;
+  const base = liveHelperBase(info.port);
+
+  if (args.includes('--evidence')) {
+    const id = args[args.indexOf('--evidence') + 1];
+    if (!id || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+      console.error('Usage: live-poll.mjs --evidence EVENT_ID');
+      process.exit(1);
+    }
+    const response = await fetch(`${base}/control/manual-edit-evidence/${encodeURIComponent(id)}`, {
+      headers: { 'X-Impeccable-Token': info.token }, signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      console.error(`Private manual-Apply evidence unavailable: HTTP ${response.status}`);
+      process.exit(1);
+    }
+    console.log(await response.text());
+    return;
+  }
 
   // Reply mode: node <scripts_path>/live-poll.mjs --reply <id> <status> [--file path] [--data '<json>'] [message]
   if (args.includes('--reply')) {

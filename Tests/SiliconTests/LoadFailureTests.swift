@@ -211,7 +211,7 @@ struct LoadFailureTests {
         // recycled ephemeral port, and anything that answers 200 there — another suite's
         // control server, say — makes a load that was supposed to fail "become ready". The
         // window is only as long as the process lives, so it lives no longer than it must.
-        let fixture = try Fixture(script: "echo 'chatter nobody can act on' >&2; exit 3")
+        let fixture = try await Fixture(script: "echo 'chatter nobody can act on' >&2; exit 3")
         defer { fixture.clean() }
 
         let began = ContinuousClock.now
@@ -233,7 +233,7 @@ struct LoadFailureTests {
     /// The one the owner actually hit: the process is gone and nothing in the log explains
     /// it, because the system took the memory back.
     @Test func aRuntimeKilledBySignalSaysWhatThatUsuallyMeans() async throws {
-        let fixture = try Fixture(script: "echo 'loaded multimodal model' >&2; kill -9 $$")
+        let fixture = try await Fixture(script: "echo 'loaded multimodal model' >&2; kill -9 $$")
         defer { fixture.clean() }
 
         let failure = try await fixture.expectFailedLoad()
@@ -251,7 +251,7 @@ struct LoadFailureTests {
     /// A server that is alive and simply never answers is a different failure, and must not
     /// be described as having died.
     @Test func aRuntimeThatNeverAnswersSaysHowLongItWasGiven() async throws {
-        let fixture = try Fixture(script: "sleep 30", readinessTimeout: 1)
+        let fixture = try await Fixture(script: "sleep 30", readinessTimeout: 1)
         defer { fixture.clean() }
 
         let failure = try await fixture.expectFailedLoad()
@@ -267,7 +267,7 @@ struct LoadFailureTests {
     /// stopped *before* the new load announces itself, so asked at the moment of the stop the
     /// honest answer is "nobody yet".
     @Test func aLoadStoppedByAnotherLoadIsReportedAsReplaced() async throws {
-        let fixture = try Fixture(
+        let fixture = try await Fixture(
             script: "sleep 30", readinessTimeout: 30, settle: .seconds(3)
         )
         defer { fixture.clean() }
@@ -290,7 +290,7 @@ struct LoadFailureTests {
     /// Without a second load, the same stop is an unload — and says so rather than
     /// inventing a replacement.
     @Test func anUnloadMidLoadIsReportedAsAnUnload() async throws {
-        let fixture = try Fixture(
+        let fixture = try await Fixture(
             script: "sleep 30", readinessTimeout: 30, settle: .milliseconds(200)
         )
         defer { fixture.clean() }
@@ -309,7 +309,7 @@ struct LoadFailureTests {
     /// Cancelling the task a load runs in is its own ending, and one a client can tell from
     /// a model that failed.
     @Test func aCancelledLoadSaysItWasCancelled() async throws {
-        let fixture = try Fixture(script: "sleep 30", readinessTimeout: 30)
+        let fixture = try await Fixture(script: "sleep 30", readinessTimeout: 30)
         defer { fixture.clean() }
 
         let load = Task { try await fixture.runtime.start(fixture.request) }
@@ -326,7 +326,7 @@ struct LoadFailureTests {
     /// The app throws the runtime object away the moment a load fails, so the account of
     /// the failure has to outlive it — that is what `/status` answers from.
     @Test func theFailureOutlivesTheRuntimeObject() async throws {
-        let fixture = try Fixture(script: "exit 3")
+        let fixture = try await Fixture(script: "exit 3")
         defer { fixture.clean() }
 
         #expect(fixture.recorder.last == nil)
@@ -344,7 +344,7 @@ struct LoadFailureTests {
     /// And the error the app shows is the sentence, not the log — which is the bug, in one
     /// assertion.
     @Test func theErrorAPersonSeesIsOneSentence() async throws {
-        let fixture = try Fixture(script: "echo 'ggml_metal: whatever' >&2; exit 1")
+        let fixture = try await Fixture(script: "echo 'ggml_metal: whatever' >&2; exit 1")
         defer { fixture.clean() }
 
         let failure = try await fixture.expectFailedLoad()
@@ -410,6 +410,70 @@ struct LoadFailureTests {
         #expect(termination.stopRequest == nil)
     }
 
+    /// The last thing a runtime writes before it exits is the line that says why, and it has
+    /// to be in the log by the time anybody knows the process is gone. The exit and those
+    /// last bytes reach the app as two separate events, in either order, so one process at a
+    /// time rarely shows the race; a few dozen at once used to lose the line in about a third
+    /// of them, and `aRuntimeThatExitsIsReportedWithItsStatus` now and then in a full run.
+    @Test func aProcessThatHasEndedHasItsLastLineInItsLog() async throws {
+        let lost = await withTaskGroup(of: String?.self) { group in
+            for n in 0..<32 {
+                group.addTask {
+                    let words = "last words \(n)"
+                    let server = ServerProcess(registry: ChildProcessRegistry())
+                    guard (try? await server.start(
+                        executable: URL(fileURLWithPath: "/bin/sh"),
+                        arguments: ["-c", "echo '\(words)' >&2; exit 3"]
+                    )) != nil else { return "\(n) never started" }
+                    let deadline = ContinuousClock.now + .seconds(10)
+                    while !server.hasEnded, ContinuousClock.now < deadline {
+                        try? await Task.sleep(for: .milliseconds(5))
+                    }
+                    guard server.hasEnded else { return "\(n) never ended" }
+                    let log = await server.log
+                    return log.hasSuffix(words) ? nil : "\(n) read \(log.debugDescription)"
+                }
+            }
+            return await group.reduce(into: [String]()) { lost, outcome in
+                if let outcome { lost.append(outcome) }
+            }
+        }
+        #expect(lost.isEmpty)
+    }
+
+    /// Waiting for the rest of the output is bounded, because the end of the pipe is not the
+    /// end of the process: anything the child started inherits the pipe and holds it open.
+    /// Python's resource tracker does exactly that. The log still says what was written.
+    @Test func aPipeHeldOpenByAGrandchildDoesNotHoldUpTheLog() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("held-pipe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let pidFile = directory.appendingPathComponent("grandchild.pid")
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let server = ServerProcess(registry: ChildProcessRegistry())
+        try await server.start(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "sleep 30 & echo $! > '\(pidFile.path)'; echo 'bye' >&2; exit 3"]
+        )
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !server.hasEnded, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(server.hasEnded)
+
+        let began = ContinuousClock.now
+        let log = await server.log
+        #expect(ContinuousClock.now - began < .seconds(10))
+        #expect(log.hasSuffix("bye"))
+    }
+
     // MARK: - The arbiter
 
     /// A winner that has already finished is still the load that displaced this one. The
@@ -444,7 +508,7 @@ struct LoadFailureTests {
     /// stayed alive, `stop()` had nothing to stop, and the model it held was not released
     /// until the app quit.
     @Test func aSecondLoadOnOneRuntimeDoesNotOrphanTheWinnersServer() async throws {
-        let fixture = try Fixture(
+        let fixture = try await Fixture(
             script: "sleep 30", readinessTimeout: 30, settle: .milliseconds(200)
         )
         defer { fixture.clean() }
@@ -506,6 +570,9 @@ struct LoadFailureTests {
     /// do, wired to a runtime with its own arbiter and its own recorder so nothing here can
     /// see another suite's loads.
     private struct Fixture {
+        /// Set only for the launch that warms the script up, which then exits at once.
+        static let warmUp = "SILICON_FIXTURE_WARM_UP"
+
         let directory: URL
         let runtime: LlamaCppRuntime
         let arbiter: LoadArbiter
@@ -515,17 +582,34 @@ struct LoadFailureTests {
         init(
             script: String, readinessTimeout: TimeInterval = 15,
             settle: Duration = .milliseconds(100)
-        ) throws {
+        ) async throws {
             directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("load-failure-\(UUID().uuidString)")
             try FileManager.default.createDirectory(
                 at: directory, withIntermediateDirectories: true
             )
             let executable = directory.appendingPathComponent("llama-server")
-            try Data("#!/bin/sh\n\(script)\n".utf8).write(to: executable)
+            try Data("#!/bin/sh\n[ -n \"$\(Self.warmUp)\" ] && exit 0\n\(script)\n".utf8)
+                .write(to: executable)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o755], ofItemAtPath: executable.path
             )
+            // macOS checks a new executable the first time it is launched, and that first
+            // launch is slow in a way nothing here controls: a fraction of a second alone,
+            // seconds when others queue beside it, and now and then fourteen or twenty seconds
+            // — measured on a Mac where `/bin/sh` itself never took a third of one. Inside the
+            // load that wait counted against its readiness timeout: the script had not run,
+            // so the process had neither ended nor written anything, and the load reported a
+            // server that never answered. Paying for it here keeps it out of the timed window.
+            // Awaited rather than waited on: a blocked thread is one the rest of a parallel
+            // run cannot have, for as long as the check takes.
+            let warm = Process()
+            warm.executableURL = executable
+            warm.environment = [Self.warmUp: "1"]
+            let _: Void = try await withCheckedThrowingContinuation { done in
+                warm.terminationHandler = { _ in done.resume() }
+                do { try warm.run() } catch { done.resume(throwing: error) }
+            }
 
             arbiter = LoadArbiter(settle: settle)
             recorder = LoadFailureRecorder()

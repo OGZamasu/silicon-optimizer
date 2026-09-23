@@ -508,7 +508,8 @@ struct ModelDetailSheet: View {
             let plan = model.plan(
                 for: entry, quantization: quantization, configuration: currentConfiguration
             )
-            let available = plan.budget - plan.nonExpertWeights - plan.kvCache - plan.computeBuffers
+            let available = plan.budget - plan.nonExpertWeights - plan.kvCache
+                - plan.recurrentState - plan.computeBuffers
             let affordable = perSlot.rawValue > 0 ? Int(available.rawValue / perSlot.rawValue) : 8
             expertSlots = Double(max(8, min(moe.expertCount, affordable)))
         case .switchRuntime, .closeApps:

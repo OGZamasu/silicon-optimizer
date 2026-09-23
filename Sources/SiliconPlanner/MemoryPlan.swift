@@ -6,6 +6,9 @@ public struct MemoryPlan: Sendable, Equatable {
     public var nonExpertWeights: Bytes
     public var expertWeights: Bytes
     public var kvCache: Bytes
+    /// A hybrid model's linear-attention state: fixed, however long the context. Zero for
+    /// every model whose blocks all keep a KV cache.
+    public var recurrentState: Bytes = .zero
     public var computeBuffers: Bytes
     /// Weights that stay on disk because expert streaming is enabled.
     public var streamedFromDisk: Bytes
@@ -19,7 +22,7 @@ public struct MemoryPlan: Sendable, Equatable {
 
     /// Memory that must actually be resident while generating.
     public var resident: Bytes {
-        nonExpertWeights + expertWeights + kvCache + computeBuffers
+        nonExpertWeights + expertWeights + kvCache + recurrentState + computeBuffers
     }
 
     public var headroom: Bytes { budget - resident }

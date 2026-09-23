@@ -66,7 +66,7 @@ struct QwenChatView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 34))
                 .foregroundStyle(.orange)
-            Text("Qwen Code could not start")
+            Text("Qwen Code is not running")
                 .font(.title3.weight(.semibold))
             Text(message)
                 .font(.callout)

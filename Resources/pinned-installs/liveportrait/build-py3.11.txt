@@ -1,0 +1,12 @@
+# LivePortrait's build tools for Python 3.11 on Apple Silicon (macOS 14+).
+# Every artifact is hash-pinned: pip and uv refuse anything else.
+# Resolved from: the build requirements of its source-only dependencies
+# Published by: 2026-09-23T00:00:00Z
+# Regenerate with Scripts/lock-media-installers.sh and review the diff.
+# Source: https://github.com/KwaiVGI/LivePortrait.git 9b294b3d0536135442ea73cb01e6cb3ca7029dd3
+setuptools==84.0.0 \
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670 \
+    --hash=sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73
+    # via
+    #   -c liveportrait-constraints.txt
+    #   -r liveportrait-build.in
