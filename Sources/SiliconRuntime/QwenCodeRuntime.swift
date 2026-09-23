@@ -29,6 +29,10 @@ public actor QwenCodeRuntime {
     public private(set) var processIdentifier: Int32?
 
     public init() {}
+    init(testProcess: ServerProcess, testPID: Int32) {
+        process = testProcess
+        processIdentifier = testPID
+    }
 
     // MARK: - Locations
 
@@ -233,12 +237,7 @@ public actor QwenCodeRuntime {
         guard generation == startupGeneration else { return }
         if serving {
             onState(.ready(endpoint: Self.webShellURL(port: webPort, token: token)))
-            Task {
-                while await process.isRunning {
-                    try? await Task.sleep(for: .seconds(1))
-                }
-                cleanupExitedProcess(process, generation: generation)
-            }
+            Task { await observeReadyProcess(process, generation: generation, onState: onState) }
         } else {
             let log = await process.log
             guard generation == startupGeneration else { return }
@@ -315,7 +314,31 @@ public actor QwenCodeRuntime {
         return generation
     }
 
-    private func cleanupExitedProcess(_ ended: ServerProcess, generation: Int) {
+    func observeReadyProcess(
+        _ observed: ServerProcess, generation: Int,
+        pollInterval: Duration = .seconds(1),
+        onState: @escaping @Sendable (RuntimeState) -> Void
+    ) async {
+        while await observed.isRunning {
+            try? await Task.sleep(for: pollInterval)
+        }
+        await cleanupExitedProcess(observed, generation: generation, onState: onState)
+    }
+
+    private func cleanupExitedProcess(
+        _ ended: ServerProcess, generation: Int,
+        onState: @escaping @Sendable (RuntimeState) -> Void
+    ) async {
+        guard generation == startupGeneration, process === ended else { return }
+        // Foundation can report isRunning == false before its termination handler records
+        // the exit status. Give that callback a bounded chance to supply the diagnosis.
+        var termination = await ended.termination
+        var attempts = 0
+        while termination == nil && attempts < 50 {
+            attempts += 1
+            try? await Task.sleep(for: .milliseconds(20))
+            termination = await ended.termination
+        }
         guard generation == startupGeneration, process === ended else { return }
         process = nil
         processIdentifier = nil
@@ -323,5 +346,12 @@ public actor QwenCodeRuntime {
             try? FileManager.default.removeItem(at: installedPackage.directory)
             self.installedPackage = nil
         }
+        var message = "Qwen Code exited unexpectedly"
+        if let signal = termination?.signal {
+            message += " (signal \(signal))"
+        } else if let status = termination?.exitStatus {
+            message += " (exit status \(status))"
+        }
+        onState(.failed(message: message + ". Restart it to try again."))
     }
 }
