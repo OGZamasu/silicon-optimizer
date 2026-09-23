@@ -536,6 +536,14 @@ extension AppModel: ControlHost {
             guard localEndpoint != nil || free != nil else {
                 await JevBootstrap.ready()
                 if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
+                // A swarm node is never offered Jev (see `PaidLanes`), so the owner's key
+                // is not what it is missing.
+                guard PaidLanes.allowed else {
+                    throw ControlHostError.badRequest(
+                        "Nothing free can decide on this Mac right now: no model is loaded "
+                        + "and no local decision lane is ready. A swarm node is not given Jev."
+                    )
+                }
                 throw ControlHostError.badRequest(
                     "Nothing can decide yet: install Laya in Settings → Decisions, load a "
                     + "model, or add a TypeSafe API key and turn on the decide tool."

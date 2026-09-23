@@ -281,7 +281,10 @@ There are three credentials, and each one is honoured in exactly one place:
 A shared swarm bearer is for peer discovery and direct jobs: chat and decisions, image,
 mesh and video generation, uploads, and fetching a result by its media id. It does not
 grant access to the owner's conversations, model installs or loading, or the Mac's global
-video queue. The peer event stream remains available for status, but
+video queue, and it never spends the owner's money: `/decide` with `provider: "typesafe"`
+is refused, `auto` answers it from the free lanes only, no Jev call is made on its behalf
+(verification, routing or the decide cascade), and a flagged answer is never re-run on a
+cloud model for it. The peer event stream remains available for status, but
 omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
 require this Mac's local control token or an appropriately paired device.
 

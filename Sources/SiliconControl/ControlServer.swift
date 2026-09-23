@@ -618,44 +618,57 @@ public actor ControlServer {
             }
 
             let caller = await identify(request, from: origin)
-            if let refusal = Self.scopeRefusal(for: request, as: caller) {
-                try await refusal.write(to: connection)
-                return
+            // Everything this request sets off runs with the paid lanes shut when a swarm
+            // node asked — streams and the synchronous render's task included, because both
+            // are started inside this scope. See `PaidLanes`.
+            try await PaidLanes.$allowed.withValue(caller != .swarm) {
+                try await respond(to: request, as: caller, from: origin, over: connection)
             }
-
-            switch streamRoute(request, as: caller) {
-            case .stream(let events):
-                await deliver(events, as: caller, over: connection)
-                return
-            case .refused(let response):
-                try await response.write(to: connection)
-                return
-            case .notStreaming:
-                break
-            }
-
-            let source = Self.remoteAddress(of: connection)
-            let response: HTTPResponse
-            if request.method == "POST", request.path == "/video/generate" {
-                // One request per connection: after its body, EOF/error means
-                // this client no longer wants the synchronous response. Keep a
-                // receive outstanding so Network.framework notices a FIN/RST
-                // while the route is waiting, not only at response.write().
-                let waiting = Task {
-                    await route(request, as: caller, from: source, on: origin)
-                }
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
-                    if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
-                }
-                response = await waiting.value
-                guard !waiting.isCancelled else { return }
-            } else {
-                response = await route(request, as: caller, from: source, on: origin)
-            }
-            try await response.write(to: connection)
         } catch {
             // A client that hangs up mid-request is routine, not worth surfacing.
         }
+    }
+
+    /// Everything after the caller is known: its scope, the streams, and the route.
+    private func respond(
+        to request: HTTPRequest, as caller: Caller?, from origin: Origin,
+        over connection: NWConnection
+    ) async throws {
+        if let refusal = Self.scopeRefusal(for: request, as: caller) {
+            try await refusal.write(to: connection)
+            return
+        }
+
+        switch streamRoute(request, as: caller) {
+        case .stream(let events):
+            await deliver(events, as: caller, over: connection)
+            return
+        case .refused(let response):
+            try await response.write(to: connection)
+            return
+        case .notStreaming:
+            break
+        }
+
+        let source = Self.remoteAddress(of: connection)
+        let response: HTTPResponse
+        if request.method == "POST", request.path == "/video/generate" {
+            // One request per connection: after its body, EOF/error means
+            // this client no longer wants the synchronous response. Keep a
+            // receive outstanding so Network.framework notices a FIN/RST
+            // while the route is waiting, not only at response.write().
+            let waiting = Task {
+                await route(request, as: caller, from: source, on: origin)
+            }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
+                if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
+            }
+            response = await waiting.value
+            guard !waiting.isCancelled else { return }
+        } else {
+            response = await route(request, as: caller, from: source, on: origin)
+        }
+        try await response.write(to: connection)
     }
 
     /// Answers a request that was refused before its body arrived.
@@ -810,6 +823,11 @@ public actor ControlServer {
     public static let chatOnlyRefusal =
         "This device is paired for chat only. Pair it again with full control from "
             + "Settings → Silicon Buddy on the Mac."
+
+    /// What a swarm node is told when it names the TypeSafe lane on `/decide`.
+    public static let paidLanesAreNotForPeers =
+        "A swarm node may not spend this Mac's TypeSafe (Jev) budget. Ask with provider "
+            + "\"auto\" or \"local\": for a swarm node they answer from this Mac's free lanes only."
 
     public static let swarmRouteRefusal =
         "This route is not available to swarm nodes. Use this Mac's local control API "
@@ -1536,7 +1554,14 @@ public actor ControlServer {
             case ("POST", "/decide"), ("POST", "/v1/systemone"):
                 // The second path is TypeSafe's own, so a client written for Jev can be
                 // pointed here with only its base URL changed.
-                return try .encode(await host.decide(try request.decode(ControlAPI.DecideRequest.self)))
+                let decide = try request.decode(ControlAPI.DecideRequest.self)
+                // The paid lane by name is refused to a peer here, in its own words, rather
+                // than left to `JevService`, whose refusal would read like a switch the owner
+                // forgot. `auto` still answers a peer, from the free lanes only.
+                if caller == .swarm, decide.provider?.lowercased() == "typesafe" {
+                    return .error(403, Self.paidLanesAreNotForPeers)
+                }
+                return try .encode(await host.decide(decide))
             case ("GET", "/jev"):
                 return try .encode(await host.jevStatus())
             case ("GET", "/jev/guardrails/recent"):
