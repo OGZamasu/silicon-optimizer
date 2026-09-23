@@ -219,6 +219,9 @@ public enum ControlAPI {
         public var weightsBytes: Int64
         public var expertsBytes: Int64
         public var kvCacheBytes: Int64
+        /// A hybrid model's fixed linear-attention state, part of `residentBytes`. Absent for
+        /// a model whose blocks all keep a KV cache, so an ordinary plan reads as it always has.
+        public var recurrentStateBytes: Int64?
         public var computeBytes: Int64
         public var streamedFromDiskBytes: Int64
         public var suggestions: [Suggestion]
@@ -226,8 +229,9 @@ public enum ControlAPI {
 
         public init(
             verdict: String, residentBytes: Int64, budgetBytes: Int64, weightsBytes: Int64,
-            expertsBytes: Int64, kvCacheBytes: Int64, computeBytes: Int64,
-            streamedFromDiskBytes: Int64, suggestions: [Suggestion], notes: [String]
+            expertsBytes: Int64, kvCacheBytes: Int64, recurrentStateBytes: Int64? = nil,
+            computeBytes: Int64, streamedFromDiskBytes: Int64, suggestions: [Suggestion],
+            notes: [String]
         ) {
             self.verdict = verdict
             self.residentBytes = residentBytes
@@ -235,6 +239,7 @@ public enum ControlAPI {
             self.weightsBytes = weightsBytes
             self.expertsBytes = expertsBytes
             self.kvCacheBytes = kvCacheBytes
+            self.recurrentStateBytes = recurrentStateBytes
             self.computeBytes = computeBytes
             self.streamedFromDiskBytes = streamedFromDiskBytes
             self.suggestions = suggestions

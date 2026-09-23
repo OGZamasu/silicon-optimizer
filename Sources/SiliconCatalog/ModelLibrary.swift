@@ -140,7 +140,35 @@ public actor ModelLibrary {
         decoder.dateDecodingStrategy = .iso8601
         let entries = (try? decoder.decode([InstalledModel].self, from: data)) ?? []
         index = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        backfillHybridAttention()
         pruneTrulyDeleted()
+    }
+
+    /// Shapes saved before hybrid attention was modelled say nothing about it, and would go
+    /// on planning a Qwen3.8 install as if every block kept a KV cache (#26). Only models the
+    /// catalog knows to be hybrid are touched: a GGUF has its header read again for the split,
+    /// and an MLX model, which has no header, takes the catalog's when it is the same stack of
+    /// blocks. Anything else is left exactly as it was saved.
+    private func backfillHybridAttention() {
+        var changed = false
+        for (id, model) in index {
+            guard var shape = model.shape, shape.hybrid == nil,
+                  let entry = model.catalogID.flatMap(ModelCatalog.entry(id:)),
+                  let known = entry.shape.hybrid
+            else { continue }
+            if model.format == .gguf {
+                guard let metadata = try? GGUFReader().read(at: model.primaryFile) else { continue }
+                shape.hybrid = GGUFReader().hybridAttention(
+                    from: metadata, blockCount: shape.blockCount
+                )
+            } else if entry.shape.blockCount == shape.blockCount {
+                shape.hybrid = known
+            }
+            guard shape.hybrid != nil, shape.isValidForPlanning else { continue }
+            index[id]?.shape = shape
+            changed = true
+        }
+        if changed { try? save() }
     }
 
     /// Drops index entries whose file is gone from under this library's own managed directory —
