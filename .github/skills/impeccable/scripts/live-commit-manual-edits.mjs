@@ -18,6 +18,7 @@
 import { buildManualEditEvidence } from './live-manual-edit-evidence.mjs';
 import { readBuffer, readBufferStrict, writeBuffer, countByPage } from './live/manual-edits-buffer.mjs';
 import { isGeneratedFile } from './lib/is-generated.mjs';
+import { readFileSnapshotInside, restoreFileInside } from './lib/security-boundaries.mjs';
 import {
   runCopyEditBatchAgent,
   runCopyEditPostApplyChecks,
@@ -581,18 +582,10 @@ function snapshotRollbackFiles(cwd, files = null) {
     ? uniqueStrings(files).map((file) => normalizeRollbackPath(cwd, file)).filter(Boolean)
     : collectRollbackFiles(cwd);
   for (const relativeFile of rollbackFiles) {
-    const absolute = path.resolve(cwd, relativeFile);
-    try {
-      snapshot.set(relativeFile, {
-        existed: true,
-        content: fs.readFileSync(absolute, 'utf-8'),
-      });
-    } catch (err) {
-      if (err?.code === 'ENOENT') {
-        snapshot.set(relativeFile, { existed: false });
-      }
-      // Other read failures are not safe to roll back.
-    }
+    // Links and other read failures are not safe to roll back.
+    const before = readFileSnapshotInside(cwd, relativeFile);
+    if (!before) continue;
+    snapshot.set(relativeFile, before.exists ? { existed: true, content: before.content } : { existed: false });
   }
   return snapshot;
 }
@@ -688,10 +681,9 @@ function rollbackChangedFiles(cwd, snapshot, extraFiles = [], scopeFiles = []) {
     const before = snapshot.get(item.file);
     try {
       if (before?.existed !== false && typeof before?.content === 'string') {
-        fs.mkdirSync(path.dirname(absolute), { recursive: true });
-        fs.writeFileSync(absolute, before.content, 'utf-8');
+        restoreFileInside(cwd, item.file, before.content);
       } else if (before?.existed === false && item.kind === 'added' && fs.existsSync(absolute)) {
-        fs.rmSync(absolute);
+        restoreFileInside(cwd, item.file, null);
       } else {
         rollbackFailures.push({ file: item.file, reason: 'no_snapshot' });
         continue;

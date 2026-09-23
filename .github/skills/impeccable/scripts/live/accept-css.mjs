@@ -317,6 +317,24 @@ export function substituteParamVar(css, id, value) {
   return out;
 }
 
+// A number, a dimension or percentage, a hex colour, or a keyword: the only
+// shapes a slider value or a declared default takes.
+const CSS_PARAM_TOKEN_RE = /^(?:[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?(?:%|[a-z]{1,12})?|#[0-9a-f]{3,8}|[a-z][a-z0-9-]{0,63})$/i;
+
+/**
+ * A chosen parameter value arrives from the inspected page. Bake it as one
+ * CSS value token when it is one; anything else becomes a quoted CSS string
+ * in which every character but letters, digits, space and `_.,%#+-` is a hex
+ * escape, so it can never end the declaration, open a rule or comment, or
+ * close the component's <style> element, even for a parser that ignores
+ * strings.
+ */
+export function cssParamLiteral(value) {
+  const text = String(value);
+  if (CSS_PARAM_TOKEN_RE.test(text)) return text;
+  return '"' + text.replace(/[^A-Za-z0-9 _.,%#+-]/gu, (ch) => '\\' + ch.codePointAt(0).toString(16) + ' ') + '"';
+}
+
 function normalizeToggleForVar(value) {
   return value === true || value === 'true' || value === 1 || value === '1' || value === 'on' ? '1' : '0';
 }
@@ -388,7 +406,7 @@ export function bakeParamValues(css, params = [], values = {}) {
   const bakeBody = (body) => {
     let out = String(body || '');
     for (const [id, { kind, value }] of chosen) {
-      const literal = kind === 'toggle' ? normalizeToggleForVar(value) : String(value);
+      const literal = kind === 'toggle' ? normalizeToggleForVar(value) : cssParamLiteral(value);
       out = substituteParamVar(out, id, literal);
     }
     // Strip the readiness sentinel as a DECLARATION, not a line: a one-line

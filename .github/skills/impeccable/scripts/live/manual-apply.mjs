@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getLivePrivateDir, safeSessionId } from '../lib/impeccable-paths.mjs';
+import { readFileSnapshotInside, restoreFileInside } from '../lib/security-boundaries.mjs';
 import { readBuffer as readManualEditsBuffer } from './manual-edits-buffer.mjs';
 
 const APPLY_EVENT_HARD_TIMEOUT_MS = Number(process.env.IMPECCABLE_LIVE_APPLY_EVENT_HARD_TIMEOUT_MS || 150_000);
@@ -707,15 +708,9 @@ function filterManualApplyChunkCandidates(batch, refsByEntry) {
 export function snapshotApplyEventFiles(batch, cwd = process.cwd()) {
   const snapshot = new Map();
   for (const relativeFile of collectManualApplyFiles(batch, [], cwd)) {
-    const absolute = path.resolve(cwd, relativeFile);
-    try {
-      snapshot.set(relativeFile, {
-        exists: fs.existsSync(absolute),
-        content: fs.existsSync(absolute) ? fs.readFileSync(absolute, 'utf-8') : '',
-      });
-    } catch {
-      // If a file cannot be read before dispatch, do not attempt late rollback.
-    }
+    // If a file cannot be read link-free before dispatch, do not attempt late rollback.
+    const before = readFileSnapshotInside(cwd, relativeFile);
+    if (before) snapshot.set(relativeFile, before);
   }
   return snapshot;
 }
@@ -746,14 +741,10 @@ export function writeManualApplyTransaction({ cwd = process.cwd(), pageUrl = nul
     // Keep the user-reviewed copy-edit proposal immutable for repair retries;
     // the page may continue staging new drafts after Apply begins.
     reviewedEntries: batch?.entries || [],
-    files: files.map((relativeFile) => {
-      const absolute = path.resolve(cwd, relativeFile);
-      const exists = fs.existsSync(absolute);
-      return {
-        file: relativeFile,
-        exists,
-        content: exists ? fs.readFileSync(absolute, 'utf-8') : '',
-      };
+    // Paths that run through a link get no snapshot, so rollback never touches them.
+    files: files.flatMap((relativeFile) => {
+      const before = readFileSnapshotInside(cwd, relativeFile);
+      return before ? [{ file: relativeFile, ...before }] : [];
     }),
   };
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -805,14 +796,8 @@ export function rollbackManualApplyTransaction({
   for (const item of transaction.files || []) {
     const relativeFile = normalizeProjectFile(item.file, cwd);
     if (!relativeFile) continue;
-    const absolute = path.resolve(cwd, relativeFile);
     try {
-      if (item.exists) {
-        fs.mkdirSync(path.dirname(absolute), { recursive: true });
-        fs.writeFileSync(absolute, item.content || '', 'utf-8');
-      } else if (fs.existsSync(absolute)) {
-        fs.rmSync(absolute);
-      }
+      restoreFileInside(cwd, relativeFile, item.exists ? (item.content || '') : null);
       rolledBackFiles.push(relativeFile);
     } catch (err) {
       rollbackFailures.push({ file: relativeFile, reason: 'restore_failed', message: err.message || String(err) });
@@ -869,14 +854,8 @@ export function rollbackApplySnapshot(
   for (const relativeFile of scope) {
     const before = rollbackSnapshot?.get(relativeFile);
     if (!before) continue;
-    const absolute = path.resolve(cwd, relativeFile);
     try {
-      if (before.exists) {
-        fs.mkdirSync(path.dirname(absolute), { recursive: true });
-        fs.writeFileSync(absolute, before.content, 'utf-8');
-      } else if (fs.existsSync(absolute)) {
-        fs.rmSync(absolute);
-      }
+      restoreFileInside(cwd, relativeFile, before.exists ? before.content : null);
       rolledBackFiles.push(relativeFile);
     } catch (err) {
       rollbackFailures.push({ file: relativeFile, reason: 'restore_failed', message: err.message || String(err) });

@@ -264,6 +264,48 @@ export function removeFileInside(root, candidate) {
   return filePath;
 }
 
+/**
+ * Snapshot a file for a later restoreFileInside: `{ exists, content }`, or
+ * null when the path runs through a link, leaves root, or is not a regular
+ * file. A null snapshot means "never restore this path".
+ */
+export function readFileSnapshotInside(root, candidate) {
+  try {
+    return { exists: true, content: readFileInside(root, candidate, { encoding: 'utf8' }) };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return null;
+  }
+  try {
+    resolveFuturePathInside(root, candidate);
+    return { exists: false, content: '' };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Put a file back to a snapshot; `content === null` removes it. Rollback
+ * obeys the same rules as a forward write: every component is link-free and
+ * inside root, and the file is replaced by rename, so a symlink planted in
+ * the project (or swapped in during an agent run) is refused, never followed.
+ */
+export function restoreFileInside(root, candidate, content) {
+  const lexicalRoot = path.resolve(root);
+  const absolutePath = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(lexicalRoot, candidate);
+  let present = true;
+  try { fs.lstatSync(absolutePath); } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    present = false;
+  }
+  if (content === null) {
+    if (present) removeFileInside(lexicalRoot, absolutePath);
+    return absolutePath;
+  }
+  ensureDirectoryInside(lexicalRoot, path.dirname(absolutePath), { mode: 0o777 });
+  // A recreated file gets the usual umask-derived mode; an existing one keeps its own.
+  return atomicWriteFileInside(lexicalRoot, absolutePath, content, { encoding: 'utf8', mode: present ? null : 0o666 });
+}
+
 export function safeQuestionKey(value) {
   if (typeof value !== 'string' || !/^(?:[a-f0-9]{8,64}|[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$/.test(value)) {
     throw new SecurityBoundaryError('question key must be 8-64 lowercase hex characters or a canonical UUID', 'INVALID_QUESTION_KEY');

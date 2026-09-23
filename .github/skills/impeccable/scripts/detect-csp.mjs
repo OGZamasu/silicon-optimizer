@@ -8,7 +8,7 @@
  *
  * Shapes are named by patch mechanism, not framework origin:
  *   - "append-arrays":  CSP defined as structured directive arrays. Patch
- *                       appends a dev-only localhost entry. Covers:
+ *                       appends a dev-only http://127.0.0.1 entry. Covers:
  *                         - Monorepo helpers with additional*Src options
  *                           (e.g. createBaseNextConfig for Next)
  *                         - SvelteKit kit.csp.directives

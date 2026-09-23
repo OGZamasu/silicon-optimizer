@@ -592,18 +592,6 @@ function findLastStyleCloseLine(lines) {
   return -1;
 }
 
-function bakeParamValuesInCss(cssLines, paramValues) {
-  if (!paramValues || Object.keys(paramValues).length === 0) return cssLines;
-  return cssLines.map((line) => {
-    let out = line;
-    for (const [key, value] of Object.entries(paramValues)) {
-      const varName = `--p-${key}`;
-      out = out.replace(new RegExp(`var\\(${escapeRegExp(varName)}(?:,\\s*[^)]+)?\\)`, 'g'), String(value));
-    }
-    return out;
-  });
-}
-
 function sanitizeAcceptedSvelteCss(cssLines, variantNum, paramValues = null, rootTag = 'div') {
   const css = String((cssLines || []).join('\n'));
   if (!/data-impeccable-variant|impeccable-variant-ready/.test(css)) return cssLines;

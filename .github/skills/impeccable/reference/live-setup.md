@@ -53,11 +53,11 @@ Output `{ shape, signals }`; the shape names the *patch mechanism*, so one templ
 - **`null`**: no CSP; write the config with `cspChecked: true` and stop here.
 - **`append-arrays`**: CSP as structured directive arrays; auto-patchable (monorepo helpers with `additionalScriptSrc`/`additionalConnectSrc`, SvelteKit `kit.csp.directives`, Nuxt `nuxt-security`).
 - **`append-string`**: CSP as a literal value string; auto-patchable (inline `next.config.*` `headers()`, Nuxt `routeRules`).
-- **`middleware`** / **`meta-tag`**: detected but not auto-patched. Show the user the detected files, ask them to add `http://localhost:8400` to `script-src` and `connect-src` manually, then mark `cspChecked: true` and proceed.
+- **`middleware`** / **`meta-tag`**: detected but not auto-patched. Show the user the detected files, ask them to add `http://127.0.0.1:8400` to `script-src` and `connect-src` manually, then mark `cspChecked: true` and proceed.
 
 ### Consent prompt (use this phrasing)
 
-> **CSP patch needed.** I detected a Content Security Policy in your project that blocks `http://localhost:8400`: the live picker won't load without an allowance. Here's the change I'd make:
+> **CSP patch needed.** I detected a Content Security Policy in your project that blocks `http://127.0.0.1:8400`: the live picker won't load without an allowance. Here's the change I'd make:
 >
 > ```diff
 > [file: <patchTarget>]
@@ -75,10 +75,10 @@ Declare near the top of the file that holds the CSP arrays, then append `...__im
 ```ts
 // Dev-only allowance so impeccable live mode can load. Guarded by NODE_ENV.
 const __impeccableLiveDev =
-  process.env.NODE_ENV === "development" ? ["http://localhost:8400"] : [];
+  process.env.NODE_ENV === "development" ? ["http://127.0.0.1:8400"] : [];
 ```
 
-Per-framework: Next.js + monorepo helper: edit the *app's* `next.config.*` (not the shared helper), appending to `additionalScriptSrc` / `additionalConnectSrc`. SvelteKit: `svelte.config.js`, `kit.csp.directives['script-src']` and `['connect-src']`. Nuxt + nuxt-security: `nuxt.config.*`, `security.headers.contentSecurityPolicy['script-src']` and `['connect-src']`. Reference outputs: `tests/framework-fixtures/nextjs-turborepo/expected-after-patch.ts`, `tests/framework-fixtures/sveltekit-csp/expected-after-patch.js`. Idempotency: if `__impeccableLiveDev` already exists in the file, the patch is applied; just mark `cspChecked: true`.
+Per-framework: Next.js + monorepo helper: edit the *app's* `next.config.*` (not the shared helper), appending to `additionalScriptSrc` / `additionalConnectSrc`. SvelteKit: `svelte.config.js`, `kit.csp.directives['script-src']` and `['connect-src']`. Nuxt + nuxt-security: `nuxt.config.*`, `security.headers.contentSecurityPolicy['script-src']` and `['connect-src']`. Reference outputs: `tests/framework-fixtures/nextjs-turborepo/expected-after-patch.ts`, `tests/framework-fixtures/sveltekit-csp/expected-after-patch.js`. Idempotency: if `__impeccableLiveDev` already exists in the file, the patch is applied (if it still names `localhost`, change that to `127.0.0.1`); just mark `cspChecked: true`.
 
 ### append-string
 
@@ -87,7 +87,7 @@ Two-point patch: declare a dev-only string, interpolate it into the CSP value at
 ```ts
 // Dev-only allowance so impeccable live mode can load.
 const __impeccableLiveDev =
-  process.env.NODE_ENV === "development" ? " http://localhost:8400" : "";
+  process.env.NODE_ENV === "development" ? " http://127.0.0.1:8400" : "";
 ```
 
 - `script-src 'self' 'unsafe-inline'` becomes `` `script-src 'self' 'unsafe-inline'${__impeccableLiveDev}` ``
@@ -97,6 +97,8 @@ Per-framework: Next.js inline `headers()` in `next.config.*`; Nuxt `routeRules['
 
 ## Troubleshooting
 
-If the user said "no" to the CSP patch and later reports live not working: their dev CSP blocks `http://localhost:8400`. Delete `cspChecked` from `.impeccable/live/config.json` and re-run `live.mjs`; setup asks again.
+If the user said "no" to the CSP patch and later reports live not working: their dev CSP blocks `http://127.0.0.1:8400`. Delete `cspChecked` from `.impeccable/live/config.json` and re-run `live.mjs`; setup asks again.
+
+The page loads the helper from `127.0.0.1`, never `localhost` (which can resolve to `::1`, where another process may hold the same port). An allowance added under an older version names `http://localhost:8400`; change it to `http://127.0.0.1:8400`. A `<meta>` CSP in a file live injects its script tag into is re-patched on every inject; allowances added by hand or by the patches above (config, headers, middleware, a layout `<meta>`) need the edit.
 
 After setup, re-run `live.mjs`.

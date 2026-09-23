@@ -1,7 +1,7 @@
 /**
  * Impeccable Live Variant Mode - Browser Script
  *
- * Injected into the user's page via <script src="http://localhost:PORT/live.js">.
+ * Injected into the user's page via <script src="http://127.0.0.1:PORT/live.js">.
  * The server wraps this bundle with a closure-scoped per-session bootstrap.
  *
  * UI: a single floating bar that morphs between three states -
@@ -25,8 +25,11 @@
   const BOOTSTRAP = __IMPECCABLE_BOOTSTRAP__;
   const TOKEN = BOOTSTRAP.token;
   const PORT = BOOTSTRAP.port;
+  // Every helper request goes to this origin (127.0.0.1). `localhost` may
+  // resolve to ::1 first, where another process can hold the same port.
+  const HELPER_ORIGIN = BOOTSTRAP.helperOrigin;
   const APP_ROOT = BOOTSTRAP.appRoot || null;
-  if (!TOKEN || !PORT) {
+  if (!TOKEN || !PORT || !HELPER_ORIGIN) {
     window.__IMPECCABLE_LIVE_INIT__ = false; // reset so the real load can init
     return;
   }
@@ -3777,7 +3780,7 @@
     try {
       // The query token authorizes the CORS preflight for non-loopback dev
       // hosts; the header lets the server authenticate before reading bytes.
-      const res = await fetch('http://localhost:' + PORT + '/manual-edit-stash?token=' + encodeURIComponent(TOKEN), {
+      const res = await fetch(HELPER_ORIGIN + '/manual-edit-stash?token=' + encodeURIComponent(TOKEN), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
         body: JSON.stringify({
@@ -4092,7 +4095,7 @@
   async function fetchPendingCount() {
     try {
       const res = await fetch(
-        'http://localhost:' + PORT + '/page-manual-edit-count?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
+        HELPER_ORIGIN + '/page-manual-edit-count?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -5177,7 +5180,7 @@
   async function loadSvelteComponentParams(manifest) {
     const dir = String(manifest?.revisionDir || manifest?.componentDir || '').replace(/^\/+/, '');
     if (!dir) return {};
-    const url = 'http://localhost:' + PORT + '/page-preview?token=' + encodeURIComponent(TOKEN)
+    const url = HELPER_ORIGIN + '/page-preview?token=' + encodeURIComponent(TOKEN)
       + '&id=' + encodeURIComponent(manifest.id) + '&kind=params';
     try {
       const res = await fetch(url);
@@ -5651,7 +5654,7 @@
     // republish that is STILL broken at the same URL reports again instead of
     // being swallowed while the agent believes the repair landed.
     lastReportedMountFailure = null;
-    const url = 'http://localhost:' + PORT + '/page-preview?token=' + encodeURIComponent(TOKEN)
+    const url = HELPER_ORIGIN + '/page-preview?token=' + encodeURIComponent(TOKEN)
       + '&id=' + encodeURIComponent(sessionId) + '&kind=manifest';
     try {
       const res = await fetch(url);
@@ -6139,7 +6142,7 @@
       return;
     }
     rememberSessionFileMeta({ file: filePath });
-    const url = 'http://localhost:' + PORT + '/page-preview?token=' + encodeURIComponent(TOKEN)
+    const url = HELPER_ORIGIN + '/page-preview?token=' + encodeURIComponent(TOKEN)
       + '&id=' + encodeURIComponent(sessionId) + '&kind=wrapper';
     fetch(url)
       .then(r => {
@@ -6857,7 +6860,7 @@
   const SSE_MAX_RETRIES = 20;  // generous: heartbeats keep the connection alive, so retries mean real trouble
 
   function connectSSE() {
-    evtSource = new EventSource('http://localhost:' + PORT + '/events?token=' + TOKEN);
+    evtSource = new EventSource(HELPER_ORIGIN + '/events?token=' + TOKEN);
 
     evtSource.onopen = () => {
       sseRetries = 0; // reset on successful (re)connect
@@ -7114,7 +7117,7 @@
   async function waitForPageApproval(id) {
     const deadline = Date.now() + 5 * 60 * 1000 + 5000;
     while (Date.now() < deadline) {
-      const res = await fetch('http://localhost:' + PORT + '/page-approval/' + encodeURIComponent(id)
+      const res = await fetch(HELPER_ORIGIN + '/page-approval/' + encodeURIComponent(id)
         + '?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
       const result = await res.json().catch(() => ({}));
       if (res.status === 202) {
@@ -7142,7 +7145,7 @@
     }
     // The query token authorizes the CORS preflight for non-loopback dev
     // hosts; the header lets the server authenticate before reading bytes.
-    const doSend = () => fetch('http://localhost:' + PORT + '/events?token=' + encodeURIComponent(TOKEN), {
+    const doSend = () => fetch(HELPER_ORIGIN + '/events?token=' + encodeURIComponent(TOKEN), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
       body: JSON.stringify(msg),
@@ -7721,7 +7724,7 @@
     if (msLoadPromise) return msLoadPromise;
     msLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = 'http://localhost:' + PORT + '/modern-screenshot.js';
+      s.src = HELPER_ORIGIN + '/modern-screenshot.js';
       s.onload = () => resolve(window.modernScreenshot);
       s.onerror = () => { msLoadPromise = null; reject(new Error('modern-screenshot failed to load')); };
       uiAppendStyle(s);
@@ -8048,7 +8051,7 @@
     if (blob && hasAnnotations) {
       try {
         const uploadRes = await fetch(
-          'http://localhost:' + PORT + '/annotation?token=' + encodeURIComponent(TOKEN) +
+          HELPER_ORIGIN + '/annotation?token=' + encodeURIComponent(TOKEN) +
           '&eventId=' + encodeURIComponent(basePayload.id),
           { method: 'POST', headers: { 'Content-Type': 'image/png', 'X-Impeccable-Token': TOKEN }, body: blob },
         );
@@ -10624,7 +10627,7 @@ void main() {
   }
 
   function fetchAgentPollingStatus() {
-    fetch('http://localhost:' + PORT + '/page-status?token=' + TOKEN, { cache: 'no-store' })
+    fetch(HELPER_ORIGIN + '/page-status?token=' + TOKEN, { cache: 'no-store' })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data && typeof data.agentPolling === 'boolean') {
@@ -11222,7 +11225,7 @@ void main() {
     if (detectScriptLoaded) return;
     detectScriptLoaded = true;
     const s = document.createElement('script');
-    s.src = 'http://localhost:' + PORT + '/detect.js';
+    s.src = HELPER_ORIGIN + '/detect.js';
     s.dataset.impeccableExtension = 'true';
     document.head.appendChild(s);
   }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { liveHelperBase } from '../lib/live-helper-origin.mjs';
 import { LIVE_CHROME_MOUNT_CONTRACT, LIVE_UI_SURFACES } from './ui-surfaces.mjs';
 
 export const LIVE_BROWSER_SCRIPT_PARTS = Object.freeze([
@@ -51,9 +52,11 @@ export function assembleLiveBrowserScript({
   // Project identity, command vocabulary, and chrome inventory are serialized
   // for the classic browser bundle. Keep them in a closure instead of durable
   // window properties so bearer material is not needlessly exposed after init.
+  // The page reaches the helper at exactly this origin, never `localhost`.
   const prelude = `(() => {\nconst __IMPECCABLE_BOOTSTRAP__ = Object.freeze(${JSON.stringify({
     token,
     port,
+    helperOrigin: liveHelperBase(port),
     appRoot,
     commandPrefix,
     vocabulary,

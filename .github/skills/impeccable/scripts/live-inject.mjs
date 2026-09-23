@@ -119,7 +119,7 @@ Insert or remove the live mode script tag in the project's HTML entry point.
 Reads configuration from .impeccable/live/config.json.
 
 Modes:
-  --port PORT   Insert script tag pointing at http://localhost:PORT/live.js
+  --port PORT   Insert script tag pointing at http://127.0.0.1:PORT/live.js
   --remove      Remove the script tag (if present)
   --check       Print whether .impeccable/live/config.json exists and its content
 
