@@ -223,7 +223,8 @@ public actor PairingServer {
     private static let maximumConnections = 16
     private var slot: Slot?
     /// A denial must not occupy the only invitation slot while its requester is offline.
-    /// Retain just enough to tell late pollers they were denied, once.
+    /// Retain just enough to tell late pollers they were denied, until the record expires:
+    /// answering it once would turn a lost response into a five-minute wait for a timeout.
     private var deniedRequests: [(id: String, deniedAt: Date)] = []
     private static let maximumDeniedRequests = 64
     private let requestLifetime: TimeInterval
@@ -340,8 +341,7 @@ public actor PairingServer {
             guard let id = request.query["id"] else {
                 return .error(404, "No such pairing request.")
             }
-            if let index = deniedRequests.firstIndex(where: { $0.id == id }) {
-                deniedRequests.remove(at: index)
+            if deniedRequests.contains(where: { $0.id == id }) {
                 return (try? HTTPResponse.encode(PairingStatus(state: "denied")))
                     ?? HTTPResponse.error(500, "encode")
             }

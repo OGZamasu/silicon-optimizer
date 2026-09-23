@@ -220,6 +220,12 @@ struct SwarmPairingFlowTests {
             host: "127.0.0.1", requestID: deniedReceipt.requestID, port: port
         )
         #expect(denied.state == "denied")
+        // Asking again, as a client whose first answer was lost would, gets the same answer
+        // rather than a 404 it would wait out until the request's deadline.
+        let deniedAgain = try await PairingClient.status(
+            host: "127.0.0.1", requestID: deniedReceipt.requestID, port: port
+        )
+        #expect(deniedAgain.state == "denied")
         let next = try await PairingClient.status(
             host: "127.0.0.1", requestID: nextReceipt.requestID, port: port
         )
