@@ -14,9 +14,10 @@ struct SwarmFileBoundaryTests {
             let body = #"{"prompt":"a shot","imagePath":"/private/fixture-secret","initImagePath":"/private/fixture-secret"}"#
             for client in [fixture.local, fixture.phone] {
                 for route in subjectRoutes {
-                    #expect(try await client.status(
+                    let status = try await client.status(
                         "POST", route, token: swarmToken, body: body
-                    ) == 400, "\(route) accepted a swarm-supplied Mac path")
+                    )
+                    #expect(status == 400, "\(route) accepted a swarm-supplied Mac path")
                 }
             }
             #expect(await fixture.host.lastMeshImagePath == nil)
@@ -24,9 +25,10 @@ struct SwarmFileBoundaryTests {
 
             // The local per-launch bearer is still allowed to pass paths to every route.
             for route in subjectRoutes {
-                #expect(try await fixture.local.status(
+                let status = try await fixture.local.status(
                     "POST", route, token: fixture.local.token, body: body
-                ) == 200)
+                )
+                #expect(status == 200)
             }
             #expect(await fixture.host.lastMeshImagePath == "/private/fixture-secret")
             #expect(await fixture.host.lastImagePath == "/private/fixture-secret")
