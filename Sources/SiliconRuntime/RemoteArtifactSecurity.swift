@@ -9,8 +9,8 @@ public enum RemoteURLPolicy: Sendable {
     /// host stay fixed; credentials remain stricter and are still bound to one origin.
     case peerHost(URL)
     /// Provider artifacts may live on an undocumented CDN, but never on a local/private address
-    /// or over HTTP. This screens literal/special-use hosts; a provider-owned allowlist is still
-    /// needed to eliminate malicious public DNS and rebinding entirely.
+    /// or over HTTP. This URL-only policy screens literal/special-use hosts; the GMI audio
+    /// transfer additionally verifies the resolved and connected address before each GET.
     case publicHTTPS
 
     public func resolve(_ value: String, relativeTo base: URL) -> URL? {
@@ -137,10 +137,13 @@ public enum RemoteURLPolicy: Sendable {
         if a == 169, b == 254 { return false }
         if a == 172, (16...31).contains(b) { return false }
         if a == 192, b == 168 { return false }
-        if a == 192, b == 0, c == 0 || a == 192, b == 0, c == 2 { return false }
-        if a == 198, b == 18 || a == 198, b == 19 || a == 198, b == 51, c == 100 {
-            return false
-        }
+        // One range per line: a comma binds looser than `||`, so the two-ranges-per-line form
+        // this replaces tested only 192.0.2/24 and 198.51.100/24 and let 192.0.0/24 and
+        // 198.18/15 through.
+        if a == 192, b == 0, c == 0 { return false }
+        if a == 192, b == 0, c == 2 { return false }
+        if a == 198, b == 18 || b == 19 { return false }
+        if a == 198, b == 51, c == 100 { return false }
         if a == 203, b == 0, c == 113 { return false }
         return true
     }
@@ -165,7 +168,11 @@ public enum RemotePathIdentifier {
 
 public enum RemoteTransferError: LocalizedError {
     case disallowedURL
+    case disallowedResolvedAddress
+    case unverifiableProxy
     case redirectRejected
+    case tooManyRedirects
+    case networkFailure
     case responseTooLarge(Int64)
     case aggregateLimitExceeded(Int64)
     case insufficientDiskSpace
@@ -176,7 +183,13 @@ public enum RemoteTransferError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .disallowedURL: "The remote service returned a URL outside its allowed network scope."
+        case .disallowedResolvedAddress:
+            "The artifact URL resolved to a local or non-public network address."
+        case .unverifiableProxy:
+            "Audio artifact downloads require a direct connection; disable the configured proxy or PAC."
         case .redirectRejected: "The remote service redirected outside its allowed network scope."
+        case .tooManyRedirects: "The artifact server redirected too many times."
+        case .networkFailure: "The artifact download failed before a complete response was received."
         case .responseTooLarge(let limit): "The remote response exceeded its \(limit)-byte limit."
         case .aggregateLimitExceeded(let limit):
             "The remote job exceeded its \(limit)-byte aggregate download limit."
@@ -341,7 +354,7 @@ public enum RemoteArtifactTransfer {
         return destination
     }
 
-    fileprivate static func requireDiskCapacity(at directory: URL, bytes: Int64) throws {
+    static func requireDiskCapacity(at directory: URL, bytes: Int64) throws {
         let attributes = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
         if let free = (attributes[.systemFreeSize] as? NSNumber)?.int64Value, free < bytes {
             throw RemoteTransferError.insufficientDiskSpace

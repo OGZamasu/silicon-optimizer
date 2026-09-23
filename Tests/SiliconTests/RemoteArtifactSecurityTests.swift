@@ -1,4 +1,7 @@
 import Foundation
+import CArtifactHTTP
+import CFNetwork
+import Network
 import Testing
 @testable import SiliconRuntime
 
@@ -45,10 +48,137 @@ struct RemoteArtifactSecurityTests {
         #expect(policy.resolve("https://localhost/a.mp3", relativeTo: base) == nil)
         #expect(policy.resolve("https://artifact.test/a.mp3", relativeTo: base) == nil)
 
+        // Special-use ranges that share a first octet with public space. Two of these used
+        // to pass: the check listed two ranges per line, and a comma binds looser than `||`.
+        for host in ["192.0.0.8", "192.0.2.1", "198.18.0.1", "198.19.255.254", "198.51.100.7"] {
+            #expect(policy.resolve("https://\(host)/a.mp3", relativeTo: base) == nil, "\(host)")
+        }
+        for host in ["192.0.1.1", "198.17.0.1", "198.20.0.1"] {
+            #expect(policy.resolve("https://\(host)/a.mp3", relativeTo: base) != nil, "\(host)")
+        }
+
         // The provider does not publish CDN ownership in this repository. Public hostnames
-        // therefore remain compatible pending a source-backed provider allowlist; DNS
-        // resolution/rebinding is the deliberately documented residual policy gap.
+        // remain compatible while the GMI audio transfer validates each connected address.
         #expect(policy.resolve("https://undocumented-cdn.example.net/a.mp3", relativeTo: base) != nil)
+    }
+
+    @Test func connectedAddressClassifierRejectsLocalAndTransitionRanges() {
+        for address in [
+            "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254",
+            "100.64.0.1", "0.0.0.0", "224.0.0.1", "192.0.2.1", "198.51.100.1",
+            "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "64:ff9b::a00:1",
+            "2001:db8::1", "2002:0a00:0001::1", "3fff::1",
+            // NAT64: a synthesized address is judged by the IPv4 it embeds, so the tailnet's
+            // CGNAT range and loopback stay out; the local-use prefix is never translated here.
+            "64:ff9b::6440:9", "64:ff9b::7f00:1", "64:ff9b:1::a00:1",
+        ] {
+            #expect(address.withCString(silicon_artifact_public_ip) == 0)
+        }
+        for address in [
+            "1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888",
+            // DNS64 on an IPv6-only network synthesizes this for an IPv4-only CDN.
+            "64:ff9b::808:808",
+        ] {
+            #expect(address.withCString(silicon_artifact_public_ip) == 1)
+        }
+    }
+
+    @Test func artifactProxyPolicyFailsClosed() throws {
+        let typeKey = kCFProxyTypeKey as String
+        #expect(PublicHTTPSArtifactTransfer.directOnly([[typeKey: kCFProxyTypeNone as String]]))
+        #expect(!PublicHTTPSArtifactTransfer.directOnly([]))
+        #expect(!PublicHTTPSArtifactTransfer.directOnly([[typeKey: kCFProxyTypeHTTP as String]]))
+        #expect(!PublicHTTPSArtifactTransfer.directOnly([
+            [typeKey: kCFProxyTypeNone as String], [typeKey: kCFProxyTypeSOCKS as String],
+        ]))
+        #expect(!PublicHTTPSArtifactTransfer.directOnly([
+            [typeKey: kCFProxyTypeAutoConfigurationURL as String],
+        ]))
+        #expect(PublicHTTPSArtifactTransfer.proxyEnvironmentConfigured(["HTTPS_PROXY": "proxy:8080"]))
+        #expect(!PublicHTTPSArtifactTransfer.proxyEnvironmentConfigured([:]))
+        let direct = [[typeKey: kCFProxyTypeNone as String]]
+        #expect(throws: RemoteTransferError.self) {
+            try PublicHTTPSArtifactTransfer.enforceDirect(
+                environment: ["HTTPS_PROXY": "proxy:8080"], proxyEntries: direct,
+                systemSettings: [:]
+            )
+        }
+        #expect(throws: RemoteTransferError.self) {
+            try PublicHTTPSArtifactTransfer.enforceDirect(
+                environment: [:], proxyEntries: direct,
+                systemSettings: [kCFNetworkProxiesProxyAutoConfigEnable as String: 1]
+            )
+        }
+        #expect(throws: RemoteTransferError.self) {
+            try PublicHTTPSArtifactTransfer.enforceDirect(
+                environment: [:], proxyEntries: direct,
+                systemSettings: [kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1]
+            )
+        }
+        try PublicHTTPSArtifactTransfer.enforceDirect(
+            environment: [:], proxyEntries: direct, systemSettings: [:]
+        )
+        // WPAD or PAC on an interface that is not the primary one does not describe the
+        // route this transfer takes, so it no longer locks the download out.
+        try PublicHTTPSArtifactTransfer.enforceDirect(
+            environment: [:], proxyEntries: direct,
+            systemSettings: ["__SCOPED__": ["en1": [
+                kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1,
+                kCFNetworkProxiesProxyAutoConfigEnable as String: 1,
+            ]]]
+        )
+    }
+
+    @Test func audioRedirectsAreValidatedOnEveryHopAndBounded() throws {
+        let current = URL(string: "https://cdn.example.com/music/result")!
+        #expect(try PublicHTTPSArtifactTransfer.redirectTarget(
+            "/next", from: current, count: 0
+        ).absoluteString == "https://cdn.example.com/next")
+        #expect(throws: RemoteTransferError.self) {
+            try PublicHTTPSArtifactTransfer.redirectTarget(
+                "http://10.0.0.1/admin", from: current, count: 0
+            )
+        }
+        #expect(throws: RemoteTransferError.self) {
+            try PublicHTTPSArtifactTransfer.redirectTarget(
+                "https://127.0.0.1/private", from: current, count: 0
+            )
+        }
+        #expect(throws: RemoteTransferError.self) {
+            try PublicHTTPSArtifactTransfer.redirectTarget(
+                "/loop", from: current, count: 20
+            )
+        }
+    }
+
+    @Test func rebindingToLoopbackIsRefusedBeforeOpeningSocket() async throws {
+        let listener = try LoopbackConnectionCounter()
+        defer { listener.stop() }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-artifact-ip-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("partial")
+        #expect(FileManager.default.createFile(atPath: file.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+
+        let url = "https://cdn.example.com:\(listener.port)/song.mp3"
+        let override = "cdn.example.com:\(listener.port):127.0.0.1"
+        let job = url.withCString { address in
+            override.withCString { resolution in
+                silicon_artifact_job_create_test(
+                    address, handle.fileDescriptor, 1_024, 2_000, 0,
+                    resolution, nil, nil, nil
+                )
+            }
+        }
+        let unwrapped = try #require(job)
+        defer { silicon_artifact_job_destroy(unwrapped) }
+        #expect(silicon_artifact_job_perform(unwrapped) == SILICON_ARTIFACT_PRIVATE_ADDRESS)
+        #expect(silicon_artifact_job_bytes(unwrapped) == 0)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(listener.accepted == 0, "Private DNS must be rejected before a TCP connection or HTTP GET")
     }
 
     @Test func bearerCredentialsAreOriginBound() throws {
@@ -140,4 +270,42 @@ private final class BoundedBodyURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+final class LoopbackConnectionCounter: @unchecked Sendable {
+    private let listener: NWListener
+    private let lock = NSLock()
+    private var count = 0
+    private(set) var port: UInt16 = 0
+
+    var accepted: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredInterfaceType = .loopback
+        listener = try NWListener(using: parameters, on: .any)
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { ready.signal() }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { return }
+            self.lock.lock()
+            self.count += 1
+            self.lock.unlock()
+            connection.cancel()
+        }
+        listener.start(queue: DispatchQueue(label: "artifact-ip-fixture"))
+        guard ready.wait(timeout: .now() + 5) == .success else {
+            listener.cancel()
+            throw RemoteTransferError.networkFailure
+        }
+        port = listener.port?.rawValue ?? 0
+    }
+
+    func stop() { listener.cancel() }
 }
