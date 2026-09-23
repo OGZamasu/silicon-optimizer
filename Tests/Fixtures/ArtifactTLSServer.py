@@ -3,6 +3,8 @@
 import http.server
 import ssl
 import sys
+import time
+import urllib.parse
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -19,6 +21,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "https://127.0.0.1/private")
             self.end_headers()
+            return
+        if self.path.startswith("/bounce?"):
+            # A public-looking CDN handing the client on to wherever `to` names.
+            target = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["to"][0]
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.end_headers()
+            return
+        if self.path == "/stall":
+            # Half the body, then silence: a transfer that is in flight until cancelled.
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", "8192")
+            self.end_headers()
+            self.wfile.write(b"A" * 4096)
+            self.wfile.flush()
+            time.sleep(30)
+            try:
+                self.wfile.write(b"A" * 4096)
+            except OSError:
+                pass  # The client gave up, which is what the cancellation tests expect.
             return
         if self.path == "/loop":
             self.send_response(302)

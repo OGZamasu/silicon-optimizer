@@ -256,7 +256,7 @@ private final class BoundedBodyURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-private final class LoopbackConnectionCounter: @unchecked Sendable {
+final class LoopbackConnectionCounter: @unchecked Sendable {
     private let listener: NWListener
     private let lock = NSLock()
     private var count = 0

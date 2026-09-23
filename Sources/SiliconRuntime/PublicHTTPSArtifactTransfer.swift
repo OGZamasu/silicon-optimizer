@@ -77,11 +77,31 @@ public enum PublicHTTPSArtifactTransfer {
         )
     }
 
+    /// Builds the C job for one hop from its URL, descriptor, byte limit, timeout, disk
+    /// reserve and budget callback. Production always uses `silicon_artifact_job_create`,
+    /// which has no way to override DNS or trust; tests substitute fixture resolution per
+    /// hop so the redirect loop itself can be driven against a local server.
+    typealias JobFactory = @Sendable (
+        String, Int32, Int64, Int64, Int64, SiliconArtifactConsume, UnsafeMutableRawPointer
+    ) -> OpaquePointer?
+
+    static func productionJob(
+        _ url: String, _ descriptor: Int32, _ limit: Int64, _ timeout: Int64, _ reserve: Int64,
+        _ consume: SiliconArtifactConsume, _ context: UnsafeMutableRawPointer
+    ) -> OpaquePointer? {
+        url.withCString { address in
+            silicon_artifact_job_create(
+                address, descriptor, limit, timeout, reserve, consume, context
+            )
+        }
+    }
+
     static func download(
         from remote: URL, to destination: URL, maximumBytes: Int64,
         budget: RemoteByteBudget, timeout: TimeInterval,
         proxyCheck: @escaping @Sendable (URL) throws -> Void,
-        onNetworkAttempt: @escaping @Sendable () -> Void
+        onNetworkAttempt: @escaping @Sendable () -> Void,
+        makeJob: @escaping JobFactory = productionJob
     ) async throws -> URL {
         guard RemoteURLPolicy.publicHTTPS.permits(remote)
         else { throw RemoteTransferError.disallowedURL }
@@ -127,7 +147,8 @@ public enum PublicHTTPSArtifactTransfer {
             guard let job = CurlArtifactJob(
                 url: current, fileDescriptor: handle.fileDescriptor,
                 maximumBytes: maximumBytes, timeoutMilliseconds: max(1, milliseconds),
-                reserveBytes: RemoteArtifactTransfer.diskReserveBytes, budget: budget
+                reserveBytes: RemoteArtifactTransfer.diskReserveBytes, budget: budget,
+                make: makeJob
             ) else { throw RemoteTransferError.networkFailure }
             let result = await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
@@ -208,14 +229,13 @@ private final class CurlArtifactJob: @unchecked Sendable {
     }
 
     init?(url: URL, fileDescriptor: Int32, maximumBytes: Int64,
-          timeoutMilliseconds: Int64, reserveBytes: Int64, budget: RemoteByteBudget) {
+          timeoutMilliseconds: Int64, reserveBytes: Int64, budget: RemoteByteBudget,
+          make: PublicHTTPSArtifactTransfer.JobFactory) {
         self.budget = budget
-        pointer = url.absoluteString.withCString { address in
-            silicon_artifact_job_create(
-                address, fileDescriptor, maximumBytes, timeoutMilliseconds, reserveBytes,
-                Self.consumeBytes, Unmanaged.passUnretained(budget).toOpaque()
-            )
-        }
+        pointer = make(
+            url.absoluteString, fileDescriptor, maximumBytes, timeoutMilliseconds, reserveBytes,
+            Self.consumeBytes, Unmanaged.passUnretained(budget).toOpaque()
+        )
         if pointer == nil { return nil }
     }
 
