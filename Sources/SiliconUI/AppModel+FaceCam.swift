@@ -111,9 +111,10 @@ extension AppModel {
         Task { await runtime.stop() }
     }
 
-    /// Sets up Deep-Live-Cam in its own environment: its own Python, its own clone,
-    /// its own models. Kept apart from the other tools because its dependencies pin
-    /// versions the audio and image stacks disagree with.
+    /// Sets up Deep-Live-Cam in its own environment: its own Python, the reviewed commit,
+    /// its hash-locked dependencies and digest-checked models (`FaceCamRuntime.installPlan`).
+    /// Kept apart from the other tools because its dependencies pin versions the audio and
+    /// image stacks disagree with.
     public func installFaceCam() {
         guard let bundled = Bundle.main.url(forResource: "facecam", withExtension: "py")
             ?? Bundle.main.resourceURL?.appendingPathComponent("facecam.py")
@@ -121,53 +122,19 @@ extension AppModel {
             faceCamError = "The camera driver is missing from the app."
             return
         }
-        let environment = FaceCamRuntime.environment
-        let repository = FaceCamRuntime.repository
-        var steps: [RepairStep] = []
-
-        if !FileManager.default.isExecutableFile(atPath: FaceCamRuntime.python.path) {
-            steps.append(RepairStep(
-                executable: URL(fileURLWithPath: Self.faceCamPython),
-                arguments: ["-m", "venv", environment.path],
-                currentDirectory: nil,
-                label: "Making its Python environment —"
-            ))
+        let steps: [RepairStep]
+        do {
+            steps = try FaceCamRuntime.installPlan(
+                basePython: URL(fileURLWithPath: Self.faceCamPython),
+                git: URL(fileURLWithPath: "/usr/bin/git")
+            ).map {
+                RepairStep(executable: $0.executable, arguments: $0.arguments,
+                           currentDirectory: $0.workingDirectory, label: "\($0.label) —")
+            }
+        } catch {
+            faceCamError = error.localizedDescription
+            return
         }
-        if !FileManager.default.fileExists(atPath: repository.path) {
-            steps.append(RepairStep(
-                executable: URL(fileURLWithPath: "/usr/bin/git"),
-                arguments: [
-                    "clone", "--depth", "1",
-                    "https://github.com/hacksider/Deep-Live-Cam.git", repository.path,
-                ],
-                currentDirectory: nil,
-                label: "Downloading Deep-Live-Cam —"
-            ))
-        }
-        steps.append(RepairStep(
-            executable: environment.appendingPathComponent("bin/pip"),
-            arguments: [
-                "install", "-r", repository.appendingPathComponent("requirements.txt").path,
-            ],
-            currentDirectory: nil,
-            label: "Installing its tools (several minutes) —"
-        ))
-        // The project downloads its own weights, through its own pre-check, so the
-        // model comes from where upstream says it does.
-        steps.append(RepairStep(
-            executable: FaceCamRuntime.python,
-            arguments: [
-                "-c",
-                "import sys; sys.path.insert(0, '\(repository.path)'); "
-                + "import modules.globals as g; "
-                + "g.execution_providers=['CoreMLExecutionProvider','CPUExecutionProvider']; "
-                + "g.headless=True; "
-                + "from modules.processors.frame import face_swapper; "
-                + "face_swapper.pre_check()",
-            ],
-            currentDirectory: repository,
-            label: "Fetching the face model (550 MB) —"
-        ))
 
         runRepair(id: "facecam-install", steps: steps) { [weak self] in
             try? FaceCamRuntime.installDriver(from: bundled)

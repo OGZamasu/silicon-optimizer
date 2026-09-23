@@ -96,12 +96,15 @@ an agent describe successive actions. On a swarm node, Wan 2.2 and LTX-2 distill
 delivers, which each model's picker and `list_video_models` publish. Model availability is
 checked against the selected node before a job starts.
 
-Optional OpenMontage setup still clones the current upstream source and installs Python
-packages without an app-pinned, verified source/dependency set. This app now uses
-OpenMontage's Remotion lockfile for `npm ci` on a new checkout and does not automatically
-pull an existing checkout or reinstall its Remotion dependencies. These changes do not
-make the initial install reproducible or verified.
-Model downloads in other optional media setups also remain unpinned and unverified.
+The optional OpenMontage, LivePortrait and Deep-Live-Cam setups install a reviewed upstream
+commit, fetched by id and checked before anything in it runs, and only the hash-locked Python
+packages in [`Resources/pinned-installs`](Resources/pinned-installs); LivePortrait's and
+Deep-Live-Cam's weights come from a reviewed Hub revision and are kept only if their SHA-256
+matches. OpenMontage's Remotion step runs `npm ci` against that commit's lockfile. An existing
+`~/OpenMontage` is never pulled and its Remotion packages are left alone; setup checks it and
+stops if it is another revision. A rerun leaves Python packages already installed at the locked
+version as they are, so an environment made by an older, unpinned install keeps any extras it
+had. Moving a pin is a review: `Scripts/lock-media-installers.sh` rebuilds the locks.
 
 The node has a persistent queue, authenticated loopback access, and verified MP4 output
 with model metadata. The [batch example](Resources/video-node/examples/README.md) includes
