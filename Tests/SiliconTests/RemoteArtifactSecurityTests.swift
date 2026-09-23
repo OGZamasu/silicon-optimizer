@@ -224,7 +224,7 @@ struct RemoteArtifactSecurityTests {
 
         await #expect(throws: RemoteTransferError.self) {
             _ = try await RemoteArtifactTransfer.download(
-                from: remote, policy: .publicHTTPS, to: destination,
+                from: remote, policy: .peerHost(remote), to: destination,
                 maximumBytes: 64, budget: RemoteByteBudget(limit: 128), timeout: 5,
                 allowedContentTypes: ["application/octet-stream"],
                 sessionConfiguration: configuration

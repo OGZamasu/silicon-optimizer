@@ -9,9 +9,17 @@ public enum RemoteURLPolicy: Sendable {
     /// host stay fixed; credentials remain stricter and are still bound to one origin.
     case peerHost(URL)
     /// Provider artifacts may live on an undocumented CDN, but never on a local/private address
-    /// or over HTTP. This URL-only policy screens literal/special-use hosts; the GMI audio
-    /// transfer additionally verifies the resolved and connected address before each GET.
+    /// or over HTTP. The URL check here screens literal/special-use hosts; the address DNS
+    /// answers is only checked by `PublicHTTPSArtifactTransfer`, which vetoes it as the socket
+    /// opens on every hop, so the URLSession transports below refuse this policy outright.
     case publicHTTPS
+
+    /// URLSession connects to whatever DNS answers and exposes the peer address only after it
+    /// has sent the request, so it can enforce every policy here except the provider one.
+    var isEnforceableByURLSession: Bool {
+        if case .publicHTTPS = self { return false }
+        return true
+    }
 
     public func resolve(_ value: String, relativeTo base: URL) -> URL? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -256,7 +264,8 @@ public enum RemoteHTTP {
         successLimit: Int = controlResponseLimit,
         errorLimit: Int = errorResponseLimit
     ) async throws -> (Data, URLResponse) {
-        guard let safeRequest = policy.sanitized(request, credentialOrigin: credentialOrigin)
+        guard policy.isEnforceableByURLSession,
+              let safeRequest = policy.sanitized(request, credentialOrigin: credentialOrigin)
         else { throw RemoteTransferError.disallowedURL }
         let delegate = RemoteRedirectDelegate(policy: policy, credentialOrigin: credentialOrigin)
         let (bytes, response) = try await session.bytes(for: safeRequest, delegate: delegate)
@@ -299,6 +308,7 @@ public enum RemoteArtifactTransfer {
         allowedContentTypes: [String],
         sessionConfiguration: URLSessionConfiguration = .ephemeral
     ) async throws -> URL {
+        guard policy.isEnforceableByURLSession else { throw RemoteTransferError.disallowedURL }
         let manager = FileManager.default
         let directory = destination.deletingLastPathComponent()
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
