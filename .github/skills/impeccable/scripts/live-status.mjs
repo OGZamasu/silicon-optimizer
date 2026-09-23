@@ -4,7 +4,7 @@
  */
 
 import { createLiveSessionStore } from './live/session-store.mjs';
-import { readLiveServerInfo } from './lib/impeccable-paths.mjs';
+import { liveHelperBase, readLiveServerInfo } from './lib/impeccable-paths.mjs';
 import { manualApplyResumeHint, mountFailureAction, renderSummary } from './live-resume.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
 
@@ -15,7 +15,7 @@ function readServerInfo() {
 async function fetchServerStatus(info) {
   if (!info) return null;
   try {
-    const res = await fetch(`http://localhost:${info.port}/status?token=${info.token}`);
+    const res = await fetch(`${liveHelperBase(info.port)}/status?token=${info.token}`);
     if (!res.ok) return null;
     return await res.json();
   } catch {

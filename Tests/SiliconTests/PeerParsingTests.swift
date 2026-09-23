@@ -132,15 +132,15 @@ struct PeerParsingTests {
             "installed": true, "running": true, "healthy": true,
             "model": "qwen3.8-27b", "profile": "c1", "uptime_s": 4297,
             "api": [
-                "openai": "http://100.118.191.121:8081/v1 (tailnet)",
-                "anthropic": "http://100.118.191.121:8081 (tailnet, Messages API)",
+                "openai": "http://100.64.0.9:8081/v1 (tailnet)",
+                "anthropic": "http://100.64.0.9:8081 (tailnet, Messages API)",
             ],
         ]
         let llm = AppModel.parseLLM(json)
         #expect(llm.installed && llm.running && llm.healthy)
         #expect(llm.model == "qwen3.8-27b")
         #expect(within(llm.uptimeSeconds, of: 4297))
-        #expect(llm.openAIBase == "http://100.118.191.121:8081/v1")
+        #expect(llm.openAIBase == "http://100.64.0.9:8081/v1")
         #expect(llm.contextLength == nil)
     }
 
@@ -152,7 +152,7 @@ struct PeerParsingTests {
             "installed": true, "installed_models": ["qwen3_8_27b.ninfer"],
             "running": false, "healthy": false,
             "model": "qwen3.8-27b", "profile": NSNull(), "uptime_s": NSNull(),
-            "api": ["openai": "http://100.118.191.121:8081/v1 (tailnet)"],
+            "api": ["openai": "http://100.64.0.9:8081/v1 (tailnet)"],
         ]
         let llm = AppModel.parseLLM(json)
         #expect(llm.installed && !llm.running && !llm.healthy)

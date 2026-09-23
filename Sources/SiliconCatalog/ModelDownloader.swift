@@ -66,8 +66,18 @@ public actor ModelDownloader {
     private let overrideBase: URL?
     /// Which redirects may be followed. Nil follows any.
     private let redirects: (@Sendable (URL) -> Bool)?
+    /// Free bytes on the volume a folder is on, as the reserve check reads them. The live
+    /// reading unless a caller has its own — the phone-model store's, so one reading
+    /// answers every check it makes, and a test's, so whether a few hundred kilobytes fit
+    /// does not depend on how full the disk of the Mac running the suite happens to be.
+    private let availableCapacity: @Sendable (URL) -> Int64?
 
-    public init(token: String? = nil, baseURL: URL? = nil) {
+    public init(
+        token: String? = nil, baseURL: URL? = nil,
+        availableCapacity: @escaping @Sendable (URL) -> Int64? = {
+            ModelDownloader.liveAvailableCapacity(at: $0)
+        }
+    ) {
         let configuration = URLSessionConfiguration.default
         // Model downloads are long-lived; the default 7-day resource timeout is fine but the
         // per-request timeout must be generous enough for a slow first byte on a busy CDN.
@@ -79,6 +89,7 @@ public actor ModelDownloader {
         self.token = token
         self.overrideBase = baseURL
         self.redirects = nil
+        self.availableCapacity = availableCapacity
     }
 
     /// A downloader for public files, fetched for somebody else: the models this Mac keeps
@@ -90,12 +101,18 @@ public actor ModelDownloader {
     /// at once, with the partial kept to resume, rather than sitting at "0%" for the days a
     /// catalogue download is allowed to wait. A host that takes the connection and then
     /// never answers is given up on after the 60-second request timeout.
-    public init(publicFilesFrom baseURL: URL? = nil, redirects: @escaping @Sendable (URL) -> Bool) {
+    public init(
+        publicFilesFrom baseURL: URL? = nil, redirects: @escaping @Sendable (URL) -> Bool,
+        availableCapacity: @escaping @Sendable (URL) -> Int64? = {
+            ModelDownloader.liveAvailableCapacity(at: $0)
+        }
+    ) {
         self.configuration = Self.publicFileConfiguration()
         self.waitsForConnectivity = configuration.waitsForConnectivity
         self.token = nil
         self.overrideBase = baseURL
         self.redirects = redirects
+        self.availableCapacity = availableCapacity
     }
 
     /// The session a public file is fetched on: ephemeral, and keeping even less than that
@@ -379,7 +396,10 @@ public actor ModelDownloader {
     /// Exposed so callers can fail *before* telling a user a download has begun. The transfer
     /// itself runs detached, so a check that only happened inside it would surface the failure
     /// long after the caller had reported success.
-    public static func checkDiskSpace(needed: Bytes, at directory: URL) throws {
+    public static func checkDiskSpace(
+        needed: Bytes, at directory: URL,
+        capacity: (URL) -> Int64? = ModelDownloader.liveAvailableCapacity(at:)
+    ) throws {
         // Walk up to the nearest existing ancestor: the target directory is usually created
         // as part of the download that has not started yet.
         var probe = directory
@@ -387,16 +407,21 @@ public actor ModelDownloader {
               probe.pathComponents.count > 1 {
             probe = probe.deletingLastPathComponent()
         }
-        guard let values = try? probe.resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
-        ), let available = values.volumeAvailableCapacityForImportantUsage else { return }
+        guard let available = capacity(probe) else { return }
 
         guard Bytes(available) > needed + diskReserve else {
             throw DownloadError.insufficientDiskSpace(needed: needed, available: Bytes(available))
         }
     }
 
+    /// The free space macOS reports for "important" use on the volume `url` is on, or nil
+    /// when the volume does not say — in which case the check above is not made.
+    public static func liveAvailableCapacity(at url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage
+    }
+
     private func checkDiskSpace(needed: Bytes, at directory: URL) throws {
-        try Self.checkDiskSpace(needed: needed, at: directory)
+        try Self.checkDiskSpace(needed: needed, at: directory, capacity: availableCapacity)
     }
 }

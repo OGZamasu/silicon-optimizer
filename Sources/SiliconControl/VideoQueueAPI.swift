@@ -78,6 +78,16 @@ extension ControlAPI {
             public var mediaURL: String?
             /// A JPEG poster frame, when one could be made from the clip.
             public var thumbnailMediaID: String?
+            /// Set once someone asked the node to cancel this clip's render: `sending`,
+            /// `requested`, `confirmed`, `completed` (it finished first), `failed`,
+            /// `unsupported` or `unknown`. A `cancelled` status means `confirmed`.
+            public var cancelState: String?
+            /// The node's own words about that cancel, when it gave any.
+            public var cancelDetail: String?
+            /// Whether the `cancel` verb applies to this clip now: its node advertises
+            /// job cancellation for the lane and the render may still be running. When it
+            /// is false, `stop_following` is the only way to stop waiting.
+            public var canCancel: Bool?
 
             public init(id: String, batchID: String, title: String, prompt: String,
                         scene: Int, variation: Int, seed: UInt32?, modelID: String,
@@ -86,7 +96,8 @@ extension ControlAPI {
                         error: String?, uncertainSubmission: Bool, h3Steps: Int? = nil,
                         detail: String? = nil, negativePrompt: String? = nil,
                         mediaID: String? = nil, mediaURL: String? = nil,
-                        thumbnailMediaID: String? = nil) {
+                        thumbnailMediaID: String? = nil, cancelState: String? = nil,
+                        cancelDetail: String? = nil, canCancel: Bool? = nil) {
                 self.id = id; self.batchID = batchID; self.title = title; self.prompt = prompt
                 self.scene = scene; self.variation = variation; self.seed = seed
                 self.modelID = modelID; self.seconds = seconds; self.resolution = resolution
@@ -99,6 +110,9 @@ extension ControlAPI {
                 self.mediaID = mediaID
                 self.mediaURL = mediaURL
                 self.thumbnailMediaID = thumbnailMediaID
+                self.cancelState = cancelState
+                self.cancelDetail = cancelDetail
+                self.canCancel = canCancel
             }
         }
         public var paused: Bool

@@ -11,7 +11,7 @@
  *   repoRoot    the git boundary (falls back to appRoot outside git).
  *   contextRoot the nearest directory from appRoot up to repoRoot carrying
  *               PRODUCT.md / DESIGN.md (canonical spot or a fallback dir).
- *   sessionRoot <appRoot>/.impeccable/live — durable live state.
+ *   sessionRoot private per-app Live directory — durable live state.
  *
  * appRoot detection keys on dev-server config presence (vite/svelte/next/
  * astro/nuxt/... config files), not on monorepo brand markers. A nested
@@ -29,6 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { resolveProjectRoot } from '../context.mjs';
+import { getLivePrivateDirPath, readLiveServerInfo } from '../lib/impeccable-paths.mjs';
 
 const ROOTS_MANIFEST_VERSION = 1;
 const ROOTS_FILE = 'roots.json';
@@ -239,7 +240,7 @@ export function resolveRoots({ cwd = process.cwd(), targetPath = null } = {}) {
       appRoot,
       repoRoot: effectiveRepoRoot,
       contextRoot,
-      sessionRoot: path.join(appRoot, '.impeccable', 'live'),
+      sessionRoot: getLivePrivateDirPath(appRoot),
       productPath,
       designPath,
       resolvedFrom,
@@ -300,13 +301,13 @@ function readPointerEntries(repoRoot) {
 function hasLiveServer(appRoot) {
   let pid;
   let port;
-  let token;
+  let pageToken;
   try {
-    const info = JSON.parse(fs.readFileSync(path.join(appRoot, '.impeccable', 'live', 'server.json'), 'utf-8'));
+    const info = readLiveServerInfo(appRoot)?.info;
     if (!info || typeof info.pid !== 'number') return false;
     pid = info.pid;
     port = Number(info.port);
-    token = typeof info.token === 'string' ? info.token : null;
+    pageToken = typeof info.pageToken === 'string' ? info.pageToken : null;
     process.kill(pid, 0);
   } catch (err) {
     // EPERM: the process exists but is not signalable by this user.
@@ -314,25 +315,28 @@ function hasLiveServer(appRoot) {
   }
   // Liveness alone misclassifies a REUSED pid, and a bare TCP connect
   // misclassifies a coincidental listener on a reused port. The decisive
-  // signal is IDENTITY: the helper answers its authenticated /status
-  // endpoint with the token server.json records; nothing else on that port
-  // can. The probe is a spawned node one-liner so it works identically on
-  // every platform.
-  if (Number.isInteger(port) && port > 0 && token) {
+  // signal is IDENTITY: the helper answers its authenticated /page-status
+  // endpoint with the page token server.json records; nothing else on that
+  // port can. The probe is a spawned node one-liner so it works identically
+  // on every platform. Its argv is visible to every local user in `ps`, so
+  // it carries the page token (already in the app-root server.json), never
+  // the private controller credential.
+  if (Number.isInteger(port) && port > 0 && pageToken) {
     try {
       execFileSync(process.execPath, ['-e', [
-        "const req = require('node:http').get({ host: '127.0.0.1', port: Number(process.argv[1]), path: '/status?token=' + encodeURIComponent(process.argv[2]), timeout: 1200 }, (res) => { res.resume(); process.exit(res.statusCode === 200 ? 0 : 1); });",
+        "const req = require('node:http').get({ host: '127.0.0.1', port: Number(process.argv[1]), path: '/page-status?token=' + encodeURIComponent(process.argv[2]), timeout: 1200 }, (res) => { res.resume(); process.exit(res.statusCode === 200 ? 0 : 1); });",
         "req.on('timeout', () => { req.destroy(); process.exit(1); });",
         "req.on('error', () => process.exit(1));",
-      ].join(''), String(port), token], { timeout: 4000, stdio: 'ignore' });
+      ].join(''), String(port), pageToken], { timeout: 4000, stdio: 'ignore' });
       return true;
     } catch {
       return false;
     }
   }
-  // Every server.json this codebase has ever written records port + token
-  // (see writeLiveServerInfo). A record without them is malformed or foreign
-  // and cannot be authenticated, so it does not count as a live helper;
+  // Every server.json this codebase writes records port + page token (see
+  // writeLiveServerInfo). A record without them is malformed, foreign, or a
+  // pre-split helper that live.mjs already refuses to reuse, and cannot be
+  // authenticated, so it does not count as a live helper;
   // resolution falls to the durable-session tier, which is the correct
   // recovery path for a stopped or crashed helper anyway.
   return false;
@@ -347,19 +351,24 @@ const TERMINAL_SESSION_PHASES = new Set(['completed', 'discarded']);
  * app that merely booted more recently.
  */
 function hasActiveDurableSession(appRoot) {
-  const dir = path.join(appRoot, '.impeccable', 'live', 'sessions');
-  let entries;
+  // Root selection is read-only. The old app-root location is considered only
+  // until the next helper migrates it; a stopped helper's private snapshots
+  // still choose the correct app in a multi-app repository.
+  let dirs;
   try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return false;
-  }
-  for (const name of entries) {
-    if (!name.endsWith('.snapshot.json')) continue;
-    try {
-      const snapshot = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf-8'));
-      if (snapshot?.phase && !TERMINAL_SESSION_PHASES.has(snapshot.phase)) return true;
-    } catch { /* skip unreadable snapshots */ }
+    dirs = [path.join(getLivePrivateDirPath(appRoot), 'sessions'),
+      path.join(appRoot, '.impeccable', 'live', 'sessions')];
+  } catch { return false; }
+  for (const dir of dirs) {
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      if (!name.endsWith('.snapshot.json')) continue;
+      try {
+        const snapshot = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf-8'));
+        if (snapshot?.phase && !TERMINAL_SESSION_PHASES.has(snapshot.phase)) return true;
+      } catch { /* skip unreadable snapshots */ }
+    }
   }
   return false;
 }

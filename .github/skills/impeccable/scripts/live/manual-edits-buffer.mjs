@@ -1,7 +1,7 @@
 /**
  * Shared helpers for the pending-manual-edits buffer on disk.
  *
- * Location: .impeccable/live/pending-manual-edits.json (project-local).
+ * Location: owner-only private Live state outside the dev-served project.
  * Schema:   { version: 1, entries: [{ id, pageUrl, element, ops, stagedAt }] }
  *
  * Each entry corresponds to one Save action from the browser. Ops merge by
@@ -12,13 +12,20 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLiveDir } from '../lib/impeccable-paths.mjs';
+import { createHash } from 'node:crypto';
+import { getLivePrivateDir } from '../lib/impeccable-paths.mjs';
 
 const BUFFER_VERSION = 1;
 const BUFFER_FILENAME = 'pending-manual-edits.json';
+const MAX_STAGED_OPS = 500;
+const MAX_STAGED_BYTES = 2 * 1024 * 1024;
+
+export function reviewDigest(entries = []) {
+  return createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+}
 
 export function getBufferPath(cwd = process.cwd()) {
-  return path.join(getLiveDir(cwd), BUFFER_FILENAME);
+  return path.join(getLivePrivateDir(cwd), BUFFER_FILENAME);
 }
 
 export function readBuffer(cwd = process.cwd()) {
@@ -32,14 +39,27 @@ export function readBufferStrict(cwd = process.cwd()) {
 function readBufferInternal(cwd, { strict }) {
   const filePath = getBufferPath(cwd);
   try {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_STAGED_BYTES) {
+      const error = new Error(`Legacy staged edits require manual review: ${filePath}`);
+      error.code = 'MANUAL_EDIT_BUFFER_LIMIT';
+      throw error;
+    }
     const raw = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.entries)) {
       if (strict) throw new Error('manual_edit_buffer_invalid_schema');
       return { version: BUFFER_VERSION, entries: [] };
     }
+    const opCount = parsed.entries.reduce((sum, entry) => sum + (Array.isArray(entry?.ops) ? entry.ops.length : MAX_STAGED_OPS + 1), 0);
+    if (parsed.entries.length > MAX_STAGED_OPS || opCount > MAX_STAGED_OPS) {
+      const error = new Error(`Legacy staged edits exceed the review budget: ${filePath}`);
+      error.code = 'MANUAL_EDIT_BUFFER_LIMIT';
+      throw error;
+    }
     return { version: BUFFER_VERSION, entries: parsed.entries };
   } catch (err) {
+    if (err?.code === 'MANUAL_EDIT_BUFFER_LIMIT') throw err;
     if (strict && err?.code !== 'ENOENT') {
       throw new Error('manual_edit_buffer_unreadable: ' + (err.message || String(err)));
     }
@@ -98,6 +118,13 @@ export function stageEntry(cwd, newEntry) {
     }
     entry.ops.push(newOp);
     entry.stagedAt = new Date().toISOString();
+  }
+  const totalOps = buf.entries.reduce((count, entry) => count + (entry.ops?.length || 0), 0);
+  const serializedBytes = Buffer.byteLength(JSON.stringify({ version: BUFFER_VERSION, entries: buf.entries }, null, 2));
+  if (totalOps > MAX_STAGED_OPS || serializedBytes > MAX_STAGED_BYTES) {
+    const error = new RangeError('Staged copy edits are full; apply or discard existing drafts before saving more.');
+    error.code = 'MANUAL_EDIT_BUFFER_LIMIT';
+    throw error;
   }
   writeBuffer(cwd, buf);
   return buf;

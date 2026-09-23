@@ -434,11 +434,15 @@ extension AppModel {
     /// Split out from the lookup so the rule can be read — and tested — without a gateway,
     /// a swarm or a settings file behind it.
     nonisolated static func escalationTarget(
-        chosen: String?, from models: [GatewayAPI.Model], excluding: String?
+        chosen: String?, from models: [GatewayAPI.Model], excluding: String?,
+        paidAllowed: Bool = true
     ) -> String? {
         func usable(_ id: String) -> Bool {
             guard id != excluding, let parsed = GatewayAPI.parseModelID(id) else { return false }
             if case .local = parsed { return false }
+            // A cloud model runs on the owner's account. A swarm node's chat may be re-run
+            // on the owner's hardware, never on their bill.
+            if case .cloud = parsed, !paidAllowed { return false }
             return true
         }
 
@@ -481,6 +485,8 @@ extension AppModel {
         // entirely when the owner has already named one, so drawing a settings row cannot
         // be what walks the library and the swarm.
         let models = chosen?.isEmpty == false ? [] : await gatewayServableModels()
-        return Self.escalationTarget(chosen: chosen, from: models, excluding: excluding)
+        return Self.escalationTarget(
+            chosen: chosen, from: models, excluding: excluding, paidAllowed: PaidLanes.allowed
+        )
     }
 }

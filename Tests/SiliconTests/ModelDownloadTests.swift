@@ -138,6 +138,59 @@ struct ModelDownloadTests {
             .appendingPathComponent("model-dl-\(UUID().uuidString)", isDirectory: true)
     }
 
+    /// A terabyte free, whatever the Mac running the suite has. These files are a few
+    /// hundred kilobytes; whether they fit beside the 10 GiB reserve is not what is being
+    /// tested here, and on a nearly full startup disk the live answer is "no".
+    private static let roomToSpare: @Sendable (URL) -> Int64? = { _ in 1 << 40 }
+
+    // MARK: - The reserve
+
+    /// The reserve is asked of the free space the downloader was given, before a byte moves:
+    /// exactly the file plus the reserve is not enough, one byte more is.
+    @Test func theReserveIsKeptOfTheFreeSpaceTheDownloaderIsGiven() async throws {
+        let server = try FileServer()
+        defer { server.stop() }
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let whole = randomData(100_000)
+        server.set("weights.safetensors", whole)
+        let resolution = ModelResolver.Resolution(
+            repository: "test/reserve",
+            files: [.init(path: "weights.safetensors",
+                          size: Bytes(Int64(whole.count)), sha256: sha(whole))],
+            projector: nil
+        )
+        let exactly = Int64(whole.count) + ModelDownloader.diskReserve.rawValue
+        let asked = LockedPaths()
+        func downloader(free: Int64) -> ModelDownloader {
+            ModelDownloader(
+                baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+                availableCapacity: { url in
+                    asked.append(url.standardizedFileURL.path)
+                    return free
+                }
+            )
+        }
+
+        await #expect(throws: ModelDownloader.DownloadError.self) {
+            _ = try await downloader(free: exactly).download(resolution, to: directory) { _ in }
+        }
+        #expect(server.requests.isEmpty)
+        #expect(Set(asked.paths) == [directory.standardizedFileURL.path])
+
+        let written = try await downloader(free: exactly + 1)
+            .download(resolution, to: directory) { _ in }
+        #expect(try Data(contentsOf: written[0]) == whole)
+    }
+
+    private final class LockedPaths: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String] = []
+        var paths: [String] { lock.withLock { stored } }
+        func append(_ path: String) { lock.withLock { stored.append(path) } }
+    }
+
     // MARK: - The sharded transfer
 
     @Test func aShardedModelArrivesWholeAndAlreadyValidFilesAreNotRefetched() async throws {
@@ -180,7 +233,8 @@ struct ModelDownloadTests {
         }
         let progress = ProgressBox()
         let downloader = ModelDownloader(
-            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
         )
         let written = try await downloader.download(resolution, to: directory) {
             progress.last = $0
@@ -331,7 +385,8 @@ struct ModelDownloadTests {
             projector: nil
         )
         let downloader = ModelDownloader(
-            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
         )
         let written = try await downloader.download(resolution, to: directory) { _ in }
 
@@ -363,7 +418,8 @@ struct ModelDownloadTests {
             projector: nil
         )
         let downloader = ModelDownloader(
-            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
         )
         let written = try await downloader.download(resolution, to: directory) { _ in }
         #expect(try Data(contentsOf: written[0]) == whole)

@@ -555,14 +555,17 @@ function verificationFailuresForEntries(batch, entries, reason, extra = {}) {
   }));
 }
 
-function clearAppliedEntries(cwd, appliedEntryIds) {
+function clearAppliedEntries(cwd, appliedEntryIds, reviewedEntries = []) {
   const ids = new Set(appliedEntryIds);
+  const reviewedById = new Map(reviewedEntries.map((entry) => [entry.id, JSON.stringify(entry)]));
   if (ids.size === 0) return 0;
   const buffer = readBuffer(cwd);
   let cleared = 0;
   const kept = [];
   for (const entry of buffer.entries || []) {
-    if (ids.has(entry.id)) {
+    // A page may stage new edits while an approved copy-edit run is active.
+    // Never clear a buffer entry that differs from the reviewed snapshot.
+    if (ids.has(entry.id) && JSON.stringify(entry) === reviewedById.get(entry.id)) {
       cleared += Array.isArray(entry.ops) ? entry.ops.length : 0;
     } else {
       kept.push(entry);
@@ -846,7 +849,7 @@ async function repairPostApplyValidation({
       continue;
     }
 
-    const cleared = clearAppliedEntries(cwd, verified.verifiedIds);
+    const cleared = clearAppliedEntries(cwd, verified.verifiedIds, batch.entries);
     const counts = countByPage(cwd);
     const verifiedIdSet = new Set(verified.verifiedIds);
     return {
@@ -1201,7 +1204,7 @@ export async function commitManualEdits({
     });
   }
 
-  const cleared = clearAppliedEntries(cwd, verifiedAppliedIds);
+  const cleared = clearAppliedEntries(cwd, verifiedAppliedIds, batch.entries);
   const counts = countByPage(cwd);
   return {
     applied: summarizeAppliedEntries(batch.entries, verifiedAppliedIds),

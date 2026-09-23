@@ -142,7 +142,7 @@ struct HarnessConfigTests {
         silicon-swarm-silicon-node:
           apiKeyEnv: SILICON_LOCAL_API_KEY
           api: openai-completions
-          baseURL: http://100.118.191.121:8081/v1
+          baseURL: http://100.64.0.9:8081/v1
           models:
             - id: qwen3.8-27b
               name: "qwen3.8-27b on silicon-node"
@@ -164,7 +164,7 @@ struct HarnessConfigTests {
         let document = HarnessRuntime.retiringSwarmProviders(existing: legacySwarmDocument)
 
         #expect(document?.contains("silicon-swarm-silicon-node:") == false)
-        #expect(document?.contains("100.118.191.121") == false)
+        #expect(document?.contains("100.64.0.9") == false)
         // The local provider and everything foreign survive untouched.
         #expect(document?.contains("    silicon-local:") == true)
         #expect(document?.contains("baseURL: http://127.0.0.1:9131/v1") == true)

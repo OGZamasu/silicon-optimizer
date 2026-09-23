@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createLiveSessionStore } from './live/session-store.mjs';
-import { readLiveServerInfo } from './lib/impeccable-paths.mjs';
+import { liveHelperBase, readLiveServerInfo } from './lib/impeccable-paths.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
 import { verifyAcceptedFile } from './live/accept-verify.mjs';
 
@@ -88,7 +88,7 @@ async function completeThroughServer(info, args) {
       ? 'error'
       : 'complete';
   try {
-    const res = await fetch(`http://localhost:${info.port}/poll`, {
+    const res = await fetch(`${liveHelperBase(info.port)}/poll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': info.token },
       body: JSON.stringify({ token: info.token, id: args.id, type, message: args.message }),
