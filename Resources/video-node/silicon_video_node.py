@@ -497,10 +497,7 @@ def completed_media_matches(job: Dict[str, Any], path: Path) -> bool:
         return False
     try:
         probe = probe_media(path)
-        plan_for_job = (
-            h3_output_resolution_plan if job.get("model") == "hailuo-h3" else resolution_plan
-        )
-        plan = plan_for_job(str(job.get("resolution") or "720p"))
+        plan = job_delivery_plan(job)
         expected_frames = int(job.get("frames") or seconds_to_frames(int(job.get("seconds") or 10)))
         seconds = int(job.get("seconds") or 10)
         rate = Fraction(str(probe["frame_rate"]))
@@ -560,17 +557,99 @@ def seconds_to_frames(seconds: int) -> int:
     return max(9, round(seconds * 24 / 8) * 8 + 1)
 
 
+_LTX_PLANS = {
+    "1080p": {"internal_w": 768, "internal_h": 448, "output_w": 1920, "output_h": 1080},
+    "1920x1080": {"internal_w": 768, "internal_h": 448, "output_w": 1920, "output_h": 1080},
+    "720p": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
+    "1280x720": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
+    "480p": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
+    "854x480": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
+    "360p": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
+    "640x360": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
+}
+LTX_RESOLUTIONS = ("360p", "480p", "720p", "1080p")
+
+
 def resolution_plan(value: str) -> Dict[str, int]:
+    """The LTX canvas and delivery size for a request, or ValueError.
+
+    1080p keeps the proven 768x448 canvas that 720p uses and scales it for
+    delivery: a larger canvas has not been measured against this node's memory
+    budget. Every plan is an upscale, and the sidecar and job say so.
+    """
     normalized = value.strip().lower().replace(" ", "")
-    plans = {
-        "720p": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
-        "1280x720": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
-        "480p": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
-        "854x480": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
-        "360p": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
-        "640x360": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
+    if normalized not in _LTX_PLANS:
+        raise ValueError("LTX resolution must be 360p, 480p, 720p, or 1080p")
+    return dict(_LTX_PLANS[normalized])
+
+
+def legacy_resolution_plan(value: str) -> Dict[str, int]:
+    """What nodes before 1080p delivery rendered: anything unknown became 720p.
+
+    Only used to recognise their finished artifacts after an upgrade, so a
+    completed 1080p-request/720p-output clip is not rendered again.
+    """
+    normalized = value.strip().lower().replace(" ", "")
+    if normalized in {"1080p", "1920x1080"} or normalized not in _LTX_PLANS:
+        normalized = "720p"
+    return dict(_LTX_PLANS[normalized])
+
+
+def job_delivery_plan(job: Dict[str, Any]) -> Dict[str, int]:
+    """The canvas this job's artifact was, or will be, rendered to.
+
+    New jobs pin their plan at submission. A job saved without one predates
+    1080p delivery, so its artifact follows the old table.
+    """
+    if job.get("model") == "hailuo-h3":
+        return h3_output_resolution_plan(str(job.get("resolution") or "720p"))
+    pinned = job.get("delivery_plan")
+    if isinstance(pinned, dict) and all(
+        type(pinned.get(key)) is int and pinned[key] > 0
+        for key in ("internal_w", "internal_h", "output_w", "output_h")
+    ):
+        return {key: pinned[key] for key in ("internal_w", "internal_h", "output_w", "output_h")}
+    return legacy_resolution_plan(str(job.get("resolution") or "720p"))
+
+
+def delivery_report(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Requested size versus the pixels planned and, once done, delivered.
+
+    `width`/`height` and `matches_request` describe a validated file, so they
+    appear only when the job is done; until then only the plan is reported.
+    `scaling` distinguishes an LTX canvas scaled up by ffmpeg from native
+    generation; H3's canvas belongs to Phosphene, so it is not claimed here.
+    """
+    requested = str(job.get("resolution") or "720p")
+    plan = job_delivery_plan(job)
+    delivered = job.get("status") == "done"
+    report: Dict[str, Any] = {
+        "requested": requested,
+        "planned_width": plan["output_w"],
+        "planned_height": plan["output_h"],
+        "delivered": delivered,
     }
-    return plans.get(normalized, plans["720p"])
+    if delivered:
+        # A done job's file was probed against this plan before it was published,
+        # or at load for one finished before sizes were recorded.
+        report["width"] = job.get("delivered_width") or plan["output_w"]
+        report["height"] = job.get("delivered_height") or plan["output_h"]
+    if job.get("model") != "hailuo-h3":
+        report["internal_width"] = plan["internal_w"]
+        report["internal_height"] = plan["internal_h"]
+        report["scaling"] = (
+            "upscaled" if (plan["output_w"], plan["output_h"]) != (plan["internal_w"], plan["internal_h"])
+            else "native"
+        )
+        if delivered:
+            try:
+                current = resolution_plan(requested)
+                report["matches_request"] = (
+                    (report["width"], report["height"]) == (current["output_w"], current["output_h"])
+                )
+            except ValueError:
+                report["matches_request"] = False
+    return report
 
 
 def h3_output_resolution_plan(value: str) -> Dict[str, int]:
@@ -758,6 +837,11 @@ class RenderQueue:
             job.setdefault("deadline_epoch", job_deadline(job))
             output = Path(str(job.get("output_path", "")))
             if completed_media_matches(job, output) and completed_sidecar_matches(job, output):
+                # A clip finished before 1080p delivery keeps the size it was
+                # rendered at. Pin it, so no later reading of its resolution
+                # can make a finished artifact look incomplete and render again.
+                if job.get("model") != "hailuo-h3" and "delivery_plan" not in job:
+                    job["delivery_plan"] = job_delivery_plan(job)
                 job["status"] = "done"
                 job["stage"] = "complete"
                 job["progress"] = 1.0
@@ -766,6 +850,9 @@ class RenderQueue:
                 job["status"] = "queued"
                 job["stage"] = "recovering after node restart"
                 job["progress"] = 0.0
+                # The size of an artifact that is not complete is not delivered.
+                job.pop("delivered_width", None)
+                job.pop("delivered_height", None)
                 self.pending.put(job["id"])
         self._persist()
 
@@ -809,12 +896,16 @@ class RenderQueue:
             seconds,
             "h3_chain_prompts" in request,
         )
+        delivery_plan: Optional[Dict[str, int]] = None
         if model == "hailuo-h3":
             # Reject invalid discrete H3 durations/canvases before polling the
             # panel or staging an image.
             phosphene_render_options(resolution, seconds)
-        elif not 1 <= seconds <= 15:
-            raise ValueError("seconds must be between 1 and 15")
+        else:
+            if not 1 <= seconds <= 15:
+                raise ValueError("seconds must be between 1 and 15")
+            # An unknown size is refused, never quietly rendered at another.
+            delivery_plan = resolution_plan(resolution)
 
         h3_state: Optional[Dict[str, Any]] = None
         if model == "hailuo-h3":
@@ -937,6 +1028,7 @@ class RenderQueue:
             "phosphene_h3_turbo": h3_turbo if model == "hailuo-h3" else None,
             "h3_chain_prompts": chain_prompts,
             "h3_steps": h3_steps,
+            "delivery_plan": delivery_plan,
             "request_fingerprint": request_fingerprint,
             "fingerprint_version": 2,
             "created_at": created,
@@ -986,6 +1078,10 @@ class RenderQueue:
             if not source:
                 return None
             job = dict(source)
+        try:
+            delivery: Optional[Dict[str, Any]] = delivery_report(job)
+        except ValueError:
+            delivery = None
         started = job.get("started_epoch")
         if started and job.get("status") == "running":
             job["elapsed_s"] = round(time.time() - float(started), 1)
@@ -1006,8 +1102,13 @@ class RenderQueue:
             "phosphene_job_id",
             "phosphene_submit_attempted",
             "phosphene_h3_turbo",
+            "delivery_plan",
+            "delivered_width",
+            "delivered_height",
         ):
             job.pop(key, None)
+        if delivery is not None:
+            job["delivery"] = delivery
         if job.get("status") == "done":
             job["artifact"] = f"/v1/artifacts/{job_id}.mp4"
         return job
@@ -1312,6 +1413,9 @@ class RenderQueue:
             elapsed_s=round(elapsed, 1),
             completed_at=utc_now(),
             duration_s=round(duration, 3),
+            # Probed, and already validated against the plan above.
+            delivered_width=probe.get("width"),
+            delivered_height=probe.get("height"),
             bytes=output_path.stat().st_size,
             poster_path=str(poster_path) if poster_path else None,
         )
@@ -1333,7 +1437,14 @@ class RenderQueue:
         raw_path.unlink(missing_ok=True)
         candidate_path.unlink(missing_ok=True)
 
-        plan = resolution_plan(job["resolution"])
+        if job.get("delivery_plan"):
+            plan = job_delivery_plan(job)
+        else:
+            # Saved before 1080p delivery and never finished: render the size it
+            # asked for, and pin that before any output can exist.
+            plan = resolution_plan(str(job["resolution"]))
+            self._update(job_id, delivery_plan=plan)
+            job["delivery_plan"] = plan
         command = [
             "/usr/bin/caffeinate",
             "-dimsu",
@@ -1529,8 +1640,15 @@ class RenderQueue:
             "duration_seconds": duration,
             "frames": job["frames"],
             "frame_rate": 24,
+            "requested_resolution": job["resolution"],
             "internal_resolution": f"{plan['internal_w']}x{plan['internal_h']}",
             "output_resolution": f"{probe.get('width')}x{probe.get('height')}",
+            # The canvas is smaller than every delivery size: ffmpeg scaled
+            # it, and that is not the detail of native generation at this size.
+            "delivery_scaling": (
+                "upscaled" if (probe.get("width"), probe.get("height")) != (plan["internal_w"], plan["internal_h"])
+                else "native"
+            ),
             "audio": probe.get("audio", False),
             "created_at": utc_now(),
         }
@@ -1545,6 +1663,9 @@ class RenderQueue:
             elapsed_s=round(elapsed, 1),
             completed_at=utc_now(),
             duration_s=round(duration, 3),
+            # Probed, and already validated against the plan above.
+            delivered_width=probe.get("width"),
+            delivered_height=probe.get("height"),
             bytes=output_path.stat().st_size,
             poster_path=str(poster_path) if poster_path else None,
         )
@@ -1648,7 +1769,9 @@ class Handler(BaseHTTPRequestHandler):
                             "ready": not ltx_missing,
                             "peak_gb": 25,
                             "typical_seconds": 600,
-                            "detail": "LTX-2.3 distilled Q4, native MLX; local audio/video",
+                            "detail": "LTX-2.3 distilled Q4, native MLX; local audio/video; "
+                            "renders a canvas of at most 768x448 and scales it up for delivery",
+                            "supported_resolutions": list(LTX_RESOLUTIONS),
                             "missing": ltx_missing,
                         },
                         {
@@ -1657,6 +1780,7 @@ class Handler(BaseHTTPRequestHandler):
                             "supported_parameters": ["seed", "h3_chain_prompts", "h3_turbo", "entry_id"]
                             + (["h3_steps"] if h3_state["ready"] and phosphene_supports_h3_steps() else []),
                             "ready": bool(h3_state["ready"]),
+                            "supported_resolutions": ["480p", "720p", "1080p"],
                             "peak_gb": 32,
                             "typical_seconds": 1200,
                             "detail": (

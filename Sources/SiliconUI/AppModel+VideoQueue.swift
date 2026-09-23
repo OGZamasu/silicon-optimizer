@@ -16,6 +16,29 @@ extension AppModel {
         return videoCapability(for: entry, on: peer)?.supportedParameters.contains("h3_steps") == true
     }
 
+    /// Said under the Size picker when the size chosen is not what the lane generates.
+    public var videoSizeNote: String? {
+        let capability = VideoCatalog.entry(id: selectedVideoModel).flatMap { entry in
+            videoCapableNode(for: entry).flatMap { videoCapability(for: entry, on: $0)?.id }
+        }
+        return Self.videoSizeNote(
+            modelID: selectedVideoModel, resolution: videoResolution, capabilityID: capability
+        )
+    }
+
+    /// LTX-2 has no native 1080p. This Mac's own adapter (the node advertising the exact
+    /// `ltx2-distilled` id) scales its 720p canvas up to 1920×1080; another node may do
+    /// something else, so it is only told what holds everywhere.
+    nonisolated static func videoSizeNote(
+        modelID: String, resolution: String, capabilityID: String?
+    ) -> String? {
+        guard modelID == VideoCatalog.ltx2.id, resolution == "1080p" else { return nil }
+        if capabilityID == VideoCatalog.ltx2.capabilityID {
+            return "This Mac's video node scales LTX-2's 768×448 canvas up to 1920×1080: a larger file with the same detail as 720p."
+        }
+        return "LTX-2 does not generate 1080p natively; expect about 720p's detail whatever size the node delivers."
+    }
+
     /// Auto omits the override, preserving old nodes and persisted requests.
     var composerH3Steps: Int? {
         selectedVideoModel == "hailuo-h3" && videoH3Steps != 0 ? videoH3Steps : nil

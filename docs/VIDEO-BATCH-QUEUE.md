@@ -171,8 +171,9 @@ and [step handling](https://github.com/mrbizarro/phosphene/blob/main/mlx_ltx_pan
 Higher H3 **Size** increases the generation canvas and/or export work and may
 increase memory as well as time. A 1080p export is not native 1080p generation.
 Start with 480p variations and test a selected shot before increasing size for
-a whole batch. The standalone LTX adapter currently falls back to 720p delivery
-for a 1080p request; use 480p or 720p pending [the separate resolution fix](https://github.com/OGZamasu/silicon-optimizer/issues/21). Do not
+a whole batch. The standalone LTX adapter delivers a 1080p request at 1920×1080
+by scaling its 768×448 canvas — the same generated detail as 720p in a larger
+file — and says so in the job's `delivery` status and the clip's sidecar. Do not
 arbitrarily increase LTX's distilled step schedule and assume higher quality.
 
 Renderer references: [Phosphene](https://github.com/mrbizarro/phosphene) and
