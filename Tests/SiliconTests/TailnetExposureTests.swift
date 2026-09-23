@@ -301,7 +301,10 @@ struct TailnetExposureTests {
                 ("POST", "/video/queue", "{}"),
                 ("POST", "/video/queue/control", #"{"action":"pause"}"#),
                 ("GET", "/swarm/peers/another-node/status", nil),
+                ("GET", "/jev", nil),
                 ("GET", "/jev/guardrails/recent", nil),
+                ("GET", "/jev/calibration", nil),
+                ("GET", "/decisions", nil),
                 ("POST", "/recommend", #"{"task":"private work"}"#),
                 ("POST", "/benchmark", nil),
             ]
@@ -361,6 +364,57 @@ struct TailnetExposureTests {
             #expect(try await fixture.peer.status(
                 "GET", "/media/not-an-id", token: Bench.swarmToken
             ) == 404)
+        }
+    }
+
+    /// A peer borrows this Mac's hardware, not its owner's TypeSafe account. Naming the paid
+    /// lane is refused outright on both listeners; everything else it may ask — `auto`, a
+    /// chat, a streamed chat — reaches the app with the paid lanes shut, which is where the
+    /// app's one door to Jev reads it. The owner and a paired phone keep them open.
+    @Test func theSwarmSecretCannotSpendTheOwnersJev() async throws {
+        try await withExposedServer { fixture in
+            let question = #"{"state":"s","questions":{"q":{"type":"noul"}},"provider":"#
+            for client in [fixture.peer, fixture.local] {
+                for path in ["/decide", "/v1/systemone"] {
+                    for provider in [#""typesafe""#, #""TypeSafe""#] {
+                        let (status, response) = try await client.call(
+                            "POST", path, token: Bench.swarmToken, body: question + provider + "}"
+                        )
+                        #expect(status == 403, "\(path) \(provider) on port \(client.port)")
+                        #expect(try JSONDecoder().decode(
+                            ControlAPI.ErrorResponse.self, from: response
+                        ).error == ControlServer.paidLanesAreNotForPeers)
+                    }
+                }
+            }
+            #expect(await fixture.host.paidLanesOnDecide.isEmpty)
+
+            let chat = #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            for client in [fixture.peer, fixture.local] {
+                #expect(try await client.status(
+                    "POST", "/decide", token: Bench.swarmToken, body: question + #""auto"}"#
+                ) == 200)
+                #expect(try await client.status(
+                    "POST", "/chat", token: Bench.swarmToken, body: chat
+                ) == 200)
+                _ = try await client.events(
+                    "POST", "/chat/stream", token: Bench.swarmToken, body: chat
+                ) { $0.contains { $0.name == "finished" } }
+            }
+            #expect(await fixture.host.paidLanesOnDecide == [false, false])
+            #expect(await fixture.host.paidLanesOnChat == [false, false, false, false])
+
+            // The owner, and a phone the owner paired, are not peers.
+            #expect(try await fixture.local.status(
+                "POST", "/decide", token: fixture.local.token, body: question + #""typesafe"}"#
+            ) == 200)
+            try await fixture.allowDevices(true)
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status(
+                "POST", "/chat", token: paired.token, body: chat
+            ) == 200)
+            #expect(await fixture.host.paidLanesOnDecide == [false, false, true])
+            #expect(await fixture.host.paidLanesOnChat == [false, false, false, false, true])
         }
     }
 

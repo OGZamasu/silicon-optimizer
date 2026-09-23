@@ -1431,4 +1431,25 @@ extension ControlAPI {
                 + "GET /status, or POST /unload to stop it and then load again."
         }
     }
+
+    /// Why `POST /video/generate` refuses while the owner has paused the video queue: a
+    /// synchronous caller cannot wait on a paused queue, and is never resumed for.
+    ///
+    /// Typed rather than a sentence, because the sentence depends on who asked. The owner's
+    /// own tools and paired phones can resume the queue or add to it, and are told to. A
+    /// swarm node can do neither, and is told `forPeers` instead by the control server.
+    public struct VideoQueuePaused: Error, LocalizedError, ControlStatusError {
+        public init() {}
+
+        public var status: Int { 400 }
+
+        public var errorDescription: String? {
+            "The video queue is paused. Resume it first, or use /video/queue to save clips "
+                + "for later. No clip was added."
+        }
+
+        public static let forPeers =
+            "This Mac's owner has paused its video queue, so it is not taking direct renders "
+                + "right now. No clip was added. Retry later."
+    }
 }
