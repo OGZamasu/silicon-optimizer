@@ -420,27 +420,71 @@ struct AgentPackageInstallerTests {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: fakeNpm.path
         )
+        // Woken by the fixture folder changing, not by a timer. npm starts behind
+        // `node --version`, `npm --version` and the first launch of a script macOS has never
+        // seen, and on a loaded machine that has taken longer than the ten seconds this used
+        // to allow — so the wait is for the thing itself, and the deadline only bounds a hang.
+        let (events, post) = AsyncStream.makeStream(of: InstallEvent.self)
+        let watcher = try FolderWatcher(fixture.root) { post.yield(.folderChanged) }
+        defer { watcher.cancel() }
         let task = Task {
-            try await AgentPackageInstaller.install(
+            // An install that ends before npm ever starts has nothing to wait for.
+            defer { post.yield(.installEnded) }
+            return try await AgentPackageInstaller.install(
                 fixture.package, node: fakeNode, sourceRoot: fixture.sourceRoot,
                 destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
             )
         }
-        for _ in 0..<500 where !FileManager.default.fileExists(atPath: marker.path) {
-            try await Task.sleep(for: .milliseconds(20))
+        let giveUp = Task {
+            try? await Task.sleep(for: .seconds(120))
+            post.finish()
         }
-        #expect(FileManager.default.fileExists(atPath: marker.path))
+        defer { giveUp.cancel() }
+        post.yield(.folderChanged)
+        for await event in events {
+            if FileManager.default.fileExists(atPath: marker.path) || event == .installEnded {
+                break
+            }
+        }
+        #expect(FileManager.default.fileExists(atPath: marker.path), "npm ci never started")
+        // Cancelling has to stop npm, not wait it out: the fake one sleeps for thirty seconds,
+        // so an install that only noticed when npm exited by itself would still end in
+        // `CancellationError` and a clean folder. The bound is on the kill path — a signal,
+        // a poll at most a tenth of a second later, three seconds' grace — with room to spare.
+        let cancelled = ContinuousClock.now
         task.cancel()
         do {
             _ = try await task.value
             Issue.record("cancelled npm install still succeeded")
         } catch is CancellationError {
+            #expect(ContinuousClock.now - cancelled < .seconds(10), "npm was not stopped")
             let entries = try FileManager.default.contentsOfDirectory(
                 atPath: fixture.destinationRoot.path
             )
             #expect(!entries.contains { $0.hasPrefix("fixture-") })
         }
     }
+}
+
+/// What the npm cancellation test waits for.
+private enum InstallEvent: Sendable { case folderChanged, installEnded }
+
+/// Calls `changed` whenever an entry is added to or removed from `folder`.
+private final class FolderWatcher: @unchecked Sendable {
+    private let source: any DispatchSourceFileSystemObject
+
+    init(_ folder: URL, changed: @escaping @Sendable () -> Void) throws {
+        let descriptor = open(folder.path, O_EVTONLY)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor, eventMask: .write, queue: .global()
+        )
+        source.setEventHandler(handler: changed)
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+    }
+
+    func cancel() { source.cancel() }
 }
 
 /// What the app ships and how it tidies up, checked without npm, so these run everywhere.

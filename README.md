@@ -314,7 +314,8 @@ omits owner queue jobs, model download progress, and conversation verdicts. Thos
 require this Mac's local control token or an appropriately paired device. A model you
 imported from your own disk has the file's path as its id; the swarm, which cannot load it,
 is told `external:` and a token instead, the same one on `/installed`, `/status` and
-`/events`, for as long as the app runs.
+`/events` — wherever a status names a model, a failed or stopped load's included — for as
+long as the app runs.
 
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;
@@ -598,6 +599,16 @@ alternative was to obey it: kill a load the owner asked for, possibly minutes in
 is not held by that route and still wins — loading from there replaces whatever is loading —
 and the load that loses now says so rather than reporting a mystery.
 
+**When the Mac stops a load, it says so.** An unload part-way through, or another load started
+meanwhile, is not a failure — but it is an ending, and a phone following the load it asked for
+needs to hear it. `interruptedLoads` on `GET /status` (and in the `status` frame on `/events`)
+lists them the moment they happen, newest first: which model, `cancelled` or `replaced`, and
+for a replacement which model took over. A `POST /load` whose load is stopped before it
+answers gets a 409 saying the same thing in a sentence, where it used to get "The model failed
+to load:" followed by the *other* load's progress line. The same model asked for again — the
+window reloading it with a larger context — is not an ending: that model is still loading, and
+the request is answered with the live status to follow.
+
 **When a load fails, it says what happened.** One sentence, meant to be shown as it is:
 
 > llama-server stopped on its own after 8 seconds (exit 1).
@@ -605,7 +616,7 @@ and the load that loses now says so rather than reporting a mystery.
 > llama-server was killed (signal 9) after 8 seconds, which usually means the system
 > reclaimed its memory.
 >
-> llama-server was replaced by another load (Qwen3-Coder 30B).
+> llama-server was stopped by an unload before it finished loading.
 >
 > llama-server never answered in 10 minutes.
 
@@ -613,8 +624,10 @@ That line is `state` on `GET /status`, and the same sentence is the error `POST 
 answers with. Beside it, `failure` carries the facts: `reason` (`exited`, `killed`,
 `replaced`, `cancelled`, `timedOut`, `launchFailed`, `notInstalled`), `detail` — the tail of
 the runtime's own log, for behind a tap rather than for the first line anyone reads —
-`runtime`, `exitStatus`, `signal`, `wasReplaced` and `at`. The key is absent unless a load
-has failed, so a client that only ever read `state` reads exactly what it always did.
+`runtime`, `exitStatus`, `signal`, `wasReplaced`, `at`, and `modelID` — whose load it was, so
+a phone that asked for one model is not told another model's failure as its own. The key is
+absent unless a load has failed, so a client that only ever read `state` reads exactly what it
+always did.
 
 `detail` is the one part of that with a door on it. A llama.cpp log names the model file on
 most of its opening lines, and on a Mac a file name comes with the folders around it, so

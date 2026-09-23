@@ -93,11 +93,15 @@ public struct LoadFailure: Sendable, Equatable {
     /// True only when another load is what ended this one.
     public var wasReplaced: Bool
     public var at: Date
+    /// The installed model the load was for. `LoadFailureRecorder` keeps one failure for
+    /// the whole app, and two loads can overlap, so the failure says whose it is rather
+    /// than leaving a client to assume it is about the load it asked for.
+    public var modelID: String?
 
     public init(
         reason: Reason, summary: String, detail: String? = nil, runtime: RuntimeKind,
         exitStatus: Int32? = nil, signal: Int32? = nil, wasReplaced: Bool = false,
-        at: Date = Date()
+        at: Date = Date(), modelID: String? = nil
     ) {
         self.reason = reason
         self.summary = summary
@@ -107,6 +111,7 @@ public struct LoadFailure: Sendable, Equatable {
         self.signal = signal
         self.wasReplaced = wasReplaced
         self.at = at
+        self.modelID = modelID
     }
 
     /// The shape a client gets. `summary` is deliberately absent: it is already on the wire
@@ -119,7 +124,8 @@ public struct LoadFailure: Sendable, Equatable {
             exitStatus: exitStatus.map(Int.init),
             signal: signal.map(Int.init),
             wasReplaced: wasReplaced,
-            at: ControlAPI.timestamp(at)
+            at: ControlAPI.timestamp(at),
+            modelID: modelID
         )
     }
 }
@@ -307,7 +313,8 @@ public enum LoadDiagnosis {
     /// The failure a runtime reports, assembled from the ending and the sentence that
     /// runtime made of it.
     static func failure(
-        ending: LoadEnding, summary: String, log: String, runtime: RuntimeKind
+        ending: LoadEnding, summary: String, log: String, runtime: RuntimeKind,
+        modelID: String
     ) -> LoadFailure {
         LoadFailure(
             reason: ending.reason,
@@ -316,7 +323,8 @@ public enum LoadDiagnosis {
             runtime: runtime,
             exitStatus: ending.exitStatus,
             signal: ending.signal,
-            wasReplaced: ending.reason == .replaced
+            wasReplaced: ending.reason == .replaced,
+            modelID: modelID
         )
     }
 

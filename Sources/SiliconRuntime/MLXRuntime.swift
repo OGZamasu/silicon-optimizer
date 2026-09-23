@@ -61,12 +61,18 @@ public actor MLXRuntime: InferenceRuntime {
         await stop(because: loadInFlight ? .replaced : .unload)
 
         guard let installation = self.installation ?? Self.locate() else {
-            throw record(RuntimeError.notInstalled(.mlx), reason: .notInstalled)
+            throw record(
+                RuntimeError.notInstalled(.mlx), reason: .notInstalled,
+                model: request.model.id
+            )
         }
         self.installation = installation
 
         guard request.configuration.expertStreaming == nil else {
-            throw record(RuntimeError.expertStreamingUnsupported, reason: .launchFailed)
+            throw record(
+                RuntimeError.expertStreamingUnsupported, reason: .launchFailed,
+                model: request.model.id
+            )
         }
 
         let port = request.port > 0 ? request.port : PortAllocator.free()
@@ -87,7 +93,10 @@ public actor MLXRuntime: InferenceRuntime {
             )
         } catch {
             self.release(server)
-            throw record(error, reason: .launchFailed)
+            throw record(
+                error, reason: .launchFailed,
+                model: request.model.id
+            )
         }
 
         let endpoint = URL(string: "http://127.0.0.1:\(port)")!
@@ -113,7 +122,7 @@ public actor MLXRuntime: InferenceRuntime {
                 summary: Self.diagnose(
                     log: log, ending: outcome.ending, replacedBy: outcome.replacedBy
                 ),
-                log: log, runtime: kind
+                log: log, runtime: kind, modelID: request.model.id
             )
             recorder.record(failure)
             lastFailure = failure
@@ -153,9 +162,12 @@ public actor MLXRuntime: InferenceRuntime {
     }
 
     @discardableResult
-    private func record(_ error: any Error, reason: LoadFailure.Reason) -> any Error {
+    private func record(
+        _ error: any Error, reason: LoadFailure.Reason, model: String
+    ) -> any Error {
         let failure = LoadFailure(
-            reason: reason, summary: error.localizedDescription, runtime: kind
+            reason: reason, summary: error.localizedDescription, runtime: kind,
+            modelID: model
         )
         recorder.record(failure)
         lastFailure = failure

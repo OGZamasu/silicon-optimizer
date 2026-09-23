@@ -96,6 +96,11 @@ struct LoadRouteTests {
     /// shape, the same `state` line `GET /status` would give — and keeps loading.
     @Test func aSlowLoadAnswersWithTheStatusAndKeepsGoing() async throws {
         try await withServer(patience: .milliseconds(200)) { fixture in
+            // The live status is read when the patience runs out, and the load starts on a
+            // detached task: on a loaded machine that task could begin after 200 ms, and the
+            // answer was then "Not loaded". The host's status waits for the load it is about
+            // to be asked for to have begun, so what is pinned is the answer, not the race.
+            await fixture.host.expectLoad()
             let (code, body) = try await fixture.call(
                 "POST", "/load", body: #"{"modelID":"qwen3-coder-30b"}"#
             )
@@ -120,7 +125,10 @@ struct LoadRouteTests {
     /// The overlapping-load decision, in one test: the second caller is refused, in words,
     /// and the first load is untouched.
     @Test func aSecondLoadIsRefusedRatherThanKillingTheFirst() async throws {
-        try await withServer(patience: .seconds(10)) { fixture in
+        // A clock that does not move, so "started 0s ago" is the sentence however long the
+        // second request takes to arrive. It used to read the wall clock, and on a loaded
+        // machine half a second between the two requests made it "1s ago".
+        try await withServer(patience: .seconds(10), clock: TestClock()) { fixture in
             let first = Task {
                 try await fixture.call("POST", "/load", body: #"{"modelID":"bonsai-2-27b"}"#)
             }
@@ -153,6 +161,39 @@ struct LoadRouteTests {
         }
     }
 
+    /// How long the first load has been running is the dispatcher's own arithmetic, from
+    /// when it started the load to when the second request arrived — pinned with a clock
+    /// the test moves, rather than one it hopes about.
+    @Test func theRefusalSaysHowLongTheFirstLoadHasBeenRunning() async throws {
+        let clock = TestClock()
+        let host = LoadTestHost()
+        let dispatcher = LoadDispatcher(now: { clock.now })
+
+        let first = Task {
+            try await dispatcher.load(
+                ControlAPI.LoadRequest(modelID: "bonsai-2-27b"), on: host,
+                patience: .seconds(10)
+            )
+        }
+        try await waitUntil { await host.accepted == 1 }
+        clock.advance(by: 42.4)
+
+        do {
+            _ = try await dispatcher.load(
+                ControlAPI.LoadRequest(modelID: "qwen3-coder-30b"), on: host,
+                patience: .seconds(10)
+            )
+            Issue.record("a second load must be refused")
+        } catch let refusal as ControlAPI.LoadAlreadyRunning {
+            #expect(refusal.modelID == "bonsai-2-27b")
+            #expect(refusal.secondsAgo == 42)
+            #expect(refusal.localizedDescription.contains("(started 42s ago)"))
+        }
+
+        await host.release()
+        _ = try await first.value
+    }
+
     // MARK: - The failure a client reads
 
     /// The new fields, on the wire, exactly as the contract documents them.
@@ -163,7 +204,8 @@ struct LoadRouteTests {
                 + "means the system reclaimed its memory.",
             detail: "load_tensors: loading model tensors\nloaded multimodal model",
             runtime: .llamaCpp, signal: 9,
-            at: try #require(ControlAPI.date(fromTimestamp: "2026-09-19T11:04:38Z"))
+            at: try #require(ControlAPI.date(fromTimestamp: "2026-09-19T11:04:38Z")),
+            modelID: "bonsai-2-27b@Q2_0"
         )
 
         try await withServer(patience: .seconds(1), lastFailure: failure) { fixture in
@@ -182,6 +224,8 @@ struct LoadRouteTests {
             #expect(wire["runtime"] as? String == "llama.cpp")
             #expect(wire["wasReplaced"] as? Bool == false)
             #expect(wire["at"] as? String == "2026-09-19T11:04:38Z")
+            // Whose load it was, in the form `loadedModelID` uses.
+            #expect(wire["modelID"] as? String == "bonsai-2-27b@Q2_0")
             #expect((wire["detail"] as? String)?.contains("loaded multimodal model") == true)
             // The sentence is not duplicated into the detail block.
             #expect(wire["summary"] == nil)
@@ -203,8 +247,24 @@ struct LoadRouteTests {
         )
         let text = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
         #expect(!text.contains("failure"))
+        #expect(!text.contains("interruptedLoads"))
         #expect(try JSONDecoder().decode(ControlAPI.Status.self, from: Data(text.utf8))
                 .failure == nil)
+    }
+
+    /// A Mac from before the model id, or before interrupted loads, still decodes: both are
+    /// optional, and absent reads as nil.
+    @Test func aStatusFromAnOlderMacStillDecodes() throws {
+        let older = """
+            {"state": "llama-server was killed (signal 9) after 8 seconds.",
+             "expertStreaming": false,
+             "failure": {"reason": "killed", "runtime": "llama.cpp", "signal": 9,
+                         "wasReplaced": false, "at": "2026-09-19T11:04:38Z"}}
+            """
+        let status = try JSONDecoder().decode(ControlAPI.Status.self, from: Data(older.utf8))
+        #expect(status.failure?.reason == "killed")
+        #expect(status.failure?.modelID == nil)
+        #expect(status.interruptedLoads == nil)
     }
 
     // MARK: - Who may see the runtime's log
@@ -219,8 +279,12 @@ struct LoadRouteTests {
             failure: ControlAPI.LoadFailure(
                 reason: "exited", detail: "error loading model: bonsai.gguf",
                 runtime: "llama.cpp", exitStatus: 1, wasReplaced: false,
-                at: "2026-09-19T11:04:38Z"
-            )
+                at: "2026-09-19T11:04:38Z", modelID: "bonsai-2-27b@Q2_0"
+            ),
+            interruptedLoads: [ControlAPI.LoadInterruption(
+                modelID: "qwen3-coder-30b@Q4_K_M", reason: "replaced",
+                replacedBy: "bonsai-2-27b@Q2_0", at: "2026-09-19T11:04:30Z"
+            )]
         )
 
         for caller in [ControlServer.Caller.control, .device(id: "d", scope: .full)] {
@@ -237,6 +301,10 @@ struct LoadRouteTests {
             #expect(narrowed.failure?.runtime == "llama.cpp")
             #expect(narrowed.failure?.wasReplaced == false)
             #expect(narrowed.failure?.at == "2026-09-19T11:04:38Z")
+            // Which models these were is no more private than `loadedModelID`, which every
+            // one of these callers is already told.
+            #expect(narrowed.failure?.modelID == "bonsai-2-27b@Q2_0")
+            #expect(narrowed.interruptedLoads == full.interruptedLoads)
         }
 
         // A status with nothing to withhold is passed through untouched.
@@ -264,8 +332,12 @@ struct LoadRouteTests {
             failure: ControlAPI.LoadFailure(
                 reason: "killed", detail: "loaded multimodal model, 'mmproj-Q8_0.gguf'",
                 runtime: "llama.cpp", signal: 9, wasReplaced: false,
-                at: "2026-09-19T11:04:38Z"
-            )
+                at: "2026-09-19T11:04:38Z", modelID: "gemma-4-26b@Q4_K_M"
+            ),
+            interruptedLoads: [ControlAPI.LoadInterruption(
+                modelID: "qwen3-coder-30b@Q4_K_M", reason: "replaced",
+                replacedBy: "gemma-4-26b@Q4_K_M", at: "2026-09-19T11:04:30Z"
+            )]
         )))
 
         func firstFrame(_ stream: AsyncStream<BuddyEvent.Frame>) async throws -> String {
@@ -287,6 +359,11 @@ struct LoadRouteTests {
                     || seen.contains("\"reason\":\"killed\""))
             #expect(seen.contains("signal"))
             #expect(seen.contains("was killed (signal 9)"))
+            // And whose load failed, and which load was stopped for it.
+            let frame = try JSONDecoder().decode(ControlAPI.Status.self, from: Data(seen.utf8))
+            #expect(frame.failure?.modelID == "gemma-4-26b@Q4_K_M")
+            #expect(frame.interruptedLoads?.first?.modelID == "qwen3-coder-30b@Q4_K_M")
+            #expect(frame.interruptedLoads?.first?.replacedBy == "gemma-4-26b@Q4_K_M")
         }
     }
 
@@ -322,7 +399,7 @@ struct LoadRouteTests {
     }
 
     private func withServer(
-        patience: Duration, lastFailure: LoadFailure? = nil,
+        patience: Duration, lastFailure: LoadFailure? = nil, clock: TestClock? = nil,
         _ body: (Fixture) async throws -> Void
     ) async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -337,6 +414,7 @@ struct LoadRouteTests {
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
             events: BuddyEventHub(),
             loadPatience: patience,
+            loadClock: { clock?.now ?? Date() },
             discoverTailnetAddress: { nil }
         )
         let configuration = URLSessionConfiguration.ephemeral
@@ -470,6 +548,18 @@ struct FailedLoadReportingTests {
     }
 }
 
+/// A wall clock that only moves when a test moves it.
+final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 1_790_000_000)
+
+    var now: Date { lock.withLock { current } }
+
+    func advance(by seconds: TimeInterval) {
+        lock.withLock { current = current.addingTimeInterval(seconds) }
+    }
+}
+
 enum LoadTestError: Error, LocalizedError {
     case timeout
     case loadFailed(String)
@@ -496,6 +586,10 @@ private actor LoadTestHost: ControlHost {
     private var loaded: String?
     private var released = false
     private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    /// Set by a test that is about to ask for a load, so a status read before that load
+    /// has begun waits for it rather than racing it.
+    private var loadExpected = false
+    private var acceptanceWaiters: [CheckedContinuation<Void, Never>] = []
     /// When set, the load fails with this sentence instead of succeeding.
     private let failing: String?
     /// A load that already failed, reported the way the app reports one: the sentence as
@@ -507,6 +601,8 @@ private actor LoadTestHost: ControlHost {
         self.lastFailure = lastFailure
     }
 
+    func expectLoad() { loadExpected = true }
+
     func release() {
         released = true
         let waiting = waiters
@@ -516,6 +612,9 @@ private actor LoadTestHost: ControlHost {
 
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status {
         accepted += 1
+        let waiting = acceptanceWaiters
+        acceptanceWaiters = []
+        for waiter in waiting { waiter.resume() }
         if !released {
             let id = UUID()
             try await withTaskCancellationHandler {
@@ -548,7 +647,10 @@ private actor LoadTestHost: ControlHost {
     }
 
     func status() async -> ControlAPI.Status {
-        ControlAPI.Status(
+        if loadExpected, accepted == 0 {
+            await withCheckedContinuation { acceptanceWaiters.append($0) }
+        }
+        return ControlAPI.Status(
             state: stateLine, loadedModelID: loaded, loadedModelName: loaded,
             contextLength: loaded == nil ? nil : 16_384,
             expertStreaming: false, lastGenerationTokensPerSecond: nil,

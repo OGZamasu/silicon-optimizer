@@ -51,9 +51,8 @@ extension AppModel: ControlHost {
             expertStreaming: activeConfiguration?.expertStreaming != nil,
             lastGenerationTokensPerSecond: lastGeneration?.generationTokensPerSecond,
             activity: activeGenerationSummary,
-            failure: Self.failedLoadDetail(
-                state: runtimeState, recorded: LoadFailureRecorder.shared.last
-            )
+            failure: Self.failedLoadDetail(state: runtimeState, recorded: loadFailures.last),
+            interruptedLoads: interruptedLoads.isEmpty ? nil : interruptedLoads.map(\.wire)
         )
     }
 
@@ -323,11 +322,22 @@ extension AppModel: ControlHost {
         }
 
         let configuration = try controlLoadConfiguration(for: target, request: request)
-        await loadAsync(target, configuration: configuration)
-        guard runtimeState.isRunning else {
-            throw ControlHostError.loadFailed(runtimeState.label)
+        // This load's own ending, not whatever the state line says once it is over: a load
+        // stopped by another one used to be answered with the winner's progress line, as
+        // "The model failed to load: Loading weights… 42%".
+        switch await loadAsync(target, configuration: configuration) {
+        case .loaded:
+            return await status()
+        case .failed(let sentence):
+            throw ControlHostError.loadFailed(sentence)
+        case .interrupted(let interruption) where interruption.isReload:
+            // The same model asked for again before this load finished — from the Mac's
+            // window with a larger context, say. What this caller asked for is still being
+            // loaded, so it is answered as a slow load is: with the live status to follow.
+            return await status()
+        case .interrupted(let interruption):
+            throw ControlHostError.loadInterrupted(interruption.sentence)
         }
-        return await status()
     }
 
     /// Resolve defaults after validating the caller's actual context. Keeping this separate
@@ -769,6 +779,9 @@ public enum ControlHostError: Error, LocalizedError, ControlStatusError {
     case notInstalled(String)
     case noModelLoaded
     case loadFailed(String)
+    /// The load was stopped before it finished — by an unload, or by another load — so
+    /// nothing failed and nothing is loaded.
+    case loadInterrupted(String)
     case badRequest(String)
     /// The Mac is already doing this, and doing it twice would be worse than waiting.
     case busy(String)
@@ -783,6 +796,8 @@ public enum ControlHostError: Error, LocalizedError, ControlStatusError {
             "No model is loaded. Use load_model first."
         case .loadFailed(let reason):
             "The model failed to load: \(reason)"
+        case .loadInterrupted(let sentence):
+            sentence
         case .badRequest(let reason):
             reason
         case .busy(let reason):
@@ -791,10 +806,13 @@ public enum ControlHostError: Error, LocalizedError, ControlStatusError {
     }
 
     /// Everything here is "you asked wrong", which is a 400 — except being told to come back
-    /// later, which a caller can act on and a 400 gives it no way to recognise.
+    /// later, which a caller can act on and a 400 gives it no way to recognise, and a load
+    /// that something else on this Mac stopped, which is a conflict with what happened
+    /// meanwhile rather than a fault in the request. Both are 409, the status `POST /load`
+    /// already gives a load that meets another one.
     public var status: Int {
         switch self {
-        case .busy: 409
+        case .busy, .loadInterrupted: 409
         default: 400
         }
     }

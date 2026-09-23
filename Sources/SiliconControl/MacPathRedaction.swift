@@ -176,12 +176,23 @@ extension ControlAPI.Status {
     /// without the runtime's log, as for every caller short of full control, with an
     /// imported model named by its token wherever its id appears, and with the home folder
     /// out of the state line.
+    ///
+    /// "Wherever" is four places: the loaded model, the model a failure belongs to, and each
+    /// stopped load's model and the one that replaced it. The last three name loads that are
+    /// over, and an imported model's id is its path whether or not it is still in memory.
     var forPeers: Self {
         var peer = withoutPrivilegedDetail
         if let id = loadedModelID, id.hasPrefix(ImportedModelID.prefix) {
             let token = ImportedModelID.forPeers(id)
             peer.loadedModelID = token
             peer.state = peer.state.replacingOccurrences(of: id, with: token)
+        }
+        peer.failure?.modelID = failure?.modelID.map(ImportedModelID.forPeers)
+        peer.interruptedLoads = interruptedLoads?.map { stopped in
+            var told = stopped
+            told.modelID = ImportedModelID.forPeers(stopped.modelID)
+            told.replacedBy = stopped.replacedBy.map(ImportedModelID.forPeers)
+            return told
         }
         if peer.state.contains("/") {
             peer.state = MacPathRedaction(roots: []).scrub(peer.state)

@@ -39,7 +39,15 @@ struct SwarmExposureRetryTests {
         try await server.start(
             exposeToTailnet: true, swarmToken: "a-shared-swarm-secret", tailnetPort: port
         )
-        try await TailnetExposureTests.waitUntil { await server.tailnetEndpoint != nil }
+        // Until the bind has an answer either way, not for a fixed five seconds: a bind that
+        // failed says why on `exposure.problem` at once, and a slow one on a loaded machine
+        // is not a failure. The deadline only bounds a hang.
+        try await TailnetExposureTests.waitUntil(30) {
+            if await server.tailnetEndpoint != nil { return true }
+            return await server.exposure.problem != nil
+        }
+        let problem = await server.exposure.problem
+        try #require(await server.tailnetEndpoint != nil, "\(problem ?? "no endpoint")")
         model.controlServer = server
 
         // Deliberately stale — what the window would still be showing after a bind that
