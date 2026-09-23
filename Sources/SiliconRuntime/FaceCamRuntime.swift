@@ -1,12 +1,13 @@
 import Foundation
+import SiliconControl
 
 /// The live face camera: Deep-Live-Cam's pipeline, driven headlessly, with the picture
 /// served as MJPEG for OBS to pick up.
 ///
 /// The project is AGPL-3.0 and ships its own desktop UI. Rather than copying any of it,
-/// this clones it into a private environment and runs it as a separate process through
+/// this fetches it into a private environment and runs it as a separate process through
 /// a small driver script, which keeps the licences apart and means upstream fixes
-/// arrive with a `git pull` rather than a port.
+/// arrive by moving the reviewed pin in `PinnedInstall` rather than by a port.
 public actor FaceCamRuntime {
 
     public enum State: Sendable, Equatable {
@@ -48,9 +49,15 @@ public actor FaceCamRuntime {
         environment.appendingPathComponent("Deep-Live-Cam")
     }
 
-    /// The weights the swapper needs, downloaded by the project's own pre-check.
+    /// The weights the swapper needs, fetched at install at a reviewed digest.
     public nonisolated static var swapperModel: URL {
         repository.appendingPathComponent("models/inswapper_128.onnx")
+    }
+
+    /// Where insightface looks for the face analyser pack the project uses.
+    public nonisolated static var faceAnalyserModels: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".insightface/models/buffalo_l", isDirectory: true)
     }
 
     /// The driver script, copied out of the app bundle so the environment owns a
@@ -79,6 +86,80 @@ public actor FaceCamRuntime {
             )
         }
         return Installation(missing: .nothing, detail: "Ready.")
+    }
+
+    /// The install, as commands. Deep-Live-Cam at its reviewed commit, checked before use;
+    /// its hash-locked dependencies for this Python, build tools first so insightface (source
+    /// only) builds with locked setuptools, Cython and NumPy rather than downloaded ones; and
+    /// the weights, fetched at a reviewed revision and digest before the project's own
+    /// downloader — which takes them from a moving branch without checking certificates on
+    /// macOS — would. `basePython` makes the environment when there is none.
+    public nonisolated static func installPlan(
+        basePython: URL, git: URL, locks: URL = PinnedInstall.defaultLockRoot(),
+        environment: URL = FaceCamRuntime.environment,
+        faceAnalyserModels: URL = FaceCamRuntime.faceAnalyserModels
+    ) throws -> [PinnedInstall.Command] {
+        let source = PinnedInstall.deepLiveCam
+        let python = environment.appendingPathComponent("bin/python3")
+        let repository = environment.appendingPathComponent("Deep-Live-Cam")
+        let swapperModel = repository.appendingPathComponent("models/inswapper_128.onnx")
+        let existing = FileManager.default.isExecutableFile(atPath: python.path)
+        let version = existing
+            ? PinnedInstall.pythonVersion(ofVirtualEnvironment: environment)
+            : PinnedInstall.pythonVersion(ofInterpreter: basePython)
+        guard let version, PinnedInstall.deepLiveCamPythons.contains(version) else {
+            throw PinnedInstall.PlanError.unsupportedPython(
+                tool: source.name, found: version, supported: PinnedInstall.deepLiveCamPythons
+            )
+        }
+
+        var commands: [PinnedInstall.Command] = []
+        if !existing {
+            commands.append(PinnedInstall.Command(
+                label: "Making its Python environment",
+                executable: basePython, arguments: ["-m", "venv", environment.path]
+            ))
+        }
+        commands += PinnedInstall.fetch(source, into: repository, git: git)
+        commands.append(PinnedInstall.pipInstall(
+            python: python,
+            lock: PinnedInstall.lock("build", for: source, python: version, in: locks),
+            label: "Installing its build tools"
+        ))
+        commands.append(PinnedInstall.pipInstall(
+            python: python,
+            lock: PinnedInstall.lock("requirements", for: source, python: version, in: locks),
+            label: "Installing its tools (several minutes)",
+            noBuildIsolation: true
+        ))
+        commands.append(PinnedInstall.fetch(
+            PinnedInstall.deepLiveCamSwapper, to: swapperModel,
+            label: "Fetching the face model (550 MB)"
+        ))
+        for file in PinnedInstall.deepLiveCamFaceAnalyser {
+            let name = (file.path as NSString).lastPathComponent
+            commands.append(PinnedInstall.fetch(
+                file, to: faceAnalyserModels.appendingPathComponent(name),
+                label: "Fetching the face analyser (340 MB): \(name)"
+            ))
+        }
+        // Loads the swapper the way the driver will; with the model in place, the project's
+        // pre-check finds it and downloads nothing.
+        commands.append(PinnedInstall.Command(
+            label: "Checking the face engine loads",
+            executable: python,
+            arguments: [
+                "-c",
+                "import sys; sys.path.insert(0, '\(repository.path)'); "
+                    + "import modules.globals as g; "
+                    + "g.execution_providers=['CoreMLExecutionProvider','CPUExecutionProvider']; "
+                    + "g.headless=True; "
+                    + "from modules.processors.frame import face_swapper; "
+                    + "sys.exit(0 if face_swapper.pre_check() else 1)",
+            ],
+            workingDirectory: repository
+        ))
+        return commands
     }
 
     /// Copies the driver next to the environment it drives.

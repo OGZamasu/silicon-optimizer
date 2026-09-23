@@ -13,7 +13,7 @@ import Foundation
 /// home directory.
 public enum OpenMontageLink {
 
-    public static let repository = "https://github.com/calesthio/OpenMontage.git"
+    public static var repository: String { PinnedInstall.openMontage.repository }
 
     /// Written into the checkout root when the provider is installed, holding the version
     /// of the provider that was copied. Comparing it with the bundle's copy is how "your
@@ -38,16 +38,20 @@ public enum OpenMontageLink {
         /// Every Python interpreter found on this Mac, in no particular order.
         public var pythons: [URL]
         public var git: URL?
+        /// The reviewed dependency locks (`PinnedInstall.defaultLockRoot()` in the app).
+        public var locks: URL
 
         public init(
             home: URL, providerSource: URL?, npm: URL? = nil,
-            pythons: [URL] = [], git: URL? = nil
+            pythons: [URL] = [], git: URL? = nil,
+            locks: URL = PinnedInstall.defaultLockRoot()
         ) {
             self.home = home
             self.providerSource = providerSource
             self.npm = npm
             self.pythons = pythons
             self.git = git
+            self.locks = locks
         }
     }
 
@@ -148,6 +152,7 @@ public enum OpenMontageLink {
         case noGit
         case noPython
         case noProviderInBuild
+        case checkoutInTheWay
 
         public var errorDescription: String? {
             switch self {
@@ -157,53 +162,90 @@ public enum OpenMontageLink {
                 "No Python 3 was found. Install one with `brew install python@3.12`."
             case .noProviderInBuild:
                 "This build has no OpenMontage provider in it."
+            case .checkoutInTheWay:
+                "~/OpenMontage already exists and is not a Git checkout. Move it aside and "
+                    + "run Set up again."
             }
         }
     }
 
     /// Setup steps the app runs itself — with the Python picked for wheel coverage rather
-    /// than recency, and npm from beside a Node this app trusts. An existing checkout's
-    /// Git revision and Remotion dependencies are not updated by this plan.
+    /// than recency, and npm from beside a Node this app trusts. The source is the reviewed
+    /// commit in `PinnedInstall.openMontage`, checked before anything in it is used, and the
+    /// Python packages are the hash-locked set for that commit and that Python. An existing
+    /// checkout's Git revision and Remotion dependencies are not updated by this plan: it is
+    /// checked against the reviewed commit, and setup stops if it is anything else.
     public static func plan(in env: Environment) throws -> (steps: [Step], notes: [String]) {
         guard let git = env.git else { throw LinkError.noGit }
-        guard let python = pickPython(from: env.pythons) else { throw LinkError.noPython }
 
         let checkout = checkoutURL(in: env)
-        let venvPython = checkout.appendingPathComponent(".venv/bin/python")
+        let venv = checkout.appendingPathComponent(".venv", isDirectory: true)
+        let venvPython = venv.appendingPathComponent("bin/python")
+        let source = PinnedInstall.openMontage
         var steps: [Step] = []
         var notes: [String] = []
         let existingCheckout = FileManager.default.fileExists(
             atPath: checkout.appendingPathComponent(".git").path)
-
-        if !existingCheckout {
-            steps.append(Step(
-                label: "Downloading OpenMontage",
-                executable: git,
-                arguments: ["clone", "--depth", "1", "--quiet", repository, checkout.path],
-                workingDirectory: env.home
-            ))
+        let existingVenv = FileManager.default.isExecutableFile(atPath: venvPython.path)
+        // A clone would have refused a folder that is already there; fetching into it would
+        // not, and must not write over someone's files.
+        if !existingCheckout,
+           let contents = try? FileManager.default.contentsOfDirectory(atPath: checkout.path),
+           !contents.isEmpty {
+            throw LinkError.checkoutInTheWay
         }
 
-        if !FileManager.default.isExecutableFile(atPath: venvPython.path) {
+        // The locks are per Python version, so the version must be known before anything
+        // runs: the environment's own when there is one, otherwise the chosen interpreter's.
+        let interpreter = pickPython(from: env.pythons)
+        if !existingVenv && interpreter == nil { throw LinkError.noPython }
+        let version = existingVenv
+            ? PinnedInstall.pythonVersion(ofVirtualEnvironment: venv)
+            : interpreter.flatMap(PinnedInstall.pythonVersion(ofInterpreter:))
+        guard let version, PinnedInstall.openMontagePythons.contains(version) else {
+            throw PinnedInstall.PlanError.unsupportedPython(
+                tool: source.name, found: version, supported: PinnedInstall.openMontagePythons
+            )
+        }
+
+        let pinned = existingCheckout
+            ? [PinnedInstall.verify(source, in: checkout, git: git)]
+            : PinnedInstall.fetch(source, into: checkout, git: git)
+        steps += pinned.map {
+            Step(label: $0.label, executable: $0.executable, arguments: $0.arguments,
+                 workingDirectory: $0.workingDirectory ?? env.home)
+        }
+
+        if !existingVenv, let interpreter {
             steps.append(Step(
-                label: "Creating a Python environment (\(python.lastPathComponent))",
-                executable: python, arguments: ["-m", "venv", ".venv"],
+                label: "Creating a Python environment (\(interpreter.lastPathComponent))",
+                executable: interpreter, arguments: ["-m", "venv", ".venv"],
                 workingDirectory: checkout
             ))
         }
 
-        steps.append(Step(
+        // Wheels only: every package has one for Apple Silicon at these versions, and a
+        // source build would fetch unpinned build tools.
+        let dependencies = PinnedInstall.pipInstall(
+            python: venvPython,
+            lock: PinnedInstall.lock("requirements", for: source, python: version, in: env.locks),
             label: "Installing Python dependencies — a few minutes the first time",
-            executable: venvPython,
-            arguments: ["-m", "pip", "install", "--quiet", "-r", "requirements.txt"],
-            workingDirectory: checkout
+            onlyBinary: true
+        )
+        steps.append(Step(
+            label: dependencies.label, executable: dependencies.executable,
+            arguments: dependencies.arguments, workingDirectory: checkout
         ))
 
-        steps.append(Step(
+        let piper = PinnedInstall.pipInstall(
+            python: venvPython,
+            lock: PinnedInstall.lock("piper", for: source, python: version, in: env.locks),
             label: "Installing Piper, the free offline voice",
-            executable: venvPython,
-            arguments: ["-m", "pip", "install", "--quiet", "piper-tts"],
-            workingDirectory: checkout, optional: true
+            onlyBinary: true
+        )
+        steps.append(Step(
+            label: piper.label, executable: piper.executable,
+            arguments: piper.arguments, workingDirectory: checkout, optional: true
         ))
 
         if existingCheckout {
@@ -211,6 +253,8 @@ public enum OpenMontageLink {
             // dependencies alone. The settings UI only offers setup before the clone.
             notes.append("Existing Remotion dependencies were left unchanged in ~/OpenMontage.")
         } else if let npm = env.npm {
+            // `npm ci` installs exactly the reviewed commit's package-lock.json, whose
+            // integrity hashes npm checks for every package.
             steps.append(Step(
                 label: "Installing Remotion, the composition engine",
                 executable: npm, arguments: ["ci", "--silent", "--no-audit", "--no-fund"],
