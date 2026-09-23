@@ -1510,9 +1510,11 @@ public actor ControlServer {
                     try request.decode(ControlAPI.VideoQueueRequest.self)
                 )))
             case ("POST", "/video/queue/control"):
-                return try .encode(await media.decorated(await host.controlVideoQueue(
-                    try request.decode(ControlAPI.VideoQueueControl.self)
-                )))
+                let control = try request.decode(ControlAPI.VideoQueueControl.self)
+                guard control.action != "cancel" || caller != .swarm else {
+                    return .error(403, Self.cancelIsNotForPeers)
+                }
+                return try .encode(await media.decorated(await host.controlVideoQueue(control)))
             case ("POST", "/video/generate"):
                 guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
                     if caller == .swarm {
@@ -2099,9 +2101,17 @@ public actor ControlServer {
     /// The verbs `POST /video/queue/control` has, in the one sentence it refuses an
     /// unknown one with. Here rather than beside the switch that implements them because
     /// the contract export has to publish the same list, and two hand-written copies of a
-    /// six-item set drift the first time a seventh is added.
+    /// seven-item set drift the first time an eighth is added.
     public static let unknownQueueAction =
-        "Use pause, resume, retry, remove, stop_following, or clear_finished."
+        "Use pause, resume, retry, remove, stop_following, cancel, or clear_finished."
+
+    /// Why the swarm secret, which may pause or retry the queue like any client, may not
+    /// cancel a render. Cancelling is the one verb that throws away GPU work already done,
+    /// and that secret is a node's credential in a config file, not a person deciding to.
+    /// The owner's own token and a full-scope phone keep it.
+    public static let cancelIsNotForPeers =
+        "A swarm node may not cancel this Mac's renders. Cancel from the Mac, its control "
+        + "token, or a phone paired with full control; a peer can use stop_following."
 
     /// What a chat-only device is told when it asks for a render rather than a poster.
     /// Its own sentence, not the general chat-only one, because the route it is being

@@ -7,6 +7,7 @@ struct VideoQueueView: View {
     @Environment(AppModel.self) private var model
     @State private var uncertainRetry: VideoQueueItem?
     @State private var stopFollowing: VideoQueueItem?
+    @State private var cancelRender: VideoQueueItem?
 
     var body: some View {
         CollapsibleCard(title: "Video queue", systemImage: "list.bullet.rectangle",
@@ -73,7 +74,32 @@ struct VideoQueueView: View {
                 stopFollowing = nil
             }
         } message: {
-            Text("This pauses the queue and stops the app waiting. It does not stop the GPU render. The saved receipt lets you reconnect and download later. To stop rendering, use the video node's own controls.")
+            Text("This pauses the queue and stops the app waiting. It does not stop the GPU render. The saved receipt lets you reconnect and download later. To stop the render itself, use Cancel render where the node offers it, or the node's own controls.")
+        }
+        .alert("Cancel this render?", isPresented: Binding(
+            get: { cancelRender != nil }, set: { if !$0 { cancelRender = nil } }
+        )) {
+            Button("Keep rendering", role: .cancel) { cancelRender = nil }
+            Button("Cancel render", role: .destructive) {
+                if let item = cancelRender { model.videoQueueAction("cancel", id: item.id) }
+                cancelRender = nil
+            }
+        } message: {
+            Text("Asks \(cancelRender?.nodeName ?? "the node") to stop rendering this clip and nothing else. If it finishes first, the clip is kept. Nothing is resubmitted either way.")
+        }
+    }
+
+    /// What asking the node to cancel came to, in the words a person needs later.
+    private static func cancelLine(_ cancel: VideoCancelRecord) -> String {
+        let detail = cancel.detail.map { ": \($0)" } ?? ""
+        switch cancel.state {
+        case .sending: return "Asking the node to cancel…"
+        case .requested: return "Cancel requested — waiting for the node to confirm"
+        case .confirmed: return "Cancelled on the node" + detail
+        case .completed: return "Finished before the cancel took effect; the clip is kept"
+        case .failed: return "Had already failed when the cancel arrived" + detail
+        case .unsupported: return "The node could not stop this render" + detail
+        case .unknown: return "Cancel not confirmed; the render may still be running" + detail
         }
     }
 
@@ -106,6 +132,12 @@ struct VideoQueueView: View {
                 }
             }
             VideoQueueProgress(itemID: item.id)
+            if let cancel = item.cancel {
+                Label(Self.cancelLine(cancel), systemImage: "stop.circle")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let error = item.error {
                 Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
             }
@@ -118,8 +150,15 @@ struct VideoQueueView: View {
                 if item.status == .pending {
                     Button("Remove") { model.videoQueueAction("remove", id: item.id) }
                 }
+                if model.canCancelVideo(item) {
+                    Button("Cancel render…") { cancelRender = item }
+                }
                 if model.activeVideoQueueID == item.id {
                     Button("Stop following…") { stopFollowing = item }
+                }
+                if item.status == .cancelled {
+                    // The node confirmed the old render stopped: a new one is not a duplicate.
+                    Button("Render again") { model.videoQueueAction("retry", id: item.id) }
                 }
                 if item.status == .failed {
                     Button(item.canReconnect ? "Reconnect / download" : "Retry render") {

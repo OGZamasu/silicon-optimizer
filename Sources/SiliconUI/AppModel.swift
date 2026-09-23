@@ -1089,6 +1089,9 @@ public final class AppModel {
         public var enabled: Bool?
         public var settings: [String: String] = [:]
         public var supportedParameters: [String] = []
+        /// Per-job operations the node offers for this lane, such as `cancel`. Absent on
+        /// older nodes, which is read as "not offered" — never guessed.
+        public var supportedJobActions: [String] = []
     }
 
     /// One GPU job on a peer, as its queue reports it (hub #128). `running` jobs carry
@@ -1546,7 +1549,8 @@ public final class AppModel {
                     description: entry["description"] as? String,
                     enabled: entry["enabled"] as? Bool,
                     settings: settings,
-                    supportedParameters: entry["supported_parameters"] as? [String] ?? []
+                    supportedParameters: entry["supported_parameters"] as? [String] ?? [],
+                    supportedJobActions: entry["supported_job_actions"] as? [String] ?? []
                 )
             }
         }
