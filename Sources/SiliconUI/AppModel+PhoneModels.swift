@@ -35,8 +35,8 @@ extension AppModel {
 ///
 /// Its configuration is the app's own and is the thing the tests exercise: a token-free
 /// store, the real catalogue, the real room check and drive rule. `PhoneModelSeams` can
-/// swap only the network endpoint, the state file and the room check — never the service —
-/// so a test of "the app sends no token" is a test of this.
+/// swap only the network endpoint, the state file and the room check with the free space it
+/// reads — never the service — so a test of "the app sends no token" is a test of this.
 enum AppPhoneModels {
     static let service = PhoneModelService(
         store: PhoneModelStore(
@@ -48,7 +48,17 @@ enum AppPhoneModels {
                 } else {
                     try PhoneModelStore.checkRoom(needed: needed, at: folder)
                 }
-            }
+            },
+            // The downloader reads free space again as it starts; through here, so a test
+            // that swaps the reading swaps that one too.
+            volumes: .init(
+                missingDrive: { PhoneModelStore.missingDrive(for: $0) },
+                availableCapacity: { folder in
+                    PhoneModelSeams.environment?.availableCapacity?(folder)
+                        ?? PhoneModelStore.availableCapacity(at: folder)
+                },
+                volumeID: { PhoneModelStore.volumeID(of: $0) }
+            )
         ),
         hub: .shared
     )
@@ -63,6 +73,7 @@ enum PhoneModelSeams {
         var huggingFace: URL?
         var stateFile: URL?
         var spaceCheck: PhoneModelStore.SpaceCheck?
+        var availableCapacity: (@Sendable (URL) -> Int64?)? = nil
     }
 
     @TaskLocal static var environment: Environment?

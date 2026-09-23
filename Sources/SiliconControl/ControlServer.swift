@@ -618,44 +618,57 @@ public actor ControlServer {
             }
 
             let caller = await identify(request, from: origin)
-            if let refusal = Self.scopeRefusal(for: request, as: caller) {
-                try await refusal.write(to: connection)
-                return
+            // Everything this request sets off runs with the paid lanes shut when a swarm
+            // node asked — streams and the synchronous render's task included, because both
+            // are started inside this scope. See `PaidLanes`.
+            try await PaidLanes.$allowed.withValue(caller != .swarm) {
+                try await respond(to: request, as: caller, from: origin, over: connection)
             }
-
-            switch streamRoute(request, as: caller) {
-            case .stream(let events):
-                await deliver(events, as: caller, over: connection)
-                return
-            case .refused(let response):
-                try await response.write(to: connection)
-                return
-            case .notStreaming:
-                break
-            }
-
-            let source = Self.remoteAddress(of: connection)
-            let response: HTTPResponse
-            if request.method == "POST", request.path == "/video/generate" {
-                // One request per connection: after its body, EOF/error means
-                // this client no longer wants the synchronous response. Keep a
-                // receive outstanding so Network.framework notices a FIN/RST
-                // while the route is waiting, not only at response.write().
-                let waiting = Task {
-                    await route(request, as: caller, from: source, on: origin)
-                }
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
-                    if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
-                }
-                response = await waiting.value
-                guard !waiting.isCancelled else { return }
-            } else {
-                response = await route(request, as: caller, from: source, on: origin)
-            }
-            try await response.write(to: connection)
         } catch {
             // A client that hangs up mid-request is routine, not worth surfacing.
         }
+    }
+
+    /// Everything after the caller is known: its scope, the streams, and the route.
+    private func respond(
+        to request: HTTPRequest, as caller: Caller?, from origin: Origin,
+        over connection: NWConnection
+    ) async throws {
+        if let refusal = Self.scopeRefusal(for: request, as: caller) {
+            try await refusal.write(to: connection)
+            return
+        }
+
+        switch streamRoute(request, as: caller) {
+        case .stream(let events):
+            await deliver(events, as: caller, over: connection)
+            return
+        case .refused(let response):
+            try await response.write(to: connection)
+            return
+        case .notStreaming:
+            break
+        }
+
+        let source = Self.remoteAddress(of: connection)
+        let response: HTTPResponse
+        if request.method == "POST", request.path == "/video/generate" {
+            // One request per connection: after its body, EOF/error means
+            // this client no longer wants the synchronous response. Keep a
+            // receive outstanding so Network.framework notices a FIN/RST
+            // while the route is waiting, not only at response.write().
+            let waiting = Task {
+                await route(request, as: caller, from: source, on: origin)
+            }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, complete, error in
+                if complete || error != nil || !(data?.isEmpty ?? true) { waiting.cancel() }
+            }
+            response = await waiting.value
+            guard !waiting.isCancelled else { return }
+        } else {
+            response = await route(request, as: caller, from: source, on: origin)
+        }
+        try await response.write(to: connection)
     }
 
     /// Answers a request that was refused before its body arrived.
@@ -689,11 +702,30 @@ public actor ControlServer {
             return id
         }
 
-        /// A chat-only device may read what the Mac is and talk to the model it has loaded.
-        /// Anything that spends the machine — a download, a load, a render — or that
-        /// administers other devices is the owner's own business.
+        /// A shared peer bearer reaches discovery and direct jobs, not the owner's
+        /// conversations, model installs and loading, or global queue. A chat-only device
+        /// may read what the Mac is and talk to its loaded model, but may not spend the
+        /// machine or administer it.
         func mayReach(method: String, path: String) -> Bool {
-            guard case .device(_, .chat) = self else { return true }
+            switch self {
+            case .control, .device(_, .full):
+                return true
+            case .swarm:
+                let segments = path.split(separator: "/")
+                // These families already have their own peer-specific 403. Keep that
+                // sentence, and let their shared family gate cover every subroute.
+                if segments.first == "agent" || segments.first == "ondevice" {
+                    return true
+                }
+                // A peer can fetch a result whose unguessable id a direct job returned,
+                // but it cannot list the owner's queue to discover unrelated results.
+                if method == "GET", segments.count == 2, segments.first == "media" {
+                    return true
+                }
+                return Self.swarmRoutes.contains("\(method) \(path)")
+            case .device(_, .chat):
+                break
+            }
             // `/media/{id}` is per-id rather than a fixed path, so it is matched by shape.
             // A chat-only device may fetch a result for the same reason it may read
             // `GET /video/queue`, which has told it about that result since the queue
@@ -721,6 +753,23 @@ public actor ControlServer {
             case .device(_, let scope): scope == .full
             }
         }
+
+        /// New owner-facing routes are not made reachable from a legacy shared swarm
+        /// credential merely by being added to the server's switch. Direct jobs remain
+        /// usable; queue administration does not, and neither does `POST /install`: a peer
+        /// cannot load what it installs, so all it could do is spend this Mac's disk and
+        /// bandwidth, several downloads at a time.
+        static let swarmRoutes: Set<String> = [
+            "GET /health", "GET /status", "GET /profile", "GET /metrics",
+            "GET /catalog", "GET /installed", "GET /recommend", "GET /swarm",
+            "GET /v1/node", "GET /image/models", "GET /mesh/models",
+            "GET /video/models", "GET /events",
+            "POST /plan", "POST /chat", "POST /chat/stream",
+            "POST /decide", "POST /v1/systemone",
+            "POST /image/plan", "POST /image/generate",
+            "POST /mesh/plan", "POST /mesh/generate",
+            "POST /video/generate", "POST /uploads",
+        ]
 
         /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
         /// nothing and costs the machine minutes — so the set is written out, and a route
@@ -752,6 +801,7 @@ public actor ControlServer {
         guard let caller else { return nil }
         guard !(request.method == "POST" && request.path == "/buddy/pair") else { return nil }
         guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
+        if caller == .swarm { return .error(403, swarmRouteRefusal) }
         return .error(403, chatOnlyRefusal)
     }
 
@@ -773,6 +823,15 @@ public actor ControlServer {
     public static let chatOnlyRefusal =
         "This device is paired for chat only. Pair it again with full control from "
             + "Settings → Silicon Buddy on the Mac."
+
+    /// What a swarm node is told when it names the TypeSafe lane on `/decide`.
+    public static let paidLanesAreNotForPeers =
+        "A swarm node may not spend this Mac's TypeSafe (Jev) budget. Ask with provider "
+            + "\"auto\" or \"local\": for a swarm node they answer from this Mac's free lanes only."
+
+    public static let swarmRouteRefusal =
+        "This route is not available to swarm nodes. Use this Mac's local control API "
+            + "or a paired device for owner controls."
 
     /// What `POST /buddy/invitations` says when a code would have nowhere to point.
     ///
@@ -962,9 +1021,9 @@ public actor ControlServer {
                 guard let id = caller.deviceID else { return true }
                 return await buddy.isKnown(deviceID: id)
             }
-            // Who is reading decides what they are sent. The hub keeps agent frames from
-            // everyone the agent routes refuse — a device paired for chat, and the swarm —
-            // and counts the full-control devices for the Chat tab's badge.
+            // Who is reading decides what they are sent. The hub withholds owner activity
+            // from peers and agent frames from chat-only devices, and counts full-control
+            // devices for the Chat tab's badge.
             let audience: BuddyEventHub.Audience = switch caller {
             case .control: .thisMac
             case .device(let id, let scope): .device(id: id, scope: scope)
@@ -1389,6 +1448,9 @@ public actor ControlServer {
                 return try .encode(await host.plan(try request.decode(ControlAPI.PlanRequest.self)))
             case ("POST", "/install"):
                 let install = try request.decode(ControlAPI.LoadRequest.self)
+                // The swarm never gets here (its route scope has no installs). A paired
+                // device may install into the active library, but only this Mac's control
+                // credential may choose a filesystem destination.
                 guard install.directory == nil || Self.mayNamePaths(caller) else {
                     return .error(403, "Only this Mac can choose a model download directory. Omit directory to use the configured model library.")
                 }
@@ -1448,22 +1510,33 @@ public actor ControlServer {
                     try request.decode(ControlAPI.VideoQueueRequest.self)
                 )))
             case ("POST", "/video/queue/control"):
-                return try .encode(await media.decorated(await host.controlVideoQueue(
-                    try request.decode(ControlAPI.VideoQueueControl.self)
-                )))
+                let control = try request.decode(ControlAPI.VideoQueueControl.self)
+                guard control.action != "cancel" || caller != .swarm else {
+                    return .error(403, Self.cancelIsNotForPeers)
+                }
+                return try .encode(await media.decorated(await host.controlVideoQueue(control)))
             case ("POST", "/video/generate"):
                 guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
+                    if caller == .swarm {
+                        return .error(429, "Too many synchronous video requests. No clip was added. Retry this direct request later.")
+                    }
                     return .error(429, "Too many synchronous video requests. No clip was added. Use POST /video/queue to save work without holding a connection, then GET /video/queue to follow it.")
                 }
                 activeSynchronousVideos += 1
                 defer { activeSynchronousVideos -= 1 }
-                return try .encode(await media.decorated(
-                    await host.generateVideo(
-                        try await resolvedVideo(
-                            request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
+                do {
+                    return try .encode(await media.decorated(
+                        await host.generateVideo(
+                            try await resolvedVideo(
+                                request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
+                            )
                         )
-                    )
-                ))
+                    ))
+                } catch is ControlAPI.VideoQueuePaused where caller == .swarm {
+                    // Like the 429 above: a peer cannot resume the queue or add to it, so it
+                    // is not told to.
+                    return .error(400, ControlAPI.VideoQueuePaused.forPeers)
+                }
             case ("POST", "/mesh/plan"):
                 return try .encode(await host.planMesh(
                     try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
@@ -1483,16 +1556,21 @@ public actor ControlServer {
             case ("POST", "/decide"), ("POST", "/v1/systemone"):
                 // The second path is TypeSafe's own, so a client written for Jev can be
                 // pointed here with only its base URL changed.
-                return try .encode(await host.decide(try request.decode(ControlAPI.DecideRequest.self)))
+                let decide = try request.decode(ControlAPI.DecideRequest.self)
+                // The paid lane by name is refused to a peer here, in its own words, rather
+                // than left to `JevService`, whose refusal would read like a switch the owner
+                // forgot. `auto` still answers a peer, from the free lanes only.
+                if caller == .swarm, decide.provider?.lowercased() == "typesafe" {
+                    return .error(403, Self.paidLanesAreNotForPeers)
+                }
+                return try .encode(await host.decide(decide))
             case ("GET", "/jev"):
                 return try .encode(await host.jevStatus())
             case ("GET", "/jev/guardrails/recent"):
-                // Reachable by the Mac's own token, a full-control device, and — like every
-                // route that is not listed as control-only — the swarm secret. A phone that
-                // approves tool calls needs to see what the guardrail has been deciding;
-                // the route carries verdicts and question ids and never what was screened,
-                // which is what makes that sharing safe. A chat-only device is refused
-                // before it gets here, because the path is not in `chatOnlyRoutes`.
+                // Reachable by the Mac's own token and a full-control device. A phone
+                // approving tool calls needs to see the guardrail's verdicts and question
+                // ids, but neither the screened content nor the peer credential belongs
+                // here. Chat-only devices and peers are refused by their route scopes.
                 return try .encode(await host.recentGuardrailScreenings())
             case ("POST", "/jev"):
                 // Reading what Jev costs is one thing; changing what this Mac will spend
@@ -1576,11 +1654,10 @@ public actor ControlServer {
 
     /// What a node is told when it reaches for `/agent`.
     ///
-    /// The swarm secret is a credential everywhere else on this server, because everywhere
-    /// else it buys rendering and model lists — things a peer is *for*. These routes run
-    /// commands on this Mac and approve file changes to it, and a node is a machine with a
-    /// token in a config file, not a person with a phone in their hand. So this is the one
-    /// family the shared secret does not open, and it is refused by name rather than by
+    /// The swarm secret buys rendering and model lists — things a peer is *for*.
+    /// These routes run commands on this Mac and approve file changes to it, and a node
+    /// is a machine with a token in a config file, not a person with a phone in their
+    /// hand. So this owner-only family is refused by name rather than by
     /// 404: the owner debugging their own swarm should read why, not wonder where the
     /// route went.
     public static let agentsAreNotForPeers =
@@ -2024,9 +2101,18 @@ public actor ControlServer {
     /// The verbs `POST /video/queue/control` has, in the one sentence it refuses an
     /// unknown one with. Here rather than beside the switch that implements them because
     /// the contract export has to publish the same list, and two hand-written copies of a
-    /// six-item set drift the first time a seventh is added.
+    /// seven-item set drift the first time an eighth is added.
     public static let unknownQueueAction =
-        "Use pause, resume, retry, remove, stop_following, or clear_finished."
+        "Use pause, resume, retry, remove, stop_following, cancel, or clear_finished."
+
+    /// Why the swarm secret may not cancel a render. The route gate already keeps that
+    /// secret off the queue's controls; this stays as a backstop, because cancelling is the
+    /// one verb that throws away GPU work already done, and that secret is a node's
+    /// credential in a config file, not a person deciding to. The owner's own token and a
+    /// full-scope phone keep it.
+    public static let cancelIsNotForPeers =
+        "A swarm node may not cancel this Mac's renders. Cancel from the Mac, its control "
+        + "token, or a phone paired with full control; a peer can use stop_following."
 
     /// What a chat-only device is told when it asks for a render rather than a poster.
     /// Its own sentence, not the general chat-only one, because the route it is being

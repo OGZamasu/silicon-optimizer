@@ -930,8 +930,12 @@ actor MediaTestHost: ControlHost {
     /// like from down here.
     private(set) var lastMeshImagePath: String?
     private(set) var installRequests: [ControlAPI.LoadRequest] = []
+    /// The owner's pause button on the video queue, as a synchronous render meets it.
+    private var videoQueuePaused = false
 
     init(roots: [String]) { self.roots = roots }
+
+    func setVideoQueuePaused(_ paused: Bool) { videoQueuePaused = paused }
 
     func setQueueFile(_ path: String?) { queueFile = path }
     func forgetMesh() { lastMeshImagePath = nil }
@@ -1047,6 +1051,7 @@ actor MediaTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoResponse {
         // Reached only when the subject resolved; the path-from-a-device test asserts it
         // is never reached at all.
+        if videoQueuePaused { throw ControlAPI.VideoQueuePaused() }
         lastImagePath = request.imagePath
         return .init(file: queueFile ?? "", node: "fixture", model: "fixture", elapsedSeconds: 1)
     }
@@ -1617,6 +1622,34 @@ struct BuddyMediaEdgeTests {
                 body: #"{"prompt":"a kettle","uploadID":"\#(upload.uploadID)"}"#
             ) == 200)
             #expect(await fixture.host.lastImagePath != nil)
+        }
+    }
+
+    /// A paused queue refuses a synchronous render in words the caller can act on. The
+    /// owner's own tools and a paired phone can resume the queue or add to it, so they are
+    /// told to; a swarm node can do neither, so it is told to come back later instead.
+    @Test func aPausedQueueIsExplainedInTermsTheCallerCanActOn() async throws {
+        let swarmToken = "test-shared-swarm-secret"
+        try await BuddyMediaFixture.withServer(swarmToken: swarmToken) { fixture in
+            await fixture.host.setVideoQueuePaused(true)
+            let body = #"{"prompt":"a kettle"}"#
+            func refusal(_ client: TestClient, _ token: String) async throws -> String {
+                let (status, answer) = try await client.call(
+                    "POST", "/video/generate", token: token, body: body
+                )
+                #expect(status == 400)
+                return try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: answer).error
+            }
+            let owner = ControlAPI.VideoQueuePaused().localizedDescription
+            #expect(owner.contains("Resume it first"))
+            #expect(try await refusal(fixture.local, fixture.local.token) == owner)
+            let paired = try await fixture.pair()
+            #expect(try await refusal(fixture.phone, paired.token) == owner)
+            for client in [fixture.local, fixture.phone] {
+                let peer = try await refusal(client, swarmToken)
+                #expect(peer == ControlAPI.VideoQueuePaused.forPeers)
+                #expect(!peer.contains("/video/queue"))
+            }
         }
     }
 

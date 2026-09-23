@@ -644,7 +644,8 @@ struct BuddyPhoneModelsTests {
                 catalog: [f.qwen],
                 stateFile: { directory.appendingPathComponent("offline.json") },
                 source: { URL(string: "http://127.0.0.1:\(closed)")! },
-                spaceCheck: { _, _ in }
+                spaceCheck: { _, _ in },
+                volumes: .roomToSpare
             )
             let library = f.library
             _ = try await store.prepare(id: f.qwen.id, library: library)
@@ -717,6 +718,24 @@ struct BuddyPhoneModelsTests {
             } catch let error as PhoneModelError {
                 #expect(error.status == 507)
             }
+        }
+    }
+
+    /// The check the downloader makes as it starts reads free space through the store's
+    /// volumes, like every other check the store makes: a drive that filled up after the
+    /// prepare was answered stops the fetch before a byte moves, and a test's reading is
+    /// the only one there is.
+    @Test func theDownloadsOwnRoomCheckReadsTheStoresVolumes() async throws {
+        try await PhoneModelFixture.with { f in
+            f.room.value = 1_000_000
+            try await f.fetch(f.qwen)
+            guard case .failed(let failure) = await f.state(f.qwen) else {
+                Issue.record("A drive without room should fail the fetch.")
+                return
+            }
+            #expect(failure.kind == .diskFull)
+            #expect(failure.reason.contains("space"))
+            #expect(f.huggingFace.requests.isEmpty)
         }
     }
 
@@ -1032,7 +1051,7 @@ struct BuddyPhoneModelsTests {
             let base = f.huggingFace.baseURL
             let relaunched = PhoneModelStore(
                 catalog: [f.qwen, f.gemma], stateFile: { stateFile }, source: { base },
-                spaceCheck: { _, _ in }
+                spaceCheck: { _, _ in }, volumes: .roomToSpare
             )
             #expect(await relaunched.state(of: f.qwen.id, library: f.library) == .ready)
             guard case .failed(let failure) = await relaunched.state(
@@ -2058,7 +2077,8 @@ struct BuddyPhoneModelsTests {
 
     /// What the Mac fetches for the owner's phone is the owner's business: frames about it
     /// go to this Mac's own token and full-control devices, never to a chat-only phone or
-    /// the swarm. The Mac's own downloads still go to everyone.
+    /// the swarm. Ordinary Mac model downloads remain visible to paired devices but not
+    /// to a shared peer bearer.
     @Test func phoneModelFramesGoOnlyToFullControl() async throws {
         let hub = BuddyEventHub()
         let full = await hub.subscribe(as: .device(id: "full", scope: .full))
@@ -2089,7 +2109,7 @@ struct BuddyPhoneModelsTests {
         #expect(await ids(full.stream) == [phoneFrame.id, macFrame.id])
         #expect(await ids(mac.stream) == [phoneFrame.id, macFrame.id])
         #expect(await ids(chat.stream) == [macFrame.id])
-        #expect(await ids(peer.stream) == [macFrame.id])
+        #expect(await ids(peer.stream) == [])
     }
 
     /// 3.35 GB is served from wherever the phone asks without the file ever being read
@@ -2312,7 +2332,8 @@ struct BuddyPhoneModelsTests {
         let environment = PhoneModelSeams.Environment(
             huggingFace: huggingFace.baseURL,
             stateFile: directory.appendingPathComponent("phone-models.json"),
-            spaceCheck: { _, _ in }
+            spaceCheck: { _, _ in },
+            availableCapacity: { _ in PhoneModelFixture.roomToSpare }
         )
         try await PhoneModelSeams.$environment.withValue(environment) {
             let provider = try #require(await app.phoneModelProvider())

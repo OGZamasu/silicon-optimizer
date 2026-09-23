@@ -72,6 +72,7 @@ PHOSPHENE_PANEL_URL = os.environ.get(
 PHOSPHENE_HTTP_TIMEOUT_SECONDS = 5.0
 PHOSPHENE_POLL_SECONDS = 2.0
 JOB_TIMEOUT_SECONDS = 12 * 60 * 60
+CANCEL_CONFIRM_SECONDS = 15.0
 MAX_PHOSPHENE_JSON_BYTES = 16 * 1024 * 1024
 H3_SECONDS = frozenset({3, 5, 10, 15})
 MAX_H3_CHAIN_PROMPT_CHARS = 4000
@@ -128,19 +129,50 @@ def job_remaining_seconds(job: Dict[str, Any], maximum: float = JOB_TIMEOUT_SECO
     return min(maximum, remaining)
 
 
-def terminate_process_group(process: Any) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=10)
-    except ProcessLookupError:
-        return
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+class JobCancelled(Exception):
+    """A cancel was accepted for this job; the worker stops at this point."""
+
+
+class OwnedProcess:
+    """A renderer this node started for one job, in its own process group.
+
+    Signals go to that group only while the child is unreaped. Reaping happens
+    under the same lock, so a signal can never reach a recycled process ID:
+    cancelling one job must not be able to stop anything else on the Mac.
+    """
+
+    def __init__(self, process: Any) -> None:
+        self.process = process
+        self._lock = threading.Lock()
+
+    def poll(self) -> Optional[int]:
+        with self._lock:
+            return self.process.poll()
+
+    def signal(self, signum: int) -> bool:
+        with self._lock:
+            if self.process.poll() is not None:
+                return False
+            try:
+                os.killpg(self.process.pid, signum)
+            except ProcessLookupError:
+                return False
+            return True
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            code = self.poll()
+            if code is not None:
+                return code
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+
+    def terminate(self, grace_seconds: float = 10.0) -> None:
+        if self.signal(signal.SIGTERM) and self.wait(grace_seconds) is None:
+            self.signal(signal.SIGKILL)
+            self.wait(3.0)
 
 
 def required_assets() -> Tuple[Path, ...]:
@@ -497,10 +529,7 @@ def completed_media_matches(job: Dict[str, Any], path: Path) -> bool:
         return False
     try:
         probe = probe_media(path)
-        plan_for_job = (
-            h3_output_resolution_plan if job.get("model") == "hailuo-h3" else resolution_plan
-        )
-        plan = plan_for_job(str(job.get("resolution") or "720p"))
+        plan = job_delivery_plan(job)
         expected_frames = int(job.get("frames") or seconds_to_frames(int(job.get("seconds") or 10)))
         seconds = int(job.get("seconds") or 10)
         rate = Fraction(str(probe["frame_rate"]))
@@ -560,17 +589,99 @@ def seconds_to_frames(seconds: int) -> int:
     return max(9, round(seconds * 24 / 8) * 8 + 1)
 
 
+_LTX_PLANS = {
+    "1080p": {"internal_w": 768, "internal_h": 448, "output_w": 1920, "output_h": 1080},
+    "1920x1080": {"internal_w": 768, "internal_h": 448, "output_w": 1920, "output_h": 1080},
+    "720p": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
+    "1280x720": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
+    "480p": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
+    "854x480": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
+    "360p": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
+    "640x360": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
+}
+LTX_RESOLUTIONS = ("360p", "480p", "720p", "1080p")
+
+
 def resolution_plan(value: str) -> Dict[str, int]:
+    """The LTX canvas and delivery size for a request, or ValueError.
+
+    1080p keeps the proven 768x448 canvas that 720p uses and scales it for
+    delivery: a larger canvas has not been measured against this node's memory
+    budget. Every plan is an upscale, and the sidecar and job say so.
+    """
     normalized = value.strip().lower().replace(" ", "")
-    plans = {
-        "720p": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
-        "1280x720": {"internal_w": 768, "internal_h": 448, "output_w": 1280, "output_h": 720},
-        "480p": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
-        "854x480": {"internal_w": 672, "internal_h": 384, "output_w": 854, "output_h": 480},
-        "360p": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
-        "640x360": {"internal_w": 576, "internal_h": 320, "output_w": 640, "output_h": 360},
+    if normalized not in _LTX_PLANS:
+        raise ValueError("LTX resolution must be 360p, 480p, 720p, or 1080p")
+    return dict(_LTX_PLANS[normalized])
+
+
+def legacy_resolution_plan(value: str) -> Dict[str, int]:
+    """What nodes before 1080p delivery rendered: anything unknown became 720p.
+
+    Only used to recognise their finished artifacts after an upgrade, so a
+    completed 1080p-request/720p-output clip is not rendered again.
+    """
+    normalized = value.strip().lower().replace(" ", "")
+    if normalized in {"1080p", "1920x1080"} or normalized not in _LTX_PLANS:
+        normalized = "720p"
+    return dict(_LTX_PLANS[normalized])
+
+
+def job_delivery_plan(job: Dict[str, Any]) -> Dict[str, int]:
+    """The canvas this job's artifact was, or will be, rendered to.
+
+    New jobs pin their plan at submission. A job saved without one predates
+    1080p delivery, so its artifact follows the old table.
+    """
+    if job.get("model") == "hailuo-h3":
+        return h3_output_resolution_plan(str(job.get("resolution") or "720p"))
+    pinned = job.get("delivery_plan")
+    if isinstance(pinned, dict) and all(
+        type(pinned.get(key)) is int and pinned[key] > 0
+        for key in ("internal_w", "internal_h", "output_w", "output_h")
+    ):
+        return {key: pinned[key] for key in ("internal_w", "internal_h", "output_w", "output_h")}
+    return legacy_resolution_plan(str(job.get("resolution") or "720p"))
+
+
+def delivery_report(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Requested size versus the pixels planned and, once done, delivered.
+
+    `width`/`height` and `matches_request` describe a validated file, so they
+    appear only when the job is done; until then only the plan is reported.
+    `scaling` distinguishes an LTX canvas scaled up by ffmpeg from native
+    generation; H3's canvas belongs to Phosphene, so it is not claimed here.
+    """
+    requested = str(job.get("resolution") or "720p")
+    plan = job_delivery_plan(job)
+    delivered = job.get("status") == "done"
+    report: Dict[str, Any] = {
+        "requested": requested,
+        "planned_width": plan["output_w"],
+        "planned_height": plan["output_h"],
+        "delivered": delivered,
     }
-    return plans.get(normalized, plans["720p"])
+    if delivered:
+        # A done job's file was probed against this plan before it was published,
+        # or at load for one finished before sizes were recorded.
+        report["width"] = job.get("delivered_width") or plan["output_w"]
+        report["height"] = job.get("delivered_height") or plan["output_h"]
+    if job.get("model") != "hailuo-h3":
+        report["internal_width"] = plan["internal_w"]
+        report["internal_height"] = plan["internal_h"]
+        report["scaling"] = (
+            "upscaled" if (plan["output_w"], plan["output_h"]) != (plan["internal_w"], plan["internal_h"])
+            else "native"
+        )
+        if delivered:
+            try:
+                current = resolution_plan(requested)
+                report["matches_request"] = (
+                    (report["width"], report["height"]) == (current["output_w"], current["output_h"])
+                )
+            except ValueError:
+                report["matches_request"] = False
+    return report
 
 
 def h3_output_resolution_plan(value: str) -> Dict[str, int]:
@@ -722,8 +833,15 @@ class RenderQueue:
         self.lock = threading.RLock()
         self.jobs: Dict[str, Dict[str, Any]] = {}
         self.pending: "queue.Queue[str]" = queue.Queue()
-        self.current_process: Optional[subprocess.Popen[str]] = None
         self.current_job_id: Optional[str] = None
+        # Renderer processes by the job that started them. A cancel signals the
+        # one registered for its own job and nothing else.
+        self.processes: Dict[str, OwnedProcess] = {}
+        # Jobs already publishing their artifact: too late to cancel.
+        self.committing: set = set()
+        # One Phosphene removal at a time, so a repeated cancel reads the first
+        # one's outcome instead of racing it.
+        self.phosphene_cancel_lock = threading.Lock()
         self.stop_event = threading.Event()
         self._load()
         self.worker: Optional[threading.Thread] = None
@@ -756,16 +874,37 @@ class RenderQueue:
 
         for job in self.jobs.values():
             job.setdefault("deadline_epoch", job_deadline(job))
+            if job.get("status") == "cancelled":
+                # Terminal: never resumed, whatever is on disk.
+                continue
             output = Path(str(job.get("output_path", "")))
             if completed_media_matches(job, output) and completed_sidecar_matches(job, output):
+                # Includes a cancel that arrived after publishing had begun: the
+                # caller was told the job completed, and it did.
+                # A clip finished before 1080p delivery keeps the size it was
+                # rendered at. Pin it, so no later reading of its resolution
+                # can make a finished artifact look incomplete and render again.
+                if job.get("model") != "hailuo-h3" and "delivery_plan" not in job:
+                    job["delivery_plan"] = job_delivery_plan(job)
                 job["status"] = "done"
                 job["stage"] = "complete"
                 job["progress"] = 1.0
+                continue
+            if job.get("cancel_requested_at") and job.get("status") in {"queued", "running", "done"}:
+                # Accepted, but the node stopped before its worker confirmed it.
+                # Resuming would render what the caller asked to stop.
+                now = utc_now()
+                job.update(status="cancelled", stage="cancelled", cancelled_at=now, updated_at=now, error=None,
+                           cancel_detail="Cancelled; the node restarted before the renderer confirmed the stop, "
+                           "and it will not resume or publish this job.")
                 continue
             if job.get("status") in {"queued", "running", "done"}:
                 job["status"] = "queued"
                 job["stage"] = "recovering after node restart"
                 job["progress"] = 0.0
+                # The size of an artifact that is not complete is not delivered.
+                job.pop("delivered_width", None)
+                job.pop("delivered_height", None)
                 self.pending.put(job["id"])
         self._persist()
 
@@ -774,10 +913,152 @@ class RenderQueue:
             atomic_json(STATE_FILE, self.jobs)
 
     def _update(self, job_id: str, **changes: Any) -> None:
+        """Record the worker's progress, or stop it if the job was cancelled.
+
+        The cancel check and the write share one lock, so an accepted cancel
+        takes effect at the worker's next step and never after its next write.
+        """
         with self.lock:
-            self.jobs[job_id].update(changes)
-            self.jobs[job_id]["updated_at"] = utc_now()
-            self._persist()
+            self._checkpoint_locked(job_id)
+            self._record_locked(job_id, changes)
+
+    def _record(self, job_id: str, **changes: Any) -> None:
+        """An unconditional write, for facts that must be kept even after a
+        cancel: a remote job ID, or how the job ended."""
+        with self.lock:
+            self._record_locked(job_id, changes)
+
+    def _record_locked(self, job_id: str, changes: Dict[str, Any]) -> None:
+        self.jobs[job_id].update(changes)
+        self.jobs[job_id]["updated_at"] = utc_now()
+        self._persist()
+
+    def _checkpoint_locked(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+        if job.get("status") == "cancelled" or (
+            job.get("cancel_requested_at") and job_id not in self.committing
+        ):
+            raise JobCancelled()
+
+    def _checkpoint(self, job_id: str) -> None:
+        with self.lock:
+            self._checkpoint_locked(job_id)
+
+    def _commit(self, job_id: str) -> None:
+        """The last point a cancel wins. After it, the artifact is published."""
+        with self.lock:
+            self._checkpoint_locked(job_id)
+            self.committing.add(job_id)
+
+    def _mark_cancelled_locked(self, job_id: str, detail: str) -> None:
+        job = self.jobs[job_id]
+        now = utc_now()
+        job.update(
+            status="cancelled", stage="cancelled", error=None, updated_at=now,
+            cancel_requested_at=job.get("cancel_requested_at") or now,
+            cancelled_at=job.get("cancelled_at") or now,
+            cancel_detail=job.get("cancel_detail") if job.get("status") == "cancelled" else detail,
+        )
+        self._persist()
+
+    def _discard_staging(self, job_id: str) -> None:
+        """Remove only this job's intermediate files; a published artifact stays."""
+        with self.lock:
+            job = dict(self.jobs.get(job_id) or {})
+        for key in ("raw_path", "candidate_path"):
+            if job.get(key):
+                Path(str(job[key])).unlink(missing_ok=True)
+
+    def _cancel_answer(self, job_id: str, http_status: int, outcome: str, detail: str) -> Tuple[int, Dict[str, Any]]:
+        with self.lock:
+            status = str((self.jobs.get(job_id) or {}).get("status") or "unknown")
+        return http_status, {"job_id": job_id, "cancel": outcome, "status": status, "detail": detail}
+
+    def cancel(self, job_id: str) -> Tuple[int, Dict[str, Any]]:
+        """Stop one job, touching nothing that belongs to another.
+
+        Outcomes: "cancelled" (confirmed, 200), "requested" (accepted, confirmation
+        pending, 202), "completed" or "failed" (already terminal, 409),
+        "unsupported" (cannot be stopped without risking other work, 409) and
+        "unknown" (no such job, 404). Repeating a request repeats its answer.
+        """
+        owned: Optional[OwnedProcess] = None
+        phosphene_job_id = ""
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return HTTPStatus.NOT_FOUND, {"job_id": job_id, "cancel": "unknown", "status": "unknown",
+                                              "detail": "This node has no job with that ID."}
+            status = job.get("status")
+            if status == "cancelled":
+                return self._cancel_answer(job_id, HTTPStatus.OK, "cancelled",
+                                           str(job.get("cancel_detail") or "Cancelled."))
+            if status == "done" or job_id in self.committing:
+                return self._cancel_answer(job_id, HTTPStatus.CONFLICT, "completed",
+                                           "The render had already finished; its artifact is kept.")
+            if status == "failed":
+                return self._cancel_answer(job_id, HTTPStatus.CONFLICT, "failed",
+                                           str(job.get("error") or "The render had already failed."))
+            h3 = job.get("model") == "hailuo-h3"
+            if h3 and job.get("phosphene_job_id"):
+                phosphene_job_id = str(job["phosphene_job_id"])
+            elif h3 and job.get("phosphene_submit_attempted"):
+                return self._cancel_answer(
+                    job_id, HTTPStatus.CONFLICT, "unsupported",
+                    "Its submission to Phosphene has not returned a job ID, so there is no way to stop "
+                    "that render and nothing else. Nothing was changed.")
+            elif job_id != self.current_job_id:
+                # Still waiting in this node's own queue: no renderer has it yet.
+                self._mark_cancelled_locked(job_id, "Cancelled before rendering started.")
+                return self._cancel_answer(job_id, HTTPStatus.OK, "cancelled", "Cancelled before rendering started.")
+            else:
+                job["cancel_requested_at"] = job.get("cancel_requested_at") or utc_now()
+                self._persist()
+                owned = self.processes.get(job_id)
+        if phosphene_job_id:
+            return self._cancel_phosphene(job_id, phosphene_job_id)
+        deadline = time.monotonic() + CANCEL_CONFIRM_SECONDS
+        if owned is not None:
+            # Its SIGTERM grace and SIGKILL escalation run beside this answer, so the
+            # request never waits longer than the confirmation window.
+            threading.Thread(target=owned.terminate, name=f"cancel-{job_id}", daemon=True).start()
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.jobs[job_id].get("status") == "cancelled":
+                    return self._cancel_answer(job_id, HTTPStatus.OK, "cancelled",
+                                               str(self.jobs[job_id].get("cancel_detail") or "Cancelled."))
+            time.sleep(0.05)
+        return self._cancel_answer(job_id, HTTPStatus.ACCEPTED, "requested",
+                                   "The renderer is stopping; this job will report status \"cancelled\".")
+
+    def _cancel_phosphene(self, job_id: str, phosphene_job_id: str) -> Tuple[int, Dict[str, Any]]:
+        """Phosphene's only job-specific stop is removing a job that has not started.
+
+        /queue/remove takes the expected job ID and checks it under the panel's own
+        lock, so it cannot remove anything else. A render already running there has
+        no such stop: its /stop ends whatever is current, which may be another
+        client's job by the time it arrives, so it is never called.
+        """
+        with self.phosphene_cancel_lock:
+            with self.lock:
+                if self.jobs[job_id].get("status") == "cancelled":
+                    return self._cancel_answer(job_id, HTTPStatus.OK, "cancelled",
+                                               str(self.jobs[job_id].get("cancel_detail") or "Cancelled."))
+            try:
+                removed = phosphene_request("/queue/remove", {"id": phosphene_job_id}).get("removed") is True
+                reason = ""
+            except RuntimeError as exc:
+                removed, reason = False, f" ({exc})"
+            with self.lock:
+                if removed:
+                    self._mark_cancelled_locked(job_id, "Removed from Phosphene's queue before it started rendering.")
+                    return self._cancel_answer(job_id, HTTPStatus.OK, "cancelled",
+                                               "Removed from Phosphene's queue before it started rendering.")
+            return self._cancel_answer(
+                job_id, HTTPStatus.CONFLICT, "unsupported",
+                "Phosphene has already started this render (or could not be asked" + reason + "). It offers no "
+                "way to stop one specific running job, so nothing was stopped; the render continues and can "
+                "still be downloaded.")
 
     def submit(self, request: Dict[str, Any]) -> str:
         # Requests arrive on separate HTTP threads. Keep deduplication, image
@@ -809,12 +1090,16 @@ class RenderQueue:
             seconds,
             "h3_chain_prompts" in request,
         )
+        delivery_plan: Optional[Dict[str, int]] = None
         if model == "hailuo-h3":
             # Reject invalid discrete H3 durations/canvases before polling the
             # panel or staging an image.
             phosphene_render_options(resolution, seconds)
-        elif not 1 <= seconds <= 15:
-            raise ValueError("seconds must be between 1 and 15")
+        else:
+            if not 1 <= seconds <= 15:
+                raise ValueError("seconds must be between 1 and 15")
+            # An unknown size is refused, never quietly rendered at another.
+            delivery_plan = resolution_plan(resolution)
 
         h3_state: Optional[Dict[str, Any]] = None
         if model == "hailuo-h3":
@@ -937,6 +1222,7 @@ class RenderQueue:
             "phosphene_h3_turbo": h3_turbo if model == "hailuo-h3" else None,
             "h3_chain_prompts": chain_prompts,
             "h3_steps": h3_steps,
+            "delivery_plan": delivery_plan,
             "request_fingerprint": request_fingerprint,
             "fingerprint_version": 2,
             "created_at": created,
@@ -986,6 +1272,16 @@ class RenderQueue:
             if not source:
                 return None
             job = dict(source)
+        try:
+            delivery: Optional[Dict[str, Any]] = delivery_report(job)
+        except ValueError:
+            delivery = None
+        cancel: Optional[Dict[str, Any]] = None
+        if job.get("status") == "cancelled":
+            cancel = {"state": "cancelled", "requested_at": job.get("cancel_requested_at"),
+                      "cancelled_at": job.get("cancelled_at"), "detail": job.get("cancel_detail")}
+        elif job.get("cancel_requested_at"):
+            cancel = {"state": "requested", "requested_at": job.get("cancel_requested_at")}
         started = job.get("started_epoch")
         if started and job.get("status") == "running":
             job["elapsed_s"] = round(time.time() - float(started), 1)
@@ -1006,8 +1302,18 @@ class RenderQueue:
             "phosphene_job_id",
             "phosphene_submit_attempted",
             "phosphene_h3_turbo",
+            "delivery_plan",
+            "delivered_width",
+            "delivered_height",
+            "cancel_requested_at",
+            "cancelled_at",
+            "cancel_detail",
         ):
             job.pop(key, None)
+        if delivery is not None:
+            job["delivery"] = delivery
+        if cancel is not None:
+            job["cancel"] = cancel
         if job.get("status") == "done":
             job["artifact"] = f"/v1/artifacts/{job_id}.mp4"
         return job
@@ -1031,20 +1337,33 @@ class RenderQueue:
             except queue.Empty:
                 continue
             try:
-                self.current_job_id = job_id
+                with self.lock:
+                    # Taking the job and checking it is still wanted are one step,
+                    # so a cancel either finds it waiting or finds it current.
+                    if (self.jobs.get(job_id) or {}).get("status") != "queued":
+                        continue
+                    self.current_job_id = job_id
                 self._run_job(job_id)
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 try:
-                    if self.stop_event.is_set():
-                        self._update(
+                    with self.lock:
+                        job = self.jobs.get(job_id) or {}
+                        cancelled = (isinstance(exc, JobCancelled) or bool(job.get("cancel_requested_at"))
+                                     or job.get("status") == "cancelled")
+                        if cancelled:
+                            self._mark_cancelled_locked(job_id, "Cancelled; the renderer was stopped.")
+                    if cancelled:
+                        self._discard_staging(job_id)
+                    elif self.stop_event.is_set():
+                        self._record(
                             job_id,
                             status="queued",
                             stage="interrupted safely; will resume after restart",
                             error=None,
                         )
                     else:
-                        self._update(
+                        self._record(
                             job_id,
                             status="failed",
                             stage="render failed",
@@ -1054,8 +1373,10 @@ class RenderQueue:
                 except Exception:
                     pass
             finally:
-                self.current_process = None
-                self.current_job_id = None
+                with self.lock:
+                    self.current_job_id = None
+                    self.committing.discard(job_id)
+                    self.processes.pop(job_id, None)
                 self.pending.task_done()
 
     def _run_phosphene_job(self, job_id: str) -> None:
@@ -1113,7 +1434,9 @@ class RenderQueue:
             phosphene_job_id = str(response.get("id") or "")
             if not response.get("ok") or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", phosphene_job_id):
                 raise RuntimeError("Phosphene accepted no usable job ID")
-            self._update(
+            # Kept unconditionally: losing a live remote ID would leave a render
+            # nobody can identify, follow or stop.
+            self._record(
                 job_id,
                 phosphene_job_id=phosphene_job_id,
                 stage="queued in Phosphene",
@@ -1136,6 +1459,7 @@ class RenderQueue:
             unavailable_since: Optional[float] = None
             terminal: Optional[Dict[str, Any]] = None
             while not self.stop_event.is_set():
+                self._checkpoint(job_id)
                 job_remaining_seconds(job)
                 try:
                     snapshot = phosphene_request("/status")
@@ -1249,6 +1573,7 @@ class RenderQueue:
                 f"fps={probe.get('frame_rate')} frames={probe.get('nb_frames')} "
                 f"duration={duration:.3f}s"
             )
+        self._commit(job_id)
         candidate_path.replace(output_path)
 
         if poster_path:
@@ -1312,6 +1637,9 @@ class RenderQueue:
             elapsed_s=round(elapsed, 1),
             completed_at=utc_now(),
             duration_s=round(duration, 3),
+            # Probed, and already validated against the plan above.
+            delivered_width=probe.get("width"),
+            delivered_height=probe.get("height"),
             bytes=output_path.stat().st_size,
             poster_path=str(poster_path) if poster_path else None,
         )
@@ -1333,7 +1661,14 @@ class RenderQueue:
         raw_path.unlink(missing_ok=True)
         candidate_path.unlink(missing_ok=True)
 
-        plan = resolution_plan(job["resolution"])
+        if job.get("delivery_plan"):
+            plan = job_delivery_plan(job)
+        else:
+            # Saved before 1080p delivery and never finished: render the size it
+            # asked for, and pin that before any output can exist.
+            plan = resolution_plan(str(job["resolution"]))
+            self._update(job_id, delivery_plan=plan)
+            job["delivery_plan"] = plan
         command = [
             "/usr/bin/caffeinate",
             "-dimsu",
@@ -1391,19 +1726,25 @@ class RenderQueue:
             log.write(f"\n[{utc_now()}] starting {job_id}\n")
             log.write("Command: " + " ".join(command[:2] + ["<ltx-command-with-prompt-redacted>"]) + "\n")
             log.flush()
-            process = subprocess.Popen(
-                command,
-                cwd=str(LTX_ROOT),
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                start_new_session=True,
-            )
-            self.current_process = process
+            with self.lock:
+                # Starting the renderer and registering it as this job's are one
+                # step with the cancel check, so a cancel always finds it or
+                # stops it from starting.
+                self._checkpoint_locked(job_id)
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(LTX_ROOT),
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    start_new_session=True,
+                )
+                owned = OwnedProcess(process)
+                self.processes[job_id] = owned
             assert process.stdout is not None
-            deadline_timer = threading.Timer(job_remaining_seconds(job), terminate_process_group, args=(process,))
+            deadline_timer = threading.Timer(job_remaining_seconds(job), owned.terminate)
             deadline_timer.daemon = True
             deadline_timer.start()
             try:
@@ -1425,11 +1766,15 @@ class RenderQueue:
                             self._update(job_id, stage="decoding video and audio", progress=0.88)
                         elif "sav" in lower or "writ" in lower:
                             self._update(job_id, stage="saving raw render", progress=0.93)
-                return_code = process.wait()
+                return_code = owned.wait()
             finally:
                 deadline_timer.cancel()
-                terminate_process_group(process)
+                owned.terminate()
+                with self.lock:
+                    self.processes.pop(job_id, None)
                 process.stdout.close()
+            # A renderer stopped by a cancel exits nonzero; say cancelled, not failed.
+            self._checkpoint(job_id)
             job_remaining_seconds(job)
             log.write(f"[{utc_now()}] renderer exit code {return_code}\n")
         if return_code != 0:
@@ -1490,6 +1835,7 @@ class RenderQueue:
 
         # Preserve an existing good clip until its replacement has passed all
         # stream checks, then swap the new candidate into place atomically.
+        self._commit(job_id)
         candidate_path.replace(output_path)
 
         if poster_path:
@@ -1529,8 +1875,15 @@ class RenderQueue:
             "duration_seconds": duration,
             "frames": job["frames"],
             "frame_rate": 24,
+            "requested_resolution": job["resolution"],
             "internal_resolution": f"{plan['internal_w']}x{plan['internal_h']}",
             "output_resolution": f"{probe.get('width')}x{probe.get('height')}",
+            # The canvas is smaller than every delivery size: ffmpeg scaled
+            # it, and that is not the detail of native generation at this size.
+            "delivery_scaling": (
+                "upscaled" if (probe.get("width"), probe.get("height")) != (plan["internal_w"], plan["internal_h"])
+                else "native"
+            ),
             "audio": probe.get("audio", False),
             "created_at": utc_now(),
         }
@@ -1545,29 +1898,19 @@ class RenderQueue:
             elapsed_s=round(elapsed, 1),
             completed_at=utc_now(),
             duration_s=round(duration, 3),
+            # Probed, and already validated against the plan above.
+            delivered_width=probe.get("width"),
+            delivered_height=probe.get("height"),
             bytes=output_path.stat().st_size,
             poster_path=str(poster_path) if poster_path else None,
         )
 
     def shutdown(self) -> None:
         self.stop_event.set()
-        process = self.current_process
-        if process and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    pass
+        with self.lock:
+            owned = list(self.processes.values())
+        for process in owned:
+            process.terminate()
         worker = self.worker
         if worker and worker.is_alive() and worker is not threading.current_thread():
             worker.join(timeout=15)
@@ -1648,15 +1991,25 @@ class Handler(BaseHTTPRequestHandler):
                             "ready": not ltx_missing,
                             "peak_gb": 25,
                             "typical_seconds": 600,
-                            "detail": "LTX-2.3 distilled Q4, native MLX; local audio/video",
+                            "detail": "LTX-2.3 distilled Q4, native MLX; local audio/video; "
+                            "renders a canvas of at most 768x448 and scales it up for delivery",
+                            "supported_resolutions": list(LTX_RESOLUTIONS),
+                            # This node owns the LTX renderer process for each job,
+                            # so POST /v1/jobs/{id}/cancel can stop exactly that one.
+                            "supported_job_actions": ["cancel"],
                             "missing": ltx_missing,
                         },
                         {
+                            # No "cancel" here. Phosphene can remove a job that has not
+                            # started, by its ID, but a running render's only stop is
+                            # global and may hit another client's job. The cancel
+                            # route still answers for H3, honestly, per job.
                             "id": "hailuo-h3",
                             "kind": "video",
                             "supported_parameters": ["seed", "h3_chain_prompts", "h3_turbo", "entry_id"]
                             + (["h3_steps"] if h3_state["ready"] and phosphene_supports_h3_steps() else []),
                             "ready": bool(h3_state["ready"]),
+                            "supported_resolutions": ["480p", "720p", "1080p"],
                             "peak_gb": 32,
                             "typical_seconds": 1200,
                             "detail": (
@@ -1710,10 +2063,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/v1/text-to-video":
+        cancel = re.fullmatch(r"/v1/jobs/([A-Za-z0-9_-]{1,64})/cancel", parsed.path)
+        if parsed.path != "/v1/text-to-video" and not cancel:
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         if not self._require_auth():
+            return
+        if cancel:
+            # The body carries nothing; the job ID in the path is the whole request.
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if 0 < length <= 4096:
+                self.rfile.read(length)
+            assert RENDERS is not None
+            status, answer = RENDERS.cancel(cancel.group(1))
+            self._json(status, answer)
             return
         try:
             size = int(self.headers.get("Content-Length", "0"))

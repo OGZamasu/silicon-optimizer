@@ -18,7 +18,41 @@ public enum VideoSampling: String, CaseIterable, Codable, Sendable {
 }
 
 public enum VideoQueueStatus: String, Codable, Sendable {
-    case pending, submitting, rendering, completed, failed
+    /// `cancelled` is set only when the node confirmed it stopped the job.
+    case pending, submitting, rendering, completed, failed, cancelled
+}
+
+/// What became of asking a node to stop one clip's render. Kept on the clip and saved
+/// with it, because "we asked", "it stopped", "it finished first" and "nobody knows"
+/// each call for something different after a relaunch.
+public struct VideoCancelRecord: Codable, Sendable, Equatable {
+    public enum State: String, Codable, Sendable {
+        /// Saved before the request leaves. Still this at launch means the app closed
+        /// before the node answered, which is `unknown`.
+        case sending
+        /// The node accepted it and is stopping the renderer; following continues until
+        /// the job reports cancelled, finished or failed.
+        case requested
+        /// The node confirmed the render is stopped and will never be published.
+        case confirmed
+        /// The render finished before the cancel could take effect; the clip is kept.
+        case completed
+        /// The job had already failed on the node.
+        case failed
+        /// The node cannot stop this job without risking someone else's; it continues.
+        case unsupported
+        /// No usable answer. The render may still be running.
+        case unknown
+    }
+    public var state: State
+    public var requestedAt: Date
+    public var detail: String?
+
+    public init(state: State, requestedAt: Date, detail: String? = nil) {
+        self.state = state
+        self.requestedAt = requestedAt
+        self.detail = detail
+    }
 }
 
 public struct VideoQueueItem: Identifiable, Codable, Sendable {
@@ -41,6 +75,8 @@ public struct VideoQueueItem: Identifiable, Codable, Sendable {
     public var error: String?
     public var uncertainSubmission = false
     public var nodeFailed = false
+    /// Absent unless someone asked the node to cancel this clip's render.
+    public var cancel: VideoCancelRecord?
     /// One line about how this clip's settings were arrived at, when they were not simply
     /// typed: "Auto → LTX-2.3 (5 s): motion-heavy, no people". Optional, and absent on every
     /// clip queued before the media router existed, so an older saved queue still decodes.
@@ -107,6 +143,10 @@ public final class VideoBatchQueue {
                     item.uncertainSubmission = true
                     item.error = "The app closed before the node receipt was saved. Check the node before rendering again; the original may still be running. Client ID: \(item.request.clientID ?? item.id)."
                 }
+                if item.cancel?.state == .sending {
+                    item.cancel?.state = .unknown
+                    item.cancel?.detail = "The app closed before the node answered the cancel request. The render may still be running."
+                }
                 return item
             }
             isPaused = document.paused || items.contains(where: \.uncertainSubmission)
@@ -131,7 +171,7 @@ public final class VideoBatchQueue {
             switch item.status {
             case .rendering, .submitting: active.append(item)
             case .pending: waiting.append(item)
-            case .completed, .failed: finished.append((offset, item))
+            case .completed, .failed, .cancelled: finished.append((offset, item))
             }
         }
         finished.sort {
@@ -302,6 +342,104 @@ public final class VideoBatchQueue {
             item.elapsed = result.elapsed
             item.finishedAt = now
             item.error = nil
+            if let cancel = item.cancel, [.sending, .requested, .unknown].contains(cancel.state) {
+                item.cancel?.state = .completed
+                item.cancel?.detail = "The render finished before the cancel took effect; the clip is kept."
+            }
+        }
+    }
+
+    /// The node reported this clip's job cancelled: the one outcome that frees the GPU
+    /// for certain. Nothing is paused, because nothing is left running.
+    public func cancelled(_ id: String, detail: String?, now: Date = Date()) throws {
+        try update(id) { item in
+            item.status = .cancelled
+            item.finishedAt = now
+            item.error = nil
+            item.uncertainSubmission = false
+            let requestedAt = item.cancel?.requestedAt ?? now
+            item.cancel = VideoCancelRecord(
+                state: .confirmed, requestedAt: requestedAt,
+                detail: detail ?? item.cancel?.detail ?? "The node stopped this render."
+            )
+        }
+    }
+
+    /// Only a clip whose job the node accepted can be cancelled by ID, and only while
+    /// it may still be running there.
+    public nonisolated static func mayCancel(_ item: VideoQueueItem) -> Bool {
+        cancelRefusal(item) == nil
+    }
+
+    /// Why this clip cannot be cancelled now, in words that say what to do instead; nil
+    /// when it can. A cancel already on its way is the common case: say so, rather than
+    /// that the clip is not cancellable.
+    public nonisolated static func cancelRefusal(_ item: VideoQueueItem) -> String? {
+        switch item.cancel?.state {
+        case .sending, .requested:
+            return "A cancel for this clip is already in progress. Its outcome will show on the clip; there is no need to ask again."
+        case .confirmed:
+            return "This clip's render is already cancelled."
+        case .completed:
+            return "This clip's render already finished, so there is nothing left to cancel."
+        case .failed:
+            return "This clip's render had already failed, so there is nothing left to cancel."
+        case .unsupported, .unknown, nil:
+            break
+        }
+        guard item.nodeJob != nil, item.nodeURL != nil,
+              item.status == .rendering || item.canReconnect else {
+            return "Only a clip the node has accepted, and that may still be rendering, can be cancelled."
+        }
+        return nil
+    }
+
+    /// Saved before the request is sent, so a relaunch mid-request says "unknown", never
+    /// nothing.
+    public func beginCancel(_ id: String, now: Date = Date()) throws {
+        try update(id) { item in
+            if let refusal = Self.cancelRefusal(item) { throw VideoRuntimeError.failed(refusal) }
+            item.cancel = VideoCancelRecord(state: .sending, requestedAt: now)
+        }
+    }
+
+    /// Records the node's answer. A failed cancel changes nothing about the render: the
+    /// receipt stays, and no answer here ever queues a new one.
+    public func recordCancel(_ id: String, outcome: VideoCancelOutcome, following: Bool, now: Date = Date()) throws {
+        // The job's own status can settle it while the request is out; an answer arriving
+        // after that never overrides what the node already reported.
+        guard let current = items.first(where: { $0.id == id }),
+              current.status != .cancelled, current.status != .completed else { return }
+        if case .cancelled(let detail) = outcome, !following {
+            return try cancelled(id, detail: detail, now: now)
+        }
+        try update(id) { item in
+            let requestedAt = item.cancel?.requestedAt ?? now
+            switch outcome {
+            case .cancelled(let detail):
+                // The render being followed reads the cancelled status on its next poll.
+                item.cancel = .init(state: .confirmed, requestedAt: requestedAt, detail: detail)
+            case .requested(let detail):
+                item.cancel = .init(state: .requested, requestedAt: requestedAt, detail: detail)
+                if !following && item.canReconnect {
+                    // Follow the same job again to learn how it ends. This never submits.
+                    item.status = .rendering
+                    item.error = nil
+                    item.finishedAt = nil
+                }
+            case .completed(let detail):
+                item.cancel = .init(state: .completed, requestedAt: requestedAt, detail: detail)
+            case .alreadyFailed(let detail):
+                item.cancel = .init(state: .failed, requestedAt: requestedAt, detail: detail)
+                if !following && item.status == .failed {
+                    item.nodeFailed = true
+                    item.error = detail ?? "The node reported the job failed."
+                }
+            case .unsupported(let detail):
+                item.cancel = .init(state: .unsupported, requestedAt: requestedAt, detail: detail)
+            case .unknown(let detail):
+                item.cancel = .init(state: .unknown, requestedAt: requestedAt, detail: detail)
+            }
         }
     }
 
@@ -323,11 +461,15 @@ public final class VideoBatchQueue {
             throw VideoRuntimeError.failed("The queue already has 200 unfinished clips; retry after one finishes or is removed.")
         }
         try update(id) { item in
-            guard item.status == .failed else { throw VideoRuntimeError.failed("Only failed clips can be retried.") }
+            guard item.status == .failed || item.status == .cancelled else {
+                throw VideoRuntimeError.failed("Only failed or cancelled clips can be retried.")
+            }
             if item.canReconnect && !confirmNewRender {
                 item.status = .rendering
             } else {
-                guard (!item.uncertainSubmission && !item.canReconnect) || confirmNewRender else {
+                // A confirmed cancel stopped the old render, so a new one cannot duplicate it.
+                guard item.status == .cancelled || (!item.uncertainSubmission && !item.canReconnect)
+                        || confirmNewRender else {
                     throw VideoRuntimeError.failed("Check the node first. Retrying an uncertain submission can create a duplicate; explicitly confirm a new render.")
                 }
                 if let old = item.nodeJob { item.previousNodeJobs.append(old.id) }
@@ -335,6 +477,7 @@ public final class VideoBatchQueue {
                 item.request.clientID = "vq-\(UUID().uuidString)"
                 item.attempt += 1
                 item.status = .pending
+                item.cancel = nil
             }
             item.uncertainSubmission = false
             item.nodeFailed = false
@@ -423,8 +566,9 @@ public final class VideoBatchQueue {
     public func clearFinished() throws {
         // Completed media and exported manifests stay on disk. Failed jobs are
         // retained, especially those whose remote outcome is still unknown.
+        // A confirmed cancel is as finished as a completed clip; an unconfirmed one is not.
         let receipts = items.filter { $0.status == .completed && receiptWaiters[$0.id] != nil }
-        try commit(items.filter { $0.status != .completed }, paused: isPaused)
+        try commit(items.filter { $0.status != .completed && $0.status != .cancelled }, paused: isPaused)
         for item in receipts { retainedReceipts[item.id] = item }
     }
 
@@ -492,4 +636,12 @@ public struct VideoNodeFailed: LocalizedError, Sendable {
     public var message: String
     public var errorDescription: String? { message }
     public init(_ message: String) { self.message = message }
+}
+
+/// The node reported the job cancelled. Unlike a failure it frees the GPU for certain,
+/// and unlike a lost connection there is nothing left to reconnect to.
+public struct VideoNodeCancelled: LocalizedError, Sendable {
+    public var detail: String?
+    public var errorDescription: String? { detail ?? "The node cancelled this render." }
+    public init(_ detail: String?) { self.detail = detail }
 }

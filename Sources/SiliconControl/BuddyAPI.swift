@@ -265,8 +265,9 @@ extension ControlAPI {
         /// its turn has a status and no stage.
         public var stage: String?
         /// Why it failed, in the words the queue would show. Present only on a terminal
-        /// failure, and the reason a phone no longer has to poll `GET /video/queue`
-        /// alongside the stream to have something true to say when a render breaks.
+        /// failure (or a confirmed cancel, with the node's words for it), and the reason a
+        /// phone no longer has to poll `GET /video/queue` alongside the stream to have
+        /// something true to say when a render breaks.
         public var reason: String?
         /// The finished file, fetchable at `GET /media/{mediaID}`. Set on the frame that
         /// says the job is done, which is the frame a notification is written from.

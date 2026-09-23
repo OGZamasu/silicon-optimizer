@@ -402,7 +402,8 @@ extension AppModel {
             id: item.id, kind: "video", status: item.status, title: item.title,
             fraction: active ? fraction : nil,
             stage: active ? stage : nil,
-            reason: item.status == VideoQueueStatus.failed.rawValue ? item.error : nil,
+            reason: item.status == VideoQueueStatus.failed.rawValue ? item.error
+                : item.status == VideoQueueStatus.cancelled.rawValue ? item.cancelDetail : nil,
             mediaID: mediaID
         )
     }
