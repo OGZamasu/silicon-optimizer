@@ -84,18 +84,30 @@ public actor CloudAudioRuntime {
     private static let maximumArtifactURLs = 8
     private static let maximumArtifactBytes: Int64 = 256 * 1_024 * 1_024
     private let session: URLSession
-    private let artifactSessionConfiguration: URLSessionConfiguration
+    private let artifactDownload: ArtifactDownload
     private var activeJobIDs = Set<UUID>()
     private var cancelledJobIDs = Set<UUID>()
 
+    /// Source URL, destination, byte limit, budget and timeout in; the published file out.
+    /// The app always uses the resolved-address transport, which is not URLSession, so a
+    /// test's URLProtocol stub cannot answer it and the tests hand in a local TLS fixture.
+    typealias ArtifactDownload = @Sendable (
+        URL, URL, Int64, RemoteByteBudget, TimeInterval
+    ) async throws -> URL
+
     public init() {
         session = URLSession(configuration: .default)
-        artifactSessionConfiguration = .ephemeral
+        artifactDownload = { url, destination, maximumBytes, budget, timeout in
+            try await PublicHTTPSArtifactTransfer.download(
+                from: url, to: destination, maximumBytes: maximumBytes, budget: budget,
+                timeout: timeout
+            )
+        }
     }
 
-    init(session: URLSession, artifactSessionConfiguration: URLSessionConfiguration) {
+    init(session: URLSession, artifactDownload: @escaping ArtifactDownload) {
         self.session = session
-        self.artifactSessionConfiguration = artifactSessionConfiguration
+        self.artifactDownload = artifactDownload
     }
 
     public func cancel() { cancelledJobIDs.formUnion(activeJobIDs) }
@@ -316,19 +328,9 @@ public actor CloudAudioRuntime {
         )
         do {
             try checkCancellation(jobID: jobID)
-            // The receiver adjusts timeouts/cache settings; overlapping jobs need separate
-            // configurations even when a test injects the same URLProtocol-backed template.
-            let transferConfiguration = artifactSessionConfiguration.copy()
-                as? URLSessionConfiguration ?? .ephemeral
-            return try await RemoteArtifactTransfer.download(
-                from: url,
-                policy: .publicHTTPS,
-                to: destination,
-                maximumBytes: Self.maximumArtifactBytes,
-                budget: RemoteByteBudget(limit: Self.maximumArtifactBytes),
-                timeout: 600,
-                allowedContentTypes: ["audio/*", "application/octet-stream"],
-                sessionConfiguration: transferConfiguration
+            return try await artifactDownload(
+                url, destination, Self.maximumArtifactBytes,
+                RemoteByteBudget(limit: Self.maximumArtifactBytes), 600
             )
         } catch let error as RemoteTransferError {
             throw CloudAudioError.submitFailed(502, error.localizedDescription)

@@ -99,7 +99,7 @@ extension AppModel {
         let (data, response) = try await RemoteHTTP.data(
             for: request,
             session: session,
-            policy: .publicHTTPS,
+            policy: .sameOrigin(provider.chatBaseURL),
             credentialOrigin: provider.chatBaseURL
         )
         let status = (response as? HTTPURLResponse)?.statusCode ?? 502

@@ -16,24 +16,31 @@ private final class CloudAudioStubState: @unchecked Sendable {
     private var heldPhase: CloudAudioPhase?
     private var started: [CloudAudioPhase: Int] = [:]
     private var stopped: [CloudAudioPhase: Int] = [:]
-    private var downloadChunkSent = false
     private var overlappingReplies = false
     private var pollsByID: [String: Int] = [:]
+    private var artifactOrigin = "https://cdn.example.com"
 
-    func reset(holding phase: CloudAudioPhase?) {
+    /// `artifactOrigin` is the TLS fixture's: audio downloads go through the resolved-address
+    /// transport, not URLSession, so this stub answers only submission and polling.
+    func reset(holding phase: CloudAudioPhase?, artifactOrigin: String) {
         lock.withLock {
             heldPhase = phase
             started = [:]
             stopped = [:]
-            downloadChunkSent = false
             overlappingReplies = false
             pollsByID = [:]
+            self.artifactOrigin = artifactOrigin
         }
     }
 
-    func enableOverlappingReplies() {
-        reset(holding: nil)
+    func enableOverlappingReplies(artifactOrigin: String) {
+        reset(holding: nil, artifactOrigin: artifactOrigin)
         lock.withLock { overlappingReplies = true }
+    }
+
+    /// The fixture stalls mid-body on `/stall`, which is how a download is held.
+    func artifactURL() -> String {
+        lock.withLock { artifactOrigin + (heldPhase == .download ? "/stall" : "/audio") }
     }
 
     func didStart(_ phase: CloudAudioPhase, url: URL?) -> Bool {
@@ -58,14 +65,8 @@ private final class CloudAudioStubState: @unchecked Sendable {
         lock.withLock { stopped[phase, default: 0] += 1 }
     }
 
-    func sentDownloadChunk() {
-        lock.withLock { downloadChunkSent = true }
-    }
-
     func hasStarted(_ phase: CloudAudioPhase) -> Bool {
-        lock.withLock {
-            (started[phase] ?? 0) > 0 && (phase != .download || downloadChunkSent)
-        }
+        lock.withLock { (started[phase] ?? 0) > 0 }
     }
 
     func hasStopped(_ phase: CloudAudioPhase) -> Bool {
@@ -85,41 +86,35 @@ private final class CloudAudioStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        let phase: CloudAudioPhase = request.httpMethod == "POST"
-            ? .submit : request.url?.host == "cdn.example.com" ? .download : .poll
+        let phase: CloudAudioPhase = request.httpMethod == "POST" ? .submit : .poll
         self.phase = phase
-        let hold = Self.state.didStart(phase, url: request.url)
-        if hold && phase != .download { return }
+        if Self.state.didStart(phase, url: request.url) { return }
 
         let body: Data
-        let contentType: String
         switch phase {
         case .submit:
             let id = Self.state.usesOverlappingReplies()
                 ? "job-\(Self.state.count(.submit))" : "job-1"
             body = Data("{\"request_id\":\"\(id)\"}".utf8)
-            contentType = "application/json"
-        case .poll:
+        case .poll, .download:
             if Self.state.usesOverlappingReplies(),
                request.url?.lastPathComponent == "job-1",
                Self.state.pollCount("job-1") == 1 {
                 body = Data(#"{"status":"queued"}"#.utf8)
             } else {
-                body = Data(#"{"status":"success","outcome":{"audio_url":"https://cdn.example.com/audio.mp3"}}"#.utf8)
+                body = Data(
+                    #"{"status":"success","outcome":{"audio_url":"\#(Self.state.artifactURL())"}}"#
+                        .utf8
+                )
             }
-            contentType = "application/json"
-        case .download:
-            body = Data(repeating: 0x41, count: 4_096)
-            contentType = "audio/mpeg"
         }
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": contentType]
+            headerFields: ["Content-Type": "application/json"]
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
-        if phase == .download { Self.state.sentDownloadChunk() }
-        if !hold { client?.urlProtocolDidFinishLoading(self) }
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     override func stopLoading() {
@@ -129,16 +124,31 @@ private final class CloudAudioStubProtocol: URLProtocol, @unchecked Sendable {
 
 @Suite("Cloud audio cancellation", .serialized, .redirectedConversationStore)
 struct CloudAudioCancellationTests {
-    @MainActor private func model(directory: URL) throws -> AppModel {
+    /// The runtime the app would build, except that the provider is a URLProtocol stub and
+    /// the artifact host is the local TLS fixture reached through the real transport.
+    private func runtime(_ server: FixtureTLSHTTPServer) -> CloudAudioRuntime {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [CloudAudioStubProtocol.self]
-        let runtime = CloudAudioRuntime(
+        return CloudAudioRuntime(
             session: URLSession(configuration: configuration),
-            artifactSessionConfiguration: configuration
+            artifactDownload: { url, destination, maximumBytes, budget, timeout in
+                _ = CloudAudioStubState.shared.didStart(.download, url: url)
+                defer { CloudAudioStubState.shared.didStop(.download) }
+                return try await PublicHTTPSArtifactTransfer.download(
+                    from: url, to: destination, maximumBytes: maximumBytes, budget: budget,
+                    timeout: timeout, proxyCheck: { _ in }, onNetworkAttempt: {},
+                    makeJob: server.hopJobs
+                )
+            }
         )
+    }
+
+    @MainActor private func model(
+        directory: URL, server: FixtureTLSHTTPServer
+    ) throws -> AppModel {
         var settings = Settings()
         settings.voiceOutputDirectory = directory.path
-        let model = AppModel(cloudAudioRuntime: runtime, settings: settings)
+        let model = AppModel(cloudAudioRuntime: runtime(server), settings: settings)
         var credentials = CloudCredentials()
         credentials.set("test-key", for: .gmi)
         model.cloudCredentials = credentials
@@ -160,21 +170,33 @@ struct CloudAudioCancellationTests {
         return condition()
     }
 
+    /// Reached means in flight: a held request for the provider phases, and body bytes in
+    /// the transfer's partial file for the download.
+    private func reached(_ phase: CloudAudioPhase, in directory: URL) -> Bool {
+        phase == .download
+            ? partialBytes(in: directory) >= 4_096
+            : CloudAudioStubState.shared.hasStarted(phase)
+    }
+
     @Test(arguments: CloudAudioPhase.allCases)
     @MainActor func cancelStopsEachNetworkPhaseAndAllowsRetry(
         phase: CloudAudioPhase
     ) async throws {
-        CloudAudioStubState.shared.reset(holding: phase)
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cloud-audio-cancel-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let model = try model(directory: directory)
+        let server = try FixtureTLSHTTPServer()
+        let origin = "https://cdn.example.com:\(server.port)"
+        CloudAudioStubState.shared.reset(holding: phase, artifactOrigin: origin)
+        let directory = server.directory.appendingPathComponent("voice")
+        let model = try model(directory: directory, server: server)
 
         model.speak()
-        let reachedPhase = await waitUntil { CloudAudioStubState.shared.hasStarted(phase) }
+        let reachedPhase = await pollUntil { reached(phase, in: directory) }
         #expect(reachedPhase, "The request should reach \(phase.rawValue) before cancellation")
+        let cancelled = ContinuousClock.now
         model.cancelVoice()
         #expect(await waitUntil { !model.isSpeaking })
+        // The fixture holds a download for 30 seconds; stopping well inside that is the
+        // transfer being cut short rather than finished and thrown away.
+        #expect(ContinuousClock.now - cancelled < .seconds(5))
         #expect(CloudAudioStubState.shared.hasStopped(phase))
         #expect(model.speechResults.isEmpty)
         #expect(model.voiceError == "Cancelled.")
@@ -182,28 +204,24 @@ struct CloudAudioCancellationTests {
         #expect(leftovers.isEmpty, "Cancelled downloads must not leave partial or published audio")
 
         // A delayed signal to the old actor job must not poison a new request.
-        CloudAudioStubState.shared.reset(holding: nil)
+        CloudAudioStubState.shared.reset(holding: nil, artifactOrigin: origin)
         model.speak()
         #expect(await waitUntil { !model.isSpeaking && model.speechResults.count == 1 })
         #expect(model.voiceError == nil)
         #expect(model.speechResults.count == 1)
         if let audio = model.speechResults.first?.audio {
-            #expect(FileManager.default.fileExists(atPath: audio.path))
+            #expect(try Data(contentsOf: audio) == Data("audio".utf8))
         }
         #expect(CloudAudioStubState.shared.count(.download) == 1)
     }
 
-    @Test @MainActor func cancellingAnOlderOverlappingJobLeavesTheNewerOneAlone() async throws {
-        CloudAudioStubState.shared.enableOverlappingReplies()
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [CloudAudioStubProtocol.self]
-        let runtime = CloudAudioRuntime(
-            session: URLSession(configuration: configuration),
-            artifactSessionConfiguration: configuration
+    @Test func cancellingAnOlderOverlappingJobLeavesTheNewerOneAlone() async throws {
+        let server = try FixtureTLSHTTPServer()
+        CloudAudioStubState.shared.enableOverlappingReplies(
+            artifactOrigin: "https://cdn.example.com:\(server.port)"
         )
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cloud-audio-overlap-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let runtime = runtime(server)
+        let directory = server.directory.appendingPathComponent("overlap")
         let base = try #require(CloudProvider.gmi.jobsBaseURL)
         let firstID = UUID()
         let first = Task {
@@ -213,7 +231,7 @@ struct CloudAudioCancellationTests {
                 base: base, apiKey: "test-key", jobID: firstID, onProgress: { _ in }
             )
         }
-        #expect(await waitUntil { CloudAudioStubState.shared.pollCount("job-1") == 1 })
+        #expect(await pollUntil { CloudAudioStubState.shared.pollCount("job-1") == 1 })
 
         let second = Task {
             try await runtime.generate(
@@ -222,7 +240,7 @@ struct CloudAudioCancellationTests {
                 base: base, apiKey: "test-key", jobID: UUID(), onProgress: { _ in }
             )
         }
-        #expect(await waitUntil { CloudAudioStubState.shared.pollCount("job-2") == 1 })
+        #expect(await pollUntil { CloudAudioStubState.shared.pollCount("job-2") == 1 })
         await runtime.cancel(jobID: firstID)
         let newer = try await second.value
         #expect(FileManager.default.fileExists(atPath: newer.audio.path))
