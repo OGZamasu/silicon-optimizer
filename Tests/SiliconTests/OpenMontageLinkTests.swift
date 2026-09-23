@@ -139,24 +139,49 @@ struct OpenMontageLinkTests {
 
     // MARK: - The plan
 
-    @Test("a fresh Mac clones, makes a venv, installs, and skips Remotion when there is no npm")
+    @Test("a fresh Mac fetches the reviewed commit, checks it, and installs only locked packages")
     func planFresh() throws {
         var env = try makeEnvironment()
         defer { cleanUp(env) }
         env.pythons = [URL(fileURLWithPath: "/opt/homebrew/bin/python3.12")]
+        let checkout = OpenMontageLink.checkoutURL(in: env)
+        let commit = PinnedInstall.openMontage.commit
 
         let (steps, notes) = try OpenMontageLink.plan(in: env)
-        #expect(steps.first?.arguments.first == "clone")
-        #expect(steps.first?.optional == false, "no checkout is a hard failure, not a skip")
-        #expect(steps.contains { $0.arguments == ["-m", "venv", ".venv"] })
-        #expect(steps.contains { $0.arguments.contains("requirements.txt") && !$0.optional })
-        #expect(steps.contains { $0.arguments.contains("piper-tts") && $0.optional })
+        // The pinned commit, by id — never a branch, never a pull.
+        #expect(steps.first?.arguments == ["init", "--quiet", checkout.path])
+        #expect(steps.contains { $0.arguments.contains("fetch") && $0.arguments.last == commit })
+        #expect(!steps.contains { $0.arguments.contains("clone") || $0.arguments.contains("pull") })
+        // Checked before anything in it runs: the check comes before the first Python step.
+        let check = try #require(steps.firstIndex { $0.label.hasPrefix("Checking OpenMontage") })
+        let venv = try #require(steps.firstIndex { $0.arguments == ["-m", "venv", ".venv"] })
+        #expect(steps[check].arguments.suffix(3) == [checkout.path, commit, "OpenMontage"])
+        #expect(check < venv)
+        #expect(steps[..<venv].allSatisfy { !$0.optional }, "a missing or wrong checkout is fatal")
+
+        // Python packages come from the app's hash lock for this Python, wheels only; the
+        // checkout's own requirements.txt is never handed to pip.
+        let pip = steps.filter { $0.arguments.starts(with: ["-m", "pip", "install"]) }
+        #expect(pip.count == 2)
+        for step in pip {
+            #expect(step.arguments.contains("--require-hashes"))
+            #expect(step.arguments.contains("--only-binary"))
+            #expect(!step.arguments.contains("requirements.txt"))
+            let lock = try #require(step.arguments.last)
+            #expect(lock.hasPrefix(env.locks.path))
+            #expect(lock.hasSuffix("-py3.12.txt"))
+            #expect(FileManager.default.fileExists(atPath: lock), "\(lock) must ship with the app")
+        }
+        #expect(pip[0].optional == false)
+        #expect(pip[1].optional == true && pip[1].arguments.last!.hasSuffix("piper-py3.12.txt"))
+
         #expect(!steps.contains { $0.executable.lastPathComponent == "npm" })
         #expect(notes.contains { $0.contains("Remotion") }, "a skipped step is said, not silent")
         #expect(notes.contains { $0.contains("npm ci") })
         #expect(!notes.contains { $0.contains("Set up again") })
 
-        // With an npm, Remotion is a step — optional, in its own directory.
+        // With an npm, Remotion is a step — optional, in its own directory, from the
+        // reviewed commit's lockfile.
         env.npm = URL(fileURLWithPath: "/usr/local/bin/npm")
         let (withNpm, quiet) = try OpenMontageLink.plan(in: env)
         let remotion = withNpm.first { $0.executable.lastPathComponent == "npm" }
@@ -166,26 +191,52 @@ struct OpenMontageLinkTests {
         #expect(quiet.isEmpty)
     }
 
-    @Test("an existing checkout is not pulled or cloned during setup")
+    @Test("an existing checkout is checked against the reviewed commit, not pulled or cloned")
     func planExisting() throws {
         var env = try makeEnvironment()
         defer { cleanUp(env) }
         env.pythons = [URL(fileURLWithPath: "/usr/bin/python3")]
         env.npm = URL(fileURLWithPath: "/usr/local/bin/npm")
         let checkout = try makeCheckout(in: env)
-        // A venv already there is not made again.
+        // A venv already there is not made again, and its own version picks the lock.
         try FileManager.default.createDirectory(
             at: checkout.appendingPathComponent(".venv/bin"), withIntermediateDirectories: true)
         FileManager.default.createFile(
             atPath: checkout.appendingPathComponent(".venv/bin/python").path, contents: Data(),
             attributes: [.posixPermissions: 0o755])
+        try "home = /opt/homebrew/bin\nversion = 3.11.9\n".write(
+            to: checkout.appendingPathComponent(".venv/pyvenv.cfg"), atomically: true, encoding: .utf8)
 
         let (steps, notes) = try OpenMontageLink.plan(in: env)
-        #expect(!steps.contains { $0.executable == env.git })
+        #expect(!steps.contains { $0.executable == env.git }, "never fetched or pulled")
+        #expect(steps.first?.label.hasPrefix("Checking OpenMontage") == true,
+                "checked before anything runs from the checkout")
+        #expect(steps.first?.arguments.contains(env.git!.path) == true)
         #expect(!steps.contains { $0.executable == env.npm }, "npm ci would replace user-managed node_modules")
         #expect(!steps.contains { $0.arguments == ["-m", "venv", ".venv"] })
-        #expect(steps.contains { $0.arguments.contains("requirements.txt") })
+        #expect(steps.contains { $0.arguments.last?.hasSuffix("requirements-py3.11.txt") == true })
         #expect(notes.contains { $0.contains("Remotion dependencies were left unchanged") })
+    }
+
+    @Test("a Python the locks were not made for is refused before anything runs")
+    func planUnlockedPython() throws {
+        var env = try makeEnvironment()
+        defer { cleanUp(env) }
+        for names in [["python3"], ["python3.14"], ["python3.9"]] {
+            env.pythons = names.map { URL(fileURLWithPath: "/opt/homebrew/bin/\($0)") }
+            #expect(throws: PinnedInstall.PlanError.self) { try OpenMontageLink.plan(in: env) }
+        }
+    }
+
+    @Test("a folder already at ~/OpenMontage that is not a checkout is never written over")
+    func planFolderInTheWay() throws {
+        var env = try makeEnvironment()
+        defer { cleanUp(env) }
+        env.pythons = [URL(fileURLWithPath: "/opt/homebrew/bin/python3.12")]
+        let folder = OpenMontageLink.checkoutURL(in: env)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "mine".write(to: folder.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        #expect(throws: OpenMontageLink.LinkError.self) { try OpenMontageLink.plan(in: env) }
     }
 
     @Test("no Python at all is an error the button can show, not a crash mid-install")

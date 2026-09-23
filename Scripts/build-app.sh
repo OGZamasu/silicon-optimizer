@@ -198,6 +198,17 @@ for package in harness qwen codex pi; do
     cp "$source/package.json" "$source/package-lock.json" "$destination/"
 done
 
+# The optional media installers (OpenMontage, LivePortrait, Deep-Live-Cam) install only the
+# hash-locked dependency sets in Resources/pinned-installs; without them they cannot run.
+for tool in openmontage liveportrait deep-live-cam; do
+    compgen -G "Resources/pinned-installs/$tool/*.txt" >/dev/null || {
+        echo "ERROR: missing dependency locks for $tool" >&2
+        exit 1
+    }
+    mkdir -p "$BUNDLE/Contents/Resources/pinned-installs/$tool"
+    cp Resources/pinned-installs/"$tool"/*.txt "$BUNDLE/Contents/Resources/pinned-installs/$tool/"
+done
+
 # The MCP bridge rides along so the Codex engine can offer the app's tools without a
 # separate install step. install-mcp.sh remains the way to give Claude and ChatGPT a copy.
 MCP_BINARY="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/silicon-mcp"
