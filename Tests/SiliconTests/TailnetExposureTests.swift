@@ -301,7 +301,10 @@ struct TailnetExposureTests {
                 ("POST", "/video/queue", "{}"),
                 ("POST", "/video/queue/control", #"{"action":"pause"}"#),
                 ("GET", "/swarm/peers/another-node/status", nil),
+                ("GET", "/jev", nil),
                 ("GET", "/jev/guardrails/recent", nil),
+                ("GET", "/jev/calibration", nil),
+                ("GET", "/decisions", nil),
                 ("POST", "/recommend", #"{"task":"private work"}"#),
                 ("POST", "/benchmark", nil),
             ]
