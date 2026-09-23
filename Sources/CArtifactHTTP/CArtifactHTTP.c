@@ -309,6 +309,15 @@ SiliconArtifactJob *silicon_artifact_job_create_test(const char *url, int fd,
     job->allow_fixture_loopback = trusted_ca_file != NULL;
     return job;
 }
+#else
+SiliconArtifactJob *silicon_artifact_job_create_test(const char *url, int fd,
+    int64_t maximum_bytes, int64_t timeout_ms, int64_t reserve_bytes,
+    const char *resolve_override, const char *trusted_ca_file,
+    SiliconArtifactConsume consume, void *consume_context) {
+    (void)url; (void)fd; (void)maximum_bytes; (void)timeout_ms; (void)reserve_bytes;
+    (void)resolve_override; (void)trusted_ca_file; (void)consume; (void)consume_context;
+    return NULL;
+}
 #endif
 
 enum SiliconArtifactOutcome silicon_artifact_job_perform(SiliconArtifactJob *job) {

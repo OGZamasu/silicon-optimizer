@@ -38,15 +38,16 @@ void silicon_artifact_job_destroy(SiliconArtifactJob *job);
 // Transfer callbacks use this same raw-address classifier.
 int silicon_artifact_public_ip(const char *address);
 
-#ifdef DEBUG
-// Debug-only DNS fixture hook. A trusted CA file additionally permits exactly 127.0.0.1
-// for local HTTPS tests; NULL retains the production peer-address veto.
+// DNS fixture hook for the tests. A trusted CA file additionally permits exactly 127.0.0.1
+// for local HTTPS tests; NULL retains the production peer-address veto. Declared in every
+// configuration because SwiftPM defines DEBUG for this C target but not for the Swift code
+// importing it; only a DEBUG build of this file implements it, and any other build returns
+// NULL, so a release binary carries no way to override DNS or trust.
 SiliconArtifactJob *silicon_artifact_job_create_test(
     const char *url, int file_descriptor, int64_t maximum_bytes,
     int64_t timeout_milliseconds, int64_t disk_reserve_bytes,
     const char *resolve_override, const char *trusted_ca_file,
     SiliconArtifactConsume consume, void *consume_context
 );
-#endif
 
 #endif
