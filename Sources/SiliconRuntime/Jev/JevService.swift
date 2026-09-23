@@ -704,6 +704,9 @@ public enum JevError: Error, LocalizedError, Equatable {
     /// cancelled — see `ask(_:state:questions:cacheKey:deadline:)` — so this means "not in
     /// time", not "not sent".
     case timedOut(JevFeature, seconds: TimeInterval)
+    /// The request being answered came from a swarm node, which may not spend the owner's
+    /// Jev budget. Nothing was sent. See `PaidLanes`.
+    case notForPeers
 
     public var errorDescription: String? {
         switch self {
@@ -726,6 +729,8 @@ public enum JevError: Error, LocalizedError, Equatable {
                 format: "Jev did not answer %@ within %.1fs, so this one went ahead without it.",
                 feature.displayName, seconds
             )
+        case .notForPeers:
+            "Jev answers for this Mac's owner, not for swarm nodes, so nothing was sent to it."
         }
     }
 }
@@ -918,9 +923,10 @@ public actor JevService {
         )
     }
 
-    /// Whether this feature would answer right now. Four conditions, all cheap: no network,
-    /// and no Keychain prompt.
+    /// Whether this feature would answer right now. Five conditions, all cheap: no network,
+    /// and no Keychain prompt. The first is who is asking — never a swarm node's request.
     public func isAvailable(_ feature: JevFeature) -> Bool {
+        guard PaidLanes.allowed else { return false }
         let settings = settings()
         guard settings.enabled, settings.isOn(feature), hasKey() else { return false }
         return (remainingBudgetUSD(settings) ?? .infinity) > 0
@@ -984,6 +990,9 @@ public actor JevService {
         cacheKey: String? = nil,
         deadline: TimeInterval? = nil
     ) async throws -> ControlAPI.DecideResponse {
+        // Before anything else, cache included: a swarm node's request is not answered from
+        // the owner's paid lane, and not from what that lane answered the owner either.
+        guard PaidLanes.allowed else { throw JevError.notForPeers }
         let settings = settings()
         guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
 

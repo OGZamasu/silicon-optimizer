@@ -213,19 +213,24 @@ Output (JSON):
     console.error(JSON.stringify({ ok: false, error: 'missing_port' }));
     process.exit(1);
   }
-  // Optional server token: appended to the /live.js src so the token-gated
+  // Optional page token: appended to the /live.js src so the page-scoped
   // /live.js handler authorizes the browser fetch. `live.mjs` always passes
-  // it; a manual `--port`-only invocation reads the running helper's token
+  // it; a manual `--port`-only invocation reads the running helper's page token
   // from server.json instead of writing an unauthenticated URL that 401s.
   const tokenIdx = args.indexOf('--token');
   let token = tokenIdx !== -1 ? args[tokenIdx + 1] : undefined;
+  let runningInfo = null;
+  try {
+    runningInfo = JSON.parse(fs.readFileSync(path.join(cwd, '.impeccable', 'live', 'server.json'), 'utf-8'));
+  } catch { /* checked below */ }
   if (!token) {
-    try {
-      const info = JSON.parse(fs.readFileSync(path.join(cwd, '.impeccable', 'live', 'server.json'), 'utf-8'));
-      // A record for a DIFFERENT port is a stale or foreign helper; its token
-      // would 401 just the same, so only adopt a matching one.
-      if (info?.token && Number(info.port) === port) token = info.token;
-    } catch { /* no running helper recorded; keep legacy tokenless behavior */ }
+    if (runningInfo?.pageToken && Number(runningInfo.port) === port) token = runningInfo.pageToken;
+  }
+  // An explicit --token must never let a caller accidentally persist the
+  // controller credential in a framework adapter or HTML script src.
+  if (!runningInfo?.pageToken || Number(runningInfo.port) !== port || token !== runningInfo.pageToken) {
+    console.error(JSON.stringify({ ok: false, error: 'page_token_required' }));
+    process.exit(1);
   }
 
   // Reconcile before writing anything. Artifacts this run is about to own are

@@ -206,6 +206,10 @@ struct VideoView: View {
                             Text("1080p").tag("1080p")
                         }
                     }
+                    if let note = model.videoSizeNote {
+                        Text(note).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
                     if entry.id == "hailuo-h3" {
                         Picker("Sampling", selection: $model.videoSampling) {

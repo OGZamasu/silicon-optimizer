@@ -536,6 +536,14 @@ extension AppModel: ControlHost {
             guard localEndpoint != nil || free != nil else {
                 await JevBootstrap.ready()
                 if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
+                // A swarm node is never offered Jev (see `PaidLanes`), so the owner's key
+                // is not what it is missing.
+                guard PaidLanes.allowed else {
+                    throw ControlHostError.badRequest(
+                        "Nothing free can decide on this Mac right now: no model is loaded "
+                        + "and no local decision lane is ready. A swarm node is not given Jev."
+                    )
+                }
                 throw ControlHostError.badRequest(
                     "Nothing can decide yet: install Laya in Settings → Decisions, load a "
                     + "model, or add a TypeSafe API key and turn on the decide tool."
@@ -1289,9 +1297,7 @@ extension AppModel {
         // A synchronous caller cannot wait indefinitely for a manually paused
         // queue. Reject before accepting anything; the async queue API can append
         // to a paused queue intentionally. Never resume it on the caller's behalf.
-        guard !videoBatchQueue.isPaused else {
-            throw ControlHostError.badRequest("The video queue is paused. Resume it first, or use /video/queue to save clips for later. No clip was added.")
-        }
+        guard !videoBatchQueue.isPaused else { throw ControlAPI.VideoQueuePaused() }
 
         let videoRequest = VideoRequest(
             entryID: entry.id,

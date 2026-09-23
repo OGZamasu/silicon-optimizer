@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLiveDir } from '../lib/impeccable-paths.mjs';
+import { getLivePrivateDir, safeSessionId } from '../lib/impeccable-paths.mjs';
 import { readBuffer as readManualEditsBuffer } from './manual-edits-buffer.mjs';
 
 const APPLY_EVENT_HARD_TIMEOUT_MS = Number(process.env.IMPECCABLE_LIVE_APPLY_EVENT_HARD_TIMEOUT_MS || 150_000);
@@ -322,26 +322,37 @@ export function countManualApplyOps(entriesOrBatch) {
   return count;
 }
 
+export const MAX_MANUAL_APPLY_EVIDENCE_BYTES = 16 * 1024 * 1024;
+
 export function writeManualApplyEvidence(eventId, batch, cwd = process.cwd()) {
   const dir = manualApplyEvidenceDir(cwd);
-  fs.mkdirSync(dir, { recursive: true });
-  const evidencePath = path.join(dir, `${eventId}.json`);
-  fs.writeFileSync(evidencePath, JSON.stringify(batch, null, 2) + '\n', 'utf-8');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const evidencePath = path.join(dir, `${safeSessionId(eventId)}.json`);
+  const payload = JSON.stringify(batch, null, 2) + '\n';
+  if (Buffer.byteLength(payload) > MAX_MANUAL_APPLY_EVIDENCE_BYTES) {
+    throw new Error('manual_apply_evidence_too_large');
+  }
+  fs.writeFileSync(evidencePath, payload, { encoding: 'utf8', mode: 0o600 });
   return evidencePath;
 }
 
 export function manualApplyEvidenceDir(cwd = process.cwd()) {
-  return path.join(getLiveDir(cwd), 'manual-edit-evidence');
+  return path.join(getLivePrivateDir(cwd), 'manual-edit-evidence');
 }
 
 export function normalizeManualApplyEvidencePath(evidencePath, cwd = process.cwd()) {
   if (!evidencePath || typeof evidencePath !== 'string') return null;
   const fullPath = path.isAbsolute(evidencePath) ? evidencePath : path.resolve(cwd, evidencePath);
   const evidenceDir = manualApplyEvidenceDir(cwd);
-  const relative = path.relative(evidenceDir, fullPath);
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
-  if (path.extname(relative) !== '.json') return null;
-  return fullPath;
+  const legacyDir = path.join(cwd, '.impeccable', 'live', 'manual-edit-evidence');
+  for (const dir of [evidenceDir, legacyDir]) {
+    const relative = path.relative(dir, fullPath);
+    if (!/^[A-Za-z0-9_-]{1,128}\.json$/.test(relative)) continue;
+    // Legacy journal events retain their former app-root evidencePath after
+    // migration; map only that exact generated filename to private storage.
+    return path.join(evidenceDir, relative);
+  }
+  return null;
 }
 
 export function removeManualApplyEvidence(evidencePath, cwd = process.cwd()) {
@@ -710,7 +721,7 @@ export function snapshotApplyEventFiles(batch, cwd = process.cwd()) {
 }
 
 export function manualApplyTransactionPath(cwd = process.cwd()) {
-  return path.join(getLiveDir(cwd), 'manual-edit-apply-transaction.json');
+  return path.join(getLivePrivateDir(cwd), 'manual-edit-apply-transaction.json');
 }
 
 export function readManualApplyTransaction(cwd = process.cwd()) {
@@ -732,6 +743,9 @@ export function writeManualApplyTransaction({ cwd = process.cwd(), pageUrl = nul
     createdAt: new Date().toISOString(),
     pageUrl,
     entryIds: (batch?.entries || []).map((entry) => entry.id).filter(Boolean),
+    // Keep the user-reviewed copy-edit proposal immutable for repair retries;
+    // the page may continue staging new drafts after Apply begins.
+    reviewedEntries: batch?.entries || [],
     files: files.map((relativeFile) => {
       const absolute = path.resolve(cwd, relativeFile);
       const exists = fs.existsSync(absolute);
