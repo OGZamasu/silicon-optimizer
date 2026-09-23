@@ -1015,6 +1015,13 @@ public actor ControlServer {
         let segments = request.path.split(separator: "/").map(String.init)
         let host = self.host
         let hub = self.events
+        // A chat that fails says why in the host's words, which are written for the owner
+        // and may quote a folder — the same rule as the buffered routes' refusals.
+        let media = self.media
+        let shown: @Sendable (String) async -> String = { sentence in
+            guard caller?.seesMacPaths == false, sentence.contains("/") else { return sentence }
+            return MacPathRedaction(roots: await media.roots()).scrub(sentence)
+        }
 
         let body: EventSource
         if request.method == "POST", segments == ["chat", "stream"] {
@@ -1023,7 +1030,7 @@ public actor ControlServer {
                 return .refused(.error(400, "Could not read the chat request."))
             }
             body = EventSource { writer in
-                await Self.pumpChat(writer) { try await host.chatStream(chat) }
+                await Self.pumpChat(writer, shown: shown) { try await host.chatStream(chat) }
             }
         } else if request.method == "POST",
                   let id = Self.parameter(segments, matching: ["conversations", "*", "messages"]) {
@@ -1032,7 +1039,7 @@ public actor ControlServer {
                 return .refused(.error(400, "Could not read the message."))
             }
             body = EventSource { writer in
-                await Self.pumpChat(writer) {
+                await Self.pumpChat(writer, shown: shown) {
                     try await host.replyInConversation(id: id, to: message)
                 }
             }
@@ -1104,9 +1111,11 @@ public actor ControlServer {
     }
 
     /// Turns a chat stream into SSE frames. A failure becomes a final `error` event rather
-    /// than a dropped connection, so a phone can show the sentence instead of guessing.
+    /// than a dropped connection, so a phone can show the sentence instead of guessing —
+    /// the sentence as `shown` lets this caller read it.
     private static func pumpChat(
         _ writer: EventStreamWriter,
+        shown: @Sendable (String) async -> String,
         _ open: @Sendable () async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error>
     ) async {
         do {
@@ -1132,10 +1141,10 @@ public actor ControlServer {
             // The client hung up. There is nobody left to tell.
         } catch let error as BuddyHostError {
             await writer.refuse(
-                status: error.status, message: error.localizedDescription
+                status: error.status, message: await shown(error.localizedDescription)
             )
         } catch {
-            await writer.refuse(status: 400, message: error.localizedDescription)
+            await writer.refuse(status: 400, message: await shown(error.localizedDescription))
         }
     }
 

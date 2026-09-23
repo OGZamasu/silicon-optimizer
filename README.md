@@ -367,8 +367,8 @@ clip's `file`, and a queue item's `file` and `outputDirectory` are the last comp
 A path on this Mac names your account and how your disk is laid out, and neither caller can
 open one here anyway — it fetches by `mediaID`. A warning, detail, error or refusal that
 mentions one of the app's output, upload or poster folders names it the same way, and your
-home folder as `~`. This Mac's own control token — the MCP bridge and local scripts, which
-open those files — still gets absolute paths.
+home folder as `~`, and so does a `/chat/stream` refusal. This Mac's own control token — the
+MCP bridge and local scripts, which open those files — still gets absolute paths.
 
 **Scope is decided per id, not per route.** A full-control device may fetch anything it has
 an id for. A chat-only device may fetch the poster frames and is refused the renders

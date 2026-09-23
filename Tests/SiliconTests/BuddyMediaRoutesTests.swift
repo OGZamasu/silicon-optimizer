@@ -945,6 +945,8 @@ actor MediaTestHost: ControlHost {
     /// What `/installed` and `/status` answer, and the status posted when `/events` opens.
     private var installedList: [ControlAPI.InstalledModel] = []
     private var currentStatus: ControlAPI.Status?
+    /// A sentence `/chat/stream` fails with, before its first frame or after one token.
+    private var chatFailure: (sentence: String, afterAToken: Bool)?
 
     init(roots: [String]) { self.roots = roots }
 
@@ -955,6 +957,9 @@ actor MediaTestHost: ControlHost {
     func setInstalled(_ models: [ControlAPI.InstalledModel], status: ControlAPI.Status?) {
         installedList = models
         currentStatus = status
+    }
+    func setChatFailure(_ sentence: String, afterAToken: Bool) {
+        chatFailure = (sentence, afterAToken)
     }
 
     func setQueueFile(_ path: String?) { queueFile = path }
@@ -1096,7 +1101,14 @@ actor MediaTestHost: ControlHost {
     func chatStream(
         _ request: ControlAPI.ChatRequest
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
-        throw BuddyTestError.unexpectedRoute
+        guard let chatFailure else { throw BuddyTestError.unexpectedRoute }
+        guard chatFailure.afterAToken else {
+            throw ControlHostError.badRequest(chatFailure.sentence)
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.token("Hello"))
+            continuation.finish(throwing: ControlHostError.badRequest(chatFailure.sentence))
+        }
     }
     func conversationList() async -> [ControlAPI.ConversationSummary] { [] }
     func createConversation(title: String?) async -> ControlAPI.ConversationSummary {

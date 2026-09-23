@@ -186,3 +186,59 @@ struct MacPathRedactionTests {
         (try? JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body))?.error
     }
 }
+
+/// `/chat/stream` answers a failure with the host's own sentence — as a plain refusal before
+/// the stream opens, or as a final `error` frame after it has — and the swarm can reach it.
+@Suite("Mac paths in chat stream refusals")
+struct ChatStreamRefusalPathTests {
+
+    private static let swarmToken = "test-shared-swarm-secret"
+
+    @Test(arguments: [false, true])
+    func aChatStreamFailureQuotesNoFolderOfThisMacToAnyoneButTheMac(
+        afterAToken: Bool
+    ) async throws {
+        try await BuddyMediaFixture.withServer(swarmToken: Self.swarmToken) { fixture in
+            let home = NSHomeDirectory()
+            let sentence = "The model could not read \(fixture.outputs.path)/prompt.txt "
+                + "or \(home)/Documents/notes.txt."
+            let scrubbed = "The model could not read Movies/prompt.txt or ~/Documents/notes.txt."
+            await fixture.host.setChatFailure(sentence, afterAToken: afterAToken)
+            let phone = try await fixture.pair()
+            let body = #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+
+            for (label, client, token, expected) in [
+                ("swarm on the tailnet", fixture.phone, Self.swarmToken, scrubbed),
+                ("swarm on loopback", fixture.local, Self.swarmToken, scrubbed),
+                ("phone", fixture.phone, phone.token, scrubbed),
+                ("this Mac", fixture.local, fixture.local.token, sentence),
+            ] {
+                let message = try await Self.refusal(
+                    client, token: token, body: body, afterAToken: afterAToken
+                )
+                #expect(message == expected, "\(label)")
+            }
+        }
+    }
+
+    /// Before the first frame the refusal is an HTTP error; after it, an `error` frame.
+    private static func refusal(
+        _ client: TestClient, token: String, body: String, afterAToken: Bool
+    ) async throws -> String? {
+        guard afterAToken else {
+            let (status, data) = try await client.call(
+                "POST", "/chat/stream", token: token, body: body
+            )
+            #expect(status == 400)
+            return (try? JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: data))?.error
+        }
+        let frames = try await client.events(
+            "POST", "/chat/stream", token: token, body: body
+        ) { $0.contains { $0.name == "error" } }
+        #expect(frames.first?.name == "token")
+        let error = try #require(frames.first { $0.name == "error" })
+        return (try? JSONDecoder().decode(
+            ControlAPI.ErrorResponse.self, from: Data(error.data.utf8)
+        ))?.error
+    }
+}
