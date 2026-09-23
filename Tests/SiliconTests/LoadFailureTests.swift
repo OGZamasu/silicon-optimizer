@@ -410,6 +410,70 @@ struct LoadFailureTests {
         #expect(termination.stopRequest == nil)
     }
 
+    /// The last thing a runtime writes before it exits is the line that says why, and it has
+    /// to be in the log by the time anybody knows the process is gone. The exit and those
+    /// last bytes reach the app as two separate events, in either order, so one process at a
+    /// time rarely shows the race; a few dozen at once used to lose the line in about a third
+    /// of them, and `aRuntimeThatExitsIsReportedWithItsStatus` now and then in a full run.
+    @Test func aProcessThatHasEndedHasItsLastLineInItsLog() async throws {
+        let lost = await withTaskGroup(of: String?.self) { group in
+            for n in 0..<32 {
+                group.addTask {
+                    let words = "last words \(n)"
+                    let server = ServerProcess(registry: ChildProcessRegistry())
+                    guard (try? await server.start(
+                        executable: URL(fileURLWithPath: "/bin/sh"),
+                        arguments: ["-c", "echo '\(words)' >&2; exit 3"]
+                    )) != nil else { return "\(n) never started" }
+                    let deadline = ContinuousClock.now + .seconds(10)
+                    while !server.hasEnded, ContinuousClock.now < deadline {
+                        try? await Task.sleep(for: .milliseconds(5))
+                    }
+                    guard server.hasEnded else { return "\(n) never ended" }
+                    let log = await server.log
+                    return log.hasSuffix(words) ? nil : "\(n) read \(log.debugDescription)"
+                }
+            }
+            return await group.reduce(into: [String]()) { lost, outcome in
+                if let outcome { lost.append(outcome) }
+            }
+        }
+        #expect(lost.isEmpty)
+    }
+
+    /// Waiting for the rest of the output is bounded, because the end of the pipe is not the
+    /// end of the process: anything the child started inherits the pipe and holds it open.
+    /// Python's resource tracker does exactly that. The log still says what was written.
+    @Test func aPipeHeldOpenByAGrandchildDoesNotHoldUpTheLog() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("held-pipe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let pidFile = directory.appendingPathComponent("grandchild.pid")
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let server = ServerProcess(registry: ChildProcessRegistry())
+        try await server.start(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "sleep 30 & echo $! > '\(pidFile.path)'; echo 'bye' >&2; exit 3"]
+        )
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !server.hasEnded, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(server.hasEnded)
+
+        let began = ContinuousClock.now
+        let log = await server.log
+        #expect(ContinuousClock.now - began < .seconds(10))
+        #expect(log.hasSuffix("bye"))
+    }
+
     // MARK: - The arbiter
 
     /// A winner that has already finished is still the load that displaced this one. The
