@@ -45,7 +45,7 @@ struct SwarmPairingPieceTests {
     @Test("the tailscale CGNAT range and nothing else")
     func cidrCheck() {
         #expect(SwarmPairing.isTailnetIPv4("100.64.0.1"))
-        #expect(SwarmPairing.isTailnetIPv4("100.64.0.9"))
+        #expect(SwarmPairing.isTailnetIPv4("100.101.1.2"))
         #expect(SwarmPairing.isTailnetIPv4("100.127.255.254"))
         #expect(!SwarmPairing.isTailnetIPv4("100.128.0.1"))
         #expect(!SwarmPairing.isTailnetIPv4("100.63.0.1"))
