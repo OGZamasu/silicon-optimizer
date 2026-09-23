@@ -153,21 +153,25 @@ struct OpenMontageLinkTests {
         #expect(steps.contains { $0.arguments.contains("piper-tts") && $0.optional })
         #expect(!steps.contains { $0.executable.lastPathComponent == "npm" })
         #expect(notes.contains { $0.contains("Remotion") }, "a skipped step is said, not silent")
+        #expect(notes.contains { $0.contains("npm ci") })
+        #expect(!notes.contains { $0.contains("Set up again") })
 
         // With an npm, Remotion is a step — optional, in its own directory.
         env.npm = URL(fileURLWithPath: "/usr/local/bin/npm")
         let (withNpm, quiet) = try OpenMontageLink.plan(in: env)
         let remotion = withNpm.first { $0.executable.lastPathComponent == "npm" }
         #expect(remotion?.optional == true)
+        #expect(remotion?.arguments == ["ci", "--silent", "--no-audit", "--no-fund"])
         #expect(remotion?.workingDirectory.lastPathComponent == "remotion-composer")
         #expect(quiet.isEmpty)
     }
 
-    @Test("an existing checkout is pulled — and a pull that cannot happen offline is not fatal")
+    @Test("an existing checkout is not pulled or cloned during setup")
     func planExisting() throws {
         var env = try makeEnvironment()
         defer { cleanUp(env) }
         env.pythons = [URL(fileURLWithPath: "/usr/bin/python3")]
+        env.npm = URL(fileURLWithPath: "/usr/local/bin/npm")
         let checkout = try makeCheckout(in: env)
         // A venv already there is not made again.
         try FileManager.default.createDirectory(
@@ -176,10 +180,12 @@ struct OpenMontageLinkTests {
             atPath: checkout.appendingPathComponent(".venv/bin/python").path, contents: Data(),
             attributes: [.posixPermissions: 0o755])
 
-        let (steps, _) = try OpenMontageLink.plan(in: env)
-        #expect(steps.first?.arguments.first == "pull")
-        #expect(steps.first?.optional == true)
+        let (steps, notes) = try OpenMontageLink.plan(in: env)
+        #expect(!steps.contains { $0.executable == env.git })
+        #expect(!steps.contains { $0.executable == env.npm }, "npm ci would replace user-managed node_modules")
         #expect(!steps.contains { $0.arguments == ["-m", "venv", ".venv"] })
+        #expect(steps.contains { $0.arguments.contains("requirements.txt") })
+        #expect(notes.contains { $0.contains("Remotion dependencies were left unchanged") })
     }
 
     @Test("no Python at all is an error the button can show, not a crash mid-install")
