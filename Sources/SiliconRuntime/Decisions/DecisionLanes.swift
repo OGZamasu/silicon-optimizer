@@ -14,15 +14,15 @@ import SiliconControl
 public struct LayaLane: DecisionLane {
     public let laneID = DecisionLaneID.laya
     private let runtime: LayaRuntime
-    private let checkpoint: @Sendable () -> LayaCheckpoint
+    private let checkpoint: @Sendable () async -> LayaCheckpoint
     /// Whether the lane should answer at all — the owner's switch, checked here so the
     /// policy above can treat "not installed" and "switched off" identically.
-    private let enabled: @Sendable () -> Bool
+    private let enabled: @Sendable () async -> Bool
 
     public init(
         runtime: LayaRuntime = .shared,
-        checkpoint: @escaping @Sendable () -> LayaCheckpoint = { .default },
-        enabled: @escaping @Sendable () -> Bool = { true }
+        checkpoint: @escaping @Sendable () async -> LayaCheckpoint = { .default },
+        enabled: @escaping @Sendable () async -> Bool = { true }
     ) {
         self.runtime = runtime
         self.checkpoint = checkpoint
@@ -30,7 +30,7 @@ public struct LayaLane: DecisionLane {
     }
 
     public func isReady() async -> Bool {
-        guard enabled() else { return false }
+        guard await enabled() else { return false }
         return await runtime.installation(checkpoint: checkpoint()).isInstalled
     }
 
@@ -38,7 +38,7 @@ public struct LayaLane: DecisionLane {
         _ request: ControlAPI.DecideRequest
     ) async throws -> ControlAPI.DecideResponse {
         try request.validate()
-        let checkpoint = checkpoint()
+        let checkpoint = await checkpoint()
         let started = Date()
         do {
             return try await ask(request, checkpoint: checkpoint, started: started)
@@ -107,12 +107,12 @@ public struct NodeDecisionLane: DecisionLane {
 
     /// Which peer to ask, read fresh: the swarm is polled on a timer and a node that was
     /// ready a minute ago may not be now.
-    private let peer: @Sendable () -> Peer?
+    private let peer: @Sendable () async -> Peer?
     private let session: URLSession?
     public var deadline: TimeInterval
 
     public init(
-        peer: @escaping @Sendable () -> Peer?,
+        peer: @escaping @Sendable () async -> Peer?,
         session: URLSession? = nil,
         deadline: TimeInterval = 4
     ) {
@@ -121,13 +121,13 @@ public struct NodeDecisionLane: DecisionLane {
         self.deadline = deadline
     }
 
-    public func isReady() async -> Bool { peer() != nil }
+    public func isReady() async -> Bool { await peer() != nil }
 
     public func decide(
         _ request: ControlAPI.DecideRequest
     ) async throws -> ControlAPI.DecideResponse {
         try request.validate()
-        guard let peer = peer() else { throw DecisionLaneError.nodeUnreachable }
+        guard let peer = await peer() else { throw DecisionLaneError.nodeUnreachable }
         let client = SystemOneClient(
             baseURL: peer.baseURL,
             // The node authenticates with the swarm credential this Mac already holds for
@@ -183,18 +183,18 @@ public struct NodeDecisionLane: DecisionLane {
 /// model at all — which is what keeps it as the last resort rather than retiring it.
 public struct OneTokenLane: DecisionLane {
     public let laneID = DecisionLaneID.oneToken
-    private let decider: @Sendable () -> LocalDecider?
+    private let decider: @Sendable () async -> LocalDecider?
 
-    public init(decider: @escaping @Sendable () -> LocalDecider?) {
+    public init(decider: @escaping @Sendable () async -> LocalDecider?) {
         self.decider = decider
     }
 
-    public func isReady() async -> Bool { decider() != nil }
+    public func isReady() async -> Bool { await decider() != nil }
 
     public func decide(
         _ request: ControlAPI.DecideRequest
     ) async throws -> ControlAPI.DecideResponse {
-        guard let decider = decider() else { throw DecisionLaneError.noLocalModel }
+        guard let decider = await decider() else { throw DecisionLaneError.noLocalModel }
         return try await decider.decide(request)
     }
 }
