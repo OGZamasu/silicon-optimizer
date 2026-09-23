@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 @testable import SiliconCatalog
 @testable import SiliconControl
@@ -209,6 +210,66 @@ struct LoadLifecycleTests {
         _ = await again.value
     }
 
+    /// A load that failed on its own is over the moment it fails. The app then reads the
+    /// runtime's log for its window — an await — and a load started in that moment used to
+    /// find the failed one still "in progress" and list it as replaced.
+    @Test func aLoadThatFailedIsNotListedAsReplacedByTheNextOne() async throws {
+        let bench = try await Bench()
+        defer { bench.clean() }
+        let broken = bench.installed("Broken 7B", id: "\(Bench.failingModel)@Q4_K_M")
+        let qwen = bench.installed("Qwen3-Coder 30B", id: "qwen3-coder-30b@Q4_K_M")
+
+        // The next load is started from inside the failure: as the alert is raised, which is
+        // after the load has failed and before the app reads the log. `onChange` runs there,
+        // on the main actor, so the load it queues runs before the failed one resumes from
+        // that read.
+        let next = NextLoad()
+        withObservationTracking { _ = bench.model.alert } onChange: {
+            MainActor.assumeIsolated {
+                next.task = Task { await bench.model.loadAsync(qwen) }
+            }
+        }
+        guard case .failed = await bench.model.loadAsync(broken) else {
+            Issue.record("the load was meant to fail on its own"); return
+        }
+        let started = try #require(next.task, "the next load never started")
+        try await bench.waitUntilServing()
+
+        let status = await bench.model.status()
+        #expect(status.interruptedLoads?.contains { $0.modelID == broken.id } != true,
+                "\(String(describing: status.interruptedLoads))")
+        await bench.model.unload()
+        _ = await started.value
+    }
+
+    /// The same model asked for again before its load finished — the Mac's own window
+    /// reloading it with a larger context, say — is that model still being loaded. The load
+    /// a phone asked for is answered with the live status to follow, as a slow load is, not
+    /// with "replaced by another load (itself)"; and nothing is listed as stopped.
+    @Test func theSameModelAskedForAgainIsStillThatModelLoading() async throws {
+        let bench = try await Bench()
+        defer { bench.clean() }
+        let qwen = bench.installed("Qwen3-Coder 30B", id: "qwen3-coder-30b@Q4_K_M")
+        bench.model.installedModels = [qwen]
+
+        let asked = Task { try await bench.model.load(ControlAPI.LoadRequest(modelID: qwen.id)) }
+        let firstRuntime = try await bench.waitUntilServing()
+        let again = Task { await bench.model.loadAsync(qwen) }
+
+        let answer = try await asked.value
+        #expect(answer.loadedModelID == nil)
+        #expect(answer.failure == nil)
+        #expect(answer.interruptedLoads == nil)
+        _ = try await bench.waitUntilServing(after: firstRuntime)
+        let status = await bench.model.status()
+        #expect(status.interruptedLoads == nil)
+        #expect(status.failure == nil)
+        #expect(bench.model.runtimeState.isBusy, "\(bench.model.runtimeState)")
+
+        await bench.model.unload()
+        _ = await again.value
+    }
+
     // MARK: - What `POST /load` answers
 
     /// A load a phone asked for, replaced by one the owner started on the Mac. It used to
@@ -260,6 +321,12 @@ struct LoadLifecycleTests {
     }
 
     // MARK: - Fixture
+
+    /// Where a load started from inside another one's failure is kept.
+    @MainActor
+    private final class NextLoad {
+        var task: Task<LoadOutcome, Never>?
+    }
 
     /// An app model whose loads run on a fake llama-server.
     @MainActor

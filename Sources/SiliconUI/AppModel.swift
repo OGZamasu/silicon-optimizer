@@ -3819,6 +3819,9 @@ public final class AppModel {
                 )
                 return .interrupted(interruption)
             }
+            // Over, and by nobody's hand: it failed. Said before anything below awaits, so a
+            // load started while the log is being read does not count as replacing this one.
+            if loadInProgress === attempt { loadInProgress = nil }
             if Self.showsFailure(for: error) {
                 runtimeState = .failed(message: error.localizedDescription)
                 alert = AlertContent(
@@ -3872,6 +3875,10 @@ public final class AppModel {
             modelID: attempt.model.id, modelName: attempt.model.name, cause: cause, at: Date()
         )
         attempt.interruption = interruption
+        // The same model asked for again — other settings, a second tap — is that model still
+        // being loaded, not a load that ended. An entry would say it was replaced by itself,
+        // and the new load clears its model's entry the moment it starts anyway.
+        guard !interruption.isReload else { return }
         interruptedLoads.removeAll { $0.modelID == interruption.modelID }
         interruptedLoads.insert(interruption, at: 0)
         if interruptedLoads.count > Self.interruptedLoadsKept {

@@ -605,7 +605,9 @@ needs to hear it. `interruptedLoads` on `GET /status` (and in the `status` frame
 lists them the moment they happen, newest first: which model, `cancelled` or `replaced`, and
 for a replacement which model took over. A `POST /load` whose load is stopped before it
 answers gets a 409 saying the same thing in a sentence, where it used to get "The model failed
-to load:" followed by the *other* load's progress line.
+to load:" followed by the *other* load's progress line. The same model asked for again — the
+window reloading it with a larger context — is not an ending: that model is still loading, and
+the request is answered with the live status to follow.
 
 **When a load fails, it says what happened.** One sentence, meant to be shown as it is:
 

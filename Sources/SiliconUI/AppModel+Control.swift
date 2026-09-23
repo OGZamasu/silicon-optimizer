@@ -330,6 +330,11 @@ extension AppModel: ControlHost {
             return await status()
         case .failed(let sentence):
             throw ControlHostError.loadFailed(sentence)
+        case .interrupted(let interruption) where interruption.isReload:
+            // The same model asked for again before this load finished — from the Mac's
+            // window with a larger context, say. What this caller asked for is still being
+            // loaded, so it is answered as a slow load is: with the live status to follow.
+            return await status()
         case .interrupted(let interruption):
             throw ControlHostError.loadInterrupted(interruption.sentence)
         }
