@@ -139,7 +139,7 @@ extension AppModel {
                             + "Rename the joining Mac, then close and reopen this invite")
                     } else {
                         blocked.append("\(joinerName) already has a key on \(peer.name). "
-                            + "Close this invite, revoke that member in Swarm → Members, "
+                            + "Close this invite, revoke that member in Swarm → People, "
                             + "then invite again")
                     }
                 case .failed:
