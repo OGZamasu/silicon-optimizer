@@ -16,6 +16,7 @@ import {
   readFileInside,
   removeFileInside,
 } from '../lib/security-boundaries.mjs';
+import { buildLiveScriptSrc } from './frameworks/script-src.mjs';
 
 export const SVELTE_LIVE_ROOT_COMPONENT = 'src/lib/impeccable/ImpeccableLiveRoot.svelte';
 export const SVELTE_LAYOUT_MARKER_OPEN = '<!-- impeccable-live-svelte-start -->';
@@ -187,8 +188,7 @@ export function ensureSvelteLiveRootComponent(cwd, port, token) {
 }
 
 export function buildSvelteLiveRootComponent(port, token) {
-  const liveUrl = 'http://localhost:' + Number(port) + '/live.js'
-    + (token ? '?token=' + encodeURIComponent(token) : '');
+  const liveUrl = buildLiveScriptSrc(Number(port), token);
   return `<script>
   import { onMount } from 'svelte';
 

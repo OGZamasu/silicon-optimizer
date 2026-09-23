@@ -18,7 +18,6 @@ import path from 'node:path';
 import { isGeneratedFile } from './lib/is-generated.mjs';
 import { getLivePrivateDir, safeSessionId } from './lib/impeccable-paths.mjs';
 import { resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
-import { readBuffer as readManualEditsBuffer, writeBuffer as writeManualEditsBuffer } from './live/manual-edits-buffer.mjs';
 import { NEVER_SOURCE_DIRS, findSourceFile } from './live/source-search.mjs';
 import { withSourceLockSync } from './live/source-lock.mjs';
 import {
@@ -252,7 +251,6 @@ Output (JSON):
       emitResult(operationFailure(err, { file: relFile }));
       return;
     }
-    delete result.acceptedOriginalText;
     // Single-line attention-grabber when cleanup is required. The full
     // five-step checklist lives in reference/live.md (loaded once per
     // session); repeating it per-event would waste tokens.
@@ -263,66 +261,6 @@ Output (JSON):
     // until the trusted controller separately approves their exact batch.
     emitResult({ handled: true, file: relFile, ...result });
   }
-}
-
-/**
- * After a variant accept rewrites one wrapper, drop only buffer ops whose
- * text appeared inside that wrapper's original block. The previous file-wide
- * scrub dropped unrelated staged edits from other components/files whenever
- * their originalText wasn't present in the just-accepted file.
- *
- * Legacy direct-call helper only. Accept no longer invokes this: source-preview
- * generation deliberately ignores page-staged edits until approved Apply.
- */
-function scrubManualEditsAgainstOriginalBlock(originalBlockText, cwd = process.cwd(), pageUrl = null) {
-  const originalBlock = String(originalBlockText || '');
-  if (!originalBlock) return;
-  if (!pageUrl) return;
-  const buffer = readManualEditsBuffer(cwd);
-  if (buffer.entries.length === 0) return;
-  let mutated = false;
-  for (const entry of buffer.entries) {
-    if (entry.pageUrl !== pageUrl) continue;
-    const before = entry.ops.length;
-    entry.ops = entry.ops.filter((op) => {
-      return !manualEditOpAppearsInBlock(op, originalBlock);
-    });
-    if (entry.ops.length !== before) mutated = true;
-  }
-  buffer.entries = buffer.entries.filter((entry) => entry.ops.length > 0);
-  if (mutated) writeManualEditsBuffer(cwd, buffer);
-}
-
-function manualEditOpAppearsInBlock(op, originalBlock) {
-  const candidates = [op?.newText, op?.originalText]
-    .filter((text) => typeof text === 'string' && text.length > 0);
-  return candidates.some((text) => originalBlockHasExactManualText(originalBlock, text));
-}
-
-function originalBlockHasExactManualText(originalBlock, text) {
-  const needle = normalizeManualEditText(text);
-  if (!needle) return false;
-  return manualEditTextSegments(originalBlock).some((segment) => segment === needle);
-}
-
-function manualEditTextSegments(source) {
-  return String(source || '')
-    .replace(/<[^>]*>/g, '\n')
-    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '\n')
-    .replace(/<!--[\s\S]*?-->/g, '\n')
-    .split(/\n+/)
-    .map(normalizeManualEditText)
-    .filter(Boolean);
-}
-
-function normalizeManualEditText(text) {
-  return String(text || '').replace(/\s+/g, ' ').trim();
-}
-
-// Compatibility export for older tests/callers. The unsafe file-wide scrub was
-// removed; callers must pass accepted original-block text for scoped cleanup.
-function scrubManualEditsAgainstFile(_targetFile, cwd = process.cwd(), originalBlockText = '', pageUrl = null) {
-  return scrubManualEditsAgainstOriginalBlock(originalBlockText, cwd, pageUrl);
 }
 
 // ---------------------------------------------------------------------------
@@ -442,10 +380,7 @@ function handleAcceptUnlocked(id, variantNum, lines, targetFile, paramValues) {
   const built = buildAcceptedWrappedSource(id, variantNum, lines, targetFile, paramValues);
   if (built.handled === false) return built;
   fs.writeFileSync(targetFile, built.content, 'utf-8');
-  return {
-    carbonize: built.carbonize,
-    acceptedOriginalText: built.acceptedOriginalText,
-  };
+  return { carbonize: built.carbonize };
 }
 
 function buildAcceptedWrappedSource(id, variantNum, lines, targetFile, paramValues) {
@@ -464,7 +399,6 @@ function buildAcceptedWrappedSource(id, variantNum, lines, targetFile, paramValu
   // Extract the chosen variant's inner content
   const variantContent = extractVariant(lines, block, variantNum);
   if (!variantContent) return { handled: false, error: 'Variant ' + variantNum + ' not found' };
-  const originalContent = extractOriginal(lines, block);
 
   // Extract CSS block if present
   const cssContent = extractCss(lines, block, id);
@@ -496,7 +430,6 @@ function buildAcceptedWrappedSource(id, variantNum, lines, targetFile, paramValu
   return {
     content: newLines.join('\n'),
     carbonize: needsCarbonize,
-    acceptedOriginalText: originalContent.join('\n'),
   };
 }
 
@@ -936,4 +869,4 @@ if (_running?.endsWith('live-accept.mjs') || _running?.endsWith('live-accept.mjs
   acceptCli();
 }
 
-export { findMarkerBlock, extractOriginal, extractVariant, extractCss, deindentContent, detectCommentSyntax, scrubManualEditsAgainstFile, scrubManualEditsAgainstOriginalBlock, applyDeferredSvelteComponentAccepts };
+export { findMarkerBlock, extractOriginal, extractVariant, extractCss, deindentContent, detectCommentSyntax, applyDeferredSvelteComponentAccepts };

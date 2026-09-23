@@ -74,6 +74,7 @@ import {
 import { enterLiveRoot } from './live/roots.mjs';
 import { matchesTemplateExtension, resolveLiveTemplateExtensions } from './lib/template-extensions.mjs';
 import { atomicWriteFileInside, readFileInside, resolvePathInside } from './lib/security-boundaries.mjs';
+import { LIVE_HELPER_HOST } from './lib/live-helper-origin.mjs';
 import {
   applyDefensiveServerTimeouts,
   readBoundedBody,
@@ -132,7 +133,7 @@ const VARIANT_PROGRESS_CHECKPOINT_REASONS = new Set(VARIANT_PROGRESS_CHECKPOINT_
 async function findOpenPort(start = 8400) {
   return new Promise((resolve) => {
     const srv = net.createServer();
-    srv.listen(start, '127.0.0.1', () => {
+    srv.listen(start, LIVE_HELPER_HOST, () => {
       const port = srv.address().port;
       srv.close(() => resolve(port));
     });
@@ -339,7 +340,7 @@ async function resolvePageApproval(approvalId, decision) {
     return true;
   }
   try {
-    const response = await fetch(`http://127.0.0.1:${state.port}/events`, {
+    const response = await fetch(`${liveHelperBase(state.port)}/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': state.token },
       body: JSON.stringify(approval.msg),
@@ -988,7 +989,7 @@ function isPageCorsRequest(req, pathname) {
 
 function createRequestHandler({ detectScript, liveScriptParts }) {
   return (req, res) => {
-    const url = new URL(req.url, `http://localhost:${state.port}`);
+    const url = new URL(req.url, liveHelperBase(state.port));
     // The inspected page owns only a page-scoped capability. It may come from
     // a localhost dev server or a non-loopback alias, but controller responses
     // must never be CORS-readable by either. Same-origin controller fetches
@@ -1028,7 +1029,8 @@ function createRequestHandler({ detectScript, liveScriptParts }) {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ approvals: [...state.pageApprovals.values()]
         .filter((approval) => !approval.dispatching)
-        .map(({ id, msg, createdAt }) => ({ id, msg, createdAt })) }));
+        .map(({ id, msg, createdAt }) => ({ id, msg, createdAt })),
+      capacity: MAX_PENDING_PAGE_APPROVALS }));
       return;
     }
     const approvalMatch = /^\/control\/approvals\/([0-9a-f-]{36})\/(approve|reject)$/.exec(p);
@@ -2147,7 +2149,7 @@ state.sessionDir = fs.mkdtempSync(path.join(annotRoot, 'session-'));
 const { detectScript, liveScriptParts } = loadBrowserScripts();
 httpServer = applyDefensiveServerTimeouts(http.createServer(createRequestHandler({ detectScript, liveScriptParts })));
 
-httpServer.listen(state.port, '127.0.0.1', () => {
+httpServer.listen(state.port, LIVE_HELPER_HOST, () => {
   writeLiveServerInfo(process.cwd(), {
     pid: process.pid,
     port: state.port,
@@ -2156,7 +2158,7 @@ httpServer.listen(state.port, '127.0.0.1', () => {
   });
   console.log(`\nImpeccable live server running on ${liveHelperBase(state.port)}`);
   console.log(`Controller: ${liveControllerUrl(state.port, state.token)}\n`);
-  console.log(`Script: http://localhost:${state.port}/live.js`);
+  console.log(`Script: ${liveHelperBase(state.port)}/live.js`);
   console.log('Inject: managed by live-inject.mjs; Astro source tags use is:inline automatically.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });

@@ -13,6 +13,7 @@
  * extension or a project shape.
  */
 
+import { liveHelperBase } from '../../lib/live-helper-origin.mjs';
 import { buildLiveScriptSrc } from './script-src.mjs';
 
 export const MARKER_OPEN_TEXT = 'impeccable-live-start';
@@ -122,9 +123,9 @@ export function removeTag(content, _syntax) {
 //
 // When the user's HTML carries `<meta http-equiv="Content-Security-Policy">`,
 // the cross-origin load of /live.js (and the SSE/POST connection back to
-// localhost:PORT) is blocked unless the CSP explicitly allows that origin.
+// 127.0.0.1:PORT) is blocked unless the CSP explicitly allows that origin.
 //
-// On insert: append `http://localhost:PORT` to `script-src` and `connect-src`,
+// On insert: append `http://127.0.0.1:PORT` to `script-src` and `connect-src`,
 // and stash the original `content` value in a `data-impeccable-csp-original`
 // attribute (base64) so revert is exact.
 //
@@ -174,7 +175,7 @@ function appendOriginToDirective(csp, directive, origin) {
 export function patchCspMeta(content, port) {
   const tags = findCspMetaTags(content);
   if (tags.length === 0) return content;
-  const origin = `http://localhost:${port}`;
+  const origin = liveHelperBase(port);
 
   // Walk last-to-first so prior splices don't invalidate later indices.
   let result = content;

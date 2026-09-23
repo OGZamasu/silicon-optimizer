@@ -4,6 +4,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { resolveProjectRoot } from '../context.mjs';
 import { designSidecarCandidatesFor } from './staleness.mjs';
+import { liveHelperBase } from './live-helper-origin.mjs';
+
+export { liveHelperBase };
 export { IMPECCABLE_COMMAND_PREFIX } from './provider.mjs';
 
 export const IMPECCABLE_DIR = '.impeccable';
@@ -54,15 +57,6 @@ export function resolveLiveConfigPath({ cwd = process.cwd(), scriptsDir, env = p
 
 export function getLiveServerPath(cwd = process.cwd(), options = {}) {
   return path.join(getLiveDir(cwd, options), 'server.json');
-}
-
-/**
- * Base URL for requests that carry the controller credential. The helper
- * listens on 127.0.0.1 only, and `localhost` may resolve to ::1 first, where
- * any local process can listen on the same port number and would receive it.
- */
-export function liveHelperBase(port) {
-  return `http://127.0.0.1:${Number(port)}`;
 }
 
 export function liveControllerUrl(port, token) {

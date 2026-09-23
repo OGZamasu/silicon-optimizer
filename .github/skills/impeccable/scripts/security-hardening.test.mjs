@@ -45,9 +45,19 @@ import {
   quarantineLegacySvelteComponentSessions,
   shouldUseSvelteComponentInjection,
 } from './live/svelte-component.mjs';
-import { writeManualApplyEvidence, writeManualApplyTransaction } from './live/manual-apply.mjs';
+import {
+  rollbackApplySnapshot,
+  rollbackManualApplyTransaction,
+  snapshotApplyEventFiles,
+  writeManualApplyEvidence,
+  writeManualApplyTransaction,
+} from './live/manual-apply.mjs';
+import { commitManualEdits } from './live-commit-manual-edits.mjs';
 import { pageSafeAgentReply, pageSafeManualEditActivity } from './live/page-safe-activity.mjs';
-import { renderControlUi } from './live/control-ui.mjs';
+import { describePageProposal, renderControlUi } from './live/control-ui.mjs';
+import { bakeParamValues, cssParamLiteral, parseStylesheet } from './live/accept-css.mjs';
+import { buildLiveScriptSrc } from './live/frameworks/script-src.mjs';
+import { buildTagBlock, patchCspMeta } from './live/frameworks/tag-strategy.mjs';
 import { createPendingDispatchAuth } from './live/pending-dispatch-auth.mjs';
 import {
   assembleLiveBrowserScript,
@@ -57,7 +67,7 @@ import {
 } from './live/browser-script-parts.mjs';
 import { healInjectJournal } from './live/frameworks/journal.mjs';
 import { applyNuxtLiveAdapter } from './live/frameworks/nuxt.mjs';
-import { applySvelteKitLiveAdapter } from './live/sveltekit-adapter.mjs';
+import { applySvelteKitLiveAdapter, buildSvelteLiveRootComponent } from './live/sveltekit-adapter.mjs';
 import { applyTanStackLiveAdapter } from './live/tanstack-adapter.mjs';
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
@@ -147,6 +157,23 @@ function freePort() {
       server.close((error) => error ? reject(error) : resolve(port));
     });
   });
+}
+
+// Holds `port` on [::1], where `localhost` may resolve first, and logs every
+// request it receives. Resolves false when IPv6 loopback is unavailable.
+async function squatIpv6Loopback(t, port, log) {
+  const squatter = spawn(process.execPath, ['-e', [
+    "const fs = require('node:fs');",
+    "const server = require('node:http').createServer((req, res) => {",
+    "  fs.appendFileSync(process.argv[2], req.method + ' ' + req.url + ' ' + (req.headers['x-impeccable-token'] || '') + '\\n');",
+    "  res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');",
+    "});",
+    "server.on('error', () => { console.log('unavailable'); process.exit(0); });",
+    "server.listen(Number(process.argv[1]), '::1', () => console.log('ready'));",
+  ].join('\n'), String(port), log], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => squatter.kill());
+  const listening = await new Promise((resolve) => squatter.stdout.once('data', (data) => resolve(String(data).trim())));
+  return listening === 'ready';
 }
 
 test('canonical boundary rejects traversal and symlink reads/writes', (t) => {
@@ -441,6 +468,105 @@ test('trusted controller keeps fragment credential in memory when tab storage th
   }));
   assert.deepEqual(replacements, ['/control']);
   assert.equal(location.hash, '');
+});
+
+// Just enough DOM for the controller script: element trees with text, class,
+// listeners and the child operations the card sync uses.
+function fakeControllerDocument() {
+  class FakeElement {
+    constructor(tag) {
+      this.tagName = tag.toUpperCase();
+      this.children = [];
+      this.parentNode = null;
+      this.textContent = '';
+      this.className = '';
+      this.listeners = {};
+      this.style = {};
+      this.disabled = false;
+    }
+    append(...nodes) { for (const node of nodes) { node.parentNode = this; this.children.push(node); } }
+    replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+    replaceWith(node) { const list = this.parentNode.children; list[list.indexOf(this)] = node; node.parentNode = this.parentNode; }
+    remove() { const list = this.parentNode.children; list.splice(list.indexOf(this), 1); }
+    insertBefore(node, ref) {
+      const index = this.children.indexOf(ref);
+      node.parentNode = this;
+      this.children.splice(index < 0 ? this.children.length : index, 0, node);
+    }
+    addEventListener(type, listener) { this.listeners[type] = listener; }
+    get firstElementChild() { return this.children[0] || null; }
+    find(predicate) {
+      if (predicate(this)) return this;
+      for (const child of this.children) { const hit = child.find(predicate); if (hit) return hit; }
+      return null;
+    }
+  }
+  const byId = new Map();
+  const document = {
+    createElement: (tag) => new FakeElement(tag),
+    getElementById: (id) => { if (!byId.has(id)) byId.set(id, new FakeElement('div')); return byId.get(id); },
+  };
+  return { byId, document };
+}
+
+function allText(node) {
+  return [node.textContent, ...node.children.map(allText)].filter(Boolean).join('\n');
+}
+
+test('the controller card says what approving does and can clear a full approval queue', async () => {
+  const script = renderControlUi('nonce').match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script);
+  const approvals = [
+    { id: '11111111-1111-4111-8111-111111111111', createdAt: 1,
+      msg: { type: 'discard', id: 'aabbccdd', orphaned: true } },
+    { id: '22222222-2222-4222-8222-222222222222', createdAt: 2,
+      msg: { type: 'accept', id: 'aabbccdd', variantId: '2', paramValues: { space: 3 }, pageUrl: '/pricing' } },
+  ];
+  const posts = [];
+  const respond = (body) => ({ ok: true, status: 200, json: async () => body });
+  const { byId, document } = fakeControllerDocument();
+  vm.runInNewContext(script, {
+    window: { opener: {}, confirm: () => true },
+    location: { hash: '#token=controller-secret', pathname: '/control', search: '' },
+    URLSearchParams,
+    sessionStorage: { setItem() {}, getItem() { return null; } },
+    history: { replaceState() {} },
+    document,
+    fetch: async (url, options = {}) => {
+      if (options.method === 'POST') { posts.push(url); return respond({ ok: true }); }
+      if (url === '/control/approvals') return respond({ approvals, capacity: 2 });
+      if (url.startsWith('/manual-edit-stash')) return respond({ entries: [], pageDigests: {}, commitInProgress: false, repair: null });
+      if (url.startsWith('/status')) return respond({ agentPolling: true, activeSessions: [] });
+      throw new Error('unexpected request ' + url);
+    },
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+
+  const cards = byId.get('approvals').children;
+  assert.equal(cards.length, 2);
+  const [discard, accept] = cards.map(allText);
+  assert.match(discard, /^Discard orphaned session\nMarks the session discarded without asking the agent to touch source\./);
+  assert.match(discard, /already gone from source/);
+  assert.match(accept, /^Accept variant 2 · \/pricing\nWrites this variant into source/);
+  assert.match(accept, /Parameters\nspace = 3/);
+  // The raw proposal is still there, folded away below the summary.
+  assert.match(allText(cards[1].find((node) => node.tagName === 'DETAILS')), /"paramValues"/);
+
+  const bar = byId.get('approvals-bar');
+  assert.match(allText(bar), /All 2 approval slots are full/);
+  const rejectAll = bar.find((node) => node.tagName === 'BUTTON');
+  assert.equal(rejectAll.textContent, 'Reject all 2 waiting actions');
+  await rejectAll.listeners.click();
+  assert.deepEqual(posts, approvals.map((item) => `/control/approvals/${item.id}/reject`));
+
+  // Every page action type gets a plain-language effect; page text stays clipped data.
+  for (const type of ['generate', 'accept', 'discard', 'steer', 'variant_mount_failed', 'prefetch', 'exit']) {
+    assert.doesNotMatch(describePageProposal({ type }).effect, /Unrecognized/, type);
+  }
+  const steer = describePageProposal({ type: 'steer', id: 'aabbccdd', message: 'x'.repeat(5000) });
+  assert.ok(steer.rows.find(([label]) => label === 'Message')[1].length <= 1001);
 });
 
 test('no-HMR route reload is once per published session and fails safe without tab storage', () => {
@@ -772,6 +898,8 @@ test('page actions wait for trusted controller approval and page telemetry canno
   }
   assert.ok(approval, 'the page action was queued for trusted review');
   assert.equal(approval.id, approvalId);
+  // The controller learns how many slots the page can fill, so it can say when they are full.
+  assert.equal(JSON.parse((await request({ port, pathname: '/control/approvals', headers: controllerHeaders })).body).capacity, 8);
   assert.equal((await request({
     port, pathname: `/page-approval/${approvalId}?token=${info.pageToken}`,
   })).status, 202);
@@ -1168,6 +1296,26 @@ test('page param values stay inert inside the accepted source comment', (t) => {
   assert.deepEqual(JSON.parse(line.match(/impeccable-param-values bbccddee: (.*) -->$/)[1]), paramValues);
 });
 
+test('page param values bake into accepted Svelte CSS only as inert values', () => {
+  const css = ':global(.card) { padding: calc(var(--p-space, 1) * 1rem); opacity: var(--p-fade, 0.5); }';
+  const params = [{ id: 'space', kind: 'range', default: 1 }, { id: 'fade', kind: 'range', default: 0.5 }];
+  const hostile = '1; } </style><script>alert(1)</script><style> body { display: none';
+  const baked = bakeParamValues(css, params, { space: hostile, fade: 0.25 });
+  assert.match(baked, /opacity: 0\.25;/);
+  assert.doesNotMatch(baked, /[<>]|body \{|\/\*/);
+  const rules = parseStylesheet(baked).filter((node) => node.type === 'rule');
+  assert.equal(rules.length, 1);
+  assert.equal(rules[0].prelude.trim(), ':global(.card)');
+  assert.equal(baked.match(/[{}]/g).length, 2, 'only the rule\'s own braces remain');
+  // Undeclared keys bake as ranges and get the same treatment.
+  const undeclared = bakeParamValues(':global(.x) { width: var(--p-w); }', [], { w: '1px } :global(body) { color: red' });
+  assert.equal(parseStylesheet(undeclared).filter((node) => node.type === 'rule').length, 1);
+  // Slider values and declared defaults still bake as themselves.
+  for (const value of [0.5, 3, '12px', '-1.5e2', '75%', '#ff0', 'auto']) assert.equal(cssParamLiteral(value), String(value));
+  assert.equal(cssParamLiteral('a"b\\c\n'), '"a\\22 b\\5c c\\a "');
+  assert.match(bakeParamValues(css, params, {}), /padding: calc\(1 \* 1rem\); opacity: 0\.5;/);
+});
+
 test('an approved accept stays an accept whatever page URL it carries', (t) => {
   const root = tempDir(t);
   writeAcceptFixture(root);
@@ -1178,6 +1326,25 @@ test('an approved accept stays an accept whatever page URL it carries', (t) => {
   const source = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   assert.match(source, /<h1>V1<\/h1>/);
   assert.doesNotMatch(source, /Original/);
+});
+
+test('accept leaves page-staged copy edits to the trusted Apply', (t) => {
+  const root = tempDir(t);
+  writeAcceptFixture(root);
+  stageManualEditEntry(root, {
+    id: 'ccddeeff', pageUrl: '/', element: {},
+    ops: [{ ref: 'title', tag: 'h1', originalText: 'Original', newText: 'Edited' }],
+  });
+  const bufferPath = path.join(getLivePrivateDirPath(root), 'pending-manual-edits.json');
+  const before = fs.readFileSync(bufferPath, 'utf8');
+  const accepted = spawnSync(process.execPath, [liveAccept, '--id', 'bbccddee', '--variant', '1'], {
+    cwd: root, encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
+  assert.equal(fs.readFileSync(bufferPath, 'utf8'), before);
+  // The removed scrub helpers were the only code in accept that could rewrite
+  // the staged-edit buffer; keep accept from reaching it again.
+  assert.doesNotMatch(fs.readFileSync(liveAccept, 'utf8'), /manual-edits-buffer|scrubManualEdits|acceptedOriginalText/);
 });
 
 test('root selection proves a helper is live without the controller credential on a command line', async (t) => {
@@ -1261,18 +1428,7 @@ test('credential-bearing CLI requests reach the helper, never a process squattin
   const root = tempDir(t);
   const port = await freePort();
   const log = path.join(root, 'squatter-requests.log');
-  const squatter = spawn(process.execPath, ['-e', [
-    "const fs = require('node:fs');",
-    "const server = require('node:http').createServer((req, res) => {",
-    "  fs.appendFileSync(process.argv[2], req.method + ' ' + req.url + ' ' + (req.headers['x-impeccable-token'] || '') + '\\n');",
-    "  res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{}');",
-    "});",
-    "server.on('error', () => { console.log('unavailable'); process.exit(0); });",
-    "server.listen(Number(process.argv[1]), '::1', () => console.log('ready'));",
-  ].join('\n'), String(port), log], { stdio: ['ignore', 'pipe', 'inherit'] });
-  t.after(() => squatter.kill());
-  const listening = await new Promise((resolve) => squatter.stdout.once('data', (data) => resolve(String(data).trim())));
-  if (listening !== 'ready') { t.skip('IPv6 loopback is unavailable'); return; }
+  if (!await squatIpv6Loopback(t, port, log)) { t.skip('IPv6 loopback is unavailable'); return; }
   const started = spawnSync(process.execPath, [liveServer, '--background', `--port=${port}`], {
     cwd: root, encoding: 'utf8', timeout: 15_000,
   });
@@ -1297,6 +1453,53 @@ test('credential-bearing CLI requests reach the helper, never a process squattin
   assert.match(await (await fetch(controllerUrl)).text(), /Impeccable Live Controller/);
   const stopped = run('live-server.mjs', ['stop', '--keep-inject']);
   assert.match(stopped.stdout, /Stopped live server/);
+  assert.equal(fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '', '', 'the squatter received no request');
+});
+
+test('the inspected page loads and calls the helper at 127.0.0.1, never a process squatting its port on ::1', async (t) => {
+  const root = tempDir(t);
+  const port = await freePort();
+  const log = path.join(root, 'squatter-requests.log');
+  if (!await squatIpv6Loopback(t, port, log)) { t.skip('IPv6 loopback is unavailable'); return; }
+  const started = spawnSync(process.execPath, [liveServer, '--background', `--port=${port}`], {
+    cwd: root, encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(started.status, 0, started.stderr || started.stdout);
+  const info = JSON.parse(started.stdout.trim().split('\n').filter(Boolean).at(-1));
+  t.after(() => { try { process.kill(info.pid); } catch {} });
+  const helper = `http://127.0.0.1:${port}`;
+  const devPage = { Origin: 'http://localhost:5173' };
+
+  // Every way a page learns where /live.js is: the shared src (Nuxt, TanStack),
+  // the generic tag block, and the SvelteKit root component.
+  const sources = [
+    buildLiveScriptSrc(port, info.pageToken),
+    buildTagBlock('html', port, info.pageToken).match(/src="([^"]+)"/)[1],
+    buildSvelteLiveRootComponent(port, info.pageToken).match(/const LIVE_URL = '([^']+)'/)[1],
+  ];
+  let bundle = '';
+  for (const src of sources) {
+    assert.equal(new URL(src).origin, helper, src);
+    const res = await fetch(src, { headers: devPage });
+    assert.equal(res.status, 200, src);
+    // The dev page's origin is unchanged, so its CORS allowance still applies.
+    assert.equal(res.headers.get('access-control-allow-origin'), devPage.Origin);
+    bundle = await res.text();
+  }
+  // The script builds every helper URL from the origin it was served with.
+  const bootstrap = JSON.parse(bundle.match(/const __IMPECCABLE_BOOTSTRAP__ = Object\.freeze\((.*)\);\n/)[1]);
+  assert.equal(bootstrap.helperOrigin, helper);
+  assert.doesNotMatch(bundle, /['"]https?:\/\/localhost:['"]\s*\+/);
+  assert.ok((bundle.match(/HELPER_ORIGIN \+ '\//g) || []).length >= 10);
+  const status = await fetch(`${bootstrap.helperOrigin}/page-status?token=${encodeURIComponent(info.pageToken)}`, { headers: devPage });
+  assert.equal(status.status, 200);
+  assert.equal(status.headers.get('access-control-allow-origin'), devPage.Origin);
+
+  // A <meta> CSP is opened for that same origin.
+  const csp = patchCspMeta(`<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self'">`, port);
+  assert.ok(csp.includes(`script-src 'self' ${helper};`), csp);
+  assert.ok(csp.includes(`connect-src 'self' ${helper}`), csp);
+  assert.doesNotMatch(csp, /localhost/);
   assert.equal(fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '', '', 'the squatter received no request');
 });
 
@@ -1618,6 +1821,74 @@ test('copy-edit Apply rejects stale review and accepts the currently displayed b
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal(finished, true, 'copy-edit worker finished before test cleanup');
+});
+
+test('copy-edit rollback never writes or deletes through a symlink', async (t) => {
+  const root = tempDir(t);
+  const outside = tempDir(t);
+  const victim = path.join(outside, 'victim.html');
+  fs.writeFileSync(victim, 'OUTSIDE');
+  const index = path.join(root, 'index.html');
+  const resetIndex = () => { fs.rmSync(index, { force: true }); fs.writeFileSync(index, '<main>old</main>'); };
+  const plantLink = () => { fs.rmSync(index, { force: true }); fs.symlinkSync(victim, index); };
+  const batchFor = (file) => ({ entries: [{ id: 'aabbccdd', ops: [{ ref: 'headline', sourceHint: { file, line: 1 } }] }] });
+  const batch = batchFor('index.html');
+  const refused = (result) => {
+    assert.deepEqual(result.rolledBackFiles, []);
+    assert.match(result.rollbackFailures[0]?.message || '', /symbolic links|contains a link/);
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'OUTSIDE');
+  };
+
+  // A timed-out or cancelled chat Apply restores its dispatch snapshot.
+  resetIndex();
+  const snapshot = snapshotApplyEventFiles(batch, root);
+  assert.equal(snapshot.get('index.html')?.content, '<main>old</main>');
+  plantLink();
+  refused(rollbackApplySnapshot(batch, snapshot, [], 'test', root));
+
+  // A linked directory is never snapshotted, and never used to restore or delete.
+  fs.symlinkSync(outside, path.join(root, 'shared'));
+  const linked = batchFor('shared/victim.html');
+  assert.equal(snapshotApplyEventFiles(linked, root).has('shared/victim.html'), false);
+  for (const before of [{ exists: true, content: 'ROLLED BACK' }, { exists: false, content: '' }]) {
+    refused(rollbackApplySnapshot(linked, new Map([['shared/victim.html', before]]), [], 'test', root));
+  }
+
+  // The trusted controller's Rollback restores the Apply transaction.
+  resetIndex();
+  stageManualEditEntry(root, {
+    id: 'aabbccdd', pageUrl: '/page', element: {},
+    ops: [{ ref: 'headline', tag: 'span', originalText: 'old', newText: 'new' }],
+  });
+  writeManualApplyTransaction({ cwd: root, pageUrl: '/page', batch });
+  plantLink();
+  refused(rollbackManualApplyTransaction({ cwd: root, pageUrl: '/page' }));
+
+  // A failed copy-edit run rolls back what the runner changed.
+  resetIndex();
+  refused(await commitManualEdits({
+    cwd: root, pageUrl: '/page', provider: 'chat', batch,
+    applyBatchToSource: async () => {
+      plantLink();
+      return { status: 'error', appliedEntryIds: [], failed: [{ entryId: 'aabbccdd', reason: 'runner_failed' }], files: ['index.html'], notes: [] };
+    },
+  }));
+
+  // Ordinary files still roll back: modes are kept, and a deleted file comes
+  // back with its directory.
+  resetIndex();
+  fs.chmodSync(index, 0o640);
+  fs.mkdirSync(path.join(root, 'pages'));
+  fs.writeFileSync(path.join(root, 'pages', 'about.html'), '<p>about</p>');
+  const both = { entries: [...batch.entries, ...batchFor('pages/about.html').entries] };
+  const plain = snapshotApplyEventFiles(both, root);
+  fs.writeFileSync(index, '<main>new</main>');
+  fs.rmSync(path.join(root, 'pages'), { recursive: true });
+  const restored = rollbackApplySnapshot(both, plain, [], 'test', root);
+  assert.deepEqual(restored.rolledBackFiles.sort(), ['index.html', path.join('pages', 'about.html')]);
+  assert.equal(fs.readFileSync(index, 'utf8'), '<main>old</main>');
+  assert.equal(fs.statSync(index).mode & 0o777, 0o640);
+  assert.equal(fs.readFileSync(path.join(root, 'pages', 'about.html'), 'utf8'), '<p>about</p>');
 });
 
 test('detector and live file resolution enforce budgets and skip links', (t) => {
