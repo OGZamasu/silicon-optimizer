@@ -146,7 +146,7 @@ struct PublicHTTPSArtifactTransferTests {
         defer { listener.stop() }
         let output = server.directory.appendingPathComponent("out")
         let destination = output.appendingPathComponent("audio.mp3")
-        let target = "https://media.example.net:\(listener.port)/audio.mp3"
+        let target = "https://\(listener.host):\(listener.port)/audio.mp3"
         let escaped = try #require(
             target.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
         )
@@ -166,7 +166,7 @@ struct PublicHTTPSArtifactTransferTests {
             Issue.record("Expected the resolved-address veto, got \(error)")
         }
         #expect(counter.value == 2, "The first hop ran; the second was attempted and refused")
-        try await Task.sleep(for: .milliseconds(100))
+        // The transfer has returned, so a connection it made would already be counted.
         #expect(listener.accepted == 0)
         #expect(!FileManager.default.fileExists(atPath: destination.path))
         #expect(try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty)
@@ -178,7 +178,7 @@ struct PublicHTTPSArtifactTransferTests {
         let handle = try FileHandle(forWritingTo: scratch)
         defer { try? handle.close() }
         let control = try #require(target.withCString { address in
-            "media.example.net:\(listener.port):127.0.0.1".withCString { override in
+            "\(listener.host):\(listener.port):127.0.0.1".withCString { override in
                 server.certificate.path.withCString { trusted in
                     silicon_artifact_job_create_test(
                         address, handle.fileDescriptor, 256, 2_000, 0, override, trusted, nil, nil
@@ -188,8 +188,8 @@ struct PublicHTTPSArtifactTransferTests {
         })
         defer { silicon_artifact_job_destroy(control) }
         _ = silicon_artifact_job_perform(control)
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(listener.accepted >= 1)
+        #expect(listener.waitForConnections(1), "the listener is reachable at this address")
+        #expect(listener.accepted == 1)
     }
 
     @Test func cancellingMidBodyRemovesThePartialAndPublishesNothing() async throws {
