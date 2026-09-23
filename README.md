@@ -395,6 +395,13 @@ runs both on arrival and on a queue poll, at most hourly, so a device that uploa
 then only ever polls does not leave a picture behind for good. The answer says `expiresAt`,
 so an app can say "available until" rather than discover the 404 a week later.
 
+Each sender has an **allowance** of uploads waiting at once: 200 files or 1 GiB per paired
+device, and 32 files or 128 MiB for the swarm secret — every node holding it shares the one.
+Past that an upload is a `429` saying so, with `Retry-After` set to when the oldest expires,
+and nothing is written; an upload past its week stops counting before the sweep reaches it.
+This Mac's own control token has no allowance. The per-request ceiling stops one upload
+from filling the disk; this stops a thousand small ones, a week at a time.
+
 `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
 `POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on
 this side before the render sees the request. **Paired devices and swarm peers use these

@@ -2174,6 +2174,26 @@ public actor ControlServer {
     public static let uploadNotSaved =
         "This Mac could not save that upload. Check the Mac has free space, then try again."
 
+    /// What a sender that already has its whole allowance waiting here is told. A 429
+    /// rather than a 413: this upload is not too big, there are too many before it — and
+    /// `Retry-After` says when the oldest of them expires.
+    public static func uploadAllowanceSpent(_ allowance: BuddyUploads.Allowance) -> String {
+        "This Mac is already keeping as many uploads from this sender as it will hold at "
+            + "once (\(allowance.files) files or \(allowance.bytes / 1_048_576) MiB). Start "
+            + "the render from an uploadID or mediaID you already have, or send this again "
+            + "once older uploads expire — each is kept for seven days."
+    }
+
+    /// How much this caller may have waiting here. The Mac's own token has no allowance:
+    /// its uploads are the owner's own, onto the owner's own disk.
+    private static func uploadAllowance(for caller: Caller) -> BuddyUploads.Allowance? {
+        switch caller {
+        case .control: nil
+        case .swarm: .swarm
+        case .device: .device
+        }
+    }
+
     /// Which folder a caller's uploads go in.
     ///
     /// A device's own id, so revoking a phone and deleting what it sent are one gesture.
@@ -2201,6 +2221,20 @@ public actor ControlServer {
         }
         guard let kind = MediaSniffer.kind(of: payload) else {
             return .error(415, Self.unreadableUpload)
+        }
+        // Checked and written with no suspension between them, so two uploads racing on
+        // this actor cannot both see the last free slot.
+        if let allowance = Self.uploadAllowance(for: caller) {
+            let held = BuddyUploads.usage(ofBucket: Self.bucket(for: caller), at: uploadsRoot)
+            if held.files + 1 > allowance.files || held.bytes + payload.count > allowance.bytes {
+                var refusal = HTTPResponse.error(429, Self.uploadAllowanceSpent(allowance))
+                if let oldest = held.oldest {
+                    let free = oldest.addingTimeInterval(BuddyUploads.lifetime)
+                        .timeIntervalSinceNow
+                    refusal.extraHeaders["Retry-After"] = "\(max(1, Int(free.rounded(.up))))"
+                }
+                return refusal
+            }
         }
         let uploadID = UUID().uuidString
         let destination: URL

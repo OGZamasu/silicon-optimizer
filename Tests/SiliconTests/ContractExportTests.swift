@@ -216,6 +216,10 @@ struct ContractExportTests {
         // nothing about this Mac's disk.
         #expect(errors("POST", "/uploads")[500] == ControlServer.uploadNotSaved)
         #expect(!ControlServer.uploadNotSaved.contains("/"))
+        // A device has an allowance of uploads waiting at once, and is told it in numbers.
+        #expect(errors("POST", "/uploads")[429]
+            == ControlServer.uploadAllowanceSpent(BuddyUploads.Allowance.device))
+        #expect(errors("POST", "/uploads")[429]?.contains("\(BuddyUploads.Allowance.device.files)") == true)
 
         // A device is never handed a path to send back. Every route that takes a subject
         // image advertises both ids, and the fixture shows them.
@@ -1158,7 +1162,11 @@ struct ContractExportTests {
             "request from a paired phone is refused, because a device that could name a file",
             "could name any file. Full scope only — uploading spends this Mac's disk, and",
             "the 24 MiB ceiling is granted to an identified full-scope device rather than to",
-            "the path, so an unknown bearer gets the ordinary 4 MiB.",
+            "the path, so an unknown bearer gets the ordinary 4 MiB. Each device may have at",
+            "most \(BuddyUploads.Allowance.device.files) uploads or \(BuddyUploads.Allowance.device.bytes / 1_048_576) MiB",
+            "waiting at once; past that an upload is a 429 with `Retry-After` set to when its",
+            "oldest expires, and nothing is written. Reuse an `uploadID` or `mediaID` rather",
+            "than sending the same picture again.",
             "",
             "`GET /swarm` says what the Mac's last poll saw, which is why every field beyond",
             "name, address and reachability is optional there. `GET /swarm/peers/{name}/status`",
@@ -2315,6 +2323,7 @@ struct ContractExportTests {
                 413: "That request body is larger than this device may send "
                     + "(\(BuddyUploads.maximumBytes) bytes).",
                 415: ControlServer.unreadableUpload,
+                429: ControlServer.uploadAllowanceSpent(.device),
                 500: ControlServer.uploadNotSaved,
             ]
         ),
