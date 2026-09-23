@@ -447,11 +447,17 @@ struct AgentPackageInstallerTests {
             }
         }
         #expect(FileManager.default.fileExists(atPath: marker.path), "npm ci never started")
+        // Cancelling has to stop npm, not wait it out: the fake one sleeps for thirty seconds,
+        // so an install that only noticed when npm exited by itself would still end in
+        // `CancellationError` and a clean folder. The bound is on the kill path — a signal,
+        // a poll at most a tenth of a second later, three seconds' grace — with room to spare.
+        let cancelled = ContinuousClock.now
         task.cancel()
         do {
             _ = try await task.value
             Issue.record("cancelled npm install still succeeded")
         } catch is CancellationError {
+            #expect(ContinuousClock.now - cancelled < .seconds(10), "npm was not stopped")
             let entries = try FileManager.default.contentsOfDirectory(
                 atPath: fixture.destinationRoot.path
             )
