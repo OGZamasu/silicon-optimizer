@@ -59,6 +59,11 @@ static bool public_ipv4(const unsigned char *b) {
 }
 
 static bool public_ipv6(const unsigned char *b) {
+    // NAT64's well-known prefix, 64:ff9b::/96, is what DNS64 synthesizes on an IPv6-only
+    // network for a host that has only IPv4. The translator forwards to the embedded
+    // address, so that address is the destination the policy has to judge.
+    static const unsigned char nat64[12] = { 0x00, 0x64, 0xff, 0x9b };
+    if (!memcmp(b, nat64, sizeof(nat64))) return public_ipv4(b + 12);
     // Global unicast only; reject transition ranges that can embed a private IPv4 address.
     if ((b[0] & 0xe0) != 0x20) return false;
     if (b[0] == 0x20 && b[1] == 0x01 && b[2] < 0x02) return false;

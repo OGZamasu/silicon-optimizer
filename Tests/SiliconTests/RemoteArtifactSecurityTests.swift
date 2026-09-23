@@ -59,10 +59,17 @@ struct RemoteArtifactSecurityTests {
             "100.64.0.1", "0.0.0.0", "224.0.0.1", "192.0.2.1", "198.51.100.1",
             "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "64:ff9b::a00:1",
             "2001:db8::1", "2002:0a00:0001::1", "3fff::1",
+            // NAT64: a synthesized address is judged by the IPv4 it embeds, so the tailnet's
+            // CGNAT range and loopback stay out; the local-use prefix is never translated here.
+            "64:ff9b::6440:9", "64:ff9b::7f00:1", "64:ff9b:1::a00:1",
         ] {
             #expect(address.withCString(silicon_artifact_public_ip) == 0)
         }
-        for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888"] {
+        for address in [
+            "1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888",
+            // DNS64 on an IPv6-only network synthesizes this for an IPv4-only CDN.
+            "64:ff9b::808:808",
+        ] {
             #expect(address.withCString(silicon_artifact_public_ip) == 1)
         }
     }
