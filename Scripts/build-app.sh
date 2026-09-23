@@ -198,9 +198,10 @@ for package in harness qwen codex pi; do
     cp "$source/package.json" "$source/package-lock.json" "$destination/"
 done
 
-# The optional media installers (OpenMontage, LivePortrait, Deep-Live-Cam) install only the
-# hash-locked dependency sets in Resources/pinned-installs; without them they cannot run.
-for tool in openmontage liveportrait deep-live-cam; do
+# The optional installers (OpenMontage, LivePortrait, Deep-Live-Cam, MFLUX and the voice
+# tools, LuxTTS, face tracking, Laya) install only the hash-locked dependency sets in
+# Resources/pinned-installs; without them they cannot run.
+for tool in openmontage liveportrait deep-live-cam silicon-mlx luxtts tracker laya; do
     compgen -G "Resources/pinned-installs/$tool/*.txt" >/dev/null || {
         echo "ERROR: missing dependency locks for $tool" >&2
         exit 1
@@ -208,6 +209,14 @@ for tool in openmontage liveportrait deep-live-cam; do
     mkdir -p "$BUNDLE/Contents/Resources/pinned-installs/$tool"
     cp Resources/pinned-installs/"$tool"/*.txt "$BUNDLE/Contents/Resources/pinned-installs/$tool/"
 done
+# And the reviewed files of every Hugging Face repository a voice model reads, which the app
+# puts in place before running it offline; without them no local voice model runs.
+compgen -G "Resources/pinned-installs/models/*.json" >/dev/null || {
+    echo "ERROR: missing pinned model manifests" >&2
+    exit 1
+}
+mkdir -p "$BUNDLE/Contents/Resources/pinned-installs/models"
+cp Resources/pinned-installs/models/*.json "$BUNDLE/Contents/Resources/pinned-installs/models/"
 
 # The MCP bridge rides along so the Codex engine can offer the app's tools without a
 # separate install step. install-mcp.sh remains the way to give Claude and ChatGPT a copy.

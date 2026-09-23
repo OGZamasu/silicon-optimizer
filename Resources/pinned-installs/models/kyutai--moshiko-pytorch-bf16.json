@@ -1,0 +1,11 @@
+{
+  "repository": "kyutai/moshiko-pytorch-bf16",
+  "revision": "2bfc9ae6e89079a5cc7ed2a68436010d91a3d289",
+  "files": [
+    {
+      "path": "tokenizer-e351c8d8-checkpoint125.safetensors",
+      "sha256": "09b782f0629851a271227fb9d36db65c041790365f11bbe5d3d59369cf863f50",
+      "size": 384644900
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import Foundation
+import SiliconControl
 
 /// The Laya checkpoints this app will fetch, pinned to a commit each.
 ///
@@ -147,6 +148,8 @@ public enum LayaPackage {
     /// What the package itself requires. MLX is capped below 0.33 rather than open-ended.
     public static let mlxRequirement = "mlx>=0.32.2,<0.33"
     public static let minimumPython = (major: 3, minor: 11)
+    /// The Pythons its dependencies are hash-locked for (`Resources/pinned-installs/laya`).
+    public static let lockedPythons = PinnedInstall.layaPythons
     public static let repository = "https://github.com/mizorewww/laya-mlx"
     public static let upstreamRepository = "https://github.com/NandhaKishorM/laya"
 

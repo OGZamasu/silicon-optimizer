@@ -1,0 +1,16 @@
+{
+  "repository": "appautomaton/openmoss-audio-tokenizer-mlx",
+  "revision": "3b22b5958c15f807e3ca8faae2cc3b7cc4b74552",
+  "files": [
+    {
+      "path": "mlx-int8/config.json",
+      "sha256": "73168ab6e4d65cd23b765f5662890586f7d074f4e59b2a61e4436ba9cfb56db1",
+      "size": 6686
+    },
+    {
+      "path": "mlx-int8/model.safetensors",
+      "sha256": "de45810416fbc67a444e9b1afdbb41569a13669f7942af2f011b26e918767995",
+      "size": 2003407408
+    }
+  ]
+}

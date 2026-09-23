@@ -1,0 +1,11 @@
+# The voice tools' build tools for Python 3.14 on Apple Silicon (macOS 14+).
+# Every artifact is hash-pinned: pip and uv refuse anything else.
+# Resolved from: the build requirements of their source-only dependencies
+# Published by: 2026-09-23T00:00:00Z
+# Regenerate with Scripts/lock-media-installers.sh and review the diff.
+setuptools==80.10.2 \
+    --hash=sha256:8b0e9d10c784bf7d262c4e5ec5d4ec94127ce206e8738f29a437945fbc219b70 \
+    --hash=sha256:95b30ddfb717250edb492926c92b5221f7ef3fbcc2b07579bcd4a27da21d0173
+    # via
+    #   -c voice-constraints.txt
+    #   -r voice-build.in

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SiliconControl
 
 // MARK: - Where everything lives
 
@@ -65,6 +66,9 @@ public enum LayaInstallError: Error, LocalizedError, Equatable {
     case noModelLibrary
     case libraryUnreachable(String)
     case noPython(tried: [String])
+    /// An environment made by an earlier install with a Python the dependency locks do not
+    /// cover. Nothing was changed in it.
+    case unsupportedPython(found: String?, environment: String)
     case stepFailed(step: String, detail: String)
     /// The wheel pip fetched does not hash to the pinned `LayaPackage.wheelSHA256`. Thrown
     /// before that file is ever handed to `pip install`, so nothing is half-installed —
@@ -81,8 +85,14 @@ public enum LayaInstallError: Error, LocalizedError, Equatable {
             "The model library at \(path) is not there. If it is on an external drive, "
             + "mount it and try again."
         case .noPython(let tried):
-            "No Python \(LayaPackage.minimumPython.major).\(LayaPackage.minimumPython.minor) "
-            + "or newer was found. laya-mlx needs one. Tried: \(tried.joined(separator: ", "))."
+            "No Python \(LayaPackage.lockedPythons.joined(separator: ", ")) was found. "
+            + "laya-mlx's reviewed dependencies are locked for those. "
+            + "Tried: \(tried.joined(separator: ", "))."
+        case .unsupportedPython(let found, let environment):
+            "The Laya environment at \(environment) was made with "
+            + "\(found.map { "Python \($0)" } ?? "a Python of unknown version"), and laya-mlx's "
+            + "reviewed dependencies are locked for \(LayaPackage.lockedPythons.joined(separator: ", ")). "
+            + "Remove that folder and install again."
         case .stepFailed(let step, let detail):
             "\(step) failed: \(detail)"
         case .wheelHashMismatch(let expected, let got):
@@ -127,6 +137,8 @@ public actor LayaRuntime {
     /// owner can move the library while the app is running — a captured path would then be
     /// pointing at the old drive.
     private var libraryProvider: @Sendable () async -> URL? = { nil }
+    /// The dependency locks: the app bundle's, or the repository's under `swift run`.
+    private let locks: URL
     /// Where the driver script was installed to, out of the app bundle.
     private var scriptProvider: @Sendable () async -> URL? = { nil }
     private var sidecar: LayaSidecar?
@@ -140,7 +152,9 @@ public actor LayaRuntime {
     /// Set while an install is running, so the panel can say so and a second one is refused.
     public private(set) var isInstalling = false
 
-    public init() {}
+    public init(locks: URL = PinnedInstall.defaultLockRoot()) {
+        self.locks = locks
+    }
 
     public func configure(
         library: @escaping @Sendable () async -> URL?,
@@ -312,19 +326,22 @@ public actor LayaRuntime {
     ///
     /// laya-mlx needs 3.11 or newer and macOS ships 3.9, so `/usr/bin/python3` is listed
     /// last and usually fails the version check — it is there for a future macOS rather
-    /// than as a real candidate today.
+    /// than as a real candidate today. The bare `python3`s are only taken when their version
+    /// is one the dependency locks cover.
     public static let pythonCandidates = [
+        "/opt/homebrew/bin/python3.14",
         "/opt/homebrew/bin/python3.13",
         "/opt/homebrew/bin/python3.12",
         "/opt/homebrew/bin/python3.11",
         "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3.14",
         "/usr/local/bin/python3.13",
         "/usr/local/bin/python3.12",
         "/usr/local/bin/python3.11",
         "/usr/bin/python3",
     ]
 
-    /// The first interpreter that is both executable and new enough.
+    /// The first interpreter that is both executable and a version the locks cover.
     public static func locatePython(
         candidates: [String] = pythonCandidates,
         version: (URL) -> (Int, Int)? = { probeVersion(of: $0) }
@@ -334,14 +351,12 @@ public actor LayaRuntime {
             guard FileManager.default.isExecutableFile(atPath: path),
                   let (major, minor) = version(url)
             else { continue }
-            if major > minimum.major || (major == minimum.major && minor >= minimum.minor) {
+            if LayaPackage.lockedPythons.contains("\(major).\(minor)") {
                 return url
             }
         }
         return nil
     }
-
-    private static var minimum: (major: Int, minor: Int) { LayaPackage.minimumPython }
 
     public static func probeVersion(of interpreter: URL) -> (Int, Int)? {
         guard let output = RuntimeLocator.run(
@@ -383,10 +398,22 @@ public actor LayaRuntime {
             at: hubCache, withIntermediateDirectories: true
         )
 
-        if !FileManager.default.isExecutableFile(atPath: python.path) {
-            guard let interpreter = Self.locatePython() else {
+        // The environment's Python picks the dependency lock, so it is settled first: an
+        // existing environment by its own version, a new one by the interpreter that makes it.
+        let version: String
+        if FileManager.default.isExecutableFile(atPath: python.path) {
+            let found = PinnedInstall.pythonVersion(ofVirtualEnvironment: environment)
+            guard let found, LayaPackage.lockedPythons.contains(found) else {
+                throw LayaInstallError.unsupportedPython(found: found, environment: environment.path)
+            }
+            version = found
+        } else {
+            guard let interpreter = Self.locatePython(),
+                  let probed = Self.probeVersion(of: interpreter)
+            else {
                 throw LayaInstallError.noPython(tried: Self.pythonCandidates)
             }
+            version = "\(probed.0).\(probed.1)"
             progress(.init(
                 step: "Making a Python environment", detail: interpreter.path, fraction: 0.05
             ))
@@ -397,19 +424,23 @@ public actor LayaRuntime {
         }
 
         let pip = environment.appendingPathComponent("bin/pip")
-        let wheel = try await downloadAndVerifyWheel(pip: pip, hubCache: hubCache, progress: progress)
-        defer { try? FileManager.default.removeItem(at: wheel) }
+        try await downloadAndVerifyWheel(pip: pip, hubCache: hubCache, progress: progress)
 
         progress(.init(
             step: "Installing \(LayaPackage.requirement)",
             detail: "about 300 MB, mostly MLX", fraction: 0.2
         ))
+        // The whole set from its lock — laya-mlx with the digest just checked, and every
+        // dependency (MLX, huggingface_hub, tokenizers, NumPy …) with its own — wheels only.
+        let install = PinnedInstall.pipInstall(
+            python: python,
+            lock: PinnedInstall.lock(
+                "requirements", directory: PinnedInstall.layaLocks, python: version, in: locks
+            ),
+            label: "Installing \(LayaPackage.requirement)", onlyBinary: true
+        )
         try await run(
-            pip,
-            // The wheel on disk, not the requirement string: pip has already fetched and
-            // this has already verified it, so this step never touches the network for the
-            // package itself — only for its dependencies, which are not pinned by a hash.
-            ["install", "--disable-pip-version-check", "--no-input", wheel.path],
+            install.executable, install.arguments,
             step: "Installing \(LayaPackage.requirement)",
             environment: Self.childEnvironment(hubCache: hubCache)
         ) { line in
@@ -427,18 +458,17 @@ public actor LayaRuntime {
     /// checks its sha256 against `LayaPackage.wheelSHA256` before anything is handed to
     /// `pip install`.
     ///
-    /// Only the top-level package is verified this way, deliberately: `--require-hashes`
-    /// would need a pinned hash for every transitive dependency too (MLX, huggingface_hub,
-    /// numpy, and whatever they pull in), which is a much larger reproducibility promise
-    /// than this pin is making. What matters most — that the code laya-mlx itself runs is
-    /// the exact release this was reviewed against — is what this checks.
+    /// The install that follows is hash-locked as a whole (`Resources/pinned-installs/laya`),
+    /// laya-mlx included, so pip would refuse a changed wheel there too; checking it here
+    /// first is what turns that into this error, which names the package, rather than pip's
+    /// wall of hashes.
     ///
     /// A mismatch throws before `pip install` ever runs, so a bad wheel never reaches
     /// site-packages: the venv exists, `laya_mlx` does not, and the next attempt starts
     /// clean rather than atop a partial install.
     private func downloadAndVerifyWheel(
         pip: URL, hubCache: URL, progress: @escaping @Sendable (LayaInstallProgress) -> Void
-    ) async throws -> URL {
+    ) async throws {
         let step = "Downloading \(LayaPackage.requirement)"
         progress(.init(step: step, detail: "verifying the pinned sha256 before install", fraction: 0.15))
         let downloadDirectory = FileManager.default.temporaryDirectory
@@ -447,12 +477,17 @@ public actor LayaRuntime {
             at: downloadDirectory, withIntermediateDirectories: true
         )
         defer { try? FileManager.default.removeItem(at: downloadDirectory) }
+        // pip checks the digest as it downloads, too; the check below is the one that says so
+        // in words.
+        let requirement = downloadDirectory.appendingPathComponent("requirement.txt")
+        try "\(LayaPackage.requirement) --hash=sha256:\(LayaPackage.wheelSHA256)\n"
+            .write(to: requirement, atomically: true, encoding: .utf8)
 
         try await run(
             pip,
             [
-                "download", "--no-deps", "--disable-pip-version-check", "--no-input",
-                "--dest", downloadDirectory.path, LayaPackage.requirement,
+                "download", "--no-deps", "--require-hashes", "--disable-pip-version-check",
+                "--no-input", "--dest", downloadDirectory.path, "-r", requirement.path,
             ],
             step: step, environment: Self.childEnvironment(hubCache: hubCache)
         ) { _ in }
@@ -470,14 +505,6 @@ public actor LayaRuntime {
         guard digest.caseInsensitiveCompare(LayaPackage.wheelSHA256) == .orderedSame else {
             throw LayaInstallError.wheelHashMismatch(expected: LayaPackage.wheelSHA256, got: digest)
         }
-
-        // Moved out of the directory this function is about to delete, so the caller still
-        // has a file to hand `pip install`.
-        let verified = FileManager.default.temporaryDirectory
-            .appendingPathComponent(wheel.lastPathComponent)
-        try? FileManager.default.removeItem(at: verified)
-        try FileManager.default.copyItem(at: wheel, to: verified)
-        return verified
     }
 
     /// sha256 of a file on disk, lowercase hex. A pure, testable seam: the install path

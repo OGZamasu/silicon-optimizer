@@ -1621,6 +1621,30 @@ public final class AppModel {
         public var currentDirectory: URL?
         /// Shown while this step runs, ahead of the tool's own output.
         public var label: String
+
+        public init(executable: URL, arguments: [String], currentDirectory: URL?, label: String) {
+            self.executable = executable
+            self.arguments = arguments
+            self.currentDirectory = currentDirectory
+            self.label = label
+        }
+
+        /// A planned install command, labelled the way the progress line reads it.
+        init(_ command: PinnedInstall.Command) {
+            self.init(
+                executable: command.executable, arguments: command.arguments,
+                currentDirectory: command.workingDirectory, label: "\(command.label) —"
+            )
+        }
+    }
+
+    /// Shows a plan that could not be made — no Python the locks cover, say — where the
+    /// install's own progress and failures appear, before anything has run.
+    func failRepair(id: String, message: String) {
+        guard repairs[id] == nil else { return }
+        let job = RepairJob(id: id)
+        job.error = message
+        repairs[id] = job
     }
 
     /// Runs the steps in order, streaming the tool's output into `stage` (throttled — a
@@ -1744,25 +1768,20 @@ public final class AppModel {
         }
     }
 
-    /// Sets up MFLUX for image generation: a private Python environment plus the package.
-    /// The venv step is instant; the install downloads a few hundred megabytes.
+    /// Sets up MFLUX for image generation: a private Python environment plus its hash-locked
+    /// packages (`MFluxRuntime.installPlan`). The venv step is instant; the install downloads
+    /// a few hundred megabytes.
     public func installMFlux() {
-        let venv = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".silicon-mlx")
-        runRepair(id: "mflux-install", steps: [
-            RepairStep(
-                executable: URL(fileURLWithPath: "/usr/bin/python3"),
-                arguments: ["-m", "venv", venv.path],
-                currentDirectory: nil,
-                label: "Creating the Python environment —"
-            ),
-            RepairStep(
-                executable: venv.appendingPathComponent("bin/pip"),
-                arguments: ["install", "--upgrade", "mflux"],
-                currentDirectory: nil,
-                label: "Installing MFLUX —"
-            ),
-        ]) { [weak self] in
+        let steps: [RepairStep]
+        do {
+            steps = try MFluxRuntime.installPlan(
+                basePython: PinnedInstall.basePython(for: PinnedInstall.mfluxPythons)
+            ).map(RepairStep.init)
+        } catch {
+            failRepair(id: "mflux-install", message: error.localizedDescription)
+            return
+        }
+        runRepair(id: "mflux-install", steps: steps) { [weak self] in
             self?.rediscoverRuntimes()
         }
     }
@@ -2334,64 +2353,38 @@ public final class AppModel {
     /// list is exactly what a real end-to-end run needed: misaki and its G2P chain for
     /// Kokoro (num2words, spacy and its small English model, phonemizer) plus the
     /// espeakng-loader wheel that carries the espeak library misaki otherwise only
-    /// finds via Homebrew. The spacy model is pinned by URL because spacy's own
-    /// downloader shells out to uv and dies outside an activated environment.
+    /// finds via Homebrew — each at a reviewed version and digest
+    /// (`VoiceRuntime.toolsInstallPlan`). The spacy model comes by its release URL
+    /// because spacy's own downloader shells out to uv and dies outside an activated
+    /// environment.
     public func installVoiceTools() {
-        runRepair(id: "voice-install", steps: [
-            RepairStep(
-                executable: URL(fileURLWithPath: "/usr/bin/python3"),
-                arguments: ["-m", "venv", VoiceRuntime.environment.path],
-                currentDirectory: nil,
-                label: "Creating the Python environment —"
-            ),
-            RepairStep(
-                executable: VoiceRuntime.environment.appendingPathComponent("bin/pip"),
-                arguments: [
-                    "install", "--upgrade",
-                    "mlx-audio", "mlx-speech", "misaki", "num2words", "spacy",
-                    "phonemizer", "espeakng-loader",
-                    "en_core_web_sm@https://github.com/explosion/spacy-models/releases/"
-                    + "download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
-                ],
-                currentDirectory: nil,
-                label: "Installing the voice tools —"
-            ),
-        ]) { }
+        let steps: [RepairStep]
+        do {
+            steps = try VoiceRuntime.toolsInstallPlan(
+                basePython: PinnedInstall.basePython(for: PinnedInstall.voicePythons)
+            ).map(RepairStep.init)
+        } catch {
+            failRepair(id: "voice-install", message: error.localizedDescription)
+            return
+        }
+        runRepair(id: "voice-install", steps: steps) { }
     }
 
     /// LuxTTS pins transformers to the 4.x line while mflux and mlx-audio need 5.x, so
     /// it gets an environment of its own — sharing one quietly breaks whichever family
-    /// installed first.
+    /// installed first. Its source, its LinaCodec and its packages are all pinned
+    /// (`VoiceRuntime.luxTTSInstallPlan`).
     public func installLuxTTS() {
-        var steps = [
-            RepairStep(
-                executable: URL(fileURLWithPath: "/usr/bin/python3"),
-                arguments: ["-m", "venv", VoiceRuntime.luxTTSEnvironment.path],
-                currentDirectory: nil,
-                label: "Creating LuxTTS's own Python environment —"
-            ),
-        ]
-        if !FileManager.default.fileExists(atPath: VoiceRuntime.luxTTSClone.path) {
-            steps.append(RepairStep(
-                executable: URL(fileURLWithPath: "/usr/bin/git"),
-                arguments: [
-                    "clone", "--depth", "1",
-                    "https://github.com/ysharma3501/LuxTTS.git",
-                    VoiceRuntime.luxTTSClone.path,
-                ],
-                currentDirectory: nil,
-                label: "Downloading LuxTTS —"
-            ))
+        let steps: [RepairStep]
+        do {
+            steps = try VoiceRuntime.luxTTSInstallPlan(
+                basePython: PinnedInstall.basePython(for: PinnedInstall.luxTTSPythons),
+                git: URL(fileURLWithPath: "/usr/bin/git")
+            ).map(RepairStep.init)
+        } catch {
+            failRepair(id: "luxtts-install", message: error.localizedDescription)
+            return
         }
-        steps.append(RepairStep(
-            executable: VoiceRuntime.luxTTSEnvironment.appendingPathComponent("bin/pip"),
-            arguments: [
-                "install", "-r",
-                VoiceRuntime.luxTTSClone.appendingPathComponent("requirements.txt").path,
-            ],
-            currentDirectory: nil,
-            label: "Installing LuxTTS's dependencies (a few minutes) —"
-        ))
         runRepair(id: "luxtts-install", steps: steps) { }
     }
 

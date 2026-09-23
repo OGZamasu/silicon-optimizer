@@ -1,0 +1,26 @@
+# Face tracking, in ~/.silicon-tracker
+# The versions installed and in use on the maintainer's Mac on 2026-09-23 (Python 3.13).
+# The locks hold to them, so re-running an installer over a working environment changes
+# nothing, and a new environment gets the combination that is known to work.
+# Packages installed from a URL or a commit are pinned in the lock script, not here.
+absl-py==2.5.0
+certifi==2026.7.22
+cffi==2.1.1
+contourpy==1.3.3
+cycler==0.12.1
+flatbuffers==25.12.19
+fonttools==4.63.0
+kiwisolver==1.5.0
+matplotlib==3.11.1
+mediapipe==0.10.35
+numpy==2.5.2
+opencv-contrib-python==5.0.0.93
+opencv-python==5.0.0.93
+packaging==26.3
+pillow==12.3.0
+pycparser==3.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-osc==1.10.2
+six==1.17.0
+sounddevice==0.5.6
