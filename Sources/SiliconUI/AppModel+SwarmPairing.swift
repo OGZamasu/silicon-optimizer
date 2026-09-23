@@ -124,7 +124,8 @@ extension AppModel {
                 guard pairingServer === server,
                       pairingApprovalState == .minting(id) else { break }
                 switch await self.mintClientToken(
-                    on: peer, clientName: joinerName, admin: config.effectiveToken
+                    on: peer, clientName: joinerName, admin: config.effectiveToken,
+                    replacingExisting: false
                 ) {
                 case .minted(let token, _):
                     mintedPeers.append(SwarmPeer(
@@ -132,6 +133,15 @@ extension AppModel {
                     ))
                 case .unsupported:
                     blocked.append("\(peer.name) needs the per-member key update")
+                case .nameConflict:
+                    if joinerName == localMachineName {
+                        blocked.append("\(joinerName) already has a key on \(peer.name). "
+                            + "Rename the joining Mac, then close and reopen this invite")
+                    } else {
+                        blocked.append("\(joinerName) already has a key on \(peer.name). "
+                            + "Close this invite, revoke that member in Swarm → Members, "
+                            + "then invite again")
+                    }
                 case .failed:
                     blocked.append("\(peer.name) could not issue a key")
                 }
@@ -216,16 +226,18 @@ extension AppModel {
     enum ClientTokenMintResult: Equatable, Sendable {
         case minted(String, role: String? = nil)
         case unsupported
+        case nameConflict
         case failed
     }
 
     /// Mints a per-client token on one node using the admin credential. Legacy absence and
     /// operational failure are deliberately distinct, and neither can release the admin
-    /// credential. A 409 means the name already has a token there; since only admins
-    /// reach this path, replace it (revoke, re-mint) so pairing the same machine
-    /// twice heals rather than fails.
+    /// credential. A 409 means the name already has a token there. Owner self-provisioning
+    /// may replace that token; pairing may not, because a later Deny cannot restore the
+    /// previous member's credential.
     func mintClientToken(
-        on peer: SwarmPeer, clientName: String, admin: String?, role: String = "member"
+        on peer: SwarmPeer, clientName: String, admin: String?, role: String = "member",
+        replacingExisting: Bool = true
     ) async -> ClientTokenMintResult {
         guard let admin,
               let clientName = SwarmPairing.normalizedClientName(clientName)
@@ -250,6 +262,7 @@ extension AppModel {
         let first = Self.classifyClientTokenResponse(status: status, body: body)
         if case .minted = first { return first }
         if status == 409 {
+            guard replacingExisting else { return .nameConflict }
             guard await revokeClientToken(
                 on: peer, clientName: clientName, admin: admin
             ), let (retryStatus, retryBody) = await attempt() else { return .failed }

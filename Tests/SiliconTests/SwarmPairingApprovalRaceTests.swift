@@ -101,6 +101,77 @@ struct SwarmPairingApprovalRaceTests {
         #expect(model.pairingCleanupNeeded != nil)
     }
 
+    @Test("cancelling a repeat request leaves the existing member key intact")
+    func repeatRequestKeepsExistingKey() async throws {
+        let (model, server, node, receipt, config, port) = try await fixture()
+        defer { node.stop(); Task { await server.stop() } }
+        await node.seedMember("Joiner", token: "existing-key")
+        await node.releasePost()
+
+        model.approvePairing(receipt.requestID, using: config)
+        try await waitUntil { model.pairingApprovalTask == nil }
+        #expect(model.pairingApprovalError?.contains("already has a key") == true)
+        #expect((await node.snapshot()).posts == 1)
+        #expect((await node.snapshot()).deletes == 0)
+        #expect(await node.token(for: "Joiner") == "existing-key")
+
+        model.denyPairing(receipt.requestID)
+        try await waitUntil { await server.pending() == nil }
+        let status = try await PairingClient.status(
+            host: "127.0.0.1", requestID: receipt.requestID, port: port
+        )
+        #expect(status.state == "denied")
+        #expect(await node.token(for: "Joiner") == "existing-key")
+    }
+
+    @Test("a later name conflict rolls back only newly minted peer keys")
+    func laterConflictRollsBackNewKeys() async throws {
+        let (model, server, firstNode, receipt, config, _) = try await fixture()
+        let conflictingNode = try await FakeMemberNode()
+        defer {
+            firstNode.stop()
+            conflictingNode.stop()
+            Task { await server.stop() }
+        }
+        await firstNode.releasePost()
+        await conflictingNode.seedMember("Joiner", token: "existing-key")
+        let twoPeers = SwarmConfig(swarmToken: config.swarmToken, peers: [
+            config.peers[0],
+            SwarmPeer(name: "conflicting-node", baseURL: conflictingNode.baseURL),
+        ])
+
+        model.approvePairing(receipt.requestID, using: twoPeers)
+        try await waitUntil { model.pairingApprovalTask == nil }
+        #expect((await firstNode.snapshot()).posts == 1)
+        #expect((await firstNode.snapshot()).deletes == 1)
+        #expect((await firstNode.snapshot()).activeNames.isEmpty)
+        #expect((await conflictingNode.snapshot()).posts == 1)
+        #expect((await conflictingNode.snapshot()).deletes == 0)
+        #expect(await conflictingNode.token(for: "Joiner") == "existing-key")
+        #expect(model.pairingApprovalError?.contains("already has a key") == true)
+    }
+
+    @Test("owner self-provisioning may still replace its own existing key")
+    func ownerKeyReplacement() async throws {
+        let (model, server, node, _, config, _) = try await fixture()
+        defer { node.stop(); Task { await server.stop() } }
+        await node.seedMember("Owner", token: "old-owner-key")
+        await node.releasePost()
+
+        let result = await model.mintClientToken(
+            on: config.peers[0], clientName: "Owner", admin: config.effectiveToken,
+            role: "admin"
+        )
+        guard case .minted(let token, _) = result else {
+            Issue.record("Owner token replacement did not mint a new key")
+            return
+        }
+        #expect(token == "member-key")
+        #expect((await node.snapshot()).posts == 2)
+        #expect((await node.snapshot()).deletes == 1)
+        #expect(await node.token(for: "Owner") == "member-key")
+    }
+
     @Test("closing during mint revokes the key when the node responds")
     func closeDuringMint() async throws {
         let (model, server, node, receipt, config, _) = try await fixture()
@@ -167,14 +238,18 @@ private final class FakeMemberNode: @unchecked Sendable {
         var released = false
         var heldResponse: CheckedContinuation<Void, Never>?
 
-        func mint(_ name: String) async -> String {
+        func mint(_ name: String) async -> String? {
             posts += 1
+            guard active[name] == nil else { return nil }
             active[name] = "member-key"
             if !released {
                 await withCheckedContinuation { heldResponse = $0 }
             }
             return "member-key"
         }
+
+        func seedMember(_ name: String, token: String) { active[name] = token }
+        func token(for name: String) -> String? { active[name] }
 
         func releasePost() {
             released = true
@@ -217,8 +292,11 @@ private final class FakeMemberNode: @unchecked Sendable {
                 switch (request.method, request.path) {
                 case ("POST", "/swarm/clients"):
                     guard let join = try? request.decode(PairingJoinRequest.self) else { return }
-                    let token = await keys.mint(join.name)
-                    response = .json(["token": token])
+                    if let token = await keys.mint(join.name) {
+                        response = .json(["token": token])
+                    } else {
+                        response = .error(409, "member already exists")
+                    }
                 case ("DELETE", let path) where path.hasPrefix("/swarm/clients/"):
                     let revoked = await keys.revoke(String(path.dropFirst("/swarm/clients/".count)))
                     response = revoked ? .json(["ok": "true"])
@@ -244,6 +322,10 @@ private final class FakeMemberNode: @unchecked Sendable {
 
     func stop() { listener.cancel() }
     func releasePost() async { await keys.releasePost() }
+    func seedMember(_ name: String, token: String) async {
+        await keys.seedMember(name, token: token)
+    }
+    func token(for name: String) async -> String? { await keys.token(for: name) }
     func setRejectDeletes(_ reject: Bool) async { await keys.setRejectDeletes(reject) }
     func snapshot() async -> (posts: Int, deletes: Int, activeNames: [String]) {
         await keys.snapshot()
