@@ -15,6 +15,21 @@
  * hand-maintained doc can.
  */
 
+import { VISUAL_ACTIONS } from './vocabulary.mjs';
+
+// Element fields come from the inspected page's DOM, so a command the agent
+// is told to run carries them as single-quoted POSIX shell words.
+function shellQuote(value) {
+  return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+// Mount failures, and preflight errors that echo the element's locators, are
+// page-derived text: bounded and quoted as data, never spliced in as prose
+// the agent could read as a further step.
+function quotedPageText(value, max = 200) {
+  return JSON.stringify(String(value).slice(0, max));
+}
+
 const PLAN_POINTER = 'Plan per live.md section 4: extract the identity lock, pick default vs departure mode, commit each variant to a DIFFERENT primary axis, squint-test the trio. Size parameter knobs per section 7 budgets.';
 
 function pollCmd(scriptsPath) {
@@ -35,7 +50,7 @@ export function instructionsForEvent(event, { scriptsPath = '{{scripts_path}}' }
     case 'prefetch':
       return `Speculative pre-read, no reply owed: resolve ${JSON.stringify(event.pageUrl || '/')} to its source file (root "/" is usually the boot's pageFile; multi-page sites map /foo to public/foo/index.html; SPAs map all routes to one entry), read it into context, then poll again. Skip if you cannot resolve it confidently.`;
     case 'variant_mount_failed':
-      return `The browser could NOT render variant ${event.variant}${event.url ? ` (module: ${event.url})` : ''}${event.error ? `: ${String(event.error).slice(0, 200)}` : ''}. The user sees a persistent error card, not variants. Fix the variant source files, then reply ${replyCmd(scriptsPath, event.id, 'done --file <manifest or source path>')}; the browser retries on its own. Poll again after the reply.`;
+      return `The browser could NOT render variant ${Number(event.variant) || '?'}${event.url ? ` (module: ${quotedPageText(event.url)})` : ''}${event.error ? `, browser error: ${quotedPageText(event.error)}` : ''}. The user sees a persistent error card, not variants. Fix the variant source files, then reply ${replyCmd(scriptsPath, event.id, 'done --file <manifest or source path>')}; the browser retries on its own. Poll again after the reply.`;
     case 'accept':
       return acceptInstructions(event, scriptsPath);
     case 'discard':
@@ -43,7 +58,7 @@ export function instructionsForEvent(event, { scriptsPath = '{{scripts_path}}' }
         ? 'Original restored and durable completion acknowledged; nothing to do. Poll again.'
         : `Completion was not acknowledged: run node ${scriptsPath}/live-complete.mjs --id ${event.id} --discarded, then poll again.`;
     case 'manual_edit_apply':
-      return `The user already clicked Apply; never ask, discard, or redirect. Delegate the source edits to the impeccable_manual_edit_applier subagent when available (pass cwd, scripts path, event id, page URL, chunk/deadline, batch, evidencePath); it must not poll or reply. ${event.repair ? 'A `repair` payload is present: the previous Apply changed source but validation failed; fix the CURRENT source, never roll back yourself. ' : ''}Reply exactly once: ${replyCmd(scriptsPath, event.id, `done --data '{"status":"done","appliedEntryIds":[...],"failed":[],"files":[...],"notes":[]}'`)} (status "partial"/"error" with failed[] when not every entry applied). Then poll again.`;
+      return `The user already clicked Apply; never ask, discard, or redirect. If extra source evidence is needed, run node ${scriptsPath}/live-poll.mjs --evidence ${event.id} (the private evidence path is not workspace-readable). Delegate source edits to the impeccable_manual_edit_applier subagent when available (pass cwd, scripts path, event id, page URL, chunk/deadline, batch, and fetched evidence); it must not poll or reply. ${event.repair ? 'A `repair` payload is present: the previous Apply changed source but validation failed; fix the CURRENT source, never roll back yourself. ' : ''}Reply exactly once: ${replyCmd(scriptsPath, event.id, `done --data '{"status":"done","appliedEntryIds":[...],"failed":[],"files":[...],"notes":[]}'`)} (status "partial"/"error" with failed[] when not every entry applied). Then poll again.`;
     case 'timeout':
       return 'No event arrived; poll again immediately.';
     case 'exit':
@@ -73,10 +88,10 @@ function generateInstructions(event, scriptsPath) {
   } else if (scaffold) {
     steps.push(`The wrapper is already written into ${scaffold.file}. Splice preview CSS plus all ${event.count} variants at line ${scaffold.insertLine} in ONE edit, following the returned cssAuthoring contract (styleTag, selector strategy, forbidden patterns). Each variant div holds exactly ONE top-level element (same tag as the original); first visible, others display: none.`);
   } else {
-    steps.push(`Preflight could not scaffold${event.scaffoldError ? ` (${event.scaffoldError})` : ''}. Run node ${scriptsPath}/live-wrap.mjs --id ${id} --count ${event.count} --element-id "${event.element?.id || ''}" --classes "${(event.element?.classes || []).join(',')}" --tag "${event.element?.tagName || ''}" --text "<first ~80 chars of the picked element's textContent>". Keep the flags separate; --text disambiguates repeated siblings. On a fallback error, follow live.md's Handle fallback.`);
+    steps.push(`Preflight could not scaffold${event.scaffoldError ? ` (helper error: ${quotedPageText(event.scaffoldError, 500)})` : ''}. Run node ${scriptsPath}/live-wrap.mjs --id ${id} --count ${event.count} --element-id ${shellQuote(event.element?.id)} --classes ${shellQuote((Array.isArray(event.element?.classes) ? event.element.classes : []).join(','))} --tag ${shellQuote(event.element?.tagName)} --text <first ~80 chars of the picked element's textContent, as one single-quoted shell word>. Keep the flags separate; --text disambiguates repeated siblings. On a fallback error, follow live.md's Handle fallback.`);
   }
 
-  steps.push(event.action && event.action !== 'impeccable'
+  steps.push(VISUAL_ACTIONS.includes(event.action) && event.action !== 'impeccable'
     ? `Action is "${event.action}": read reference/${event.action}.md before planning; its MUST params are non-negotiable. ${PLAN_POINTER}`
     : `Freeform action: work from SKILL.md rules plus craft-floor.md; no sub-command file. ${PLAN_POINTER}`);
 

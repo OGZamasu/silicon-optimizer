@@ -75,6 +75,14 @@
     window.__IMPECCABLE_LIVE_INIT__ = false;
     return;
   }
+  let sourceReloadGate;
+  try {
+    sourceReloadGate = window.__IMPECCABLE_LIVE_SESSION__?.createSourceReloadGate({
+      prefix: PREFIX, storage: window.sessionStorage,
+    });
+  } catch {
+    sourceReloadGate = window.__IMPECCABLE_LIVE_SESSION__?.createSourceReloadGate({ prefix: PREFIX, storage: null });
+  }
   const HIGHLIGHT_TRANSITION =
     'top 140ms ' + EASE +
     ', left 140ms ' + EASE +
@@ -3854,7 +3862,7 @@
   }
 
   function pendingApplyLabel(count) {
-    return count === 1 ? 'Apply copy edit' : 'Apply copy edits';
+    return count === 1 ? 'Review copy edit' : 'Review copy edits';
   }
 
   function showManualApplyBusyToast() {
@@ -4006,7 +4014,7 @@
       pendingPillEl.style.display = 'none';
       pendingPillEl.disabled = false;
       pendingPillEl.setAttribute('aria-busy', 'false');
-      pendingPillEl.setAttribute('aria-label', 'Apply copy edits to source');
+      pendingPillEl.setAttribute('aria-label', 'Review copy edits in the trusted controller');
       pendingPillEl.style.cursor = 'pointer';
       pendingPillEl.style.filter = 'none';
       pendingPillEl.style.transform = 'scale(1)';
@@ -4065,7 +4073,7 @@
     }
     pendingPillLabelEl.textContent = pendingApplyLabel(currentPageCount);
     pendingPillCountEl.textContent = String(currentPageCount);
-    pendingPillEl.setAttribute('aria-label', 'Apply ' + currentPageCount + ' copy edit' + (currentPageCount === 1 ? '' : 's') + ' to source');
+    pendingPillEl.setAttribute('aria-label', 'Review ' + currentPageCount + ' copy edit' + (currentPageCount === 1 ? '' : 's') + ' in the trusted controller');
     pendingPillEl.style.display = 'inline-flex';
     pendingTrashBtn.style.display = 'inline-flex';
     pendingDockEl.style.display = 'inline-flex';
@@ -4078,13 +4086,13 @@
   function maybeShowFirstSaveToast() {
     if (!firstSaveOfSession) return;
     firstSaveOfSession = false;
-    showToast('Saved. Click "Apply copy edits" to write changes.', 4500);
+    showToast('Draft saved. Review and apply it in the trusted controller.', 4500);
   }
 
   async function fetchPendingCount() {
     try {
       const res = await fetch(
-        'http://localhost:' + PORT + '/manual-edit-stash?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
+        'http://localhost:' + PORT + '/page-manual-edit-count?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -4094,77 +4102,13 @@
     }
   }
 
-  async function onPendingPillClick() {
-    const count = parseInt(pendingPillEl?.dataset.count || '0', 10);
-    if (count <= 0 || pendingApplyInFlight) return;
-    const ok = confirm('Apply ' + count + ' copy edit' + (count === 1 ? '' : 's') + ' to source?');
-    if (!ok) return;
-    let waitForSseCompletion = false;
-    resetManualApplyProgress(count);
-    setPendingApplyLoading(true, count);
-    try {
-      const res = await fetch(
-        'http://localhost:' + PORT + '/manual-edit-commit?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname) + '&async=1',
-        { method: 'POST', keepalive: true, headers: { 'X-Impeccable-Token': TOKEN } },
-      );
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || ('HTTP ' + res.status));
-      }
-      const result = await res.json();
-      if (res.status === 202 || result.status === 'started') {
-        waitForSseCompletion = true;
-        return;
-      }
-      const remaining = remainingManualEditCount(result);
-      updatePendingCounter(remaining);
-      if (result.failed && result.failed.length > 0) {
-        console.warn('[impeccable] some copy edits failed:', result.failed);
-        showToast('Applied ' + (result.applied?.length || 0) + ', ' + result.failed.length + ' failed - see console', 5000);
-      } else {
-        const n = Array.isArray(result.applied) ? result.applied.length : (result.cleared || 0);
-        if (n > 0) {
-          showToast('Applied ' + n + ' edit' + (n === 1 ? '' : 's'), 2500);
-        } else {
-          console.warn('[impeccable] apply returned no verified edits:', result);
-          showToast('No edits applied - see console', 4000);
-        }
-      }
-    } catch (err) {
-      console.error('[impeccable] commit failed:', err);
-      showToast('Apply failed - see console', 4000);
-    } finally {
-      if (waitForSseCompletion) return;
-      const remainingCount = parseInt(pendingPillEl?.dataset.count || '0', 10) || 0;
-      if (remainingCount > 0) setPendingApplyLoading(false);
-      else hidePendingApplyDock();
-    }
+  function openTrustedController() {
+    showToast('Use the trusted controller URL shown by impeccable live to review source changes and DESIGN.md.', 6500);
   }
 
-  async function onPendingTrashClick() {
-    const count = parseInt(pendingPillEl?.dataset.count || '0', 10);
-    if (count <= 0 || pendingApplyInFlight) return;
-    const ok = confirm('Discard ' + count + ' copy edit' + (count === 1 ? '' : 's') + ' on this page?');
-    if (!ok) return;
-    try {
-      const res = await fetch(
-        'http://localhost:' + PORT + '/manual-edit-discard?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
-        { method: 'POST', headers: { 'X-Impeccable-Token': TOKEN } },
-      );
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const result = await res.json().catch(() => ({}));
-      const restoreFailures = restoreDiscardedManualEdits(result.entries || []);
-      updatePendingCounter(0);
-      if (restoreFailures > 0) {
-        showToast('Discarded ' + count + ' copy edit' + (count === 1 ? '' : 's') + ' - refresh to reset ' + restoreFailures, 4000);
-      } else {
-        showToast('Discarded ' + count + ' copy edit' + (count === 1 ? '' : 's'), 2500);
-      }
-    } catch (err) {
-      console.error('[impeccable] discard failed:', err);
-      showToast('Discard failed - see console', 4000);
-    }
-  }
+  function onPendingPillClick() { openTrustedController(); }
+
+  function onPendingTrashClick() { openTrustedController(); }
 
   function showManualApplyDecision(msg) {
     const count = parseInt(pendingPillEl?.dataset.count || '0', 10) || numberOrNull(msg?.remainingCount) || 0;
@@ -4191,48 +4135,9 @@
     refreshLiveControlsForManualApply();
   }
 
-  async function onPendingKeepFixingClick() {
-    const count = parseInt(pendingPillEl?.dataset.count || '0', 10) || numberOrNull(readStoredManualApplyState()?.count) || 0;
-    if (count <= 0) return;
-    updateManualApplyRepairState({ attempt: 1, maxAttempts: 3 }, 'repairing');
-    try {
-      const res = await fetch(
-        'http://localhost:' + PORT + '/manual-edit-commit?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname) + '&async=1&repair=1',
-        { method: 'POST', keepalive: true, headers: { 'X-Impeccable-Token': TOKEN } },
-      );
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      if (pendingKeepFixingBtn) pendingKeepFixingBtn.style.display = 'none';
-      if (pendingRollbackBtn) pendingRollbackBtn.style.display = 'none';
-      if (pendingTrashBtn) pendingTrashBtn.style.display = 'inline-flex';
-    } catch (err) {
-      console.error('[impeccable] repair retry failed:', err);
-      showToast('Repair retry failed - see console', 4000);
-      showManualApplyDecision({ remainingCount: count, repair: readStoredManualApplyState() });
-    }
-  }
+  function onPendingKeepFixingClick() { openTrustedController(); }
 
-  async function onPendingRollbackClick() {
-    const ok = confirm('Rollback source files to before this Apply and keep the edits staged?');
-    if (!ok) return;
-    try {
-      const res = await fetch(
-        'http://localhost:' + PORT + '/manual-edit-repair-decision?token=' + encodeURIComponent(TOKEN) + '&pageUrl=' + encodeURIComponent(location.pathname),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
-          body: JSON.stringify({ token: TOKEN, pageUrl: location.pathname, action: 'rollback' }),
-        },
-      );
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const result = await res.json().catch(() => ({}));
-      clearStoredManualApplyState();
-      updatePendingCounter(numberOrNull(result.remainingCount) || 0);
-      showToast('Rolled back source; copy edits are still staged.', 3500);
-    } catch (err) {
-      console.error('[impeccable] manual Apply rollback failed:', err);
-      showToast('Rollback failed - see console', 4000);
-    }
-  }
+  function onPendingRollbackClick() { openTrustedController(); }
 
   function manualEditEventForCurrentPage(msg) {
     return !msg?.pageUrl || msg.pageUrl === location.pathname;
@@ -5272,8 +5177,8 @@
   async function loadSvelteComponentParams(manifest) {
     const dir = String(manifest?.revisionDir || manifest?.componentDir || '').replace(/^\/+/, '');
     if (!dir) return {};
-    const paramsPath = dir + '/params.json';
-    const url = 'http://localhost:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(paramsPath);
+    const url = 'http://localhost:' + PORT + '/page-preview?token=' + encodeURIComponent(TOKEN)
+      + '&id=' + encodeURIComponent(manifest.id) + '&kind=params';
     try {
       const res = await fetch(url);
       if (!res.ok) return {};
@@ -5746,9 +5651,11 @@
     // republish that is STILL broken at the same URL reports again instead of
     // being swallowed while the agent believes the repair landed.
     lastReportedMountFailure = null;
-    const url = 'http://localhost:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(manifestPath);
+    const url = 'http://localhost:' + PORT + '/page-preview?token=' + encodeURIComponent(TOKEN)
+      + '&id=' + encodeURIComponent(sessionId) + '&kind=manifest';
     try {
       const res = await fetch(url);
+      if (res.status === 410) throw new Error('Source-derived Svelte recovery is disabled for inspected pages. Wait for HMR or reload the page.');
       if (!res.ok) throw new Error(String(res.status));
       const manifest = JSON.parse(await res.text());
       if (manifest.id !== sessionId) {
@@ -6172,6 +6079,32 @@
   // failure is surfaced via recoverEmptyCycling.
   const COMPLETED_SOURCE_FALLBACK_RETRIES = 3;
   const COMPLETED_SOURCE_FALLBACK_RETRY_MS = 1200;
+  const pendingSafeReloads = new Set();
+
+  function queueSafeSourceReload(sessionId, opts = {}) {
+    if (!opts.generationCompleted && !opts.orphanDiscard) {
+      showToast('Waiting for variants to finish publishing. If they do not appear, reload this page.', 6500);
+      return;
+    }
+    if (pendingSafeReloads.has(sessionId)) return;
+    pendingSafeReloads.add(sessionId);
+    // The normal HMR path owns the DOM. Give it one last grace period before
+    // a full route reload; no source-derived bytes are sent to page JS.
+    setTimeout(() => {
+      pendingSafeReloads.delete(sessionId);
+      if (currentSessionId !== sessionId || (state !== 'GENERATING' && state !== 'CYCLING')) return;
+      const wrapper = document.querySelector('[data-impeccable-variants="' + sessionId + '"]');
+      const variantCount = wrapper?.querySelectorAll('[data-impeccable-variant]:not([data-impeccable-variant="original"])').length || 0;
+      const decision = sourceReloadGate?.decide({ id: sessionId,
+        completionMarker: 'published', completed: true, variantCount, expectedVariants }) || 'manual';
+      if (decision === 'reload') {
+        showToast('Reloading once to display the published variants.', 1800);
+        location.reload(); // preserves this route and its query without sending either to the helper
+      } else if (decision === 'manual') {
+        showToast('Automatic recovery already ran or tab storage is unavailable. Reload this page manually, or review the session in the trusted controller.', 7500);
+      }
+    }, 1800);
+  }
 
   /**
    * Terminal recovery for a session whose source-side scaffolding no longer
@@ -6190,9 +6123,9 @@
   }
 
   /**
-   * No-HMR fallback: fetch the raw source file from the live server,
-   * parse it, extract the variant wrapper, and inject it into the live DOM.
-   * This works even when the dev server caches HTML (Bun, static servers).
+   * Legacy no-HMR fallback. The helper now returns 410 for source-derived
+   * preview bytes so inspected-page JS cannot read unrendered source. Normal
+   * HMR mounts wrappers directly into the DOM without this route.
    *
    * opts.generationCompleted marks callers that KNOW the agent finished (a
    * `done` arrived or the server reported a completed generation). For them an
@@ -6206,9 +6139,14 @@
       return;
     }
     rememberSessionFileMeta({ file: filePath });
-    const url = 'http://localhost:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(filePath);
+    const url = 'http://localhost:' + PORT + '/page-preview?token=' + encodeURIComponent(TOKEN)
+      + '&id=' + encodeURIComponent(sessionId) + '&kind=wrapper';
     fetch(url)
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(r => {
+        if (r.status === 410) throw new Error('source_recovery_disabled');
+        if (!r.ok) throw new Error(r.status);
+        return r.text();
+      })
       .then(html => {
         const parser = new DOMParser();
         let srcWrapper = null;
@@ -6336,8 +6274,12 @@
         console.log('[impeccable] Injected ' + arrivedVariants + ' variants from source file.');
       })
       .catch(err => {
-        console.error('[impeccable] Failed to fetch source:', err);
-        showToast('Could not load variants. Try refreshing the page.', 5000);
+        if (err.message === 'source_recovery_disabled') {
+          queueSafeSourceReload(sessionId, opts);
+          return;
+        }
+        console.error('[impeccable] Failed to recover variants:', err);
+        showToast('Could not load variants. Try refreshing the page.', 6500);
       });
   }
 
@@ -7142,6 +7084,51 @@
   // unknown_session — which must mean "foreign leftovers", not "you raced
   // your own Go click". The gate serializes creation before progress.
   let sessionCreationGate = Promise.resolve();
+  let pendingGenerateApproval = null;
+
+  function beginGenerateApproval(id) {
+    pendingGenerateApproval?.settle(false);
+    let settle;
+    const promise = new Promise((resolve) => { settle = resolve; });
+    pendingGenerateApproval = { id, promise, settle };
+  }
+
+  async function sendGenerateForApproval(payload) {
+    showToast('Confirm generation in the trusted controller URL shown by impeccable live.', 6500);
+    const result = await sendEvent(payload);
+    const gate = pendingGenerateApproval;
+    if (gate?.id === payload.id) {
+      pendingGenerateApproval = null;
+      gate.settle(Boolean(result));
+    }
+    if (result && currentSessionId === payload.id) {
+      sendCheckpoint('generate_started');
+    } else if (!result && currentSessionId === payload.id) {
+      markSessionHandled();
+      cleanup({ instantChrome: true });
+      showToast('Generation was not approved or the live server could not be reached.', 5000);
+    }
+    return result;
+  }
+
+  async function waitForPageApproval(id) {
+    const deadline = Date.now() + 5 * 60 * 1000 + 5000;
+    while (Date.now() < deadline) {
+      const res = await fetch('http://localhost:' + PORT + '/page-approval/' + encodeURIComponent(id)
+        + '?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+      const result = await res.json().catch(() => ({}));
+      if (res.status === 202) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        continue;
+      }
+      if (!res.ok || result.status !== 'settled') throw new Error(result.error || 'Approval status unavailable');
+      if (result.eventStatus < 200 || result.eventStatus >= 300) {
+        throw new Error(result.body?.error || ('Controller action failed: HTTP ' + result.eventStatus));
+      }
+      return { ok: true, status: result.eventStatus };
+    }
+    throw new Error('Controller approval timed out');
+  }
 
   function sendEvent(msg, opts) {
     msg.token = TOKEN;
@@ -7160,6 +7147,13 @@
       headers: { 'Content-Type': 'application/json', 'X-Impeccable-Token': TOKEN },
       body: JSON.stringify(msg),
     }).then(async res => {
+      if (res.status === 202) {
+        const pending = await res.json();
+        if (!pending.pendingApproval || !/^[0-9a-f-]{36}$/.test(pending.id || '')) {
+          throw new Error('Invalid controller approval response');
+        }
+        return waitForPageApproval(pending.id);
+      }
       if (res.ok) return res;
       const body = await res.json().catch(() => ({}));
       // The server refused to journal progress for a session it has never
@@ -7180,7 +7174,9 @@
       sessionCreationGate = creation.then(() => {}, () => {});
       return creation;
     }
-    return sessionCreationGate.then(doSend);
+    const approvalGate = pendingGenerateApproval?.id === msg.id
+      ? pendingGenerateApproval.promise : Promise.resolve(true);
+    return approvalGate.then((approved) => approved ? sessionCreationGate.then(doSend) : null);
   }
 
   let abandonedForeignSessionId = null;
@@ -7625,7 +7621,7 @@
     if (editBadgeEl && editBadgeEl.style.display !== 'none') renderEditBadge('idle-disabled');
     showBar('generating');
     saveSession();
-    sendCheckpoint('generate_started');
+    beginGenerateApproval(currentSessionId);
     writeScrollY(window.scrollY);
     if (variantObserver) variantObserver.disconnect();
     variantObserver = startVariantObserver(currentSessionId);
@@ -7707,7 +7703,7 @@
     showBar('generating');
     startScrollTracking();
     saveSession();
-    sendCheckpoint('generate_started');
+    beginGenerateApproval(currentSessionId);
     writeScrollY(window.scrollY);
     if (variantObserver) variantObserver.disconnect();
     variantObserver = startVariantObserver(currentSessionId);
@@ -8029,7 +8025,7 @@
     // rasterization from delaying the fetch itself.
     if (!hasAnnotations) {
       basePayload.clientSentAt = Date.now();
-      await sendEvent(basePayload);
+      if (!await sendGenerateForApproval(basePayload)) return;
     }
 
     let screenshotPath;
@@ -8070,7 +8066,7 @@
     // is semantic input. Plain requests were already dispatched above.
     if (hasAnnotations) {
       basePayload.clientSentAt = Date.now();
-      sendEvent(screenshotPath ? { ...basePayload, screenshotPath } : basePayload);
+      void sendGenerateForApproval(screenshotPath ? { ...basePayload, screenshotPath } : basePayload);
     }
   }
 
@@ -10257,6 +10253,7 @@ void main() {
     steerRequestId = id;
     steerPendingMessage = text;
     lockSteerChat();
+    showToast('Confirm this action in the trusted controller URL shown by impeccable live.', 6500);
     scheduleSteerAwaitTimeout(id);
     // Checkpoints follow the steer event, never precede it: the steer event
     // is what creates the session journal server-side, and a checkpoint for
@@ -10627,7 +10624,7 @@ void main() {
   }
 
   function fetchAgentPollingStatus() {
-    fetch('http://localhost:' + PORT + '/status?token=' + TOKEN, { cache: 'no-store' })
+    fetch('http://localhost:' + PORT + '/page-status?token=' + TOKEN, { cache: 'no-store' })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data && typeof data.agentPolling === 'boolean') {
@@ -10823,7 +10820,7 @@ void main() {
         <span style="background:oklch(34% 0 0)"></span>
       </span>`,
       label: 'DESIGN.md',
-      ariaLabel: 'Toggle DESIGN.md panel',
+      ariaLabel: 'Read DESIGN.md in the trusted controller',
       labelFont: MONO,
       onClick: () => toggleDesignPanel(),
     });
@@ -10865,7 +10862,7 @@ void main() {
       boxShadow: '0 4px 16px oklch(0% 0 0 / 0.16), 0 1px 3px oklch(0% 0 0 / 0.1)',
       transition: 'filter 0.12s ease, transform 0.1s ease, box-shadow 0.18s ease',
     });
-    pendingPillEl.title = 'Apply copy edits to source';
+    pendingPillEl.title = 'Review copy edits in the trusted controller';
     pendingPillSpinnerEl = el('span', {
       display: 'none',
       width: '12px',
@@ -10880,7 +10877,7 @@ void main() {
       boxSizing: 'border-box',
     });
     pendingPillLabelEl = el('span', { lineHeight: '1', whiteSpace: 'nowrap' });
-    pendingPillLabelEl.textContent = 'Apply copy edits';
+    pendingPillLabelEl.textContent = 'Review copy edits';
     pendingPillCountEl = el('span', {
       display: 'inline-flex',
       alignItems: 'center',
@@ -10950,10 +10947,10 @@ void main() {
       textAlign: 'center',
       transition: 'opacity 0.16s ease, transform 0.18s ' + EASE,
     });
-    pendingTrashTooltipEl.textContent = 'Discard copy edits';
+    pendingTrashTooltipEl.textContent = 'Discard in trusted controller';
     pendingTrashTooltipEl.setAttribute('role', 'tooltip');
     pendingTrashBtn.appendChild(pendingTrashTooltipEl);
-    pendingTrashBtn.setAttribute('aria-label', 'Discard copy edits on this page');
+    pendingTrashBtn.setAttribute('aria-label', 'Discard copy edits in the trusted controller');
     const showTrashTooltip = () => {
       pendingTrashBtn.style.color = P.accent;
       pendingTrashBtn.style.boxShadow = '0 7px 22px oklch(0% 0 0 / 0.16), 0 2px 5px oklch(0% 0 0 / 0.1)';
@@ -11039,7 +11036,12 @@ void main() {
     exitBtn.title = 'Exit live mode';
     exitBtn.addEventListener('mouseenter', () => { exitBtn.style.color = 'oklch(58% 0.15 35)'; exitBtn.style.background = P.exitHover; });
     exitBtn.addEventListener('mouseleave', () => { exitBtn.style.color = P.textDim; exitBtn.style.background = 'transparent'; });
-    exitBtn.addEventListener('click', () => { sendEvent({ type: 'exit' }); teardown(); });
+    exitBtn.addEventListener('click', () => {
+      showToast('Confirm Exit in the trusted controller URL shown by impeccable live.', 6500);
+      sendEvent({ type: 'exit' }, { throwOnError: true })
+        .then(() => teardown())
+        .catch(() => showToast('Exit was not approved. Live mode is still active.', 5000));
+    });
     inner.appendChild(exitBtn);
 
     // Bar-level hover: expand mode labels unless Steer is using the space.
@@ -11744,39 +11746,14 @@ void main() {
   }
 
   function toggleDesignPanel() {
-    if (pendingApplyInFlight) { showManualApplyBusyToast(); return; }
-    designState.open = !designState.open;
-    renderDesignChrome();
-    updateGlobalBarState();
-    if (designState.open && designState.present === null && !designState.loading) {
-      fetchDesignSystem();
-    }
+    openTrustedController();
   }
 
   async function fetchDesignSystem() {
-    designState.loading = true;
-    designState.error = null;
+    // The inspected page cannot read design source. This legacy panel hook is
+    // retained only for old tab callbacks; the trusted controller owns reads.
+    designState.error = 'Open the trusted controller to read DESIGN.md.';
     renderDesignBody();
-    try {
-      const [jsonRes, rawRes] = await Promise.all([
-        fetch(`http://localhost:${PORT}/design-system.json?token=${TOKEN}`, { cache: 'no-store' }),
-        fetch(`http://localhost:${PORT}/design-system/raw?token=${TOKEN}`, { cache: 'no-store' }),
-      ]);
-      const jsonData = await jsonRes.json();
-      designState.present = jsonData.present === true;
-      designState.parsed = jsonData.parsed || null;
-      designState.sidecar = jsonData.sidecar || null;
-      designState.hasMd = !!jsonData.hasMd;
-      designState.hasSidecar = !!jsonData.hasSidecar;
-      designState.mdNewerThanJson = !!jsonData.mdNewerThanJson;
-      designState.raw = designState.present && rawRes.ok ? await rawRes.text() : null;
-      designState.error = jsonData.parseError || jsonData.sidecarError || null;
-    } catch (err) {
-      designState.error = err?.message || 'Failed to load design system.';
-    } finally {
-      designState.loading = false;
-      renderDesignChrome(); // refresh title from data
-    }
   }
 
   function renderDesignBody() {

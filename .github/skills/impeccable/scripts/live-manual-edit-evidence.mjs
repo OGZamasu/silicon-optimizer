@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './lib/is-generated.mjs';
-import { readBuffer, getBufferPath } from './live/manual-edits-buffer.mjs';
+import { readBuffer } from './live/manual-edits-buffer.mjs';
 
 const EVIDENCE_VERSION = 1;
 const TEXT_EXTENSIONS = new Set([
@@ -41,11 +41,11 @@ const SKIP_DIRS = new Set([
   'coverage',
 ]);
 
-export function buildManualEditEvidence({ cwd = process.cwd(), pageUrl = null } = {}) {
-  const buffer = readBuffer(cwd);
-  const entries = pageUrl
-    ? buffer.entries.filter((entry) => entry.pageUrl === pageUrl)
-    : buffer.entries;
+export function buildManualEditEvidence({ cwd = process.cwd(), pageUrl = null, entries: reviewedEntries = null } = {}) {
+  const entries = reviewedEntries || (() => {
+    const buffer = readBuffer(cwd);
+    return pageUrl ? buffer.entries.filter((entry) => entry.pageUrl === pageUrl) : buffer.entries;
+  })();
   const opCount = countOps(entries);
 
   if (opCount === 0) {
@@ -69,7 +69,9 @@ export function buildManualEditEvidence({ cwd = process.cwd(), pageUrl = null } 
     ops,
     context: {
       cwd,
-      bufferPath: path.relative(cwd, getBufferPath(cwd)),
+      // The staging buffer is private state outside the app/workspace. Agents
+      // receive the reviewed batch in the poll event and fetch any extra
+      // evidence through the authenticated poll CLI, never by opening it.
       totalEntries: entries.length,
       totalOps: opCount,
     },
