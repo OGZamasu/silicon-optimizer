@@ -14,6 +14,26 @@ extension AppModel {
     @discardableResult
     func startPairingInvite() -> String? {
         guard pairingServer == nil else { return nil }
+        guard pairingApprovalTask == nil, pairingStopTask == nil else {
+            return "The previous invite is still cleaning up member keys. Try again shortly."
+        }
+        if let cleanup = pairingCleanupNeeded {
+            pairingCleanupNeeded = nil
+            pairingStopTask = Task {
+                let failed = await revokeMintedPairingTokens(
+                    cleanup.peers, clientName: cleanup.clientName, admin: cleanup.admin
+                )
+                if failed.isEmpty {
+                    alert = AlertContent(
+                        title: "Member key cleanup complete",
+                        message: "The previous keys were revoked. You can reopen the invite."
+                    )
+                }
+                pairingStopTask = nil
+            }
+            return "A previous member key may remain. Retrying cleanup; reopen the invite "
+                + "when it finishes."
+        }
         guard let address = SwarmPairing.tailnetIPv4() else {
             return "This Mac has no tailscale address. Join the tailnet first — "
                 + "pairing rides on it."
@@ -44,6 +64,8 @@ extension AppModel {
         pairingAddress = address
         pairingRequest = nil
         pairingDelivered = false
+        pairingApprovalState = .idle
+        pairingApprovalAdmin = nil
         pairingApprovalError = nil
         startPairingPoll()
         return nil
@@ -51,12 +73,23 @@ extension AppModel {
 
     func stopPairingInvite() {
         let server = pairingServer
+        let admin = pairingApprovalAdmin
         pairingServer = nil
         pairingRequest = nil
         pairingDelivered = false
+        pairingApprovalState = .idle
+        pairingApprovalAdmin = nil
         pairingPollTask?.cancel()
         pairingPollTask = nil
-        Task { await server?.stop() }
+        guard let server else { return }
+        pairingStopTask = Task {
+            if let undelivered = await server.stopAndTakeUndeliveredApproval() {
+                _ = await revokeMintedPairingTokens(
+                    undelivered.payload.peers, clientName: undelivered.clientName, admin: admin
+                )
+            }
+            pairingStopTask = nil
+        }
     }
 
     /// Approval mints the joiner their OWN credential on every node that can issue one
@@ -65,17 +98,34 @@ extension AppModel {
     /// activity logs then name the member on every job, and one member can be revoked
     /// without rotating everyone.
     func approvePairing(_ id: String) {
+        guard let config = SwarmConfig.load() else { return }
+        approvePairing(id, using: config)
+    }
+
+    /// The config is passed in so the approval transaction can be exercised against
+    /// a loopback node without replacing the owner's real swarm.json in tests.
+    func approvePairing(_ id: String, using config: SwarmConfig) {
         guard let server = pairingServer,
-              let joinerName = pairingRequest?.name,
-              let config = SwarmConfig.load()
+              let request = pairingRequest, request.id == id,
+              !pairingDelivered,
+              pairingApprovalState == .idle, pairingApprovalTask == nil,
+              pairingCleanupNeeded == nil
         else { return }
-        Task {
+        let joinerName = request.name
+        pairingApprovalState = .minting(id)
+        pairingApprovalAdmin = config.effectiveToken
+        pairingApprovalError = nil
+        pairingApprovalTask = Task {
+            defer { pairingApprovalTask = nil }
             var released = SwarmConfig(swarmToken: nil, peers: [])
             var mintedPeers: [SwarmPeer] = []
             var blocked: [String] = []
             for peer in config.peers {
+                guard pairingServer === server,
+                      pairingApprovalState == .minting(id) else { break }
                 switch await self.mintClientToken(
-                    on: peer, clientName: joinerName, admin: config.effectiveToken
+                    on: peer, clientName: joinerName, admin: config.effectiveToken,
+                    replacingExisting: false
                 ) {
                 case .minted(let token, _):
                     mintedPeers.append(SwarmPeer(
@@ -83,40 +133,111 @@ extension AppModel {
                     ))
                 case .unsupported:
                     blocked.append("\(peer.name) needs the per-member key update")
+                case .nameConflict:
+                    if joinerName == localMachineName {
+                        blocked.append("\(joinerName) already has a key on \(peer.name). "
+                            + "Rename the joining Mac, then close and reopen this invite")
+                    } else {
+                        blocked.append("\(joinerName) already has a key on \(peer.name). "
+                            + "Close this invite, revoke that member in Swarm → Members, "
+                            + "then invite again")
+                    }
                 case .failed:
                     blocked.append("\(peer.name) could not issue a key")
                 }
             }
-            guard blocked.isEmpty else {
-                // Do not leave credentials behind after an all-or-nothing approval attempt.
-                for peer in mintedPeers {
-                    _ = await self.revokeClientToken(
-                        on: peer, clientName: joinerName, admin: config.effectiveToken
-                    )
+            guard blocked.isEmpty, pairingServer === server,
+                  pairingApprovalState == .minting(id) else {
+                let failedCleanup = await revokeMintedPairingTokens(
+                    mintedPeers, clientName: joinerName, admin: config.effectiveToken
+                )
+                guard pairingServer === server else { return }
+                if pairingApprovalState == .cancelling(id) {
+                    await server.deny(id)
+                    guard pairingServer === server,
+                          pairingApprovalState == .cancelling(id) else { return }
+                    if pairingRequest?.id == id { pairingRequest = nil }
+                    pairingApprovalState = .idle
+                    pairingApprovalAdmin = nil
+                    pairingApprovalError = failedCleanup.isEmpty ? nil
+                        : "Some member keys may remain. Revoke them before another invite."
+                } else if pairingApprovalState == .minting(id) {
+                    pairingApprovalState = .idle
+                    pairingApprovalAdmin = nil
+                    pairingApprovalError = blocked.joined(separator: "; ")
+                        + (failedCleanup.isEmpty
+                            ? ". Approval was not delivered. Update or reconnect those nodes, then retry."
+                            : ". Approval was not delivered, but some member keys may remain. "
+                                + "Revoke them before retrying.")
                 }
-                self.pairingApprovalError = blocked.joined(separator: "; ")
-                    + ". No credentials were shared. Update or reconnect those nodes, then retry."
                 return
             }
             released.peers = mintedPeers
-            self.pairingApprovalError = nil
-            await server.approve(id, releasing: released)
+            // Once committing begins, the UI no longer offers Deny. The server's
+            // result decides whether these keys belong to a joiner or need revocation.
+            pairingApprovalState = .committing(id)
+            guard await server.approve(id, releasing: released) else {
+                let failedCleanup = await revokeMintedPairingTokens(
+                    mintedPeers, clientName: joinerName, admin: config.effectiveToken
+                )
+                guard pairingServer === server,
+                      pairingApprovalState == .committing(id) else { return }
+                pairingApprovalState = .idle
+                pairingApprovalAdmin = nil
+                pairingRequest = nil
+                pairingApprovalError = failedCleanup.isEmpty
+                    ? "This pairing request is no longer pending."
+                    : "This request is no longer pending, but some member keys may remain. "
+                        + "Revoke them before another invite."
+                return
+            }
+            if pairingServer === server, pairingApprovalState == .committing(id) {
+                pairingApprovalState = .committed(id)
+            }
         }
+    }
+
+    /// Revocation is by member name on each node. Keep failed cleanup visible to the
+    /// owner; a failed DELETE cannot be treated as proof that a key is gone.
+    private func revokeMintedPairingTokens(
+        _ peers: [SwarmPeer], clientName: String, admin: String?
+    ) async -> [SwarmPeer] {
+        var failed: [SwarmPeer] = []
+        for peer in peers {
+            if !(await revokeClientToken(
+                on: peer, clientName: clientName, admin: admin
+            )) {
+                failed.append(peer)
+            }
+        }
+        if !failed.isEmpty {
+            pairingCleanupNeeded = PairingCleanupNeeded(
+                clientName: clientName, peers: failed, admin: admin
+            )
+            alert = AlertContent(
+                title: "Could not revoke member keys",
+                message: "Revoke \(clientName) on \(failed.map(\.name).joined(separator: ", ")) before "
+                    + "inviting another device."
+            )
+        }
+        return failed
     }
 
     enum ClientTokenMintResult: Equatable, Sendable {
         case minted(String, role: String? = nil)
         case unsupported
+        case nameConflict
         case failed
     }
 
     /// Mints a per-client token on one node using the admin credential. Legacy absence and
     /// operational failure are deliberately distinct, and neither can release the admin
-    /// credential. A 409 means the name already has a token there; since only admins
-    /// reach this path, replace it (revoke, re-mint) so pairing the same machine
-    /// twice heals rather than fails.
+    /// credential. A 409 means the name already has a token there. Owner self-provisioning
+    /// may replace that token; pairing may not, because a later Deny cannot restore the
+    /// previous member's credential.
     func mintClientToken(
-        on peer: SwarmPeer, clientName: String, admin: String?, role: String = "member"
+        on peer: SwarmPeer, clientName: String, admin: String?, role: String = "member",
+        replacingExisting: Bool = true
     ) async -> ClientTokenMintResult {
         guard let admin,
               let clientName = SwarmPairing.normalizedClientName(clientName)
@@ -141,6 +262,7 @@ extension AppModel {
         let first = Self.classifyClientTokenResponse(status: status, body: body)
         if case .minted = first { return first }
         if status == 409 {
+            guard replacingExisting else { return .nameConflict }
             guard await revokeClientToken(
                 on: peer, clientName: clientName, admin: admin
             ), let (retryStatus, retryBody) = await attempt() else { return .failed }
@@ -304,21 +426,61 @@ extension AppModel {
     }
 
     func denyPairing(_ id: String) {
-        guard let server = pairingServer else { return }
-        pairingRequest = nil
+        guard let server = pairingServer, pairingRequest?.id == id,
+              !pairingDelivered else { return }
         pairingApprovalError = nil
-        Task { await server.deny(id) }
+        switch pairingApprovalState {
+        case .idle:
+            pairingApprovalState = .cancelling(id)
+            Task {
+                await server.deny(id)
+                guard pairingServer === server,
+                      pairingApprovalState == .cancelling(id) else { return }
+                if pairingRequest?.id == id { pairingRequest = nil }
+                pairingApprovalState = .idle
+            }
+        case .minting(let activeID) where activeID == id:
+            // The in-flight mint is allowed to finish, then its keys are revoked
+            // without holding the invitation slot or delivering them to the joiner.
+            pairingApprovalState = .cancelling(id)
+            Task { await server.deny(id) }
+        case .committing(let activeID) where activeID == id,
+             .committed(let activeID) where activeID == id:
+            pairingApprovalError = "Approval has already been committed. "
+                + "Revoke this member from the People panel if needed."
+        default:
+            break
+        }
     }
 
-    private func startPairingPoll() {
+    func startPairingPoll() {
         pairingPollTask?.cancel()
         pairingPollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let server = self.pairingServer else { return }
                 let pending = await server.pending()
                 let delivered = await server.wasDelivered()
-                self.pairingRequest = pending
-                if delivered { self.pairingDelivered = true }
+                guard self.pairingServer === server else { return }
+                if let pending {
+                    self.pairingRequest = pending
+                } else if case .cancelling(let id) = self.pairingApprovalState,
+                          self.pairingRequest?.id == id {
+                    // Keep cleanup visible even after the denial frees the server slot.
+                } else if case .committing(let id) = self.pairingApprovalState,
+                          self.pairingRequest?.id == id {
+                    // Keep the approval state visible until the joiner collects it.
+                } else if case .committed(let id) = self.pairingApprovalState,
+                          self.pairingRequest?.id == id {
+                    // The server no longer calls an approved request pending.
+                } else {
+                    self.pairingRequest = nil
+                }
+                if delivered {
+                    self.pairingDelivered = true
+                    self.pairingRequest = nil
+                    self.pairingApprovalState = .idle
+                    self.pairingApprovalAdmin = nil
+                }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
