@@ -32,6 +32,8 @@ extension AppModel {
 
         let runtime = qwenRuntime ?? QwenCodeRuntime()
         qwenRuntime = runtime
+        qwenLifecycleGeneration &+= 1
+        let generation = qwenLifecycleGeneration
         qwenState = .starting(stage: "Looking for Node.js…")
         registerQwenTermination()
         // Warm the swarm view so node models make the generated settings.
@@ -56,32 +58,58 @@ extension AppModel {
                 models: models,
                 defaultModel: defaultModel, nodePath: nodePath
             ) { [weak self] state in
-                Task { @MainActor in self?.qwenState = state }
+                Task { @MainActor in self?.applyQwenRuntimeState(state, generation: generation) }
             }
             let pid = await runtime.processIdentifier
-            await MainActor.run { [weak self] in self?.qwenProcessID = pid }
+            await MainActor.run { [weak self] in
+                self?.applyQwenProcessID(pid, generation: generation)
+            }
+        }
+    }
+
+    func applyQwenRuntimeState(_ state: RuntimeState, generation: Int) {
+        guard qwenLifecycleGeneration == generation else { return }
+        if case .failed = qwenState { return }
+        if case .ready = qwenState, case .starting = state { return }
+        qwenState = state
+        if case .failed = state { qwenProcessID = nil }
+    }
+
+    func applyQwenProcessID(_ pid: Int32?, generation: Int) {
+        guard qwenLifecycleGeneration == generation else { return }
+        switch qwenState {
+        case .starting, .ready: qwenProcessID = pid
+        case .idle, .stopping, .failed: break
         }
     }
 
     public func stopQwen() {
         guard let runtime = qwenRuntime else { return }
-        qwenState = .stopping
-        qwenProcessID = nil
-        Task {
-            await runtime.stop()
-            await MainActor.run { [weak self] in self?.qwenState = .idle }
-        }
-    }
-
-    public func restartQwen() {
-        guard let runtime = qwenRuntime else { return startQwenIfNeeded() }
+        qwenLifecycleGeneration &+= 1
+        let generation = qwenLifecycleGeneration
         qwenState = .stopping
         qwenProcessID = nil
         Task {
             await runtime.stop()
             await MainActor.run { [weak self] in
-                self?.qwenState = .idle
-                self?.startQwenIfNeeded()
+                guard let self, self.qwenLifecycleGeneration == generation else { return }
+                self.qwenState = .idle
+            }
+        }
+    }
+
+    public func restartQwen() {
+        guard let runtime = qwenRuntime else { return startQwenIfNeeded() }
+        qwenLifecycleGeneration &+= 1
+        let generation = qwenLifecycleGeneration
+        qwenState = .stopping
+        qwenProcessID = nil
+        Task {
+            await runtime.stop()
+            await MainActor.run { [weak self] in
+                guard let self, self.qwenLifecycleGeneration == generation else { return }
+                self.qwenState = .idle
+                self.startQwenIfNeeded()
             }
         }
     }

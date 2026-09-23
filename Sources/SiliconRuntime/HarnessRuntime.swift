@@ -4,9 +4,10 @@ import SiliconControl
 
 /// Manages the DeepSeek Harness (`dsh`) sidecar that powers the agentic chat experience.
 ///
-/// The harness is a Node.js application, launched with `npx` and served as a local web UI the
-/// app embeds. It brings what the built-in chat lacks — tool use, web fetch and search, file
-/// access, a real agent loop — while the model itself keeps being served by this app's own
+/// The harness is a Node.js application, installed from a bundled integrity lock and served
+/// as a local web UI the app embeds. It brings what the built-in chat lacks — tool use,
+/// web fetch and search, file access, a real agent loop — while the model itself keeps
+/// being served by this app's own
 /// llama-server, which the harness reaches as a custom OpenAI-compatible provider.
 ///
 /// Isolation matters here: the process runs under its own `DSH_HOME` inside Application
@@ -15,7 +16,7 @@ public actor HarnessRuntime {
 
     /// Pinned rather than `@latest`: the harness is in developer preview and promises breaking
     /// changes, so an untested version must never arrive silently under our generated config.
-    public static let packageSpec = "@deepseek-ai/dsh@0.1.0-rc.7"
+    public static let packageSpec = AgentPackage.harness.spec
 
     /// The provider id the harness knows our local server by. Permanent once chosen — saved
     /// harness sessions and its model defaults reference it — so never rename it.
@@ -27,9 +28,15 @@ public actor HarnessRuntime {
     static let gatewayKeyVariable = "SILICON_GATEWAY_KEY"
 
     private var process: ServerProcess?
+    private var installationTask: Task<InstalledAgentPackage, any Error>?
+    private var startupGeneration = 0
     public private(set) var processIdentifier: Int32?
 
     public init() {}
+    init(testProcess: ServerProcess, testPID: Int32) {
+        process = testProcess
+        processIdentifier = testPID
+    }
 
     // MARK: - Locations
 
@@ -65,32 +72,72 @@ public actor HarnessRuntime {
 
     // MARK: - Node discovery
 
-    /// The oldest Node.js the harness runs on: it imports `util.parseEnv`, which appeared in
-    /// 20.12. Machines accumulate stale nodes — a leftover installer in /usr/local outlives
-    /// years of newer ones elsewhere — so age must be checked, not assumed.
+    /// The shared discovery floor used by Codex and other Node-backed features.
     public static let minimumNodeVersion = (major: 20, minor: 12, patch: 0)
+    /// The Harness lock includes pi-ai, which requires a newer Node.
+    public static let harnessMinimumNodeVersion = (major: 22, minor: 19, patch: 0)
 
     /// What the search saw, kept so a failure can say "found v20.10, too old" instead of the
     /// misleading "not found" when a node exists but cannot run the harness.
     public struct NodeDiscovery: Sendable {
         public var node: URL?
-        /// The newest candidate rejected for age, when no candidate qualified.
+        /// The newest candidate rejected for version compatibility, when none qualified.
         public var rejectedPath: String?
         public var rejectedVersion: String?
+        /// That candidate's Node was new enough, but the npm beside it was not — the
+        /// usual state of a Node 22 install, and fixed by updating npm, not Node.
+        public var rejectedForNpm = false
+
+        /// The sentence a failure message gives about the rejected candidate, if any.
+        public var rejectionSentence: String? {
+            guard let rejectedPath, let rejectedVersion else { return nil }
+            guard rejectedForNpm else {
+                return "Found \(rejectedVersion) at \(rejectedPath), which is incompatible. "
+            }
+            // Updating npm inside a Node some other app keeps for itself would change that
+            // app, so that advice is only given for a Node that is the user's own.
+            if HarnessRuntime.isGeneralPurposeNode(rejectedPath) {
+                return "Found \(rejectedVersion) at \(rejectedPath), but the npm beside it is "
+                    + "older than 11.19 — update it with `npm install -g npm@11`. "
+            }
+            return "Found \(rejectedVersion) at \(rejectedPath), but it belongs to another tool and "
+                + "its npm is older than 11.19. Set the Node.js path in Settings to a Node "
+                + "with npm 11.19 or newer. "
+        }
+    }
+
+    /// A Node installed to be the user's Node — Homebrew, MacPorts, the nodejs.org installer or
+    /// a version manager — rather than one another app keeps privately (found through a
+    /// symlink into its own folder, say).
+    static func isGeneralPurposeNode(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let roots = ["/opt/homebrew/", "/usr/local/", "/opt/local/"] + [
+            ".nvm/", ".local/share/fnm/", ".fnm/", ".volta/", ".vite-plus/", ".asdf/",
+            ".local/share/mise/", ".nodenv/", "n/",
+        ].map { "\(home)/\($0)" }
+        return roots.contains { resolved.hasPrefix($0) }
     }
 
     /// Finds the newest usable Node.js the way a person would, because a GUI app inherits
     /// almost no PATH from launchd and "install Node" must not mean "edit a plist".
     ///
     /// Every candidate is version-probed; the newest one at or above the floor wins, except
-    /// that a qualifying user-supplied path always wins. A candidate without `npx` beside it
-    /// is skipped rather than fatal — some package managers ship the bare binary.
-    public static func locateNode(customPath: String = "") -> NodeDiscovery {
+    /// that a qualifying user-supplied path always wins. Verified sidecars require an npm
+    /// 11.19-compatible Node and adjacent npm 11.19+; the default path retains the existing npx
+    /// discovery behavior for other Node-backed features.
+    public static func locateNode(
+        customPath: String = "",
+        minimumVersion: (major: Int, minor: Int, patch: Int) = minimumNodeVersion,
+        requiresNpm11: Bool = false
+    ) -> NodeDiscovery {
         let manager = FileManager.default
         let home = manager.homeDirectoryForCurrentUser.path
 
-        if !customPath.isEmpty, usable(nodeAt: customPath),
-           let version = nodeVersion(at: customPath), meetsFloor(version) {
+        if !customPath.isEmpty, usable(nodeAt: customPath, requiresNpm11: requiresNpm11),
+           let version = nodeVersion(at: customPath),
+           qualifies(version, nodeAt: customPath, minimumVersion: minimumVersion,
+                     requiresNpm11: requiresNpm11) {
             return NodeDiscovery(node: URL(fileURLWithPath: customPath))
         }
 
@@ -106,6 +153,7 @@ public actor HarnessRuntime {
             "/usr/local/bin/node",
             "/opt/local/bin/node",
             "\(home)/.volta/bin/node",
+            "\(home)/.vite-plus/bin/node",
             "\(home)/.bun/bin/node",
             "\(home)/.local/bin/node",
         ]
@@ -125,43 +173,51 @@ public actor HarnessRuntime {
             candidates += path.split(separator: ":").map { "\($0)/node" }
         }
 
-        var discovery = pick(from: candidates, includingRejected: customPath)
+        let discovery = pick(
+            from: candidates, includingRejected: customPath, minimumVersion: minimumVersion,
+            requiresNpm11: requiresNpm11
+        )
         if discovery.node != nil { return discovery }
 
-        // Last resort: ask the user's login shell, which sees their real PATH. Expensive, so
-        // only when nothing above qualified.
+        // Last resort: ask the user's login shells, which see their real PATH, for every node
+        // on it — not just the first, whose npm may be the one that is too old — and pick
+        // the newest that qualifies from everything seen. Expensive, so only when nothing
+        // above qualified.
         var shellCandidates: [String] = []
         for shellArguments in [["-l", "-c"], ["-i", "-l", "-c"]] {
-            if let found = shellLookup(arguments: shellArguments + ["command -v node"]) {
-                shellCandidates.append(found)
-            }
+            shellCandidates += shellLookup(arguments: shellArguments + ["whence -ap node"])
         }
-        let fromShell = pick(from: shellCandidates, includingRejected: nil)
-        if fromShell.node != nil { return fromShell }
-        if discovery.rejectedPath == nil { discovery = fromShell }
-        return discovery
+        guard !shellCandidates.isEmpty else { return discovery }
+        return pick(
+            from: candidates + shellCandidates, includingRejected: customPath,
+            minimumVersion: minimumVersion, requiresNpm11: requiresNpm11
+        )
     }
 
-    private static func pick(
-        from candidates: [String], includingRejected extraCandidate: String?
+    static func pick(
+        from candidates: [String], includingRejected extraCandidate: String?,
+        minimumVersion: (major: Int, minor: Int, patch: Int), requiresNpm11: Bool
     ) -> NodeDiscovery {
         var probed = Set<String>()
         var best: (url: URL, version: (Int, Int, Int))?
-        var rejected: (path: String, version: (Int, Int, Int))?
+        var rejected: (path: String, version: (Int, Int, Int), npm: Bool)?
 
         var all = candidates
         if let extraCandidate, !extraCandidate.isEmpty { all.append(extraCandidate) }
 
-        for candidate in all where usable(nodeAt: candidate) {
+        for candidate in all where usable(nodeAt: candidate, requiresNpm11: requiresNpm11) {
             let resolved = URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path
             guard probed.insert(resolved).inserted else { continue }
             guard let version = nodeVersion(at: candidate) else { continue }
-            if meetsFloor(version) {
+            let nodeQualifies = meetsFloor(version, minimumVersion, requiresNpm11: requiresNpm11)
+            if nodeQualifies, !requiresNpm11 || AgentPackageInstaller.supportsAuditedNpm(
+                beside: URL(fileURLWithPath: candidate)
+            ) {
                 if best == nil || version > best!.version {
                     best = (URL(fileURLWithPath: candidate), version)
                 }
             } else if rejected == nil || version > rejected!.version {
-                rejected = (candidate, version)
+                rejected = (candidate, version, nodeQualifies)
             }
         }
 
@@ -169,21 +225,40 @@ public actor HarnessRuntime {
         return NodeDiscovery(
             node: nil,
             rejectedPath: rejected?.path,
-            rejectedVersion: rejected.map { "v\($0.version.0).\($0.version.1).\($0.version.2)" }
+            rejectedVersion: rejected.map { "v\($0.version.0).\($0.version.1).\($0.version.2)" },
+            rejectedForNpm: rejected?.npm ?? false
         )
     }
 
-    /// Executable, with the `npx` launcher beside it — the harness is started through npx.
-    private static func usable(nodeAt path: String) -> Bool {
+    /// Executable, with the launcher required by the caller beside it.
+    private static func usable(nodeAt path: String, requiresNpm11: Bool) -> Bool {
         let manager = FileManager.default
         guard manager.isExecutableFile(atPath: path) else { return false }
-        let npx = URL(fileURLWithPath: path).deletingLastPathComponent()
-            .appendingPathComponent("npx").path
-        return manager.isExecutableFile(atPath: npx)
+        let companion = URL(fileURLWithPath: path).deletingLastPathComponent()
+            .appendingPathComponent(requiresNpm11 ? "npm" : "npx").path
+        return manager.isExecutableFile(atPath: companion)
     }
 
-    private static func meetsFloor(_ version: (Int, Int, Int)) -> Bool {
-        version >= (minimumNodeVersion.major, minimumNodeVersion.minor, minimumNodeVersion.patch)
+    private static func meetsFloor(
+        _ version: (Int, Int, Int), _ floor: (major: Int, minor: Int, patch: Int),
+        requiresNpm11: Bool
+    ) -> Bool {
+        version >= (floor.major, floor.minor, floor.patch)
+            && (!requiresNpm11 || supportsNpm11(version))
+    }
+
+    private static func qualifies(
+        _ version: (Int, Int, Int), nodeAt path: String,
+        minimumVersion: (major: Int, minor: Int, patch: Int), requiresNpm11: Bool
+    ) -> Bool {
+        meetsFloor(version, minimumVersion, requiresNpm11: requiresNpm11)
+            && (!requiresNpm11 || AgentPackageInstaller.supportsAuditedNpm(
+                beside: URL(fileURLWithPath: path)
+            ))
+    }
+
+    static func supportsNpm11(_ version: (Int, Int, Int)) -> Bool {
+        (version.0 == 20 && version >= (20, 17, 0)) || version >= (22, 9, 0)
     }
 
     /// Parses `v24.19.0`-style output into a comparable triple.
@@ -219,7 +294,7 @@ public actor HarnessRuntime {
         return parseNodeVersion(output)
     }
 
-    private static func shellLookup(arguments: [String]) -> String? {
+    private static func shellLookup(arguments: [String]) -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = arguments
@@ -227,7 +302,7 @@ public actor HarnessRuntime {
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
+        guard (try? process.run()) != nil else { return [] }
 
         // An interactive shell with an exotic prompt setup can hang; give it a bounded wait
         // rather than trusting it.
@@ -237,15 +312,15 @@ public actor HarnessRuntime {
         }
         if process.isRunning {
             process.terminate()
-            return nil
+            return []
         }
         guard process.terminationStatus == 0,
               let data = try? pipe.fileHandleForReading.readToEnd(),
               let output = String(data: data, encoding: .utf8)
-        else { return nil }
-        let lines = output.split(separator: "\n").map(String.init)
-        // Interactive startup files may print banners; the path is the last line.
-        return lines.last { $0.hasPrefix("/") }
+        else { return [] }
+        // Interactive startup files may print banners; only paths to a node count.
+        return output.split(separator: "\n").map(String.init)
+            .filter { $0.hasPrefix("/") && $0.hasSuffix("/node") }
     }
 
     // MARK: - Provider configuration
@@ -583,14 +658,19 @@ public actor HarnessRuntime {
         gatewayToken: String? = nil,
         onState: @escaping @Sendable (RuntimeState) -> Void
     ) async {
-        await stop()
+        let generation = await stopAndGetGeneration()
+        guard generation == startupGeneration else { return }
 
-        let discovery = Self.locateNode(customPath: nodePath)
+        let discovery = Self.locateNode(
+            customPath: nodePath, minimumVersion: Self.harnessMinimumNodeVersion,
+            requiresNpm11: true
+        )
         guard let node = discovery.node else {
-            let floor = Self.minimumNodeVersion
-            var message = "The harness needs Node.js \(floor.major).\(floor.minor) or newer. "
-            if let path = discovery.rejectedPath, let version = discovery.rejectedVersion {
-                message += "Found \(version) at \(path), which is too old. "
+            let floor = Self.harnessMinimumNodeVersion
+            var message = "The harness needs Node.js \(floor.major).\(floor.minor) or newer "
+                + "with npm 11.19 or newer. "
+            if let rejection = discovery.rejectionSentence {
+                message += rejection
             } else {
                 message += "None was found. "
             }
@@ -599,8 +679,6 @@ public actor HarnessRuntime {
             onState(.failed(message: message))
             return
         }
-
-        let npx = node.deletingLastPathComponent().appendingPathComponent("npx")
 
         let home = Self.homeDirectory
         do {
@@ -629,12 +707,26 @@ public actor HarnessRuntime {
         }
 
         onState(.starting(stage:
-            "Starting DeepSeek Harness… the first run downloads it and can take a few minutes."
+            "Verifying DeepSeek Harness… the first run downloads it and can take a few minutes."
         ))
+
+        let installed: InstalledAgentPackage
+        do {
+            let task = Task { try await AgentPackageInstaller.install(.harness, node: node) }
+            installationTask = task
+            installed = try await task.value
+        } catch {
+            if generation == startupGeneration { installationTask = nil }
+            guard generation == startupGeneration else { return }
+            onState(.failed(message: error.localizedDescription))
+            return
+        }
+        if generation == startupGeneration { installationTask = nil }
+        guard generation == startupGeneration else { return }
 
         // The `--profile web` root form rather than the `web` subcommand: `--patch` is a
         // launcher flag, and the launcher only accepts it ahead of profile arguments.
-        var arguments = ["--yes", Self.packageSpec, "--profile", "web"]
+        var arguments = [installed.bin.path, "--profile", "web"]
         if let overlayPath {
             arguments += ["--patch", overlayPath]
         }
@@ -643,8 +735,7 @@ public actor HarnessRuntime {
         let process = ServerProcess()
         self.process = process
         do {
-            // PATH must contain node's directory: npx is a script whose shebang resolves
-            // `env node`, and a launchd-spawned app offers almost nothing in PATH.
+            // PATH keeps any child Node processes on the same selected runtime.
             let path = "\(node.deletingLastPathComponent().path):/usr/bin:/bin:/usr/sbin:/sbin"
             var environment = [
                 "DSH_HOME": home.path,
@@ -661,33 +752,48 @@ public actor HarnessRuntime {
                 environment[Self.gatewayKeyVariable] = gatewayToken
             }
             try await process.start(
-                executable: npx,
+                executable: node,
                 arguments: arguments,
                 environment: environment,
                 inheritEnvironment: false,
                 currentDirectory: home
             )
+            guard generation == startupGeneration else {
+                await process.terminate()
+                return
+            }
         } catch {
-            onState(.failed(message: error.localizedDescription))
+            guard generation == startupGeneration else { return }
+            await stop()
+            if startupGeneration == generation + 1 {
+                onState(.failed(message: error.localizedDescription))
+            }
             return
         }
-        processIdentifier = await process.pid
+        let pid = await process.pid
+        guard generation == startupGeneration else { return }
+        processIdentifier = pid
 
         let url = URL(string: "http://127.0.0.1:\(webPort)")!
-        if await waitUntilServing(url: url, process: process) {
+        let serving = await waitUntilServing(url: url, process: process)
+        guard generation == startupGeneration else { return }
+        if serving {
             onState(.ready(endpoint: url))
+            Task { await observeReadyProcess(process, generation: generation, onState: onState) }
         } else {
             let log = await process.log
+            guard generation == startupGeneration else { return }
             await stop()
-            onState(.failed(message:
-                "The harness did not come up. Last output:\n"
-                + log.split(separator: "\n").suffix(6).joined(separator: "\n")
-            ))
+            if startupGeneration == generation + 1 {
+                onState(.failed(message:
+                    "The harness did not come up. Last output:\n"
+                    + log.split(separator: "\n").suffix(6).joined(separator: "\n")
+                ))
+            }
         }
     }
 
-    /// Polls the web UI until it answers. The generous deadline is for npx's first-run
-    /// download, not for the server itself, which is up within seconds once installed.
+    /// Polls the web UI until it answers after the verified package is installed.
     private func waitUntilServing(url: URL, process: ServerProcess) async -> Bool {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 2
@@ -706,9 +812,55 @@ public actor HarnessRuntime {
     }
 
     public func stop() async {
-        guard let process else { return }
-        await process.terminate()
+        _ = await stopAndGetGeneration()
+    }
+
+    private func stopAndGetGeneration() async -> Int {
+        startupGeneration &+= 1
+        let generation = startupGeneration
+        installationTask?.cancel()
+        installationTask = nil
+        let stoppedProcess = process
         self.process = nil
         processIdentifier = nil
+        if let stoppedProcess { await stoppedProcess.terminate() }
+        return generation
+    }
+
+    func observeReadyProcess(
+        _ observed: ServerProcess, generation: Int,
+        pollInterval: Duration = .seconds(1),
+        onState: @escaping @Sendable (RuntimeState) -> Void
+    ) async {
+        while await observed.isRunning {
+            try? await Task.sleep(for: pollInterval)
+        }
+        await cleanupExitedProcess(observed, generation: generation, onState: onState)
+    }
+
+    private func cleanupExitedProcess(
+        _ ended: ServerProcess, generation: Int,
+        onState: @escaping @Sendable (RuntimeState) -> Void
+    ) async {
+        guard generation == startupGeneration, process === ended else { return }
+        // Foundation can report isRunning == false before its termination handler records
+        // the exit status. Give that callback a bounded chance to supply the diagnosis.
+        var termination = await ended.termination
+        var attempts = 0
+        while termination == nil && attempts < 50 {
+            attempts += 1
+            try? await Task.sleep(for: .milliseconds(20))
+            termination = await ended.termination
+        }
+        guard generation == startupGeneration, process === ended else { return }
+        process = nil
+        processIdentifier = nil
+        var message = "The harness exited unexpectedly"
+        if let signal = termination?.signal {
+            message += " (signal \(signal))"
+        } else if let status = termination?.exitStatus {
+            message += " (exit status \(status))"
+        }
+        onState(.failed(message: message + ". Restart it to try again."))
     }
 }
