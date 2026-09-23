@@ -29,7 +29,7 @@ public final class AppModel {
 
     // MARK: - Library
 
-    public private(set) var installedModels: [InstalledModel] = []
+    public internal(set) var installedModels: [InstalledModel] = []
     public internal(set) var libraryError: String?
     public private(set) var downloads: [String: DownloadTask] = [:]
 
@@ -40,7 +40,7 @@ public final class AppModel {
     public private(set) var runtimeState: RuntimeState = .idle
     public private(set) var loadedModel: InstalledModel?
     public private(set) var activeConfiguration: LoadConfiguration?
-    public private(set) var selector = RuntimeSelector(available: [:])
+    public internal(set) var selector = RuntimeSelector(available: [:])
     public internal(set) var lastGeneration: GenerationMetrics?
     public private(set) var runtimeLog: String = ""
     /// What was loaded before the most recent unload — idle timeout or otherwise — so the
@@ -61,6 +61,23 @@ public final class AppModel {
     }
 
     private var runtime: (any InferenceRuntime)?
+
+    /// The load under way, from the moment it is asked for until it has an ending. An unload
+    /// or a newer load marks it interrupted, which is how the load itself — and whoever
+    /// asked for it — finds out that it was stopped on purpose.
+    private var loadInProgress: LoadAttempt?
+    /// Loads stopped before they finished, newest first. See
+    /// `ControlAPI.Status.interruptedLoads`.
+    public private(set) var interruptedLoads: [InterruptedLoad] = []
+    /// Where a failed load leaves its account for `/status`. The shared recorder in the app;
+    /// a test hands in its own, as the runtimes' own tests do, so it cannot read another
+    /// suite's failures.
+    @ObservationIgnored var loadFailures: LoadFailureRecorder = .shared
+    /// Builds the runtime a load runs on, when a test wants a say: one wired to its own
+    /// arbiter and recorder, pointed at a fake server on disk. Nil in the app, which uses
+    /// the selector's.
+    @ObservationIgnored
+    var makeRuntime: (@MainActor (RuntimeSelector.Selection) -> any InferenceRuntime)?
 
     /// User-supplied llama.cpp flags from Advanced mode, applied to the next load.
     public private(set) var extraArguments: [String] = []
@@ -3703,8 +3720,33 @@ public final class AppModel {
         load(lastLoaded.model, configuration: lastLoaded.configuration)
     }
 
-    public func loadAsync(_ model: InstalledModel, configuration: LoadConfiguration? = nil) async {
-        await unload()
+    /// Loads a model, and says how that went.
+    ///
+    /// Three endings, not two. A load that is stopped on purpose — by an unload, or by
+    /// another load — did not fail, and it did not succeed either; it used to end with no
+    /// word at all, which left `POST /load` quoting whatever the *next* load's progress line
+    /// was as this one's failure, and a phone following it with nothing to stop for.
+    @discardableResult
+    public func loadAsync(
+        _ model: InstalledModel, configuration: LoadConfiguration? = nil
+    ) async -> LoadOutcome {
+        // Claimed before anything is awaited. From here this is the load an unload stops
+        // and the one the next load replaces — including while the old runtime is still
+        // being stopped for it, which used to be a window in which an unload did nothing
+        // and two loads could both go on to start a server.
+        let attempt = LoadAttempt(model: model)
+        if let previous = loadInProgress {
+            interrupt(previous, because: .replaced(byID: model.id, byName: model.name))
+        }
+        loadInProgress = attempt
+        // Whatever stopped this model's last load, this is the answer to it.
+        interruptedLoads.removeAll { $0.modelID == model.id }
+        defer { if loadInProgress === attempt { loadInProgress = nil } }
+
+        await stopRuntime()
+        // Stopped while the old runtime was still being stopped for it: nothing of this
+        // load was started, and whatever stopped it has the machine now.
+        if let interruption = attempt.interruption { return .interrupted(interruption) }
         noteActivity()
 
         // Harness chat needs headroom for its system prompt and tools; raise the context when
@@ -3722,19 +3764,28 @@ public final class AppModel {
 
         do {
             let selection = try selector.select(model: model, configuration: resolved)
-            let runtime = selector.makeRuntime(for: selection)
+            let runtime = makeRuntime?(selection) ?? selector.makeRuntime(for: selection)
             started = runtime
             self.runtime = runtime
 
-            // Bridge the actor's state changes onto the main actor for SwiftUI.
+            // Bridge the actor's state changes onto the main actor for SwiftUI — for as long
+            // as this is the runtime the app holds. A runtime that has been let go keeps
+            // talking: its stop, and a moment later how its interrupted load ended. Applied
+            // over the next load, that was one load's ending shown as another's.
             if let llama = runtime as? LlamaCppRuntime {
                 await llama.observeState { [weak self] state in
-                    Task { @MainActor in self?.runtimeState = state }
+                    Task { @MainActor in self?.apply(state, from: llama) }
                 }
             } else if let mlx = runtime as? MLXRuntime {
                 await mlx.observeState { [weak self] state in
-                    Task { @MainActor in self?.runtimeState = state }
+                    Task { @MainActor in self?.apply(state, from: mlx) }
                 }
+            }
+            // Stopped while the runtime was being wired up: whatever stopped it has already
+            // let go of this runtime, and starting it now would load a model nobody holds.
+            if let interruption = attempt.interruption {
+                if started === self.runtime { self.runtime = nil }
+                return .interrupted(interruption)
             }
 
             try await runtime.start(LoadRequest(
@@ -3745,16 +3796,36 @@ public final class AppModel {
                 extraArguments: extraArguments,
                 chatTemplateFile: sharpTemplate(for: model)
             ))
+            if let interruption = attempt.interruption {
+                // Stopped before the runtime had a process to end — the moment between
+                // `start` being called and the server being launched — so the load carried
+                // on. Nobody holds this runtime any more, and a server nobody holds is a
+                // model in memory that nothing can unload.
+                await runtime.stop()
+                if started === self.runtime { self.runtime = nil }
+                settleUnloaded(attempt, reported: nil, runtime: runtime.kind)
+                return .interrupted(interruption)
+            }
             loadedModel = model
             activeConfiguration = resolved
             lastLoaded = nil
             // The harness reads its settings document per request, so telling it the new
             // model's name and true context takes effect from the next message.
             refreshHarnessProviderIfNeeded()
+            return .loaded
         } catch {
-            // A load that was replaced, or stopped on purpose, is not a failure to show: the
-            // load that displaced it owns the screen, and an unload part-way through is the
-            // owner getting what they asked for.
+            // Only if nothing has taken the slot since: clearing it unconditionally threw
+            // away the handle to a server that is running perfectly well.
+            if started === self.runtime { self.runtime = nil }
+            if let interruption = attempt.interruption {
+                // Stopped on purpose, so not a failure to show: the load that replaced it
+                // owns the screen, and an unload part-way through is the owner getting what
+                // they asked for.
+                settleUnloaded(
+                    attempt, reported: Self.loadFailure(in: error), runtime: started?.kind
+                )
+                return .interrupted(interruption)
+            }
             if Self.showsFailure(for: error) {
                 runtimeState = .failed(message: error.localizedDescription)
                 alert = AlertContent(
@@ -3765,22 +3836,89 @@ public final class AppModel {
                     runtimeLog = await llama.serverLog()
                 }
             }
-            // Only if nothing has taken the slot since: clearing it unconditionally threw
-            // away the handle to a server that is running perfectly well.
-            if started === self.runtime { self.runtime = nil }
+            return .failed(error.localizedDescription)
         }
     }
 
+    /// Unloads the model — and, when a load is still under way, stops it and says so.
     public func unload() async {
+        if let attempt = loadInProgress { interrupt(attempt, because: .unload) }
+        await stopRuntime()
+    }
+
+    /// What `unload` does, without the part that ends a load in progress as unloaded:
+    /// `loadAsync` stops the old runtime too, and the load it is replacing has already been
+    /// marked replaced.
+    private func stopRuntime() async {
         guard let runtime else { return }
         if let loadedModel, let activeConfiguration {
             lastLoaded = (loadedModel, activeConfiguration)
         }
         await runtime.stop()
+        // Only what this stop stopped: a load started while it was stopping holds a runtime
+        // of its own by now, and clearing that would leave its server with nobody to end it.
+        guard self.runtime === runtime else { return }
         self.runtime = nil
         loadedModel = nil
         activeConfiguration = nil
         runtimeState = .idle
+    }
+
+    /// A runtime's state, if that runtime is still the one the app holds.
+    private func apply(_ state: RuntimeState, from source: any InferenceRuntime) {
+        guard source === runtime else { return }
+        runtimeState = state
+    }
+
+    /// Marks a load as stopped on purpose, and publishes that for `/status`.
+    private func interrupt(_ attempt: LoadAttempt, because cause: InterruptedLoad.Cause) {
+        // The first stop is the one that ended it: an unload followed at once by another
+        // load still ended this one by unloading it.
+        guard attempt.interruption == nil else { return }
+        let interruption = InterruptedLoad(
+            modelID: attempt.model.id, modelName: attempt.model.name, cause: cause, at: Date()
+        )
+        attempt.interruption = interruption
+        interruptedLoads.removeAll { $0.modelID == interruption.modelID }
+        interruptedLoads.insert(interruption, at: 0)
+        if interruptedLoads.count > Self.interruptedLoadsKept {
+            interruptedLoads.removeLast(interruptedLoads.count - Self.interruptedLoadsKept)
+        }
+    }
+
+    /// How many interrupted loads `/status` carries. A few rather than one, so a follower
+    /// that missed a status or two still finds its own model when the owner has changed
+    /// their mind twice in a row; a few rather than all, because this rides on every status.
+    static let interruptedLoadsKept = 4
+
+    /// Says how an unloaded load ended, when nothing has taken the machine since.
+    ///
+    /// The state line becomes the sentence, and `/status` carries the failure behind it
+    /// with reason `cancelled` — which is what a client that predates `interruptedLoads`
+    /// already stops following on. It used to happen by accident, when the stopped
+    /// runtime's own report arrived a moment after the unload had set the state; a load
+    /// the owner had started in that moment had its progress line overwritten by it.
+    ///
+    /// A load that was replaced says nothing here: the load that replaced it owns the state.
+    private func settleUnloaded(
+        _ attempt: LoadAttempt, reported: LoadFailure?, runtime kind: RuntimeKind?
+    ) {
+        guard case .unload = attempt.interruption?.cause, loadInProgress === attempt,
+              runtime == nil, let kind
+        else { return }
+        let failure = reported.flatMap { $0.reason == .cancelled && !$0.wasReplaced ? $0 : nil }
+            ?? LoadFailure(
+                reason: .cancelled, summary: attempt.interruption?.sentence ?? "",
+                runtime: kind, modelID: attempt.model.id
+            )
+        loadFailures.record(failure)
+        runtimeState = .failed(message: failure.summary)
+    }
+
+    /// The runtime's own account of a load, when the error carries one.
+    static func loadFailure(in error: any Error) -> LoadFailure? {
+        guard case .didNotBecomeReady(let failure) = error as? RuntimeError else { return nil }
+        return failure
     }
 
     /// The settings the app would choose for this model on this machine.

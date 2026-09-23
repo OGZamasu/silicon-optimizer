@@ -85,7 +85,10 @@ public actor LlamaCppRuntime: InferenceRuntime {
 
         let installation = self.installation ?? Self.locate()
         guard let installation else {
-            throw record(RuntimeError.notInstalled(.llamaCpp), reason: .notInstalled)
+            throw record(
+                RuntimeError.notInstalled(.llamaCpp), reason: .notInstalled,
+                model: request.model.id
+            )
         }
         self.installation = installation
 
@@ -100,7 +103,10 @@ public actor LlamaCppRuntime: InferenceRuntime {
         let problems = arguments.validate()
         if let blocking = problems.first, request.configuration.expertStreaming != nil,
            installation.hasExpertStreaming == false {
-            throw record(RuntimeError.launchFailed(blocking), reason: .launchFailed)
+            throw record(
+                RuntimeError.launchFailed(blocking), reason: .launchFailed,
+                model: request.model.id
+            )
         }
 
         transition(to: .starting(stage: "Starting llama.cpp…"))
@@ -124,7 +130,10 @@ public actor LlamaCppRuntime: InferenceRuntime {
             )
         } catch {
             self.release(server)
-            throw record(error, reason: .launchFailed)
+            throw record(
+                error, reason: .launchFailed,
+                model: request.model.id
+            )
         }
 
         let endpoint = URL(string: "http://127.0.0.1:\(port)")!
@@ -152,7 +161,7 @@ public actor LlamaCppRuntime: InferenceRuntime {
                 summary: Self.diagnose(
                     log: log, ending: outcome.ending, replacedBy: outcome.replacedBy
                 ),
-                log: log, runtime: kind
+                log: log, runtime: kind, modelID: request.model.id
             )
             recorder.record(failure)
             lastFailure = failure
@@ -211,9 +220,12 @@ public actor LlamaCppRuntime: InferenceRuntime {
     /// Records a failure that happened before there was ever a process, and hands the error
     /// back so a call site can `throw record(…)`.
     @discardableResult
-    private func record(_ error: any Error, reason: LoadFailure.Reason) -> any Error {
+    private func record(
+        _ error: any Error, reason: LoadFailure.Reason, model: String
+    ) -> any Error {
         let failure = LoadFailure(
-            reason: reason, summary: error.localizedDescription, runtime: kind
+            reason: reason, summary: error.localizedDescription, runtime: kind,
+            modelID: model
         )
         recorder.record(failure)
         lastFailure = failure

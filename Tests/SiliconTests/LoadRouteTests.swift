@@ -163,7 +163,8 @@ struct LoadRouteTests {
                 + "means the system reclaimed its memory.",
             detail: "load_tensors: loading model tensors\nloaded multimodal model",
             runtime: .llamaCpp, signal: 9,
-            at: try #require(ControlAPI.date(fromTimestamp: "2026-09-19T11:04:38Z"))
+            at: try #require(ControlAPI.date(fromTimestamp: "2026-09-19T11:04:38Z")),
+            modelID: "bonsai-2-27b@Q2_0"
         )
 
         try await withServer(patience: .seconds(1), lastFailure: failure) { fixture in
@@ -182,6 +183,8 @@ struct LoadRouteTests {
             #expect(wire["runtime"] as? String == "llama.cpp")
             #expect(wire["wasReplaced"] as? Bool == false)
             #expect(wire["at"] as? String == "2026-09-19T11:04:38Z")
+            // Whose load it was, in the form `loadedModelID` uses.
+            #expect(wire["modelID"] as? String == "bonsai-2-27b@Q2_0")
             #expect((wire["detail"] as? String)?.contains("loaded multimodal model") == true)
             // The sentence is not duplicated into the detail block.
             #expect(wire["summary"] == nil)
@@ -203,8 +206,24 @@ struct LoadRouteTests {
         )
         let text = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
         #expect(!text.contains("failure"))
+        #expect(!text.contains("interruptedLoads"))
         #expect(try JSONDecoder().decode(ControlAPI.Status.self, from: Data(text.utf8))
                 .failure == nil)
+    }
+
+    /// A Mac from before the model id, or before interrupted loads, still decodes: both are
+    /// optional, and absent reads as nil.
+    @Test func aStatusFromAnOlderMacStillDecodes() throws {
+        let older = """
+            {"state": "llama-server was killed (signal 9) after 8 seconds.",
+             "expertStreaming": false,
+             "failure": {"reason": "killed", "runtime": "llama.cpp", "signal": 9,
+                         "wasReplaced": false, "at": "2026-09-19T11:04:38Z"}}
+            """
+        let status = try JSONDecoder().decode(ControlAPI.Status.self, from: Data(older.utf8))
+        #expect(status.failure?.reason == "killed")
+        #expect(status.failure?.modelID == nil)
+        #expect(status.interruptedLoads == nil)
     }
 
     // MARK: - Who may see the runtime's log
@@ -219,8 +238,12 @@ struct LoadRouteTests {
             failure: ControlAPI.LoadFailure(
                 reason: "exited", detail: "error loading model: bonsai.gguf",
                 runtime: "llama.cpp", exitStatus: 1, wasReplaced: false,
-                at: "2026-09-19T11:04:38Z"
-            )
+                at: "2026-09-19T11:04:38Z", modelID: "bonsai-2-27b@Q2_0"
+            ),
+            interruptedLoads: [ControlAPI.LoadInterruption(
+                modelID: "qwen3-coder-30b@Q4_K_M", reason: "replaced",
+                replacedBy: "bonsai-2-27b@Q2_0", at: "2026-09-19T11:04:30Z"
+            )]
         )
 
         for caller in [ControlServer.Caller.control, .device(id: "d", scope: .full)] {
@@ -237,6 +260,10 @@ struct LoadRouteTests {
             #expect(narrowed.failure?.runtime == "llama.cpp")
             #expect(narrowed.failure?.wasReplaced == false)
             #expect(narrowed.failure?.at == "2026-09-19T11:04:38Z")
+            // Which models these were is no more private than `loadedModelID`, which every
+            // one of these callers is already told.
+            #expect(narrowed.failure?.modelID == "bonsai-2-27b@Q2_0")
+            #expect(narrowed.interruptedLoads == full.interruptedLoads)
         }
 
         // A status with nothing to withhold is passed through untouched.
@@ -264,8 +291,12 @@ struct LoadRouteTests {
             failure: ControlAPI.LoadFailure(
                 reason: "killed", detail: "loaded multimodal model, 'mmproj-Q8_0.gguf'",
                 runtime: "llama.cpp", signal: 9, wasReplaced: false,
-                at: "2026-09-19T11:04:38Z"
-            )
+                at: "2026-09-19T11:04:38Z", modelID: "gemma-4-26b@Q4_K_M"
+            ),
+            interruptedLoads: [ControlAPI.LoadInterruption(
+                modelID: "qwen3-coder-30b@Q4_K_M", reason: "replaced",
+                replacedBy: "gemma-4-26b@Q4_K_M", at: "2026-09-19T11:04:30Z"
+            )]
         )))
 
         func firstFrame(_ stream: AsyncStream<BuddyEvent.Frame>) async throws -> String {
@@ -287,6 +318,11 @@ struct LoadRouteTests {
                     || seen.contains("\"reason\":\"killed\""))
             #expect(seen.contains("signal"))
             #expect(seen.contains("was killed (signal 9)"))
+            // And whose load failed, and which load was stopped for it.
+            let frame = try JSONDecoder().decode(ControlAPI.Status.self, from: Data(seen.utf8))
+            #expect(frame.failure?.modelID == "gemma-4-26b@Q4_K_M")
+            #expect(frame.interruptedLoads?.first?.modelID == "qwen3-coder-30b@Q4_K_M")
+            #expect(frame.interruptedLoads?.first?.replacedBy == "gemma-4-26b@Q4_K_M")
         }
     }
 

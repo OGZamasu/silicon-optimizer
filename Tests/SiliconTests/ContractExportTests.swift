@@ -4,6 +4,7 @@ import Testing
 @testable import SiliconControl
 import SiliconCore
 import SiliconRuntime
+import SiliconUI
 
 /// The machine-readable contract the Silicon Buddy apps are generated from.
 ///
@@ -800,7 +801,9 @@ struct ContractExportTests {
         #expect(state.contains("signal 9"))
 
         let failure = try #require(failed["failure"] as? [String: Any])
-        #expect(Set(failure.keys) == ["reason", "detail", "runtime", "signal", "wasReplaced", "at"])
+        #expect(Set(failure.keys)
+                == ["reason", "detail", "runtime", "signal", "wasReplaced", "at", "modelID"])
+        #expect(failure["modelID"] as? String == "bonsai-2-27b")
         #expect(failure["reason"] as? String == "killed")
         #expect(failure["signal"] as? Int == 9)
         #expect(failure["wasReplaced"] as? Bool == false)
@@ -828,12 +831,38 @@ struct ContractExportTests {
             Self.routes.first { $0.method == "GET" && $0.path == "/status" }
         ).responseVariants
         let reasons = try variants.map { label, example -> String in
-            try #require(try JSONDecoder().decode(
+            let status = try JSONDecoder().decode(
                 ControlAPI.Status.self, from: try example.encode()
-            ).failure?.reason)
+            )
+            return try #require(
+                status.failure?.reason ?? status.interruptedLoads?.first?.reason, "\(label)"
+            )
         }
         #expect(Set(reasons) == ["killed", "replaced", "cancelled", "timedOut"])
-        #expect(Self.exampleReplacedStatus.failure?.wasReplaced == true)
+
+        // A replaced load is an entry, not a failure: the state line belongs to the load
+        // that replaced it, and the entry names that load.
+        #expect(Self.exampleReplacedStatus.failure == nil)
+        let replaced = try #require(Self.exampleReplacedStatus.interruptedLoads?.first)
+        #expect(replaced.reason == "replaced")
+        #expect(replaced.modelID == "bonsai-2-27b")
+        #expect(replaced.replacedBy == "qwen3-coder-30b")
+        // An unloaded one is both, so a client from before the list still stops on it.
+        #expect(Self.exampleCancelledStatus.failure?.reason == "cancelled")
+        #expect(Self.exampleCancelledStatus.interruptedLoads?.first?.reason == "cancelled")
+        #expect(Self.exampleCancelledStatus.interruptedLoads?.first?.replacedBy == nil)
+        let entry = try #require(try JSONSerialization.jsonObject(
+            with: try Self.encoder.encode(replaced)
+        ) as? [String: Any])
+        #expect(Set(entry.keys) == ["modelID", "reason", "replacedBy", "at"])
+
+        // And a load stopped inside `POST /load`'s patience is answered in those words, as
+        // a 409 — not as a failure quoting whatever the next load's progress line was.
+        let stopped = try #require(
+            Self.routes.first { $0.method == "POST" && $0.path == "/load" }
+        ).errorVariants
+        #expect(stopped.map(\.0) == [409, 409])
+        #expect(stopped.allSatisfy { $0.2.contains("was not loaded") })
 
         // And the shape a chat-scope device or a peer is answered: the whole failure except
         // the runtime's log, which names files on this Mac.
@@ -1211,7 +1240,23 @@ struct ContractExportTests {
             "then fail in a way that looked like the model's fault. `POST /unload` stops the",
             "load in flight if that is really what is wanted. The Mac's own window is not",
             "held by this route and can still start a load that replaces one; the load that",
-            "loses says so (`failure.wasReplaced`) rather than reporting a fault.",
+            "loses says so (`interruptedLoads`, below) rather than reporting a fault.",
+            "",
+            "**A load this Mac stopped.** An unload part-way through a load, or another load",
+            "started meanwhile — from the Mac's own window, say — is not a failure, and it",
+            "is an ending. `interruptedLoads` lists them, newest first, at most four and one",
+            "per model: `modelID` (as `loadedModelID` spells it), `reason` (`cancelled` for",
+            "an unload, `replaced` for another load — treat an unknown one as `cancelled`),",
+            "`replacedBy` (the model whose load took over, when replaced) and `at`. It is",
+            "published the moment the Mac stops the load, on `GET /status` and in the",
+            "`status` frame on `/events`, to every caller. A new load of a model clears that",
+            "model's entry, so a client that has just asked for a model and finds it here",
+            "knows its own load was stopped. The key is **absent** when there are none. A",
+            "`POST /load` whose load was stopped inside its 25 seconds answers 409 with the",
+            "sentence (\"…was not loaded: another load (Gemma 4 E2B) replaced it before it",
+            "finished.\"). After an unload the state line also becomes the sentence and",
+            "`failure` says `cancelled`, as a client written before `interruptedLoads` reads",
+            "it; after a replacement the state line is the new load's.",
             "",
             "**A failed load.** `state` is one sentence — \"llama-server stopped on its own",
             "after 8 seconds (exit 1)\", \"…was killed (signal 9), which usually means the",
@@ -1221,9 +1266,11 @@ struct ContractExportTests {
             "`replaced`, `cancelled`, `timedOut`, `launchFailed`, `notInstalled` — treat an",
             "unknown one as `exited`), `detail` (the tail of the runtime's log, at most 20",
             "lines: put it behind a tap, never in the line a person reads first), `runtime`,",
-            "`exitStatus`, `signal`, `wasReplaced` and `at`. The key is **absent** unless a",
-            "load has failed, so a client written before it existed reads what it always",
-            "did.",
+            "`exitStatus`, `signal`, `wasReplaced`, `at`, and `modelID` — whose load it was,",
+            "as `loadedModelID` spells it (absent from an older Mac). A client following one",
+            "load compares `modelID` with the model it asked for: a failure naming another",
+            "model is somebody else's load. The key is **absent** unless a load has failed,",
+            "so a client written before it existed reads what it always did.",
             "",
             "`detail` is the only part of this that is scoped. It is the runtime's raw log,",
             "and on a Mac that log names files — so a device paired for **chat**, and the",
@@ -1661,7 +1708,8 @@ struct ContractExportTests {
             method: "GET", path: "/status", auth: "device",
             summary: "What is loaded, at what settings, how fast it last ran. `state` is "
                 + "one line for a person; when a load has failed, `failure` carries the "
-                + "same failure's facts — show `state`, keep `failure.detail` behind a tap.",
+                + "same failure's facts — show `state`, keep `failure.detail` behind a tap. "
+                + "`interruptedLoads` lists loads this Mac stopped before they finished.",
             response: .of(exampleStatus),
             responseVariants: [
                 ("after a failed load", .of(exampleFailedStatus)),
@@ -1732,6 +1780,11 @@ struct ContractExportTests {
                 409: ControlAPI.LoadAlreadyRunning(
                     modelID: "bonsai-2-27b", secondsAgo: 12
                 ).localizedDescription,
+            ],
+            errorVariants: [
+                (409, "replaced by another load before it finished",
+                 exampleReplacement.sentence),
+                (409, "stopped by an unload before it finished", exampleUnloaded.sentence),
             ]
         ),
         Route(
@@ -2603,30 +2656,33 @@ struct ContractExportTests {
             detail: "load_tensors: loading model tensors\n"
                 + "loaded multimodal model, 'mmproj-Q8_0.gguf'",
             runtime: "llama.cpp", exitStatus: nil, signal: 9, wasReplaced: false,
-            at: "2026-09-19T11:04:38Z"
+            at: "2026-09-19T11:04:38Z", modelID: "bonsai-2-27b"
         )
     )
 
-    /// The other three endings a client has to be able to tell apart. `wasReplaced` is the
-    /// one that is not a fault at all — somebody asked for something else.
+    /// The other three endings a client has to be able to tell apart. A replaced load is
+    /// the one that is not a fault at all — somebody asked for something else — and it ends
+    /// while the load that replaced it is still running, so it is not a `failure`: the
+    /// state line is the new load's, and the one that lost is in `interruptedLoads`.
     static let exampleReplacedStatus = ControlAPI.Status(
-        state: "llama-server was replaced by another load (Qwen3-Coder 30B).",
+        state: "Loading weights… 42%",
         loadedModelID: nil, loadedModelName: nil, contextLength: nil,
         expertStreaming: false, lastGenerationTokensPerSecond: nil,
-        failure: ControlAPI.LoadFailure(
-            reason: "replaced", detail: nil, runtime: "llama.cpp",
-            exitStatus: nil, signal: 15, wasReplaced: true, at: "2026-09-19T11:04:38Z"
-        )
+        interruptedLoads: [exampleReplacement.wire]
     )
 
+    /// An unload part-way through. The state line is the sentence and `failure` says
+    /// `cancelled`, which is where a client from before `interruptedLoads` looks.
     static let exampleCancelledStatus = ControlAPI.Status(
         state: "llama-server was stopped by an unload before it finished loading.",
         loadedModelID: nil, loadedModelName: nil, contextLength: nil,
         expertStreaming: false, lastGenerationTokensPerSecond: nil,
         failure: ControlAPI.LoadFailure(
             reason: "cancelled", detail: nil, runtime: "llama.cpp",
-            exitStatus: nil, signal: 15, wasReplaced: false, at: "2026-09-19T11:04:38Z"
-        )
+            exitStatus: nil, signal: 15, wasReplaced: false, at: "2026-09-19T11:04:38Z",
+            modelID: "bonsai-2-27b"
+        ),
+        interruptedLoads: [exampleUnloaded.wire]
     )
 
     static let exampleTimedOutStatus = ControlAPI.Status(
@@ -2636,8 +2692,19 @@ struct ContractExportTests {
         failure: ControlAPI.LoadFailure(
             reason: "timedOut", detail: "llama_context: constructing llama_context",
             runtime: "llama.cpp", exitStatus: nil, signal: nil, wasReplaced: false,
-            at: "2026-09-19T11:04:38Z"
+            at: "2026-09-19T11:04:38Z", modelID: "bonsai-2-27b"
         )
+    )
+
+    /// A load another load took the machine from, and one an unload stopped.
+    static let exampleReplacement = InterruptedLoad(
+        modelID: "bonsai-2-27b", modelName: "Bonsai 2 27B",
+        cause: .replaced(byID: "qwen3-coder-30b", byName: "Qwen3-Coder 30B A3B"),
+        at: ControlAPI.date(fromTimestamp: "2026-09-19T11:04:38Z")!
+    )
+    static let exampleUnloaded = InterruptedLoad(
+        modelID: "bonsai-2-27b", modelName: "Bonsai 2 27B", cause: .unload,
+        at: ControlAPI.date(fromTimestamp: "2026-09-19T11:04:38Z")!
     )
 
     /// The same failure as a device paired for chat — or a peer node — is answered: what

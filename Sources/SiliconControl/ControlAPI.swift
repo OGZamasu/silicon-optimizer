@@ -343,13 +343,24 @@ public enum ControlAPI {
         /// one line and keep the log behind a tap, or to tell "the system reclaimed the
         /// memory" from "you started another load" without parsing English.
         public var failure: LoadFailure?
+        /// Loads this Mac stopped before they finished, newest first: at most four, and one
+        /// per model. Absent — not null, not empty — when there are none.
+        ///
+        /// Separate from `failure` because a replaced load ends while another one is
+        /// running, and `failure` is absent whenever a model is loading: a client following
+        /// the load that won would otherwise read the loser's ending as its own. A client
+        /// following a load finds its model here the moment the Mac gives up on it —
+        /// rather than following a load that is no longer happening until its own patience
+        /// runs out.
+        public var interruptedLoads: [LoadInterruption]?
 
         public init(
             state: String, loadedModelID: String?, loadedModelName: String?,
             contextLength: Int?, expertStreaming: Bool,
             lastGenerationTokensPerSecond: Double?,
             activity: String? = nil,
-            failure: LoadFailure? = nil
+            failure: LoadFailure? = nil,
+            interruptedLoads: [LoadInterruption]? = nil
         ) {
             self.state = state
             self.loadedModelID = loadedModelID
@@ -359,6 +370,7 @@ public enum ControlAPI {
             self.lastGenerationTokensPerSecond = lastGenerationTokensPerSecond
             self.activity = activity
             self.failure = failure
+            self.interruptedLoads = interruptedLoads
         }
 
         /// This status with anything only a full-control caller may see taken out. See
@@ -396,6 +408,11 @@ public enum ControlAPI {
         public var wasReplaced: Bool
         /// ISO 8601, in the Mac's own offset.
         public var at: String
+        /// The installed model whose load this was, in the same form as `loadedModelID`.
+        /// Absent from a Mac older than this field. A client following a load compares it
+        /// with the model it asked for: a failure naming another model is somebody else's
+        /// load — one the owner started on the Mac, say — and not an ending for this one.
+        public var modelID: String?
 
         /// The same failure with the runtime's log taken out.
         ///
@@ -413,7 +430,7 @@ public enum ControlAPI {
         public init(
             reason: String, detail: String? = nil, runtime: String? = nil,
             exitStatus: Int? = nil, signal: Int? = nil, wasReplaced: Bool = false,
-            at: String
+            at: String, modelID: String? = nil
         ) {
             self.reason = reason
             self.detail = detail
@@ -421,6 +438,35 @@ public enum ControlAPI {
             self.exitStatus = exitStatus
             self.signal = signal
             self.wasReplaced = wasReplaced
+            self.at = at
+            self.modelID = modelID
+        }
+    }
+
+    /// A load this Mac stopped before it finished, and what stopped it.
+    ///
+    /// The ending a follower was missing. An unload part-way through a load, or a second
+    /// load started from the Mac's own window, is not a failure of the load — so nothing
+    /// said it had ended, and a phone that had asked for it went on following a load that
+    /// was no longer happening until its own patience ran out.
+    public struct LoadInterruption: Codable, Sendable, Equatable {
+        /// The installed model whose load was stopped, in the same form as `loadedModelID`.
+        public var modelID: String
+        /// `cancelled` — an unload stopped it — or `replaced` — another load took the
+        /// machine. The same words `LoadFailure.reason` uses for the same two endings. New
+        /// values may be added; treat an unknown one as `cancelled`.
+        public var reason: String
+        /// The model whose load replaced it, when `reason` is `replaced`. That load may
+        /// itself still be running, have finished, or have failed: `loadedModelID`, `state`
+        /// and `failure` say which.
+        public var replacedBy: String?
+        /// When it was stopped. ISO 8601, in the Mac's own offset.
+        public var at: String
+
+        public init(modelID: String, reason: String, replacedBy: String? = nil, at: String) {
+            self.modelID = modelID
+            self.reason = reason
+            self.replacedBy = replacedBy
             self.at = at
         }
     }
