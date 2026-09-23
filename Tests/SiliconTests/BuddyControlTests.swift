@@ -617,8 +617,8 @@ struct BuddyControlTests {
     @Test func aChangedEndpointRebindsRatherThanBeingIgnored() async throws {
         try await withServer { fixture in
             let first = fixture.phone.port
-            // Asked of the kernel rather than guessed: this test allows no retry, so a port
-            // that happened to be busy would look exactly like a listener that did not move.
+            // Checked free rather than guessed: this test allows no retry, so a port that
+            // happened to be busy would look exactly like a listener that did not move.
             let second = try await Self.freeLoopbackPort()
 
             // Asked for directly, with no retry loop to paper over a listener that stayed
@@ -1071,21 +1071,41 @@ struct BuddyControlTests {
 
     /// A port nobody is on. Binding and letting go is the portable way to ask, and the
     /// window in between is not one any test here can lose to.
+    /// A loopback port nothing holds, for a test to bind a moment later.
+    ///
+    /// Drawn from below the kernel's ephemeral range and checked by binding it — never taken
+    /// from a listener on port 0. A port the kernel handed out is one it hands out again:
+    /// it allocates that range in order, to listeners on port 0 and to every outgoing
+    /// connection alike, and one run of this suite takes a couple of thousand ports from it.
+    /// Anything in the process that asked for a port between this returning and the caller
+    /// binding could be given the same one, and the caller's bind then failed as "address
+    /// in use" — which a test waiting for its listener saw only as its own deadline passing.
+    /// That was the swarm exposure retry test's intermittent `.timeout`. The kernel never
+    /// allocates below the range, so a port from there is taken only by someone who asks
+    /// for it by number.
     static func freeLoopbackPort() async throws -> Int {
-        let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = .loopback
-        parameters.allowLocalEndpointReuse = true
-        let listener = try NWListener(using: parameters, on: .any)
-        listener.newConnectionHandler = { $0.cancel() }
-        listener.start(queue: .global(qos: .userInitiated))
-        defer { listener.cancel() }
-        let deadline = ContinuousClock.now + .seconds(5)
-        while true {
-            if case .ready = listener.state, let port = listener.port {
-                return Int(port.rawValue)
+        for _ in 0..<100 {
+            let candidate = Int.random(in: 20_000..<45_000)
+            if isFreeLoopbackPort(candidate) { return candidate }
+        }
+        throw BuddyTestError.timeout
+    }
+
+    /// Whether 127.0.0.1:`port` can be bound right now — without address reuse, so a port
+    /// with anything on it at all, even a connection winding down, is not offered.
+    private static func isFreeLoopbackPort(_ port: Int) -> Bool {
+        let probe = socket(AF_INET, SOCK_STREAM, 0)
+        guard probe >= 0 else { return false }
+        defer { close(probe) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(probe, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
             }
-            guard ContinuousClock.now < deadline else { throw BuddyTestError.timeout }
-            try await Task.sleep(for: .milliseconds(10))
         }
     }
 
