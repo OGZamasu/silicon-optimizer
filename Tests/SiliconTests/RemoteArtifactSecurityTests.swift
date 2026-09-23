@@ -1,7 +1,7 @@
 import Foundation
 import CArtifactHTTP
 import CFNetwork
-import Network
+import Darwin
 import Testing
 @testable import SiliconRuntime
 
@@ -163,8 +163,8 @@ struct RemoteArtifactSecurityTests {
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
 
-        let url = "https://cdn.example.com:\(listener.port)/song.mp3"
-        let override = "cdn.example.com:\(listener.port):127.0.0.1"
+        let url = "https://\(listener.host):\(listener.port)/song.mp3"
+        let override = "\(listener.host):\(listener.port):127.0.0.1"
         let job = url.withCString { address in
             override.withCString { resolution in
                 silicon_artifact_job_create_test(
@@ -177,8 +177,64 @@ struct RemoteArtifactSecurityTests {
         defer { silicon_artifact_job_destroy(unwrapped) }
         #expect(silicon_artifact_job_perform(unwrapped) == SILICON_ARTIFACT_PRIVATE_ADDRESS)
         #expect(silicon_artifact_job_bytes(unwrapped) == 0)
-        try await Task.sleep(for: .milliseconds(100))
+        // The job has returned, so any connection it made is already counted.
         #expect(listener.accepted == 0, "Private DNS must be rejected before a TCP connection or HTTP GET")
+    }
+
+    /// What made the rebinding tests flaky in a full run: another suite's connection landing
+    /// on the listener's port while the veto held. It must not read as the transfer's — and
+    /// the transfer's own connection, let past the veto, must.
+    @Test func aStrayConnectionOnTheListenersPortIsNotTheTransfers() throws {
+        let listener = try LoopbackConnectionCounter()
+        defer { listener.stop() }
+
+        // Another suite's health poll that found this port: plain HTTP, not our ClientHello.
+        let stray = socket(AF_INET, SOCK_STREAM, 0)
+        #expect(stray >= 0)
+        defer { close(stray) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = listener.port.bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(stray, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        #expect(connected == 0)
+        let request = Array("GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+        #expect(write(stray, request, request.count) == request.count)
+        _ = shutdown(stray, SHUT_WR)
+        // The listener closes a connection only after deciding whose it is, so EOF here
+        // means the stray has been judged.
+        var buffer = [UInt8](repeating: 0, count: 64)
+        while read(stray, &buffer, buffer.count) > 0 {}
+        #expect(listener.accepted == 0)
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silicon-stray-control-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("partial")
+        #expect(FileManager.default.createFile(atPath: file.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        let url = "https://\(listener.host):\(listener.port)/song.mp3"
+        let control = try #require(url.withCString { address in
+            "\(listener.host):\(listener.port):127.0.0.1".withCString { override in
+                "/etc/ssl/cert.pem".withCString { trusted in
+                    silicon_artifact_job_create_test(
+                        address, handle.fileDescriptor, 1_024, 2_000, 0, override, trusted,
+                        nil, nil
+                    )
+                }
+            }
+        })
+        defer { silicon_artifact_job_destroy(control) }
+        _ = silicon_artifact_job_perform(control)
+        #expect(listener.waitForConnections(1))
+        #expect(listener.accepted == 1)
     }
 
     @Test func bearerCredentialsAreOriginBound() throws {
@@ -272,40 +328,107 @@ private final class BoundedBodyURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+/// A loopback listener that counts this test's own connections and no one else's.
+///
+/// Suites running beside this one poll loopback ports they were handed a moment earlier —
+/// a runtime's health check, say, after the runtime died without binding — and the kernel
+/// can hand that same port to the next listener, this one. Counting every accepted
+/// connection therefore saw strays: the veto held and the count still read 1. Every
+/// connection the transfer under test can make opens with a TLS ClientHello naming `host`,
+/// which is unique to this listener, so only a connection that says that name is counted.
+///
+/// The count is also settled before the transfer can see the connection end: a connection is
+/// counted and only then closed, and the transfer only returns once it has seen the close.
+/// So once a transfer has returned, its connection is in `accepted` — no sleep to guess how
+/// long a handler takes to run.
 final class LoopbackConnectionCounter: @unchecked Sendable {
-    private let listener: NWListener
-    private let lock = NSLock()
-    private var count = 0
-    private(set) var port: UInt16 = 0
+    let host = "media-\(UUID().uuidString.prefix(8).lowercased()).example.net"
+    let port: UInt16
+    private let descriptor: Int32
+    private let source: DispatchSourceRead
+    private let condition = NSCondition()
+    private var ours = 0
 
+    /// Connections that named `host`.
     var accepted: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return count
+        condition.lock()
+        defer { condition.unlock() }
+        return ours
     }
 
     init() throws {
-        let parameters = NWParameters.tcp
-        parameters.requiredInterfaceType = .loopback
-        listener = try NWListener(using: parameters, on: .any)
-        let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { state in
-            if case .ready = state { ready.signal() }
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw RemoteTransferError.networkFailure }
+        self.descriptor = descriptor
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                bind(descriptor, generic, length) == 0
+                    && listen(descriptor, 16) == 0
+                    && getsockname(descriptor, generic, &length) == 0
+            }
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            guard let self else { return }
-            self.lock.lock()
-            self.count += 1
-            self.lock.unlock()
-            connection.cancel()
-        }
-        listener.start(queue: DispatchQueue(label: "artifact-ip-fixture"))
-        guard ready.wait(timeout: .now() + 5) == .success else {
-            listener.cancel()
+        guard bound, fcntl(descriptor, F_SETFL, O_NONBLOCK) == 0 else {
+            close(descriptor)
             throw RemoteTransferError.networkFailure
         }
-        port = listener.port?.rawValue ?? 0
+        port = UInt16(bigEndian: address.sin_port)
+        source = DispatchSource.makeReadSource(
+            fileDescriptor: descriptor, queue: DispatchQueue(label: "loopback-counter")
+        )
+        source.setEventHandler { [weak self] in
+            while case let client = accept(descriptor, nil, nil), client >= 0 {
+                guard let self else {
+                    close(client)
+                    continue
+                }
+                DispatchQueue.global().async { self.inspect(client) }
+            }
+        }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
     }
 
-    func stop() { listener.cancel() }
+    /// Reads until the ClientHello names `host`, the peer stops sending, or two seconds
+    /// pass; counts a match; then closes.
+    private func inspect(_ client: Int32) {
+        defer { close(client) }
+        _ = fcntl(client, F_SETFL, 0)
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        _ = setsockopt(
+            client, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)
+        )
+        let name = Data(host.utf8)
+        var received = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while received.count < 65_536, received.range(of: name) == nil {
+            let count = read(client, &buffer, buffer.count)
+            guard count > 0 else { break }
+            received.append(contentsOf: buffer[0..<count])
+        }
+        guard received.range(of: name) != nil else { return }
+        condition.lock()
+        ours += 1
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    /// Waits for this test's connections to reach `count` — on the event itself, with a
+    /// deadline only for when it never comes.
+    func waitForConnections(_ count: Int, within seconds: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        condition.lock()
+        defer { condition.unlock() }
+        while ours < count {
+            if !condition.wait(until: deadline) { return ours >= count }
+        }
+        return true
+    }
+
+    func stop() { source.cancel() }
 }

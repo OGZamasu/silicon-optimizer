@@ -51,7 +51,7 @@ struct ProviderArtifactAddressTests {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("silicon-provider-rebind-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let artifact = "https://media.example.net:\(listener.port)/audio.mp3"
+        let artifact = "https://\(listener.host):\(listener.port)/audio.mp3"
         ProviderStubProtocol.state.reset(artifactURL: artifact)
 
         let configuration = URLSessionConfiguration.ephemeral
@@ -80,13 +80,15 @@ struct ProviderArtifactAddressTests {
         } catch {
             Issue.record("Expected the resolved-address refusal, got \(error)")
         }
-        try await Task.sleep(for: .milliseconds(100))
+        // The transfer has returned, so a connection it made would already be counted.
         #expect(listener.accepted == 0, "No TCP connection, so no request and no body")
         let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         #expect(leftovers.isEmpty)
 
-        // The control: let the job past the veto and the listener is reached at once.
-        let trust = directory.appendingPathComponent("unused-ca.pem").path
+        // The control: let the job past the veto and the listener is reached at once. The
+        // trust file is only there to unlock the fixture's loopback exemption, but it has to
+        // be real PEM: curl reads it before it sends the ClientHello the listener counts.
+        let trust = "/etc/ssl/cert.pem"
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("silicon-provider-control-\(UUID().uuidString)")
         #expect(FileManager.default.createFile(atPath: scratch.path, contents: nil))
@@ -94,7 +96,7 @@ struct ProviderArtifactAddressTests {
         let handle = try FileHandle(forWritingTo: scratch)
         defer { try? handle.close() }
         let control = try #require(artifact.withCString { address in
-            "media.example.net:\(listener.port):127.0.0.1".withCString { override in
+            "\(listener.host):\(listener.port):127.0.0.1".withCString { override in
                 trust.withCString { caFile in
                     silicon_artifact_job_create_test(
                         address, handle.fileDescriptor, 64, 2_000, 0, override, caFile, nil, nil
@@ -104,8 +106,8 @@ struct ProviderArtifactAddressTests {
         })
         defer { silicon_artifact_job_destroy(control) }
         _ = silicon_artifact_job_perform(control)
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(listener.accepted >= 1)
+        #expect(listener.waitForConnections(1), "the listener is reachable at this address")
+        #expect(listener.accepted == 1)
     }
 
     /// Every hop's name answers 127.0.0.1 and nothing is trusted beyond production's rules,
