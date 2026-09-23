@@ -52,7 +52,10 @@ public enum PublicHTTPSArtifactTransfer {
         return next
     }
 
-    private static func requireDirectConnection(to url: URL) throws {
+    /// Throws `unverifiableProxy` when a proxy or PAC would carry traffic to `url`. The
+    /// transfer asks on every hop; `CloudAudioRuntime` asks before it submits a job, so a
+    /// proxied Mac is told before GMI does, and bills for, work that could not be fetched.
+    static func requireDirectConnection(to url: URL) throws {
         guard let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue(),
               let entries = CFNetworkCopyProxiesForURL(url as CFURL, settings)
                 .takeRetainedValue() as? [[String: Any]]

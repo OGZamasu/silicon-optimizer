@@ -63,6 +63,13 @@ public enum CloudAudioError: LocalizedError {
     case jobFailed(String)
     case noAudioReturned
     case cancelled
+    /// A proxy or PAC is in the way. Refused here, before anything is sent, because the
+    /// artifact transfer cannot check the CDN's address through a proxy and would refuse
+    /// the download after GMI had already done — and billed — the work.
+    case needsDirectConnection
+    /// The audio was made but this Mac did not fetch it: the transfer's own policy or the
+    /// network, not the provider, so it must not read as "the provider answered 502".
+    case downloadFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -74,6 +81,13 @@ public enum CloudAudioError: LocalizedError {
             "The provider reported success but returned no audio."
         case .cancelled:
             "Cancelled."
+        case .needsDirectConnection:
+            "Speech and music from GMI need a direct connection, and this Mac is set to use a "
+            + "proxy (in System Settings → Network → your connection → Details → Proxies, or "
+            + "HTTPS_PROXY or ALL_PROXY in the app's environment). Nothing was sent to GMI. "
+            + "Turn the proxy off for this, or use a voice that runs on this Mac."
+        case .downloadFailed(let detail):
+            "GMI made the audio, but Silicon Optimizer did not download it: \(detail)"
         }
     }
 }
@@ -83,10 +97,24 @@ public actor CloudAudioRuntime {
     private static let log = Logger(subsystem: "dev.siliconoptimizer", category: "cloud-audio")
     private static let maximumArtifactURLs = 8
     private static let maximumArtifactBytes: Int64 = 256 * 1_024 * 1_024
-    private let session = URLSession(configuration: .default)
+    private let session: URLSession
+    private let requireDirectConnection: @Sendable (URL) throws -> Void
     private var cancelled = false
 
-    public init() {}
+    public init() {
+        session = URLSession(configuration: .default)
+        requireDirectConnection = PublicHTTPSArtifactTransfer.requireDirectConnection(to:)
+    }
+
+    /// For tests: a stub provider, and the proxy check as an answer rather than this Mac's
+    /// own network settings.
+    init(
+        session: URLSession,
+        requireDirectConnection: @escaping @Sendable (URL) throws -> Void
+    ) {
+        self.session = session
+        self.requireDirectConnection = requireDirectConnection
+    }
 
     public func cancel() { cancelled = true }
 
@@ -166,6 +194,14 @@ public actor CloudAudioRuntime {
         onProgress: @escaping @Sendable (NodeJobProgress) -> Void
     ) async throws -> CloudAudioResult {
         cancelled = false
+        // Asked before the submit, with the jobs host standing in for a CDN nobody has named
+        // yet: whether a proxy is configured does not depend on it, and finding out at the
+        // download would be after GMI had done the work. The transfer still asks per hop.
+        do {
+            try requireDirectConnection(base)
+        } catch {
+            throw CloudAudioError.needsDirectConnection
+        }
         let started = Date()
         onProgress(.stage(request.kind == .music ? "Sending the lyrics" : "Sending the text"))
 
@@ -280,7 +316,7 @@ public actor CloudAudioRuntime {
                 timeout: 600
             )
         } catch let error as RemoteTransferError {
-            throw CloudAudioError.submitFailed(502, error.localizedDescription)
+            throw CloudAudioError.downloadFailed(error.localizedDescription)
         }
     }
 
