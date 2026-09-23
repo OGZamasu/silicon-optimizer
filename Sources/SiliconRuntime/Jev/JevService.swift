@@ -1302,6 +1302,6 @@ public actor JevService {
 
     private func debug(_ line: @autoclosure () -> String) {
         guard Self.debugEnabled else { return }
-        FileHandle.standardError.write(Data("[jev] \(line())\n".utf8))
+        FileHandle.standardError.writeUnlessNobodyIsReading(Data("[jev] \(line())\n".utf8))
     }
 }
