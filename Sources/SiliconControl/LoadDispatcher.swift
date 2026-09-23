@@ -37,6 +37,14 @@ actor LoadDispatcher {
     /// The result of the most recent load, kept only long enough for the request that asked
     /// for it to pick it up. One slot, so nothing accumulates when nobody is listening.
     private var settled: (id: UUID, result: Result<ControlAPI.Status, any Error>)?
+    /// What time it is, for the "started N seconds ago" a refusal carries. The wall clock in
+    /// the app; a test that pins that sentence fixes it, rather than hoping its two requests
+    /// land inside the same half-second.
+    private let now: @Sendable () -> Date
+
+    init(now: @escaping @Sendable () -> Date = { Date() }) {
+        self.now = now
+    }
 
     /// Whether a load is in flight right now.
     var isLoading: Bool { running != nil }
@@ -49,12 +57,12 @@ actor LoadDispatcher {
         if let running {
             throw ControlAPI.LoadAlreadyRunning(
                 modelID: running.modelID,
-                secondsAgo: max(0, Int(Date().timeIntervalSince(running.startedAt).rounded()))
+                secondsAgo: max(0, Int(now().timeIntervalSince(running.startedAt).rounded()))
             )
         }
 
         let id = UUID()
-        running = Running(id: id, modelID: request.modelID, startedAt: Date())
+        running = Running(id: id, modelID: request.modelID, startedAt: now())
 
         // What detaches the load's lifetime is that nothing here awaits this task — an
         // unstructured `Task {}` would survive this request too. `Task.detached` on top of

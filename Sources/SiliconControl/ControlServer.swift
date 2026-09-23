@@ -67,8 +67,9 @@ public actor ControlServer {
     private let discoverTailnetAddress: @Sendable () -> String?
     /// Runs `POST /load` detached from the request that asked for it, and refuses a second
     /// load rather than throwing away the first. Injected only in the sense that its
-    /// patience is: a test cannot wait 25 seconds to see what a slow load answers.
-    private let loads = LoadDispatcher()
+    /// patience and its clock are: a test cannot wait 25 seconds to see what a slow load
+    /// answers, nor count on two requests arriving inside the same second.
+    private let loads: LoadDispatcher
     private let loadPatience: Duration
     /// Called with the endpoint every time a tailnet listener becomes ready, and with nil
     /// every time one is closed. Nil in the app; the tests count these to prove that two
@@ -176,6 +177,7 @@ public actor ControlServer {
         uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
         eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
         loadPatience: Duration = ControlServer.defaultLoadPatience,
+        loadClock: @escaping @Sendable () -> Date = { Date() },
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
             SwarmPairing.tailnetIPv4()
         },
@@ -197,6 +199,7 @@ public actor ControlServer {
         )
         self.eventWriteDeadline = eventWriteDeadline
         self.loadPatience = loadPatience
+        self.loads = LoadDispatcher(now: loadClock)
         self.discoverTailnetAddress = discoverTailnetAddress
         self.tailnetBindObserver = tailnetBindObserver
         // A fresh token each launch: it is only meaningful for the lifetime of the process.
