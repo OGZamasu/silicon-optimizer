@@ -185,6 +185,19 @@ public enum ModelCatalog {
         rating: 5, maxContext: 262_144
     )
 
+    /// Qwen3.8 27B's 65 blocks: 64 main blocks, every fourth one full attention and the rest
+    /// Gated DeltaNet, then the MTP block. The geometry is a real qwen35 header's (a Bonsai 2
+    /// install: `full_attention_interval` 4, `ssm.conv_kernel` 4, `ssm.inner_size` 6144,
+    /// `ssm.state_size` 128, `ssm.group_count` 16); that file leaves the MTP block out and
+    /// says 64, which the GGUF reader counts for itself once a model is on disk. Each linear
+    /// block keeps about 3.1 MiB of state per sequence.
+    static let qwen3_8Attention = HybridAttention(
+        fullAttentionLayers: 16, linearAttentionLayers: 48, mtpLayers: 1,
+        recurrentStateElementsPerLayer: HybridAttention.deltaNetStateElements(
+            convKernel: 4, innerSize: 6144, stateSize: 128, groupCount: 16
+        ) ?? 0
+    )
+
     /// Shape figures read from the GGUF header of a real install, not a spec sheet — the
     /// qwen35 architecture's 256-wide heads (24 Q over 4 KV) are exactly the kind of
     /// rule-of-thumb break the planner exists to catch.
@@ -204,7 +217,8 @@ public enum ModelCatalog {
         shape: ModelShape(
             totalParameters: 27_400_000_000, blockCount: 65, embeddingLength: 5120,
             feedForwardLength: 17_408, headCount: 24, headCountKV: 4,
-            trainingContextLength: 262_144, vocabSize: 248_320, headDimension: 256
+            trainingContextLength: 262_144, vocabSize: 248_320, headDimension: 256,
+            hybrid: qwen3_8Attention
         ),
         variants: ggufVariants(
             repository: "unsloth/Qwen3.8-27B-GGUF", stem: "Qwen3.8-27B",
@@ -233,7 +247,8 @@ public enum ModelCatalog {
         shape: ModelShape(
             totalParameters: 27_400_000_000, blockCount: 65, embeddingLength: 5120,
             feedForwardLength: 17_408, headCount: 24, headCountKV: 4,
-            trainingContextLength: 262_144, vocabSize: 248_320, headDimension: 256
+            trainingContextLength: 262_144, vocabSize: 248_320, headDimension: 256,
+            hybrid: qwen3_8Attention
         ),
         variants: [
             ModelVariant(

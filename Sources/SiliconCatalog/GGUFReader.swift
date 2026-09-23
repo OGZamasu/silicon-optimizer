@@ -172,9 +172,41 @@ public struct GGUFReader: Sendable {
             // the residual stream (Qwen3, gpt-oss) always publish it.
             headDimension: metadata.integer("attention.key_length")
                 ?? fallback?.headDimensionOverride,
-            moe: moe
+            moe: moe,
+            // A header that describes the split is believed over the catalog; one that says
+            // nothing keeps the catalog's split only when it is the same stack of blocks.
+            hybrid: hybridAttention(from: metadata, blockCount: blockCount)
+                ?? fallback.flatMap { $0.blockCount == blockCount ? $0.hybrid : nil }
         )
         return shape.isValidForPlanning ? shape : safeFallback
+    }
+
+    /// The full/linear attention split of a Qwen3.8-style hybrid (llama.cpp's `qwen35`,
+    /// `qwen35moe` and `qwen3next`), read the way llama.cpp reads it: every
+    /// `full_attention_interval`-th main block is full attention, the rest are Gated DeltaNet,
+    /// and `nextn_predict_layers` MTP blocks sit after the main stack. Nil for any header
+    /// without the `ssm.*` geometry, which is every ordinary transformer.
+    func hybridAttention(from metadata: Metadata, blockCount: Int) -> HybridAttention? {
+        guard let interval = metadata.integer("full_attention_interval"), interval > 0,
+              let convKernel = metadata.integer("ssm.conv_kernel"),
+              let innerSize = metadata.integer("ssm.inner_size"),
+              let stateSize = metadata.integer("ssm.state_size"),
+              let groupCount = metadata.integer("ssm.group_count"),
+              let elements = HybridAttention.deltaNetStateElements(
+                convKernel: convKernel, innerSize: innerSize,
+                stateSize: stateSize, groupCount: groupCount
+              )
+        else { return nil }
+        let mtpLayers = metadata.integer("nextn_predict_layers") ?? 0
+        guard (0...blockCount).contains(mtpLayers) else { return nil }
+        let mainLayers = blockCount - mtpLayers
+        let fullAttention = mainLayers / interval
+        return HybridAttention(
+            fullAttentionLayers: fullAttention,
+            linearAttentionLayers: mainLayers - fullAttention,
+            mtpLayers: mtpLayers,
+            recurrentStateElementsPerLayer: elements
+        )
     }
 
     // MARK: - Binary cursor

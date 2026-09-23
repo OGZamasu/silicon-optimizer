@@ -86,10 +86,11 @@ struct InstalledAgentPackage: Sendable {
 /// One verified tree per bundled lock. The first start installs it from the bundled
 /// integrity lock with a strict `npm ci` in a fresh directory, so neither a previous agent
 /// run nor a project-local package can become the binary, and records every file's size
-/// and SHA-256. Each later start checks the tree against that record — under a second for
-/// the largest — and uses it; any difference, or a different lock or Node line, installs it
-/// again. A start therefore costs a hash pass, not a 100–280 MB reinstall, and still fails
-/// closed on a tree that was changed.
+/// and SHA-256. Each later start checks the tree against that record and uses it; any
+/// difference, or a different lock or Node line, installs it again. The check is a fraction
+/// of a second for Codex's and Qwen Code's trees and a few seconds for the harness's ~30,000
+/// files on an internal SSD, where a strict reinstall of the same tree takes tens of seconds
+/// and writes 100–280 MB. It still fails closed on a tree that was changed.
 ///
 /// Per-launch folders from before this, and installs that never finished, record the app
 /// process that made them and are removed once that process is gone.

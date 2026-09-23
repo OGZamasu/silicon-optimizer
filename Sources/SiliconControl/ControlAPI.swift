@@ -24,13 +24,52 @@ public enum ControlAPI {
         /// reach it, and driving someone's model is not something a random process should be
         /// able to do silently.
         public var token: String
+        /// The app's version — the same string as `appVersion`, kept under the key clients
+        /// have always read.
         public var version: String
+        /// `CFBundleShortVersionString` and `CFBundleVersion` of the app that wrote this file.
+        /// Absent from a file written before they existed.
+        public var appVersion: String?
+        public var appBuild: String?
 
-        public init(port: Int, pid: Int32? = nil, token: String, version: String) {
+        public init(port: Int, pid: Int32? = nil, token: String, app: AppVersion) {
             self.port = port
             self.pid = pid
             self.token = token
+            self.version = app.version
+            self.appVersion = app.version
+            self.appBuild = app.build
+        }
+    }
+
+    /// Which build of the app is answering.
+    ///
+    /// `/health` and the handshake used to carry a literal "0.1.0": the version in the first
+    /// Info.plist, written into the server beside it and never bumped with it. A phone
+    /// connected to 0.5.0 build 157 said 0.1.0 (#81). The control server is handed this
+    /// instead, so what it publishes is the bundle's, and a test can hand it a fixture.
+    public struct AppVersion: Sendable, Equatable {
+        /// `CFBundleShortVersionString`.
+        public var version: String
+        /// `CFBundleVersion`.
+        public var build: String
+
+        public init(version: String, build: String) {
             self.version = version
+            self.build = build
+        }
+
+        /// Read out of an Info.plist dictionary. A binary without one — a bare test runner —
+        /// says "dev" rather than inventing a number, as `gateway.json` does.
+        public init(infoDictionary info: [String: Any]?) {
+            version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+            build = info?["CFBundleVersion"] as? String ?? "dev"
+        }
+
+        /// The running app's. The executable embeds Resources/Info.plist, so even a plain
+        /// `swift build` of the app answers with the version it was built from.
+        public static var running: AppVersion {
+            AppVersion(infoDictionary: Bundle.main.infoDictionary)
         }
     }
 
@@ -219,6 +258,9 @@ public enum ControlAPI {
         public var weightsBytes: Int64
         public var expertsBytes: Int64
         public var kvCacheBytes: Int64
+        /// A hybrid model's fixed linear-attention state, part of `residentBytes`. Absent for
+        /// a model whose blocks all keep a KV cache, so an ordinary plan reads as it always has.
+        public var recurrentStateBytes: Int64?
         public var computeBytes: Int64
         public var streamedFromDiskBytes: Int64
         public var suggestions: [Suggestion]
@@ -226,8 +268,9 @@ public enum ControlAPI {
 
         public init(
             verdict: String, residentBytes: Int64, budgetBytes: Int64, weightsBytes: Int64,
-            expertsBytes: Int64, kvCacheBytes: Int64, computeBytes: Int64,
-            streamedFromDiskBytes: Int64, suggestions: [Suggestion], notes: [String]
+            expertsBytes: Int64, kvCacheBytes: Int64, recurrentStateBytes: Int64? = nil,
+            computeBytes: Int64, streamedFromDiskBytes: Int64, suggestions: [Suggestion],
+            notes: [String]
         ) {
             self.verdict = verdict
             self.residentBytes = residentBytes
@@ -235,6 +278,7 @@ public enum ControlAPI {
             self.weightsBytes = weightsBytes
             self.expertsBytes = expertsBytes
             self.kvCacheBytes = kvCacheBytes
+            self.recurrentStateBytes = recurrentStateBytes
             self.computeBytes = computeBytes
             self.streamedFromDiskBytes = streamedFromDiskBytes
             self.suggestions = suggestions

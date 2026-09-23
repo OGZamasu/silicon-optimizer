@@ -15,6 +15,7 @@ public struct ModelShape: Hashable, Sendable, Codable {
     public static let maximumContextLength = 16_777_216
     public static let maximumVocabularySize = 16_777_216
     public static let maximumExpertCount = 65_536
+    public static let maximumRecurrentStateElements = 1_073_741_824
 
     public var totalParameters: Int64
     public var blockCount: Int
@@ -36,7 +37,15 @@ public struct ModelShape: Hashable, Sendable, Codable {
     /// Non-nil only for mixture-of-experts models.
     public var moe: MoEShape?
 
+    /// Non-nil only for models whose blocks do not all keep a KV cache. Nil means every block
+    /// is full attention, which is every model planned before Qwen3.8 and every shape saved
+    /// in a model index before this existed.
+    public var hybrid: HybridAttention?
+
     public var isMoE: Bool { moe != nil }
+
+    /// Blocks that keep a KV cache — all of them, unless the model says otherwise.
+    public var kvLayerCount: Int { hybrid?.fullAttentionLayers ?? blockCount }
 
     public init(
         totalParameters: Int64,
@@ -48,7 +57,8 @@ public struct ModelShape: Hashable, Sendable, Codable {
         trainingContextLength: Int,
         vocabSize: Int = 152_064,
         headDimension: Int? = nil,
-        moe: MoEShape? = nil
+        moe: MoEShape? = nil,
+        hybrid: HybridAttention? = nil
     ) {
         self.headDimensionOverride = headDimension
         self.totalParameters = totalParameters
@@ -60,6 +70,7 @@ public struct ModelShape: Hashable, Sendable, Codable {
         self.trainingContextLength = trainingContextLength
         self.vocabSize = vocabSize
         self.moe = moe
+        self.hybrid = hybrid
     }
 
     /// Dimension of one attention head, from the model's own metadata where available.
@@ -83,6 +94,18 @@ public struct ModelShape: Hashable, Sendable, Codable {
               (1...Self.maximumVocabularySize).contains(vocabSize),
               (1...Self.maximumHeadDimension).contains(headDimension)
         else { return false }
+
+        if let hybrid {
+            let layers = [
+                hybrid.fullAttentionLayers, hybrid.linearAttentionLayers, hybrid.mtpLayers,
+            ]
+            // Every block is exactly one of the three, so they account for all of them.
+            guard layers.allSatisfy({ (0...Self.maximumBlockCount).contains($0) }),
+                  layers.reduce(0, +) == blockCount,
+                  (0...Self.maximumRecurrentStateElements)
+                    .contains(hybrid.recurrentStateElementsPerLayer)
+            else { return false }
+        }
 
         guard let moe else { return true }
         guard (1...Self.maximumExpertCount).contains(moe.expertCount),
@@ -179,6 +202,58 @@ public struct MoEShape: Hashable, Sendable, Codable {
         let (perLayer, secondOverflow) = matrices.multipliedReportingOverflow(by: feedForward)
         let (total, thirdOverflow) = perLayer.multipliedReportingOverflow(by: layers)
         guard !firstOverflow, !secondOverflow, !thirdOverflow else { return nil }
+        return total
+    }
+}
+
+/// How a hybrid model's blocks divide between attention that keeps a KV cache and linear
+/// attention that keeps a fixed-size state instead.
+///
+/// Qwen3.8 27B (and Bonsai 2, which is Qwen3.8 in ternary weights) has 64 main blocks: 16 of
+/// full attention and 48 of Gated DeltaNet linear attention, plus one multi-token-prediction
+/// block. Planned as if all 65 kept a cache, a 128K context came out at 35 GB of KV where the
+/// runtime allocates about 8.6 GB. llama.cpp builds exactly this split — an attention cache for
+/// the full-attention blocks, a recurrent cache for the rest — and so does MLX.
+public struct HybridAttention: Hashable, Sendable, Codable {
+    /// Main blocks with full softmax attention: the only ones whose cache grows with context.
+    public var fullAttentionLayers: Int
+    /// Main blocks with linear attention, each holding a fixed-size recurrent state per
+    /// sequence however long the context is.
+    public var linearAttentionLayers: Int
+    /// Multi-token-prediction blocks after the main stack, counted in `blockCount`. They get no
+    /// share of the main cache: llama.cpp gives one its own only for MTP drafting, which this
+    /// app does not ask for, and MLX drops their weights at load.
+    public var mtpLayers: Int
+    /// Elements of recurrent state one linear-attention block keeps per sequence — the
+    /// convolution window plus the delta-rule state. Held in f32 whatever the cache precision.
+    public var recurrentStateElementsPerLayer: Int
+
+    public init(
+        fullAttentionLayers: Int, linearAttentionLayers: Int, mtpLayers: Int = 0,
+        recurrentStateElementsPerLayer: Int
+    ) {
+        self.fullAttentionLayers = fullAttentionLayers
+        self.linearAttentionLayers = linearAttentionLayers
+        self.mtpLayers = mtpLayers
+        self.recurrentStateElementsPerLayer = recurrentStateElementsPerLayer
+    }
+
+    /// The recurrent state of a Gated DeltaNet block, in llama.cpp's terms: a convolution
+    /// window of `(convKernel - 1) x (innerSize + 2 x groups x stateSize)` and a delta-rule
+    /// state of `stateSize x innerSize`. These are the `ssm.*` keys of a qwen35 GGUF header.
+    public static func deltaNetStateElements(
+        convKernel: Int, innerSize: Int, stateSize: Int, groupCount: Int
+    ) -> Int? {
+        guard convKernel >= 1, innerSize >= 1, stateSize >= 1, groupCount >= 1 else { return nil }
+        let (perGroup, perGroupOverflow) = stateSize.multipliedReportingOverflow(by: 2)
+        let (keys, keysOverflow) = groupCount.multipliedReportingOverflow(by: perGroup)
+        let (channels, channelsOverflow) = innerSize.addingReportingOverflow(keys)
+        let (window, windowOverflow) = (convKernel - 1).multipliedReportingOverflow(by: channels)
+        let (state, stateOverflow) = stateSize.multipliedReportingOverflow(by: innerSize)
+        let (total, totalOverflow) = window.addingReportingOverflow(state)
+        guard !perGroupOverflow, !keysOverflow, !channelsOverflow, !windowOverflow,
+              !stateOverflow, !totalOverflow
+        else { return nil }
         return total
     }
 }
