@@ -324,7 +324,7 @@ public actor CodexRuntime {
             .map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
             ?? home
 
-        let stdin = Pipe()
+        let stdin = Pipe.childInput()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardInput = stdin

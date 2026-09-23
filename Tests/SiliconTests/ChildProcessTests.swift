@@ -215,3 +215,34 @@ struct ServerProcessRegistrationTests {
         #expect(registry.tracked.contains { $0.pid == pid } == false)
     }
 }
+
+/// A child's stdin whose reader has gone must fail the write, not raise SIGPIPE — whose
+/// default action would end this test run, and in the app the app. Laya, Pi and Codex all
+/// write to their child through this pipe.
+@Suite("A child's input pipe")
+struct ChildInputPipeTests {
+
+    @Test func aWriteWithNoReaderIsAnErrorNotASignal() throws {
+        let pipe = Pipe.childInput()
+        #expect(fcntl(pipe.fileHandleForWriting.fileDescriptor, F_GETNOSIGPIPE) == 1)
+        try pipe.fileHandleForReading.close()
+        #expect(throws: (any Error).self) {
+            try pipe.fileHandleForWriting.write(contentsOf: Data("a question\n".utf8))
+        }
+    }
+
+    /// And the same with a real child that went away, the way a sidecar does.
+    @Test func aWriteToAChildThatExitedIsAnErrorNotASignal() throws {
+        let pipe = Pipe.childInput()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        process.standardInput = pipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        #expect(throws: (any Error).self) {
+            try pipe.fileHandleForWriting.write(contentsOf: Data("a question\n".utf8))
+        }
+    }
+}

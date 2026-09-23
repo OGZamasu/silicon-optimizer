@@ -18,7 +18,12 @@ struct FakeSidecar {
 
     /// - Parameter behaviour: `ok` answers everything; `dieOnRequest` exits after the
     ///   ready line; `wrongID` answers somebody else's question; `hang` never answers;
-    ///   `notInstalled` refuses at load the way a missing `laya_mlx` does.
+    ///   `notInstalled` refuses at load the way a missing `laya_mlx` does; `closesInput`
+    ///   closes its end of stdin after the ready line and stays alive, so the next write
+    ///   finds no reader — what a sidecar that has just died looks like to the pipe, held
+    ///   still long enough to hit every time; `closesOutput` takes one request, closes
+    ///   stdout and exits 9 half a second later — a death whose pipe closes before the
+    ///   process is reaped, the order that used to be mistaken for a timeout.
     init(_ behaviour: String = "ok") throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("laya-fake-\(UUID().uuidString)", isDirectory: true)
@@ -63,6 +68,15 @@ struct FakeSidecar {
         if behaviour == "dieOnRequest":
             sys.stdin.readline()
             sys.exit(9)
+        if behaviour == "closesInput":
+            os.close(0)
+            time.sleep(30)
+            sys.exit(0)
+        if behaviour == "closesOutput":
+            sys.stdin.readline()
+            os.close(1)
+            time.sleep(0.5)
+            os._exit(9)
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -238,6 +252,64 @@ struct LayaSidecarTests {
         )
     }
 
+    /// The death `aSidecarThatDiesIsReportedAsADeath` names, in the order that made it flaky:
+    /// the answer pipe closes while `isRunning` is still true, because the child has not
+    /// been reaped yet. That is a death with an exit status, worth the lane's one restart —
+    /// not a timeout, which gets none.
+    @Test func anOutputThatClosesBeforeTheReapIsADeathWithItsStatus() async throws {
+        let fake = try FakeSidecar("closesOutput")
+        defer { fake.clean() }
+        let sidecar = LayaSidecar(
+            configuration: fake.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+        do {
+            _ = try await sidecar.decide(
+                state: "s", questions: ["q": ["type": "noul", "instructions": "?"]]
+            )
+            Issue.record("a sidecar with no output answered")
+        } catch let error as LayaSidecarError {
+            guard case .died(let status, _) = error else {
+                Issue.record("expected a death, got \(error)")
+                return
+            }
+            #expect(status == 9)
+            #expect(error.deservesRestart)
+        }
+        #expect(await sidecar.isRunning == false)
+    }
+
+    /// A write to a sidecar that is no longer reading must come back as an error, not as
+    /// SIGPIPE — whose default action ends this process, which in the app is the whole of
+    /// Silicon Optimizer. Without the fix this test does not fail, it kills the test run.
+    ///
+    /// Both writes are covered: the question, and the polite shutdown line `stop()` sends to
+    /// a process that still looks alive, which is how the suite used to die at random when
+    /// a `dieOnRequest` sidecar exited a moment before `isRunning` noticed.
+    @Test func writingToASidecarThatStoppedReadingIsADeathNotASignal() async throws {
+        let fake = try FakeSidecar("closesInput")
+        defer { fake.clean() }
+        let sidecar = LayaSidecar(
+            configuration: fake.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+        #expect(await sidecar.isRunning, "alive, but no longer reading")
+        do {
+            _ = try await sidecar.decide(
+                state: "s", questions: ["q": ["type": "noul", "instructions": "?"]]
+            )
+            Issue.record("a sidecar that cannot read the question answered it")
+        } catch let error as LayaSidecarError {
+            guard case .died = error else {
+                Issue.record("expected a death, got \(error)")
+                return
+            }
+            #expect(error.deservesRestart)
+        }
+        await sidecar.stop()
+        #expect(await sidecar.isRunning == false)
+    }
+
     @Test func aMissingPackageSaysSoRatherThanFailingToParse() async throws {
         let fake = try FakeSidecar("notInstalled")
         defer { fake.clean() }
@@ -322,6 +394,129 @@ struct LayaSidecarTests {
             ).start()
         }
     }
+}
+
+// MARK: - A sidecar that stopped reading, through the router
+
+/// The same dead pipe, one level up: the lane has to report it as a failure the router can
+/// route around, and an ability the owner pinned away from the cloud must still not reach
+/// it. The Laya lane here is the real one, over a real (fake) sidecar and a library laid out
+/// the way the install check expects, so the router's own readiness check picks it.
+@Suite("A Laya sidecar that stopped reading, through the router", .serialized)
+struct LayaStoppedReadingRoutingTests {
+
+    enum Scenario: String, CaseIterable, Sendable {
+        case alwaysLocalWithAFreeLaneBehind, alwaysLocalAlone, off
+    }
+
+    @Test(arguments: Scenario.allCases)
+    func itIsALaneFailureThatFallsThroughAndNeverReachesJev(scenario: Scenario) async throws {
+        let fake = try FakeSidecar("closesInput")
+        defer { fake.clean() }
+        let runtime = try await Self.installedRuntime(for: fake)
+        let harness = JevHarness()
+        defer { harness.clean() }
+        let jevRequests = JevRequestCounter()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CountingJevProtocol.self]
+        CountingJevProtocol.counter = jevRequests
+        // Jev fully on — keyed, enabled, in budget — so only the owner's pin keeps it out.
+        await harness.configure(session: URLSession(configuration: configuration))
+        try await harness.enable()
+        let oneToken = CountingLane(.oneToken)
+        let router = DecisionRouter(service: harness.service)
+        await router.register(LayaLane(runtime: runtime, checkpoint: { .english }))
+        if scenario == .alwaysLocalWithAFreeLaneBehind { await router.register(oneToken) }
+        try await harness.service.update {
+            $0.laneOverrides[.decideTool] = scenario == .off ? .off : .alwaysLocal
+        }
+        let questions = ControlAPI.DecideRequest.fixture().questions
+
+        switch scenario {
+        case .alwaysLocalWithAFreeLaneBehind:
+            let response = try await router.decide(
+                .decideTool, state: .string("s"), questions: questions
+            )
+            #expect(response.provider == DecisionLaneID.oneToken.wireName)
+            #expect(await oneToken.count() == 1)
+        case .alwaysLocalAlone:
+            do {
+                _ = try await router.decide(.decideTool, state: .string("s"), questions: questions)
+                Issue.record("a sidecar that cannot read answered")
+            } catch let error as LayaSidecarError {
+                guard case .died = error else {
+                    Issue.record("expected the sidecar to be reported stopped, got \(error)")
+                    return
+                }
+            }
+        case .off:
+            await #expect(throws: JevError.disabled(.decideTool)) {
+                _ = try await router.decide(.decideTool, state: .string("s"), questions: questions)
+            }
+        }
+
+        let startsLog = fake.directory.appendingPathComponent("starts.log")
+        let starts = ((try? String(contentsOf: startsLog, encoding: .utf8)) ?? "")
+            .split(separator: "\n").count
+        // Laya was asked, got its one restart, and failed again — or, switched off, was
+        // never started at all.
+        #expect(starts == (scenario == .off ? 0 : 2))
+        #expect(jevRequests.value == 0, "\(scenario.rawValue) reached the paid lane")
+        await runtime.unload()
+    }
+
+    /// A model library laid out the way `LayaRuntime` checks for an install, with the fake
+    /// standing in for the driver script: the interpreter a symlink to the system one (a
+    /// copy is killed at launch), an empty `laya_mlx` package and an empty weights file.
+    static func installedRuntime(for fake: FakeSidecar) async throws -> LayaRuntime {
+        let manager = FileManager.default
+        let library = fake.directory
+        let environment = LayaRuntime.environmentDirectory(library: library)
+        let bin = environment.appendingPathComponent("bin")
+        try manager.createDirectory(at: bin, withIntermediateDirectories: true)
+        try manager.createSymbolicLink(
+            at: bin.appendingPathComponent("python3"),
+            withDestinationURL: URL(fileURLWithPath: "/usr/bin/python3")
+        )
+        let package = environment.appendingPathComponent("lib/python3/site-packages/laya_mlx")
+        try manager.createDirectory(at: package, withIntermediateDirectories: true)
+        #expect(manager.createFile(
+            atPath: package.appendingPathComponent("__init__.py").path, contents: Data()
+        ))
+        let snapshot = LayaRuntime.checkpointDirectory(
+            .english, hubCache: LayaRuntime.hubCacheDirectory(library: library)
+        ).appendingPathComponent("snapshots/\(LayaCheckpoint.english.revision)")
+        try manager.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        #expect(manager.createFile(
+            atPath: snapshot.appendingPathComponent("model.safetensors").path, contents: Data()
+        ))
+        let runtime = LayaRuntime()
+        await runtime.configure(library: { library }, script: { fake.script })
+        #expect(await runtime.installation(checkpoint: .english).isInstalled)
+        return runtime
+    }
+}
+
+private final class JevRequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
+/// Stands in for TypeSafe. Counts, and fails, every request that reaches it.
+private final class CountingJevProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var counter: JevRequestCounter?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.counter?.increment()
+        client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+    }
+
+    override func stopLoading() {}
 }
 
 // MARK: - Install and locations
