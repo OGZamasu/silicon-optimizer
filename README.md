@@ -106,6 +106,20 @@ stops if it is another revision. A rerun leaves Python packages already installe
 version as they are, so an environment made by an older, unpinned install keeps any extras it
 had. Moving a pin is a review: `Scripts/lock-media-installers.sh` rebuilds the locks.
 
+The app's other one-click setups are held to the same rule. MFLUX, the voice tools, face
+tracking and Laya install only their hash-locked packages, at the versions known to work
+together; LuxTTS and its LinaCodec are fetched by commit and checked, and LinaCodec (a git
+dependency pip cannot hash) is installed from that checked checkout with no index and no
+dependencies. Tracking's MediaPipe models come from their numbered release, digest-checked.
+Each builds its environment on a Homebrew or python.org Python its locks cover — never macOS's
+own 3.9 — and says which to install when there is none. The voice models run offline: before a
+run the app puts the reviewed files of every Hugging Face repository the model reads (its own,
+and the tokenizers, codecs and voices its library names inside itself) into the engine cache at
+a pinned commit, each checked against its SHA-256 — reusing a copy an earlier download left when
+it matches — so nothing a model loads comes from a moving `main`. CSM without a reference speaks
+with the stock prompt from its own pinned repository rather than the gated `sesame/csm-1b`.
+`Scripts/pin-hub-models.sh` rebuilds those manifests.
+
 The node has a persistent queue, authenticated loopback access, and verified MP4 output
 with model metadata. The [batch example](Resources/video-node/examples/README.md) includes
 twenty honey-badger prompts, resumable submission, explicit retries, and a local review
@@ -293,10 +307,14 @@ mesh and video generation, uploads, and fetching a result by its media id. It do
 grant access to the owner's conversations, model installs or loading, or the Mac's global
 video queue, and it never spends the owner's money: `/decide` with `provider: "typesafe"`
 is refused, `auto` answers it from the free lanes only, no Jev call is made on its behalf
-(verification, routing or the decide cascade), and a flagged answer is never re-run on a
-cloud model for it. The peer event stream remains available for status, but
+(verification, routing or the decide cascade), a flagged answer is never re-run on a
+cloud model for it, and a render or plan that names a cloud provider's model (`cloud/…`)
+is refused before anything is asked. The peer event stream remains available for status, but
 omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
-require this Mac's local control token or an appropriately paired device.
+require this Mac's local control token or an appropriately paired device. A model you
+imported from your own disk has the file's path as its id; the swarm, which cannot load it,
+is told `external:` and a token instead, the same one on `/installed`, `/status` and
+`/events`, for as long as the app runs.
 
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;
@@ -357,6 +375,15 @@ of posters costs one fetch each rather than one per scroll. Results are the one 
 responses this server lets a client keep — `Cache-Control: private, max-age=3600`, which is
 what makes the `ETag` worth having; everything else stays `no-store`.
 
+**Names, not paths.** Those answers still say which file a render made, but to a device or
+a swarm node they say it by name: an image's `path`, a mesh's `glbPath` and `objPath`, a
+clip's `file`, and a queue item's `file` and `outputDirectory` are the last component only.
+A path on this Mac names your account and how your disk is laid out, and neither caller can
+open one here anyway — it fetches by `mediaID`. A warning, detail, error or refusal that
+mentions one of the app's output, upload or poster folders names it the same way, and your
+home folder as `~`, and so does a `/chat/stream` refusal. This Mac's own control token — the
+MCP bridge and local scripts, which open those files — still gets absolute paths.
+
 **Scope is decided per id, not per route.** A full-control device may fetch anything it has
 an id for. A chat-only device may fetch the poster frames and is refused the renders
 themselves: a device paired for chat is one that was lent out or left at the office, and
@@ -394,6 +421,13 @@ seven days** — an upload is working material for one render, not a library —
 runs both on arrival and on a queue poll, at most hourly, so a device that uploads once and
 then only ever polls does not leave a picture behind for good. The answer says `expiresAt`,
 so an app can say "available until" rather than discover the 404 a week later.
+
+Each sender has an **allowance** of uploads waiting at once: 200 files or 1 GiB per paired
+device, and 32 files or 128 MiB for the swarm secret — every node holding it shares the one.
+Past that an upload is a `429` saying so, with `Retry-After` set to when the oldest expires,
+and nothing is written; an upload past its week stops counting before the sweep reaches it.
+This Mac's own control token has no allowance. The per-request ceiling stops one upload
+from filling the disk; this stops a thousand small ones, a week at a time.
 
 `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
 `POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on
@@ -843,8 +877,9 @@ Hugging Face cache every other Python engine here uses, with `HF_HOME` pointed a
 Everything is pinned:
 
 - `laya-mlx==0.1.0` (there are no upstream git tags; the wheel's sha256 is the only pin
-  there is), which brings `mlx>=0.32.2,<0.33`. Python 3.11 or newer — macOS ships 3.9, so
-  the installer looks for a Homebrew 3.11+ and says so if it finds none.
+  there is), which brings `mlx>=0.32.2,<0.33`; it and every dependency install from a
+  hash-locked set in `Resources/pinned-installs/laya`. Python 3.11 to 3.14 — macOS ships 3.9,
+  so the installer looks for a Homebrew one and says so if it finds none.
 - Checkpoints, by **full commit sha** rather than a branch: `aac6fef/laya-mlx` (English,
   ModernBERT-large, 421M, 512 tokens of context, the default), `aac6fef/laya-multilingual-mlx`
   (mmBERT-base, 322M, 1024 tokens, the fastest and smallest) and

@@ -1,0 +1,21 @@
+{
+  "repository": "mlx-community/csm-1b",
+  "revision": "5bf5ec118cf45fecc7b51198fd9f1a20a5aab65a",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "1b14de88b821ef01d0f4b15f36cf2005032e8be1da83d6aae971dbfe37abe39b",
+      "size": 193
+    },
+    {
+      "path": "model.safetensors",
+      "sha256": "5307644eb8a34802aa37f2c564c66e3caea16396c585542378c1945ed240d89e",
+      "size": 6211188010
+    },
+    {
+      "path": "prompts/conversational_a.wav",
+      "sha256": "356648c1bc6c1da7883004557e9b21a2ef7d01682d8b9d02d6dcb950b348b04f",
+      "size": 2646044
+    }
+  ]
+}

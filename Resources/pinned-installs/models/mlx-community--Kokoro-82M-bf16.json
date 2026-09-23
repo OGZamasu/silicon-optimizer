@@ -1,0 +1,286 @@
+{
+  "repository": "mlx-community/Kokoro-82M-bf16",
+  "revision": "a71e4d38b236d968966a2002c4c895dbd12b1c3c",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+      "size": 2351
+    },
+    {
+      "path": "kokoro-v1_0.safetensors",
+      "sha256": "4e9ecdf03b8b6cf906070390237feda473dc13327cb8d56a43deaa374c02acd8",
+      "size": 327115152
+    },
+    {
+      "path": "voices/af_alloy.safetensors",
+      "sha256": "5bb848d02ade7e37981809acad52a1761ef7a586ff9f30d02d65fd71c4af95f9",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_aoede.safetensors",
+      "sha256": "23809148777f2a2378983dd856bc14b9c261018279f916f98c23d86e844409a5",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_bella.safetensors",
+      "sha256": "112d310468cbb3cf23404d3d0b50ad3adf017b87bf38bf9edd15f4ad572df6a3",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_heart.safetensors",
+      "sha256": "2c1c733b0e6576c810e268d3e440c21dea4e0f0131a3ba4cfc98d7fe6136d094",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_jessica.safetensors",
+      "sha256": "c358448e4277b79e8b13b92033711660a1a2205c3940c2dfb16698b99fed58a8",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_kore.safetensors",
+      "sha256": "c491174280cb1ad25210a842f2f34b46a9ef904ec6f6a8e784839531795fa278",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_nicole.safetensors",
+      "sha256": "574656386022c81a029e9a72558191925f44c3de2dad2fa2e45751938557d062",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_nova.safetensors",
+      "sha256": "242b9a0a01eac1ac2865c69fc617a756b20d86df82d5fae3970533e2312ca50e",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_river.safetensors",
+      "sha256": "82c866b0b976d50e82cbd781ac7bc771471ce5bd21decf05ab92812a08fb1c04",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_sarah.safetensors",
+      "sha256": "4940072182542f54c1035d1daf4c1cf3136ca9baa9ac57c8e006b4befcc50be6",
+      "size": 522320
+    },
+    {
+      "path": "voices/af_sky.safetensors",
+      "sha256": "957af332330db8e9bd7f9dc449475a946cb0d7d689afef64b91007bbbf20eaa0",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_adam.safetensors",
+      "sha256": "a4f60a3b9c20353c2604a17485ba53260502a758681a84d41e8af53cc559d929",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_echo.safetensors",
+      "sha256": "031fc608a900332c4e1a29bd0884f5d0e84bd0348261fa79981e5cbd138c950d",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_eric.safetensors",
+      "sha256": "1fb4a61dcee1f114f90886ecf29bc2feed05e29eed9caa6ddb109f1934d73274",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_fenrir.safetensors",
+      "sha256": "9abed964b906c4cae6f404d9849e76260689aea862bc6ca85fc3f5207ba96538",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_liam.safetensors",
+      "sha256": "66b65a96e16c3d91035a6e9019d9986ed524d27ce35b487270cdf61c99e3ebad",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_michael.safetensors",
+      "sha256": "3940147ded35deba0bb52e8132f89b719298e0520258c34584358aa5a24da2ea",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_onyx.safetensors",
+      "sha256": "b5d6132a5747648d98c82c9c4aaa9cf52d7230e63e403c1cb9c12858446ca5f5",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_puck.safetensors",
+      "sha256": "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89",
+      "size": 522320
+    },
+    {
+      "path": "voices/am_santa.safetensors",
+      "sha256": "d1f433b57ffccf105ea9e434ea19af6c2a8a7916ba6d1a73c34f0046bd226084",
+      "size": 522320
+    },
+    {
+      "path": "voices/bf_alice.safetensors",
+      "sha256": "9c77e390d93d9db7c4a7526c3b1f393290a2be46f233b89a00b8188e850c20a8",
+      "size": 522320
+    },
+    {
+      "path": "voices/bf_emma.safetensors",
+      "sha256": "8878a75a6661305849eeb1d6293a7177250193616e161b4c3100636434dfe69f",
+      "size": 522320
+    },
+    {
+      "path": "voices/bf_isabella.safetensors",
+      "sha256": "f7b6076f025649699fcfed1a6debf13049a87afdc7aafc8c72b7d81246db6ead",
+      "size": 522320
+    },
+    {
+      "path": "voices/bf_lily.safetensors",
+      "sha256": "ee77a419046a765420ac82cb46e8b8cf5754a0b9d20c340fece1d4b18be7ecdb",
+      "size": 522320
+    },
+    {
+      "path": "voices/bm_daniel.safetensors",
+      "sha256": "b195dec592ee024f57ddc5bf481464596082ba60998a2a295eba90bfc1064f4b",
+      "size": 522320
+    },
+    {
+      "path": "voices/bm_fable.safetensors",
+      "sha256": "9fa80184e96d016a744bc13b0b2e7695e55d6b855556fa003325cb1e5ebf2c2b",
+      "size": 522320
+    },
+    {
+      "path": "voices/bm_george.safetensors",
+      "sha256": "a3d9b8995cbbe5536f954b6be2a0f1f312f077118ba0d4d2178fc41dc8306672",
+      "size": 522320
+    },
+    {
+      "path": "voices/bm_lewis.safetensors",
+      "sha256": "e1e68013c21a141efe527aaec561e1174c2f5a6951b3bcecc8396adab315b247",
+      "size": 522320
+    },
+    {
+      "path": "voices/ef_dora.safetensors",
+      "sha256": "13f6dfe8a498ce97a384186af045b586db6292869acbfde123a0fa2798229351",
+      "size": 522320
+    },
+    {
+      "path": "voices/em_alex.safetensors",
+      "sha256": "e3bc4bf56ab47f0d52074cd3f84cd4f1713187285fdd85a545c6e167dfa3ab77",
+      "size": 522320
+    },
+    {
+      "path": "voices/em_santa.safetensors",
+      "sha256": "37c44211b77b3f29512f420bd5a2e146c7769a5ad3d904b3455cccd55055db62",
+      "size": 522320
+    },
+    {
+      "path": "voices/ff_siwis.safetensors",
+      "sha256": "5c659c9b9e12be28b98a4aa0cd6b1e66f359b6381ba5680264e9072945ac32b8",
+      "size": 522320
+    },
+    {
+      "path": "voices/hf_alpha.safetensors",
+      "sha256": "e93355a43e6f57e8cfde96874008c858f1fb7fd8b65dd043114d451882cad3f6",
+      "size": 522320
+    },
+    {
+      "path": "voices/hf_beta.safetensors",
+      "sha256": "976ea52ba7edce5da049c41ef06a663f3807fd470d2ea5c359245dfc2fb00d66",
+      "size": 522320
+    },
+    {
+      "path": "voices/hm_omega.safetensors",
+      "sha256": "227f0c710d1169686bf617fac486e8496982e96cc01617a3acd3579db75dd126",
+      "size": 522320
+    },
+    {
+      "path": "voices/hm_psi.safetensors",
+      "sha256": "03efb26b99e78c8d40ade3217f9c9905f8f84bbad7f21f921e270c036b01144e",
+      "size": 522320
+    },
+    {
+      "path": "voices/if_sara.safetensors",
+      "sha256": "2f3d092c8ba16f2007e8b234c9a55bdebec614a1e50143e41b39dd7f89fdb45b",
+      "size": 522320
+    },
+    {
+      "path": "voices/im_nicola.safetensors",
+      "sha256": "96b62f7d25c3e7efce4f2506beeaa9f63bcc73524c7b2862738c65433fe9ba16",
+      "size": 522320
+    },
+    {
+      "path": "voices/jf_alpha.safetensors",
+      "sha256": "455f78a6ebe633929cf314ce7c4a6b595ad1fb0ec7de6de7bc1d62d37e5264d2",
+      "size": 522320
+    },
+    {
+      "path": "voices/jf_gongitsune.safetensors",
+      "sha256": "30d744337db7a7a91185b129dfd24ca86c19f7d46acadf2daf077ba78edaba81",
+      "size": 522320
+    },
+    {
+      "path": "voices/jf_nezumi.safetensors",
+      "sha256": "65743c88fa1c8d30d7f41e402ce30a6ce461e2b0f8095c252e51905eb0c0754a",
+      "size": 522320
+    },
+    {
+      "path": "voices/jf_tebukuro.safetensors",
+      "sha256": "0cc28d928ce14b2ba4586b4c552edba36828a0961a37649530f80b3ad809bdec",
+      "size": 522320
+    },
+    {
+      "path": "voices/jm_kumo.safetensors",
+      "sha256": "9f6b9d85ae099c409193924add0f1c478d7c9b6904ef181f2297154bfe05cc2c",
+      "size": 522320
+    },
+    {
+      "path": "voices/pf_dora.safetensors",
+      "sha256": "9a8d587d60d0e041f593f7e7488943e7a6821f0136961bf0e554572e12c91c77",
+      "size": 522320
+    },
+    {
+      "path": "voices/pm_alex.safetensors",
+      "sha256": "bec864eaeb05cc1a6fa12777ad31faaae1b2ed6d5eb2a6f7370fb9cdc48e3e2f",
+      "size": 522320
+    },
+    {
+      "path": "voices/pm_santa.safetensors",
+      "sha256": "5009747fd93841c0865830be0f577ed50800b41b2122c469dedf51bb8311f78d",
+      "size": 522320
+    },
+    {
+      "path": "voices/zf_xiaobei.safetensors",
+      "sha256": "cbda378bbe266c735aa13c94c20b6224f2f8d0e16cf3abe612a4e6d93ebeab51",
+      "size": 522320
+    },
+    {
+      "path": "voices/zf_xiaoni.safetensors",
+      "sha256": "ef37a82850e10eb15f18a4549c76707a8eebd682e61facdda6ee4a4dc4eb0bf0",
+      "size": 522320
+    },
+    {
+      "path": "voices/zf_xiaoxiao.safetensors",
+      "sha256": "cf507ad2319c50121aca4755cd3b9793bde10eea9aa9caca6cb3b5914d5f258f",
+      "size": 522320
+    },
+    {
+      "path": "voices/zf_xiaoyi.safetensors",
+      "sha256": "1f2b7ce315a84870170ca83b2e4c0a072242bacbbd869f8a3b22377cc7d59e0b",
+      "size": 522320
+    },
+    {
+      "path": "voices/zm_yunjian.safetensors",
+      "sha256": "a08940c5dd3d8aadfda8a5576aa0f688a184ccbd5e4408d7a2a8144ab1fb3040",
+      "size": 522320
+    },
+    {
+      "path": "voices/zm_yunxi.safetensors",
+      "sha256": "78d8bb5ba4a2ea75a7f22c6148214a7434b436db85dc791a2ddf2aa7f6cc6fab",
+      "size": 522320
+    },
+    {
+      "path": "voices/zm_yunxia.safetensors",
+      "sha256": "59a4ba431ffa7165b95d5b953097affb71110b3039f81c4439cf0f7464bcb2ee",
+      "size": 522320
+    },
+    {
+      "path": "voices/zm_yunyang.safetensors",
+      "sha256": "8ad45c1077ab0d973ebb85ebb84f797caf6c6b188255c1178511a6feba3a0611",
+      "size": 522320
+    }
+  ]
+}

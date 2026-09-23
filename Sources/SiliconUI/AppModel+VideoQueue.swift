@@ -374,11 +374,15 @@ extension AppModel {
 
     func startVideoQueueWorker() {
         guard videoQueueTask == nil else { return }
-        videoQueueTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard self != nil else { return }
-                await self?.processNextQueuedVideo()
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+        // Launch starts it, but so does the first enqueue if launch has not — and a swarm
+        // node's `/video/generate` enqueues. See `PaidLanes.forTheApp`.
+        videoQueueTask = PaidLanes.forTheApp {
+            Task { [weak self] in
+                while !Task.isCancelled {
+                    guard self != nil else { return }
+                    await self?.processNextQueuedVideo()
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                }
             }
         }
     }

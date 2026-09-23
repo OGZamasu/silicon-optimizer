@@ -1,0 +1,81 @@
+{
+  "repository": "appautomaton/openmoss-sound-effect-mlx",
+  "revision": "e789d108839132af5c49259f6933939edceec303",
+  "files": [
+    {
+      "path": "mlx-4bit/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "mlx-4bit/added_tokens.json",
+      "sha256": "9dfb40d3a3f8654c8af17771d767a494e973b9a33d5c3aeffa1b21f77db8e6d3",
+      "size": 704
+    },
+    {
+      "path": "mlx-4bit/chat_template.jinja",
+      "sha256": "894e3ace884e212ae34e1f46063686e7ebcc8b2fa0153af4579dfa5685f63184",
+      "size": 352
+    },
+    {
+      "path": "mlx-4bit/config.json",
+      "sha256": "9430b9876c487501e7cfce778a31671eee1ee72126f85acc7139917a87837606",
+      "size": 2671
+    },
+    {
+      "path": "mlx-4bit/configuration_moss_tts.py",
+      "sha256": "257842f2fa90124307408f36d55b74e135ee32b7afacbe30280964f7feb329d1",
+      "size": 5584
+    },
+    {
+      "path": "mlx-4bit/inference_utils.py",
+      "sha256": "12cdf3260114e44c8cba816782f743779ab621e0ba4047e59a3f3579cfcb0e26",
+      "size": 5092
+    },
+    {
+      "path": "mlx-4bit/merges.txt",
+      "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+      "size": 1671853
+    },
+    {
+      "path": "mlx-4bit/model.safetensors",
+      "sha256": "beb8e0b3924c338dc8a18a01897a6922486a75b7f20ecc153c530b46d2fc469b",
+      "size": 4700528250
+    },
+    {
+      "path": "mlx-4bit/modeling_moss_tts.py",
+      "sha256": "4294299d601b3f52e17f8d93d0a258ae60023ebdf1f190e5e553a997d8be3e7b",
+      "size": 24827
+    },
+    {
+      "path": "mlx-4bit/processing_moss_tts.py",
+      "sha256": "6ac2f8eaab36e47f6ef968941c836722d43dd5f9901d701ce30f81a44f92a3e1",
+      "size": 34492
+    },
+    {
+      "path": "mlx-4bit/processor_config.json",
+      "sha256": "6821d4805f10fb8b5cc743c021215097e03f1a25f7c220dfc4fb0d62b5dc97e0",
+      "size": 145
+    },
+    {
+      "path": "mlx-4bit/special_tokens_map.json",
+      "sha256": "55cbd0665670e196ce105db3f0d787e5eb35bce235fcb2bd50acbdd60c1e39c6",
+      "size": 631
+    },
+    {
+      "path": "mlx-4bit/tokenizer.json",
+      "sha256": "cb3c8fa82993d515469c2800cc455bff4aaa3c4fed9da1f2b0c0668c304f335a",
+      "size": 11422691
+    },
+    {
+      "path": "mlx-4bit/tokenizer_config.json",
+      "sha256": "87b1f37a4a73e4c4b61637a1446763e8bdea274347f0418cd5c68ead488c8ea4",
+      "size": 5501
+    },
+    {
+      "path": "mlx-4bit/vocab.json",
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+      "size": 2776833
+    }
+  ]
+}

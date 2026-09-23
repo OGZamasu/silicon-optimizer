@@ -1,4 +1,5 @@
 import Foundation
+import SiliconControl
 
 /// Face tracking: the camera turned into head pose and expression values.
 ///
@@ -52,16 +53,44 @@ public actor TrackerRuntime {
         environment.appendingPathComponent("tracker.py")
     }
 
-    /// Where the landmarker model comes from — Google's own hosting for it.
-    public nonisolated static let modelURL =
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-        + "face_landmarker/float16/1/face_landmarker.task"
-    public nonisolated static let poseModelURL =
-        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-        + "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-    public nonisolated static let handModelURL =
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
-        + "hand_landmarker/float16/latest/hand_landmarker.task"
+    /// The install, as commands: its own environment, MediaPipe and the tracker's other
+    /// packages from their hash-locked set, wheels only, and the three landmarker models from
+    /// Google's own hosting at their numbered release, each kept only if its SHA-256 matches
+    /// (a copy an older, unchecked install left is checked, and replaced if it is wrong).
+    public nonisolated static func installPlan(
+        basePython: URL?, locks: URL = PinnedInstall.defaultLockRoot(),
+        environment: URL = TrackerRuntime.environment
+    ) throws -> [PinnedInstall.Command] {
+        let (python, version, commands) = try PinnedInstall.environment(
+            environment, tool: "Face tracking", supported: PinnedInstall.trackerPythons,
+            basePython: basePython
+        )
+        let models = environment.appendingPathComponent("models")
+        return commands + [
+            PinnedInstall.pipInstall(
+                python: python,
+                lock: PinnedInstall.lock(
+                    "requirements", directory: PinnedInstall.trackerLocks, python: version, in: locks
+                ),
+                label: "Installing MediaPipe", onlyBinary: true
+            ),
+            PinnedInstall.fetch(
+                PinnedInstall.trackerFaceModel,
+                to: models.appendingPathComponent("face_landmarker.task"),
+                label: "Fetching the face model"
+            ),
+            PinnedInstall.fetch(
+                PinnedInstall.trackerPoseModel,
+                to: models.appendingPathComponent("pose_landmarker.task"),
+                label: "Fetching the body model"
+            ),
+            PinnedInstall.fetch(
+                PinnedInstall.trackerHandModel,
+                to: models.appendingPathComponent("hand_landmarker.task"),
+                label: "Fetching the hand model"
+            ),
+        ]
+    }
 
     public nonisolated static func installation() -> Installation {
         let manager = FileManager.default

@@ -231,6 +231,9 @@ public actor BuddyEventHub {
             // that log on `GET /status` must not be handed it here instead.
             var frame: BuddyEvent.Frame?
             var narrowedFrame: BuddyEvent.Frame?
+            // And a third for the swarm: a status names the loaded model, and an imported
+            // model's id is a path on this Mac. `GET /status` tells a peer the same thing.
+            var peerFrame: BuddyEvent.Frame?
             let narrowed = event.withoutPrivilegedDetail
             for (id, listener) in listeners where chosen(id) {
                 // Role filtering also applies to this side channel: peers cannot see
@@ -238,6 +241,17 @@ public actor BuddyEventHub {
                 let audience = audiences[id]
                 if event.needsFullScope, audience?.seesAgentSessions != true { continue }
                 if event.hiddenFromPeers, audience == .peer { continue }
+                if audience == .peer, case .status(let status) = event {
+                    if peerFrame == nil {
+                        let shown = BuddyEvent.status(status.forPeers)
+                        guard let data = try? shown.encoded() else { break }
+                        peerFrame = BuddyEvent.Frame(name: shown.name, data: data)
+                    }
+                    if case .dropped = listener.yield(peerFrame!) {
+                        dropped[id, default: 0] += 1
+                    }
+                    continue
+                }
 
                 let full = audience?.seesRuntimeLogs ?? false
                 if let narrowed, !full {

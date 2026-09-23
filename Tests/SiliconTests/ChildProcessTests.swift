@@ -231,6 +231,20 @@ struct ChildInputPipeTests {
         }
     }
 
+    /// The app's own diagnostics go to a stderr it did not open — `SILICON_JEV_DEBUG` writes
+    /// there. Launched with that piped to a reader that has gone, a debug line must be a
+    /// write that failed, not the end of the app.
+    @Test func aDiagnosticWhoseReaderHasGoneIsDroppedNotASignal() throws {
+        let pipe = Pipe()
+        let handle = pipe.fileHandleForWriting
+        #expect(handle.writeUnlessNobodyIsReading(Data("[jev] 1 question\n".utf8)))
+        // Checked while the reader is still there, so a writer that forgot the flag fails
+        // here rather than taking the whole test run down with the next line.
+        try #require(fcntl(handle.fileDescriptor, F_GETNOSIGPIPE) == 1)
+        try pipe.fileHandleForReading.close()
+        #expect(handle.writeUnlessNobodyIsReading(Data("[jev] 2 questions\n".utf8)) == false)
+    }
+
     /// And the same with a real child that went away, the way a sidecar does.
     @Test func aWriteToAChildThatExitedIsAnErrorNotASignal() throws {
         let pipe = Pipe.childInput()
