@@ -1,24 +1,27 @@
+import CryptoKit
 import Foundation
 import SiliconCore
 
 /// PrismML's llama.cpp fork — the runtime Bonsai's ternary GGUFs need, fetched on demand.
 ///
 /// Bundling it would ship a second copy of llama.cpp to everyone for one model family, so
-/// the app fetches the fork's macOS build from its GitHub releases the first time someone
-/// installs a model that needs it: about 12 MB, into Application Support, verified by
-/// launching it and checking the ternary type names are really in the binary. The release
-/// tarball is flat and `@loader_path`-relative, so nothing is relocated or re-signed.
+/// the app fetches a reviewed fork build from GitHub the first time someone installs a model
+/// that needs it: about 12 MB, into Application Support. The archive's checked-in SHA-256 is
+/// verified before unpacking or launching it; the runtime probe then checks the ternary types.
+/// The release tarball is flat and `@loader_path`-relative, so nothing is relocated or re-signed.
 public enum PrismRuntime {
 
     public static let repository = "PrismML-Eng/llama.cpp"
 
-    /// Known-good release, used when the API is unreachable or the newest tag hasn't
-    /// finished uploading its macOS build (assets land over an hour or so after the tag).
+    /// Update this tag and both digests together after reviewing a new release's build.
     public static let pinnedTag = "prism-b10685-7dffb15"
 
-    public static var releasesURL: URL {
-        URL(string: "https://api.github.com/repos/\(repository)/releases?per_page=10")!
-    }
+    /// SHA-256 values of the release archives at pinnedTag, recorded from GitHub's release
+    /// asset metadata. These are reviewed source data, not values accepted from the network.
+    static let pinnedDigests = [
+        "-bin-macos-arm64.tar.gz": "7fffa7a40c74f3e9bd78f3f2f9f12f9befb7b13af45d5a69c239cf3fd37b9045",
+        "-bin-macos-x64.tar.gz": "b674befce466c4938e7e70a7b13009c7df2e76b072525495a78851c987a5121a",
+    ]
 
     /// What this Mac wants: the plain Metal build. The `kleidiai` variant is CPU-tuned.
     static var assetSuffix: String {
@@ -40,6 +43,7 @@ public enum PrismRuntime {
 
     public enum InstallError: LocalizedError {
         case download(String)
+        case integrityMismatch(String)
         case badArchive(String)
         case wouldNotLaunch(String)
         case notTheFork(String)
@@ -48,6 +52,8 @@ public enum PrismRuntime {
             switch self {
             case .download(let detail):
                 "Downloading PrismML's build failed: \(detail)"
+            case .integrityMismatch(let name):
+                "The downloaded \(name) did not match its reviewed SHA-256 digest."
             case .badArchive(let detail):
                 "The downloaded build could not be unpacked: \(detail)"
             case .wouldNotLaunch(let detail):
@@ -58,72 +64,26 @@ public enum PrismRuntime {
         }
     }
 
-    // MARK: - Release resolution
-
-    struct Release: Decodable {
-        var tagName: String
-        var draft: Bool
-        var prerelease: Bool
-        var assets: [Asset]
-
-        enum CodingKeys: String, CodingKey {
-            case tagName = "tag_name"
-            case draft, prerelease, assets
-        }
-    }
-
-    struct Asset: Decodable {
-        var name: String
-        var downloadURL: URL
-        var size: Int64
-
-        enum CodingKeys: String, CodingKey {
-            case name, size
-            case downloadURL = "browser_download_url"
-        }
-    }
+    // MARK: - Reviewed release
 
     struct Pick: Equatable {
         var tag: String
         var name: String
         var url: URL
         var size: Int64
-    }
-
-    /// The newest published release that actually has this Mac's build attached — a fresh
-    /// tag can sit for a while with only some platforms uploaded.
-    static func pick(from releases: [Release], suffix: String = assetSuffix) -> Pick? {
-        for release in releases where !release.draft && !release.prerelease {
-            if let asset = release.assets.first(where: {
-                $0.name.hasPrefix("llama-prism-") && $0.name.hasSuffix(suffix)
-            }) {
-                return Pick(
-                    tag: release.tagName, name: asset.name, url: asset.downloadURL,
-                    size: asset.size
-                )
-            }
-        }
-        return nil
+        var sha256: String
     }
 
     static func pinnedPick(suffix: String = assetSuffix) -> Pick {
+        guard let digest = pinnedDigests[suffix] else {
+            preconditionFailure("No reviewed PrismML archive for \(suffix)")
+        }
         let name = "llama-\(pinnedTag)\(suffix)"
         return Pick(
             tag: pinnedTag, name: name,
             url: URL(string: "https://github.com/\(repository)/releases/download/\(pinnedTag)/\(name)")!,
-            size: 0
+            size: 0, sha256: digest
         )
-    }
-
-    static func resolve(releasesURL: URL, session: URLSession) async -> Pick {
-        var request = URLRequest(url: releasesURL)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 20
-        guard let (data, _) = try? await session.data(for: request),
-              let releases = try? JSONDecoder().decode([Release].self, from: data),
-              let pick = pick(from: releases)
-        else { return pinnedPick() }
-        return pick
     }
 
     // MARK: - Install
@@ -131,6 +91,7 @@ public enum PrismRuntime {
     struct Record: Codable {
         var tag: String
         var asset: String
+        var archiveSHA256: String
         var installedAt: Date
     }
 
@@ -140,13 +101,20 @@ public enum PrismRuntime {
     @discardableResult
     public static func install(
         root: URL = defaultRoot,
-        releasesURL: URL = releasesURL,
         session: URLSession = .shared,
         progress: @escaping @Sendable (Progress) -> Void
     ) async throws -> RuntimeInstallation {
-        progress(Progress(stage: "Finding the newest PrismML build"))
-        let pick = await resolve(releasesURL: releasesURL, session: session)
+        try await install(root: root, pick: pinnedPick(), session: session, progress: progress)
+    }
 
+    /// Internal seam for exercising the verified download path against a local fixture.
+    @discardableResult
+    static func install(
+        root: URL,
+        pick: Pick,
+        session: URLSession = .shared,
+        progress: @escaping @Sendable (Progress) -> Void
+    ) async throws -> RuntimeInstallation {
         let sizeNote = pick.size > 0 ? " (\(Bytes(pick.size).formatted))" : ""
         progress(Progress(stage: "Downloading \(pick.tag)\(sizeNote)"))
         let downloaded: URL
@@ -168,6 +136,11 @@ public enum PrismRuntime {
         defer { try? FileManager.default.removeItem(at: staging) }
         let archive = staging.appendingPathComponent(pick.name)
         try FileManager.default.moveItem(at: downloaded, to: archive)
+
+        progress(Progress(stage: "Verifying \(pick.tag) archive"))
+        guard try sha256Hex(of: archive) == pick.sha256 else {
+            throw InstallError.integrityMismatch(pick.name)
+        }
 
         progress(Progress(stage: "Unpacking \(pick.tag)"))
         let unpacked = staging.appendingPathComponent("unpacked", isDirectory: true)
@@ -195,27 +168,38 @@ public enum PrismRuntime {
         try FileManager.default.moveItem(at: server.deletingLastPathComponent(), to: incoming)
         try? FileManager.default.removeItem(at: bin)
         try FileManager.default.moveItem(at: incoming, to: bin)
-        let record = Record(tag: pick.tag, asset: pick.name, installedAt: Date())
+        let record = Record(
+            tag: pick.tag, asset: pick.name, archiveSHA256: pick.sha256, installedAt: Date()
+        )
         try JSONEncoder().encode(record).write(to: root.appendingPathComponent("prism.json"))
 
-        guard let installation = managedInstallation(root: root) else {
+        guard let installation = managedInstallation(root: root, expected: pick) else {
             throw InstallError.wouldNotLaunch("the installed copy failed its probe")
         }
         return installation
     }
 
-    /// The copy the app fetched, if it is there and still the fork.
+    /// The copy the app fetched, only if its install record proves it came through the
+    /// reviewed archive path. Older installs lack this record field and must be re-fetched.
     public static func managedInstallation(root: URL = defaultRoot) -> RuntimeInstallation? {
+        managedInstallation(root: root, expected: pinnedPick())
+    }
+
+    static func managedInstallation(root: URL, expected: Pick) -> RuntimeInstallation? {
+        guard let recordData = try? Data(contentsOf: root.appendingPathComponent("prism.json")),
+              let record = try? JSONDecoder().decode(Record.self, from: recordData),
+              record.tag == expected.tag,
+              record.asset == expected.name,
+              record.archiveSHA256 == expected.sha256
+        else { return nil }
         let server = root.appendingPathComponent("bin/llama-server")
         guard FileManager.default.isExecutableFile(atPath: server.path),
               RuntimeLocator.supportsPrismTernary(server)
         else { return nil }
         let help = RuntimeLocator.capabilities(of: server)
-        let record = (try? Data(contentsOf: root.appendingPathComponent("prism.json")))
-            .flatMap { try? JSONDecoder().decode(Record.self, from: $0) }
         return RuntimeInstallation(
             kind: .llamaCppPrism, executable: server,
-            version: record?.tag ?? help.version,
+            version: record.tag,
             hasExpertStreaming: help.hasExpertStreaming, hasPrismTernary: true,
             source: .managed
         )
@@ -228,6 +212,16 @@ public enum PrismRuntime {
     }
 
     // MARK: - Helpers
+
+    static func sha256Hex(of file: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 
     static func extract(_ archive: URL, into directory: URL) throws {
         let process = Process()
