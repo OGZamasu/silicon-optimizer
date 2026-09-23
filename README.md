@@ -1007,7 +1007,6 @@ nothing at all, so the previous calibration keeps working.
 > the run reports how *both* lanes did against those labels beside the agreement rate. High
 > agreement with two poor label scores is the shape to watch for. Treat the floors as a
 > measurement of one model against another on forty cases, which is what they are.
->>>>>>> be36c32 (Calibrate the local decision lane, and make `auto` a cascade)
 
 ### Model routing
 
