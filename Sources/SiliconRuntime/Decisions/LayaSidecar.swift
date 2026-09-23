@@ -412,7 +412,7 @@ public actor LayaSidecar {
         environment["PYTHONUNBUFFERED"] = "1"
         process.environment = environment
 
-        let stdin = Pipe()
+        let stdin = Pipe.childInput()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardInput = stdin
@@ -534,7 +534,9 @@ public actor LayaSidecar {
         do {
             try input.write(contentsOf: data)
         } catch {
-            // Almost always EPIPE: it died between the check above and this write.
+            // Almost always EPIPE: it died between the check above and this write. The pipe
+            // is `Pipe.childInput()`, so that arrives here as an error rather than as a
+            // SIGPIPE that ends the app, and the lane treats it like any other death.
             throw LayaSidecarError.died(
                 status: process.flatMap { $0.isRunning ? nil : $0.terminationStatus },
                 detail: "it closed its input"
@@ -553,14 +555,24 @@ public actor LayaSidecar {
         guard let reader else {
             throw LayaSidecarError.died(status: nil, detail: "it is not running")
         }
-        let line = await race(reader: reader, timeout: timeout)
-        guard let line else {
-            let dead = process.map { !$0.isRunning } ?? true
-            guard dead else {
-                await stop()
-                throw LayaSidecarError.timedOut(seconds: timeout)
+        let line: String
+        switch await race(reader: reader, timeout: timeout) {
+        case .line(let heard):
+            line = heard
+        case .timedOut where process?.isRunning == true:
+            await stop()
+            throw LayaSidecarError.timedOut(seconds: timeout)
+        case .timedOut, .closed:
+            // Its output closing is the process going away, even while `isRunning` still
+            // says otherwise: the child is gone a moment before Foundation reaps it. Judging
+            // by `isRunning` alone called that a timeout — no restart, the wrong sentence —
+            // and the stop that followed wrote to the dead pipe. A short wait for the reap
+            // is only for the exit status.
+            let deadline = Date().addingTimeInterval(1)
+            while let process, process.isRunning, Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(20))
             }
-            let status = process?.terminationStatus
+            let status = process.flatMap { $0.isRunning ? nil : $0.terminationStatus }
             let detail = stopping ? "it was stopped" : (diagnostics?.summary() ?? "")
             await stop()
             throw LayaSidecarError.died(status: status, detail: detail)
@@ -586,17 +598,25 @@ public actor LayaSidecar {
         return object
     }
 
-    /// A line, or nil when the pipe closed or the clock ran out.
+    /// What a wait for one line ended with. The pipe closing and the clock running out were
+    /// once both nil, and they mean different things: the first is the process going away.
+    private enum Heard: Sendable {
+        case line(String)
+        case closed
+        case timedOut
+    }
+
+    /// A line, the pipe closing, or the clock running out, whichever comes first.
     ///
     /// First writer wins, exactly as `JevService.settles` does it and for the same reason:
     /// awaiting a task's value does not return early when the waiter is cancelled, so a
     /// deadline has to be a second task posting to a shared slot rather than a cancellation.
-    private func race(reader: LayaLineReader, timeout: TimeInterval) async -> String? {
+    private func race(reader: LayaLineReader, timeout: TimeInterval) async -> Heard {
         let slot = Slot()
-        let read = Task { await slot.post(await reader.next()) }
+        let read = Task { await slot.post(await reader.next().map(Heard.line) ?? .closed) }
         let timer = Task {
             try? await Task.sleep(for: .seconds(timeout))
-            await slot.post(nil)
+            await slot.post(.timedOut)
         }
         defer { read.cancel(); timer.cancel() }
         return await slot.take()
@@ -604,17 +624,17 @@ public actor LayaSidecar {
 
     /// First post wins; a line that arrives before anybody is listening is kept.
     private actor Slot {
-        private var value: String??
-        private var waiting: CheckedContinuation<String?, Never>?
+        private var value: Heard?
+        private var waiting: CheckedContinuation<Heard, Never>?
 
-        func post(_ line: String?) {
+        func post(_ heard: Heard) {
             guard value == nil else { return }
-            value = .some(line)
-            waiting?.resume(returning: line)
+            value = heard
+            waiting?.resume(returning: heard)
             waiting = nil
         }
 
-        func take() async -> String? {
+        func take() async -> Heard {
             if let value { return value }
             return await withCheckedContinuation { waiting = $0 }
         }

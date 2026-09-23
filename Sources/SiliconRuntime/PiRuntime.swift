@@ -192,7 +192,7 @@ public actor PiRuntime {
         }
         process.environment = environment
 
-        let stdin = Pipe()
+        let stdin = Pipe.childInput()
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardInput = stdin
