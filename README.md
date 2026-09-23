@@ -279,10 +279,9 @@ There are three credentials, and each one is honoured in exactly one place:
 | **Device token** — 32 bytes, minted at pairing | **No**, whatever it says | Only while Silicon Buddy is on, and only within the device's scope |
 
 A shared swarm bearer is for peer discovery and direct jobs: chat and decisions, image,
-mesh and video generation, uploads, and fetching a result by its media id. It may request
-catalog model installs into the Mac's active model library, but cannot choose another
-download directory. It does not grant access to the owner's conversations, model loading,
-or the Mac's global video queue. The peer event stream remains available for status, but
+mesh and video generation, uploads, and fetching a result by its media id. It does not
+grant access to the owner's conversations, model installs or loading, or the Mac's global
+video queue. The peer event stream remains available for status, but
 omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
 require this Mac's local control token or an appropriately paired device.
 
@@ -397,8 +396,8 @@ resolve a paired phone's private uploads. Local scripts and MCP clients can stil
 paths using the control token from the private handshake file.
 
 The same rule applies to `POST /install`'s optional `directory`: only the local control
-token may choose a destination. Devices and swarm clients omit it to use the library
-configured on the Mac.
+token may choose a destination. A paired device omits it to use the library configured on
+the Mac; a swarm client cannot install at all.
 
 **Asking a node about itself.** `GET /swarm` now publishes what the Mac's last poll already
 knew about each peer and used to keep to itself: platform, GPU or chip, memory used and

@@ -414,7 +414,8 @@ public enum ControlAPI {
         /// Installs only: an absolute folder to download into — an external volume, say —
         /// instead of the library on the startup volume. Optional on the wire, so an older
         /// MCP binary in the bundle still talks to a newer app. Only the local control
-        /// token may set this; devices and swarm peers use the configured library.
+        /// token may set this; a paired device uses the configured library, and a swarm
+        /// peer may not install at all.
         public var directory: String?
 
         public init(

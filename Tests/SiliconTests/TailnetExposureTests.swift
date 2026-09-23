@@ -364,32 +364,41 @@ struct TailnetExposureTests {
         }
     }
 
-    /// A peer may ask the Mac to fetch a catalog model, but the shared bearer must not
-    /// select a host filesystem destination. This holds on both listeners that accept it.
-    @Test func theSwarmSecretInstallsOnlyIntoTheActiveLibrary() async throws {
+    /// A peer cannot load a model, so an install would only spend this Mac's disk and
+    /// bandwidth on its behalf. The shared bearer is refused every install — into the
+    /// active library or anywhere else — on both listeners that accept it, while the owner
+    /// and a full-control phone keep theirs.
+    @Test func theSwarmSecretCannotInstallModels() async throws {
         try await withExposedServer { fixture in
             for client in [fixture.peer, fixture.local] {
                 for body in [
                     #"{"modelID":"catalog-model"}"#,
                     #"{"modelID":"catalog-model","directory":null}"#,
+                    #"{"modelID":"catalog-model","directory":"/tmp/swarm-override"}"#,
+                    #"{"modelID":"catalog-model","directory":""}"#,
                 ] {
-                    #expect(try await client.status(
-                        "POST", "/install", token: Bench.swarmToken, body: body
-                    ) == 200)
-                }
-                for directory in ["/tmp/swarm-override", "relative-path", ""] {
-                    let body = #"{"modelID":"catalog-model","directory":"\#(directory)"}"#
                     let (status, response) = try await client.call(
                         "POST", "/install", token: Bench.swarmToken, body: body
                     )
-                    #expect(status == 403)
+                    #expect(status == 403, "\(body) on port \(client.port)")
                     #expect(try JSONDecoder().decode(
                         ControlAPI.ErrorResponse.self, from: response
-                    ).error.contains("Only this Mac can choose a model download directory"))
+                    ).error == ControlServer.swarmRouteRefusal)
                 }
             }
+            #expect(await fixture.host.installRequests.isEmpty)
+
+            #expect(try await fixture.local.status(
+                "POST", "/install", token: fixture.local.token,
+                body: #"{"modelID":"catalog-model"}"#
+            ) == 200)
+            try await fixture.allowDevices(true)
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status(
+                "POST", "/install", token: paired.token, body: #"{"modelID":"catalog-model"}"#
+            ) == 200)
             let installs = await fixture.host.installRequests
-            #expect(installs.count == 4)
+            #expect(installs.count == 2)
             #expect(installs.allSatisfy { $0.directory == nil })
         }
     }

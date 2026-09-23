@@ -689,10 +689,9 @@ public actor ControlServer {
             return id
         }
 
-        /// A shared peer bearer reaches discovery and direct jobs, plus catalog installs
-        /// into the active library, not the owner's conversations, model loading or global
-        /// queue. A chat-only device may
-        /// read what the Mac is and talk to its loaded model, but may not spend the
+        /// A shared peer bearer reaches discovery and direct jobs, not the owner's
+        /// conversations, model installs and loading, or global queue. A chat-only device
+        /// may read what the Mac is and talk to its loaded model, but may not spend the
         /// machine or administer it.
         func mayReach(method: String, path: String) -> Bool {
             switch self {
@@ -744,7 +743,9 @@ public actor ControlServer {
 
         /// New owner-facing routes are not made reachable from a legacy shared swarm
         /// credential merely by being added to the server's switch. Direct jobs remain
-        /// usable; queue administration does not.
+        /// usable; queue administration does not, and neither does `POST /install`: a peer
+        /// cannot load what it installs, so all it could do is spend this Mac's disk and
+        /// bandwidth, several downloads at a time.
         static let swarmRoutes: Set<String> = [
             "GET /health", "GET /status", "GET /profile", "GET /metrics",
             "GET /catalog", "GET /installed", "GET /recommend", "GET /swarm",
@@ -754,7 +755,7 @@ public actor ControlServer {
             "POST /decide", "POST /v1/systemone",
             "POST /image/plan", "POST /image/generate",
             "POST /mesh/plan", "POST /mesh/generate",
-            "POST /video/generate", "POST /uploads", "POST /install",
+            "POST /video/generate", "POST /uploads",
         ]
 
         /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
@@ -1429,8 +1430,9 @@ public actor ControlServer {
                 return try .encode(await host.plan(try request.decode(ControlAPI.PlanRequest.self)))
             case ("POST", "/install"):
                 let install = try request.decode(ControlAPI.LoadRequest.self)
-                // Shared swarm callers may install into the active library, but only
-                // this Mac's control credential may choose a filesystem destination.
+                // The swarm never gets here (its route scope has no installs). A paired
+                // device may install into the active library, but only this Mac's control
+                // credential may choose a filesystem destination.
                 guard install.directory == nil || Self.mayNamePaths(caller) else {
                     return .error(403, "Only this Mac can choose a model download directory. Omit directory to use the configured model library.")
                 }
