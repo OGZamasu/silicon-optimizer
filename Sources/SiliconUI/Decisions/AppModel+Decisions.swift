@@ -17,27 +17,32 @@ enum DecisionLanesBootstrap {
     static func begin(_ model: AppModel) {
         guard task == nil else { return }
         task = Task { @MainActor in
-            await LayaRuntime.shared.configure(
-                // Read on every call rather than captured: the owner can move the model
-                // library while the app is running, and a captured path would go on
-                // pointing at the old drive.
-                library: { [weak model] in
-                    MainActor.assumeIsolated { model?.settings.resolvedModelLibraryDirectory }
-                },
-                script: { MainActor.assumeIsolated { AppModel.layaSidecarScript } }
-            )
-            await DecisionRouter.shared.register(LayaLane(
-                checkpoint: { MainActor.assumeIsolated { LayaLaneDefaults.checkpoint } },
-                enabled: { MainActor.assumeIsolated { LayaLaneDefaults.enabled } }
-            ))
-            await DecisionRouter.shared.register(NodeDecisionLane(peer: { [weak model] in
-                MainActor.assumeIsolated { model?.decisionNodePeer }
-            }))
-            await DecisionRouter.shared.register(OneTokenLane(decider: { [weak model] in
-                MainActor.assumeIsolated { model?.oneTokenDecider }
-            }))
+            await configure(model, runtime: .shared, router: .shared)
             await LayaLaneDefaults.refresh()
         }
+    }
+
+    static func configure(_ model: AppModel, runtime: LayaRuntime, router: DecisionRouter) async {
+        await runtime.configure(
+            // Read on every call rather than captured: the owner can move the model
+            // library while the app is running, and a captured path would go on
+            // pointing at the old drive.
+            library: { [weak model] in
+                await MainActor.run { model?.settings.resolvedModelLibraryDirectory }
+            },
+            script: { await MainActor.run { AppModel.layaSidecarScript } }
+        )
+        await router.register(LayaLane(
+            runtime: runtime,
+            checkpoint: { await MainActor.run { LayaLaneDefaults.checkpoint } },
+            enabled: { await MainActor.run { LayaLaneDefaults.enabled } }
+        ))
+        await router.register(NodeDecisionLane(peer: { [weak model] in
+            await MainActor.run { model?.decisionNodePeer }
+        }))
+        await router.register(OneTokenLane(decider: { [weak model] in
+            await MainActor.run { model?.oneTokenDecider }
+        }))
     }
 
     static func ready() async { await task?.value }
@@ -45,10 +50,9 @@ enum DecisionLanesBootstrap {
 
 /// The two settings the Laya lane reads on every question, mirrored onto the main actor.
 ///
-/// A lane's `isReady` is called while drawing a settings pane and on every routing
-/// decision, and `JevService` is an actor: awaiting it from inside a synchronous closure is
-/// not possible, and making the closure async would push the await into every caller. So
-/// the two values are copied here whenever they change, and the closure reads the copy.
+/// These values are copied from `JevService` whenever they change. Lane callbacks await
+/// the main actor to read the current copy, including when a gateway request asks about
+/// readiness from a background executor.
 @MainActor
 enum LayaLaneDefaults {
     static var enabled = true
