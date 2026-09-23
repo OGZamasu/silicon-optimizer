@@ -274,7 +274,10 @@ struct ModelDownloadTests {
             files: [.init(path: "weights.gguf", size: Bytes(Int64(expected.count)), sha256: sha(expected))],
             projector: nil
         )
-        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let downloader = ModelDownloader(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
+        )
         let written = try await downloader.download(resolution, to: directory) { _ in }
 
         #expect(try Data(contentsOf: written[0]) == expected)
@@ -298,7 +301,10 @@ struct ModelDownloadTests {
             files: [.init(path: "config.json", size: Bytes(Int64(expected.count)), sha256: nil)],
             projector: nil
         )
-        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let downloader = ModelDownloader(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
+        )
         let written = try await downloader.download(resolution, to: directory) { _ in }
 
         #expect(try Data(contentsOf: written[0]) == expected)
@@ -320,7 +326,10 @@ struct ModelDownloadTests {
             files: [.init(path: "config.json", size: Bytes(Int64(expected.count)), sha256: nil)],
             projector: nil
         )
-        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let downloader = ModelDownloader(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
+        )
         let written = try await downloader.download(resolution, to: directory) { _ in }
 
         #expect(try Data(contentsOf: written[0]) == expected)
@@ -346,7 +355,10 @@ struct ModelDownloadTests {
             files: [.init(path: "weights.gguf", size: Bytes(Int64(bytes.count)), sha256: sha(bytes))],
             projector: nil
         )
-        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let downloader = ModelDownloader(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
+        )
         let written = try await downloader.download(resolution, to: directory) { _ in }
         #expect(try Data(contentsOf: written[0]) == bytes)
         #expect(!server.sawRequest(for: "weights.gguf"), "a right partial needs no network")
@@ -373,7 +385,10 @@ struct ModelDownloadTests {
                 files: [.init(path: "weights.gguf", size: Bytes(Int64(bytes.count)), sha256: sha(bytes))],
                 projector: nil
             )
-            let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+            let downloader = ModelDownloader(
+                baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+                availableCapacity: Self.roomToSpare
+            )
             let written = try await downloader.download(resolution, to: directory) { _ in }
             #expect(try Data(contentsOf: written[0]) == bytes)
             #expect(server.sawRequest(for: "weights.gguf"))
@@ -399,7 +414,10 @@ struct ModelDownloadTests {
             files: [.init(path: "weights.gguf", size: Bytes(Int64(bytes.count)), sha256: sha(bytes))],
             projector: nil
         )
-        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let downloader = ModelDownloader(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
+        )
         let written = try await downloader.download(resolution, to: directory) { _ in }
         #expect(try Data(contentsOf: written[0]) == bytes)
         #expect(server.range(for: "weights.gguf") == nil, "the retry asks for the whole file")
@@ -422,7 +440,10 @@ struct ModelDownloadTests {
             files: [.init(path: "weights.gguf", size: Bytes(Int64(bytes.count)), sha256: sha(bytes))],
             projector: nil
         )
-        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let downloader = ModelDownloader(
+            baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+            availableCapacity: Self.roomToSpare
+        )
         let attempt = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             return try await downloader.download(resolution, to: directory) { _ in }
