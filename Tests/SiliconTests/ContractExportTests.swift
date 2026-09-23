@@ -1609,8 +1609,13 @@ struct ContractExportTests {
     static let coreRoutes: [Route] = [
         Route(
             method: "GET", path: "/health", auth: "none",
-            summary: "Unauthenticated, so a client can tell a dead app from a bad token.",
-            response: .of(["status": "ok", "version": "0.1.0"])
+            summary: "Unauthenticated, so a client can tell a dead app from a bad token. Says "
+                + "which build of the app is answering: `appVersion` and `appBuild` are its "
+                + "CFBundleShortVersionString and CFBundleVersion, and `version` repeats "
+                + "`appVersion` for clients written before those existed.",
+            response: .of([
+                "status": "ok", "version": "0.5.0", "appVersion": "0.5.0", "appBuild": "157",
+            ])
         ),
         Route(
             method: "GET", path: "/profile", auth: "device",

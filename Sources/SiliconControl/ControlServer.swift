@@ -77,6 +77,8 @@ public actor ControlServer {
     /// Where `/ondevice/models` is answered from, when a test hands one in. Nil in the app,
     /// which asks its host — see `phoneModelSource()`.
     private let phoneModelOverride: (any PhoneModelProvider)?
+    /// What `/health` and the handshake say this app is. See `ControlAPI.AppVersion`.
+    private let appVersion: ControlAPI.AppVersion
 
     /// Streams open right now. Read by the tests that prove a dead client is reaped.
     public var openEventStreams: Int { activeEventStreams }
@@ -178,10 +180,12 @@ public actor ControlServer {
             SwarmPairing.tailnetIPv4()
         },
         tailnetBindObserver: (@Sendable (TailnetEndpoint?) -> Void)? = nil,
-        phoneModels: (any PhoneModelProvider)? = nil
+        phoneModels: (any PhoneModelProvider)? = nil,
+        appVersion: ControlAPI.AppVersion = .running
     ) {
         self.host = host
         self.phoneModelOverride = phoneModels
+        self.appVersion = appVersion
         self.handshakeURL = handshakeURL
         self.buddy = buddy
         self.events = events
@@ -277,7 +281,7 @@ public actor ControlServer {
 
         let handshake = ControlAPI.Handshake(
             port: port, pid: ProcessInfo.processInfo.processIdentifier,
-            token: token, version: "0.1.0"
+            token: token, app: appVersion
         )
         let url = handshakeURL
         try? FileManager.default.createDirectory(
@@ -1159,8 +1163,14 @@ public actor ControlServer {
         _ request: HTTPRequest, as caller: Caller?, from source: String, on origin: Origin
     ) async -> HTTPResponse {
         // /health is unauthenticated so a client can tell "app not running" from "bad token".
+        // It also says which app is answering, which is what a phone shows as the Mac's
+        // version: `version` for the clients that already read it, `appVersion` and
+        // `appBuild` for the ones that want both halves under names that say what they are.
         if request.path == "/health" {
-            return .json(["status": "ok", "version": "0.1.0"])
+            return .json([
+                "status": "ok", "version": appVersion.version,
+                "appVersion": appVersion.version, "appBuild": appVersion.build,
+            ])
         }
         // The OBS overlay is a browser source: it can carry a token in its URL but
         // cannot set headers, so these three routes accept the token either way. They
