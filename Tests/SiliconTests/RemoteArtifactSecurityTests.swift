@@ -103,13 +103,20 @@ struct RemoteArtifactSecurityTests {
         #expect(throws: RemoteTransferError.self) {
             try PublicHTTPSArtifactTransfer.enforceDirect(
                 environment: [:], proxyEntries: direct,
-                systemSettings: ["__SCOPED__": ["en0": [
-                    kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1,
-                ]]]
+                systemSettings: [kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1]
             )
         }
         try PublicHTTPSArtifactTransfer.enforceDirect(
             environment: [:], proxyEntries: direct, systemSettings: [:]
+        )
+        // WPAD or PAC on an interface that is not the primary one does not describe the
+        // route this transfer takes, so it no longer locks the download out.
+        try PublicHTTPSArtifactTransfer.enforceDirect(
+            environment: [:], proxyEntries: direct,
+            systemSettings: ["__SCOPED__": ["en1": [
+                kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1,
+                kCFNetworkProxiesProxyAutoConfigEnable as String: 1,
+            ]]]
         )
     }
 

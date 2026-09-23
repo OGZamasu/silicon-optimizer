@@ -20,20 +20,19 @@ public enum PublicHTTPSArtifactTransfer {
             && (entries[0][kCFProxyTypeKey as String] as? String) == (kCFProxyTypeNone as String)
     }
 
+    /// Whether PAC or WPAD is switched on for the route this transfer takes.
+    ///
+    /// The top level only. It is the primary service's configuration — what
+    /// `CFNetworkCopyProxiesForURL`, and URLSession before this transport, apply to traffic
+    /// on the default route, which is where libcurl's connection goes. `__SCOPED__` holds
+    /// every other interface's settings, and a PAC on a Wi-Fi that is not carrying the
+    /// traffic used to refuse downloads on a Mac whose actual route was direct.
     static func autoProxyConfigured(_ settings: [String: Any]) -> Bool {
         let automaticKeys = [
             kCFNetworkProxiesProxyAutoConfigEnable as String,
             kCFNetworkProxiesProxyAutoDiscoveryEnable as String,
         ]
-        if automaticKeys.contains(where: { ((settings[$0] as? NSNumber)?.intValue ?? 0) != 0 }) {
-            return true
-        }
-        // macOS can keep per-interface proxy settings under a nested dictionary. A PAC/WPAD
-        // configuration there is not proof that this direct libcurl hop matches the system route.
-        return settings.values.contains {
-            guard let nested = $0 as? [String: Any] else { return false }
-            return autoProxyConfigured(nested)
-        }
+        return automaticKeys.contains { ((settings[$0] as? NSNumber)?.intValue ?? 0) != 0 }
     }
 
     static func enforceDirect(
