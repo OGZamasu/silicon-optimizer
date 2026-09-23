@@ -1331,6 +1331,7 @@ actor BuddyTestHost: ControlHost {
     private(set) var cancelledStreams = 0
     private(set) var emitted = 0
     private(set) var eventUpdatesRequested = 0
+    private(set) var installRequests: [ControlAPI.LoadRequest] = []
     private var stored: [ControlAPI.ConversationDetail] = []
     private var answering: Set<String> = []
     /// Where `GET /swarm` gets its exposure block, when a test cares. The app reads it off
@@ -1491,7 +1492,8 @@ actor BuddyTestHost: ControlHost {
         throw BuddyTestError.unexpectedRoute
     }
     func install(_ request: ControlAPI.LoadRequest) async throws -> String {
-        throw BuddyTestError.unexpectedRoute
+        installRequests.append(request)
+        return "install requested"
     }
     func load(_ request: ControlAPI.LoadRequest) async throws -> ControlAPI.Status {
         throw BuddyTestError.unexpectedRoute

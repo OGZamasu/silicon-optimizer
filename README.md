@@ -279,10 +279,11 @@ There are three credentials, and each one is honoured in exactly one place:
 | **Device token** — 32 bytes, minted at pairing | **No**, whatever it says | Only while Silicon Buddy is on, and only within the device's scope |
 
 A shared swarm bearer is for peer discovery and direct jobs: chat and decisions, image,
-mesh and video generation, uploads, and fetching a result by its media id. It does not
-grant access to the owner's conversations, model installation or loading, or the Mac's
-global video queue. The peer event stream remains available for status, but omits owner
-queue jobs, model download progress, and conversation verdicts. Those owner controls
+mesh and video generation, uploads, and fetching a result by its media id. It may request
+catalog model installs into the Mac's active model library, but cannot choose another
+download directory. It does not grant access to the owner's conversations, model loading,
+or the Mac's global video queue. The peer event stream remains available for status, but
+omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
 require this Mac's local control token or an appropriately paired device.
 
 A device token being refused on loopback is what keeps a phone that has left the house, or

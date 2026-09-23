@@ -689,8 +689,9 @@ public actor ControlServer {
             return id
         }
 
-        /// A shared peer bearer reaches discovery and direct jobs, not the owner's
-        /// conversations, model administration or global queue. A chat-only device may
+        /// A shared peer bearer reaches discovery and direct jobs, plus catalog installs
+        /// into the active library, not the owner's conversations, model loading or global
+        /// queue. A chat-only device may
         /// read what the Mac is and talk to its loaded model, but may not spend the
         /// machine or administer it.
         func mayReach(method: String, path: String) -> Bool {
@@ -753,7 +754,7 @@ public actor ControlServer {
             "POST /decide", "POST /v1/systemone",
             "POST /image/plan", "POST /image/generate",
             "POST /mesh/plan", "POST /mesh/generate",
-            "POST /video/generate", "POST /uploads",
+            "POST /video/generate", "POST /uploads", "POST /install",
         ]
 
         /// Listed rather than derived. "Read-only" is not the rule — `/benchmark` reads
@@ -1428,6 +1429,8 @@ public actor ControlServer {
                 return try .encode(await host.plan(try request.decode(ControlAPI.PlanRequest.self)))
             case ("POST", "/install"):
                 let install = try request.decode(ControlAPI.LoadRequest.self)
+                // Shared swarm callers may install into the active library, but only
+                // this Mac's control credential may choose a filesystem destination.
                 guard install.directory == nil || Self.mayNamePaths(caller) else {
                     return .error(403, "Only this Mac can choose a model download directory. Omit directory to use the configured model library.")
                 }

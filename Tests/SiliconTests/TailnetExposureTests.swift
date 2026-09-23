@@ -295,7 +295,6 @@ struct TailnetExposureTests {
                 ("GET", "/conversations/\(conversation.id)", nil),
                 ("POST", "/conversations/\(conversation.id)/messages",
                  #"{"content":"Peer reply","images":[]}"#),
-                ("POST", "/install", "{}"),
                 ("POST", "/load", "{}"),
                 ("POST", "/unload", nil),
                 ("GET", "/video/queue", nil),
@@ -362,6 +361,36 @@ struct TailnetExposureTests {
             #expect(try await fixture.peer.status(
                 "GET", "/media/not-an-id", token: Bench.swarmToken
             ) == 404)
+        }
+    }
+
+    /// A peer may ask the Mac to fetch a catalog model, but the shared bearer must not
+    /// select a host filesystem destination. This holds on both listeners that accept it.
+    @Test func theSwarmSecretInstallsOnlyIntoTheActiveLibrary() async throws {
+        try await withExposedServer { fixture in
+            for client in [fixture.peer, fixture.local] {
+                for body in [
+                    #"{"modelID":"catalog-model"}"#,
+                    #"{"modelID":"catalog-model","directory":null}"#,
+                ] {
+                    #expect(try await client.status(
+                        "POST", "/install", token: Bench.swarmToken, body: body
+                    ) == 200)
+                }
+                for directory in ["/tmp/swarm-override", "relative-path", ""] {
+                    let body = #"{"modelID":"catalog-model","directory":"\#(directory)"}"#
+                    let (status, response) = try await client.call(
+                        "POST", "/install", token: Bench.swarmToken, body: body
+                    )
+                    #expect(status == 403)
+                    #expect(try JSONDecoder().decode(
+                        ControlAPI.ErrorResponse.self, from: response
+                    ).error.contains("Only this Mac can choose a model download directory"))
+                }
+            }
+            let installs = await fixture.host.installRequests
+            #expect(installs.count == 4)
+            #expect(installs.allSatisfy { $0.directory == nil })
         }
     }
 
