@@ -6,7 +6,7 @@ import Testing
 
 /// Issue #74: a provider-supplied artifact URL must not reach a private or loopback address
 /// through DNS, on any hop, before a byte is read.
-@Suite("Provider artifact addresses", .serialized)
+@Suite("Provider artifact addresses", .serialized, .timeLimit(.minutes(2)))
 struct ProviderArtifactAddressTests {
     /// URLSession could only ever screen the URL text, so the provider policy is refused by
     /// the URLSession transports rather than quietly enforced by half.
@@ -74,8 +74,8 @@ struct ProviderArtifactAddressTests {
                 base: base, apiKey: "test-key", onProgress: { _ in }
             )
             Issue.record("A loopback answer for the artifact host must not be downloaded")
-        } catch CloudAudioError.submitFailed(let status, let message) {
-            #expect(status == 502)
+        } catch CloudAudioError.downloadFailed(let message) {
+            // This Mac's refusal, reported as this Mac's — not as a provider answer.
             #expect(message == RemoteTransferError.disallowedResolvedAddress.localizedDescription)
         } catch {
             Issue.record("Expected the resolved-address refusal, got \(error)")
