@@ -168,6 +168,9 @@ extension AppModel {
             if item.status == .failed {
                 throw ControlHostError.badRequest("\(item.error ?? "The render failed.") \(receipt)")
             }
+            if item.status == .cancelled {
+                throw ControlHostError.badRequest("The render was cancelled on the node. \(receipt)")
+            }
             if let error = videoBatchQueue.storageError {
                 throw ControlHostError.badRequest("\(error) \(receipt)")
             }
@@ -203,8 +206,71 @@ extension AppModel {
                   status: item.status.rawValue, nodeJobID: item.nodeJob?.id, file: item.file?.path,
                   outputDirectory: item.request.outputDirectory.path, error: item.error,
                   uncertainSubmission: item.uncertainSubmission, h3Steps: item.request.h3Steps,
-                  detail: item.detail, negativePrompt: item.request.negativePrompt)
+                  detail: item.detail, negativePrompt: item.request.negativePrompt,
+                  cancelState: item.cancel?.state.rawValue, cancelDetail: item.cancel?.detail,
+                  canCancel: canCancelVideo(item))
         })
+    }
+
+    /// Whether this clip's own node offers to cancel its render: the peer pinned in the
+    /// receipt (same name and address) advertising `cancel` for the clip's lane. Readiness
+    /// is not required — a lane that went unready mid-render can still stop it — but an
+    /// advertisement is. A node that does not say so gets Stop following, nothing more.
+    nonisolated static func canCancelVideo(_ item: VideoQueueItem, among peers: [PeerStatus]) -> Bool {
+        guard VideoBatchQueue.mayCancel(item), let pinned = item.nodeURL,
+              let entry = VideoCatalog.entry(id: item.request.entryID) else { return false }
+        return peers.contains { peer in
+            peer.reachable && peer.name == item.nodeName
+                && URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces)) == pinned
+                && peer.capabilities.contains { capability in
+                    capability.kind == NodeVideoRuntime.capabilityKind
+                        && (capability.id == entry.capabilityID
+                            || (capability.id == VideoCatalog.genericCapabilityID
+                                && entry.acceptsGenericTextToVideo))
+                        && capability.supportedJobActions.contains("cancel")
+                }
+        }
+    }
+
+    public func canCancelVideo(_ item: VideoQueueItem) -> Bool {
+        Self.canCancelVideo(item, among: swarmPeers)
+    }
+
+    /// Asks the clip's node to stop its render. The request is saved before it is sent and
+    /// the answer after, so a relaunch in between reads "unknown". Whatever the answer, the
+    /// receipt is kept and nothing is resubmitted.
+    @discardableResult
+    func cancelVideoRender(_ id: String, peers: [PeerStatus]? = nil) async throws -> String {
+        guard let item = videoBatchQueue.items.first(where: { $0.id == id }) else {
+            throw ControlHostError.badRequest("That queue item no longer exists.")
+        }
+        if let refusal = VideoBatchQueue.cancelRefusal(item) { throw ControlHostError.badRequest(refusal) }
+        guard Self.canCancelVideo(item, among: peers ?? swarmPeers), let job = item.nodeJob,
+              let base = item.nodeURL, let nodeName = item.nodeName else {
+            throw ControlHostError.badRequest("This clip's node does not offer to cancel its render. Use stop_following: the app stops waiting and keeps the receipt, but the node may still finish the render.")
+        }
+        try videoBatchQueue.beginCancel(id)
+        let outcome = await videoRuntime.cancelJob(
+            job, node: base, token: swarmConfig?.bearer(forPeer: nodeName)
+        )
+        // A clip that was not being followed and is now `requested` goes back to
+        // rendering, and the queue worker (started by the control action) follows it.
+        try videoBatchQueue.recordCancel(id, outcome: outcome, following: activeVideoQueueID == id)
+        return Self.cancelMessage(outcome)
+    }
+
+    nonisolated static func cancelMessage(_ outcome: VideoCancelOutcome) -> String {
+        func with(_ detail: String?) -> String { detail.map { " \($0)" } ?? "" }
+        switch outcome {
+        case .cancelled: return "The node stopped this render. Nothing will be published for it."
+        case .requested: return "The node is stopping this render. The queue follows it until the node confirms."
+        case .completed(let detail): return "Too late to cancel: the render had already finished, and the clip is kept.\(with(detail))"
+        case .alreadyFailed(let detail): return "Nothing to cancel: the render had already failed.\(with(detail))"
+        case .unsupported(let detail):
+            return "The node cannot stop this render without risking other work, so it keeps rendering.\(with(detail)) Stop following is still available."
+        case .unknown(let detail):
+            return "The node did not confirm the cancel, so the render may still be running. Its receipt is kept and nothing was resubmitted.\(with(detail))"
+        }
     }
 
     public func enqueueVideos(_ request: ControlAPI.VideoQueueRequest) async throws -> ControlAPI.VideoQueueView {
@@ -270,6 +336,7 @@ extension AppModel {
     }
 
     public func controlVideoQueue(_ request: ControlAPI.VideoQueueControl) async throws -> ControlAPI.VideoQueueView {
+        var message: String?
         do {
             switch request.action {
             case "pause": try videoBatchQueue.setPaused(true)
@@ -289,6 +356,9 @@ extension AppModel {
                 // a remote GPU cancellation: the node may still finish this job.
                 try videoBatchQueue.setPaused(true)
                 render.cancel()
+            case "cancel":
+                guard let id = request.id else { throw ControlHostError.badRequest("An item ID is required.") }
+                message = try await cancelVideoRender(id)
             case "clear_finished":
                 for batchID in Set(videoBatchQueue.items.map(\.batchID)) {
                     try videoBatchQueue.exportManifest(batchID: batchID)
@@ -297,7 +367,7 @@ extension AppModel {
             default: throw ControlHostError.badRequest(ControlServer.unknownQueueAction)
             }
         } catch { throw ControlHostError.badRequest(error.localizedDescription) }
-        videoQueueMessage = nil
+        videoQueueMessage = message
         startVideoQueueWorker()
         return await videoQueue()
     }
@@ -406,6 +476,12 @@ extension AppModel {
             revealVideoPanel(.queue)
             do { try videoBatchQueue.exportManifest(batchID: queued.batchID) }
             catch { videoQueueMessage = "Clip saved; could not update its manifest: \(error.localizedDescription)" }
+        } catch let cancelled as VideoNodeCancelled {
+            // Confirmed by the node: the GPU is free, so the queue simply moves on.
+            do {
+                try videoBatchQueue.cancelled(queued.id, detail: cancelled.detail)
+                try videoBatchQueue.exportManifest(batchID: queued.batchID)
+            } catch { videoQueueMessage = error.localizedDescription }
         } catch {
             let message = videoQueueRenderTask?.isCancelled == true && !(error is VideoNodeFailed)
                 ? "Stopped following. The node may still be rendering; use Reconnect / download to retrieve the same job, or check the node before rendering again."

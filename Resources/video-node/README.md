@@ -135,6 +135,33 @@ Phosphene: the node does not globally stop a shared panel queue. Its remote ID
 remains in the saved node state for inspection. Submit a new job only after
 checking the panel when the previous submission outcome is uncertain.
 
+### Cancelling one job
+
+`POST /v1/jobs/{job_id}/cancel` (Bearer token, no body) stops that job and
+nothing else. A capability whose every job can be stopped this way says so with
+`"supported_job_actions": ["cancel"]` in `/v1/node`; the app offers **Cancel
+render** only there and keeps **Stop following** everywhere. The answer's
+`cancel` field is one of:
+
+| `cancel` | HTTP | Meaning |
+| --- | --- | --- |
+| `cancelled` | 200 | Confirmed: the work is stopped and will never be published. The job's status is `cancelled`. |
+| `requested` | 202 | Accepted; the renderer is stopping. Poll the job until it reports `cancelled`. |
+| `completed` | 409 | Already finished, or already publishing its artifact. The clip is kept. |
+| `failed` | 409 | Already failed; nothing to stop. |
+| `unsupported` | 409 | This job cannot be stopped without risking other work. Nothing changed. |
+| `unknown` | 404 | No job with that ID. |
+
+Repeating a request repeats its answer. LTX advertises cancel: the node started
+that job's renderer in its own process group and signals only that group, and a
+cancel accepted before the artifact is published always wins. H3 does not.
+Phosphene's `/queue/remove` checks a job ID under its own lock, so an H3 job
+still waiting in the node or the panel is removed exactly; but a render
+Phosphene has started has only the global `/stop`, which ends whatever is
+current and may be another client's job by the time it arrives. The node never
+calls it, and answers `unsupported` instead. A cancel accepted before a node
+restart is not resumed after it.
+
 ## Optional standalone LTX setup
 
 Use the upstream [LTX MLX installation instructions](https://github.com/dgrauet/ltx-2-mlx#installation)
@@ -281,5 +308,6 @@ python3 -m unittest discover -s Resources/video-node -v
 Tests use temporary directories and mocked hardware/processes. The HTTP
 integration test starts loopback-only node and fake Phosphene servers and checks
 authenticated submit/status/download, chain prompts, idempotency and provenance;
-its media bytes and ffmpeg/probe results are synthetic. No tests download weights,
+its media bytes and ffmpeg/probe results are synthetic. The cancellation tests
+use short-lived Python child processes as stand-in renderers. No tests download weights,
 contact an external service, use a GPU or change a real LaunchAgent/registry.
