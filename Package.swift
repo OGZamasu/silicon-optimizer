@@ -18,11 +18,14 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: [
+        .target(name: "CArtifactHTTP", linkerSettings: [.linkedLibrary("curl")]),
         .target(name: "SiliconCore"),
         .target(name: "SiliconHardware", dependencies: ["SiliconCore"]),
         .target(name: "SiliconCatalog", dependencies: ["SiliconCore"]),
         .target(name: "SiliconPlanner", dependencies: ["SiliconCore", "SiliconHardware", "SiliconCatalog"]),
-        .target(name: "SiliconRuntime", dependencies: ["SiliconCore", "SiliconCatalog", "SiliconPlanner", "SiliconControl"]),
+        .target(name: "SiliconRuntime", dependencies: [
+            "SiliconCore", "SiliconCatalog", "SiliconPlanner", "SiliconControl", "CArtifactHTTP",
+        ]),
         // Deliberately depends on nothing but Foundation and Network: the MCP bridge links it,
         // and that binary must stay small and independent of the app's domain layer.
         .target(name: "SiliconControl"),
@@ -44,7 +47,7 @@ let package = Package(
             // roster from the real `Tools.all`, so a description rewritten to something a
             // roster line cannot be built from fails a test instead of quietly degrading a
             // suggestion nobody is looking at.
-            "SiliconControl", "SiliconUI", "SiliconMCP",
+            "SiliconControl", "SiliconUI", "SiliconMCP", "CArtifactHTTP",
         ]),
         // SiliconControl for the wire types the tools print; the MCP target already
         // links it, and naming it here keeps the import from relying on that.
