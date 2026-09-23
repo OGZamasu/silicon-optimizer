@@ -297,7 +297,10 @@ is refused, `auto` answers it from the free lanes only, no Jev call is made on i
 cloud model for it, and a render or plan that names a cloud provider's model (`cloud/…`)
 is refused before anything is asked. The peer event stream remains available for status, but
 omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
-require this Mac's local control token or an appropriately paired device.
+require this Mac's local control token or an appropriately paired device. A model you
+imported from your own disk has the file's path as its id; the swarm, which cannot load it,
+is told `external:` and a token instead, the same one on `/installed`, `/status` and
+`/events`, for as long as the app runs.
 
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;

@@ -819,6 +819,7 @@ public actor ControlServer {
     /// the narrow one, because the only safe reading of "who is this?" with no answer is
     /// "not somebody with full control".
     static func narrowed(_ status: ControlAPI.Status, for caller: Caller?) -> ControlAPI.Status {
+        if caller == .swarm { return status.forPeers }
         guard caller?.seesRuntimeLogs == true else { return status.withoutPrivilegedDetail }
         return status
     }
@@ -1456,7 +1457,10 @@ public actor ControlServer {
             case ("GET", "/status"):
                 return try .encode(Self.narrowed(await host.status(), for: caller))
             case ("GET", "/installed"):
-                return try .encode(await host.installed())
+                // An imported model's id is a path on this Mac. A phone loads by it; the
+                // swarm cannot load at all, so it is told a token. See `ImportedModelID`.
+                let installed = await host.installed()
+                return try .encode(caller == .swarm ? installed.map(\.forPeers) : installed)
             case ("GET", "/catalog"):
                 return try .encode(await host.catalog(
                     category: request.query["category"],

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// What a caller that is not this Mac is told about where a file is.
@@ -128,5 +129,63 @@ extension ControlAPI.VideoQueueView: MacPathBearing {
             copy.items[index].cancelDetail = item.cancelDetail.map(redaction.scrub)
         }
         return copy
+    }
+}
+
+/// An imported model's id, as a swarm node is told it.
+///
+/// A GGUF the owner imported rather than downloaded stays where it was, and its id is
+/// `external:` and that file's absolute path (`ModelLibrary.importExternal`) — the account
+/// name again, on `GET /installed`, on `GET /status` and in the `status` frames on `/events`.
+/// A paired phone sends that id back to `POST /load`, and so do this Mac's own tools, so for
+/// them it stays what it is. A swarm node cannot load anything here (`/load` is outside its
+/// scope), so it is told a token instead: the same token for the same model on all three,
+/// and no way back to the path.
+///
+/// Keyed, with a key made at launch. A plain digest of the id could be checked against a
+/// guessed `/Users/<name>/…` by anyone who holds it, which is exactly the question it must
+/// not answer. So the token is stable while the app runs and changes when it restarts.
+public enum ImportedModelID {
+
+    /// `ModelLibrary.externalIDPrefix`, which this module cannot import.
+    public static let prefix = "external:"
+
+    private static let key = Array(SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })
+
+    /// `external:` and sixteen hex digits for an imported model; any other id unchanged.
+    public static func forPeers(_ id: String) -> String {
+        guard id.hasPrefix(prefix) else { return id }
+        let code = HMAC<SHA256>.authenticationCode(
+            for: Data(id.utf8), using: SymmetricKey(data: key)
+        )
+        return prefix + code.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+extension ControlAPI.InstalledModel {
+    /// This entry as a swarm node is told it. See `ImportedModelID`.
+    var forPeers: Self {
+        var copy = self
+        copy.id = ImportedModelID.forPeers(id)
+        return copy
+    }
+}
+
+extension ControlAPI.Status {
+    /// This status as a swarm node is told it, on `GET /status` and on `/events` alike:
+    /// without the runtime's log, as for every caller short of full control, with an
+    /// imported model named by its token wherever its id appears, and with the home folder
+    /// out of the state line.
+    var forPeers: Self {
+        var peer = withoutPrivilegedDetail
+        if let id = loadedModelID, id.hasPrefix(ImportedModelID.prefix) {
+            let token = ImportedModelID.forPeers(id)
+            peer.loadedModelID = token
+            peer.state = peer.state.replacingOccurrences(of: id, with: token)
+        }
+        if peer.state.contains("/") {
+            peer.state = MacPathRedaction(roots: []).scrub(peer.state)
+        }
+        return peer
     }
 }

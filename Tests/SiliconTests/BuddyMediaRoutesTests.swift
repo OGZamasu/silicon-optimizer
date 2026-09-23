@@ -942,6 +942,9 @@ actor MediaTestHost: ControlHost {
     /// The model every render or plan was asked for, in order — what a test counts to
     /// prove a refusal came before the host was reached.
     private(set) var modelsAsked: [String] = []
+    /// What `/installed` and `/status` answer, and the status posted when `/events` opens.
+    private var installedList: [ControlAPI.InstalledModel] = []
+    private var currentStatus: ControlAPI.Status?
 
     init(roots: [String]) { self.roots = roots }
 
@@ -949,6 +952,10 @@ actor MediaTestHost: ControlHost {
     func setImageOutput(_ path: String?) { imageOutput = path }
     func setMeshOutput(glb: String?, obj: String?) { meshOutput = (glb, obj) }
     func setMeshFailure(_ sentence: String?) { meshFailure = sentence }
+    func setInstalled(_ models: [ControlAPI.InstalledModel], status: ControlAPI.Status?) {
+        installedList = models
+        currentStatus = status
+    }
 
     func setQueueFile(_ path: String?) { queueFile = path }
     func forgetMesh() { lastMeshImagePath = nil }
@@ -1018,11 +1025,13 @@ actor MediaTestHost: ControlHost {
     func profile() async -> ControlAPI.Profile { fatalError("Unexpected test route") }
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
     func status() async -> ControlAPI.Status {
-        .init(state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
-              expertStreaming: false, lastGenerationTokensPerSecond: nil)
+        currentStatus ?? .init(
+            state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+            expertStreaming: false, lastGenerationTokensPerSecond: nil
+        )
     }
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel] { [] }
-    func installed() async -> [ControlAPI.InstalledModel] { [] }
+    func installed() async -> [ControlAPI.InstalledModel] { installedList }
     func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? { nil }
     func plan(_ request: ControlAPI.PlanRequest) async throws -> ControlAPI.Plan {
         throw BuddyTestError.unexpectedRoute
@@ -1101,7 +1110,10 @@ actor MediaTestHost: ControlHost {
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
         throw BuddyHostError.noSuchConversation(id)
     }
-    func beginEventUpdates(postingTo hub: BuddyEventHub) async {}
+    /// What the app's pump does first for a new subscriber: tell it the status.
+    func beginEventUpdates(postingTo hub: BuddyEventHub) async {
+        if let currentStatus { await hub.post(.status(currentStatus)) }
+    }
 }
 
 
