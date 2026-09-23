@@ -319,7 +319,10 @@ public actor ModelDownloader {
         }
 
         if let expected = file.sha256 {
-            let actual = try sha256(of: partial)
+            // Stop and Remove wait for this task, and a phone model is gigabytes: a cancel
+            // must not sit behind the whole read. The full partial is kept, so the next
+            // attempt checks it instead of downloading it again.
+            let actual = try sha256(of: partial, checkingCancellation: true)
             guard actual == expected else {
                 try? FileManager.default.removeItem(at: partial)
                 throw DownloadError.checksumMismatch(

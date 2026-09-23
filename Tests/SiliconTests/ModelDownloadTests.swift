@@ -263,6 +263,52 @@ struct ModelDownloadTests {
         #expect(server.range(for: "config.json") == nil)
     }
 
+    /// Reusing a local file now means hashing it, and a cancel must not wait behind that:
+    /// the check stops, nothing is fetched, and nothing comes back as verified.
+    @Test func aCancelledDownloadStopsCheckingLocalBytes() async throws {
+        let server = try FileServer()
+        defer { server.stop() }
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let bytes = randomData(64 * 1024)
+        server.set("weights.gguf", bytes)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try bytes.write(to: directory.appendingPathComponent("weights.gguf"))
+        let resolution = ModelResolver.Resolution(
+            repository: "test/curated",
+            files: [.init(path: "weights.gguf", size: Bytes(Int64(bytes.count)), sha256: sha(bytes))],
+            projector: nil
+        )
+        let downloader = ModelDownloader(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+        let attempt = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await downloader.download(resolution, to: directory) { _ in }
+        }
+        await #expect(throws: CancellationError.self) { _ = try await attempt.value }
+        #expect(!server.sawRequest(for: "weights.gguf"))
+    }
+
+    /// The checksum after a transfer, and the one before a reuse, stop at the next chunk
+    /// once their task is cancelled — Stop and Remove wait for a phone model's attempt,
+    /// and that attempt hashes gigabytes.
+    @Test func aCancelledChecksumStopsReading() async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("weights.gguf")
+        try randomData(64 * 1024).write(to: file)
+        let downloader = ModelDownloader()
+
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try downloader.sha256(of: file, checkingCancellation: true)
+        }
+        await #expect(throws: CancellationError.self) { _ = try await cancelled.value }
+        // The same read in a live task still finishes.
+        #expect(try downloader.sha256(of: file, checkingCancellation: true) == sha(try Data(contentsOf: file)))
+    }
+
     @Test func aPartialFileResumesWhereItStopped() async throws {
         let server = try FileServer()
         defer { server.stop() }
