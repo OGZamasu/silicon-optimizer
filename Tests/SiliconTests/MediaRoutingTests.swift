@@ -997,6 +997,39 @@ struct MediaRoutingAppTests {
         #expect(named.request.steps == 17)
     }
 
+    /// A swarm node's `auto` render is chosen among free lanes only. With nothing but Jev to
+    /// route it, that means not routed at all — the same fall-back an omitted model has
+    /// always had — and nothing is sent or spent. The owner's own `auto` a moment later is
+    /// routed, so the door is shut for the peer rather than simply broken.
+    @Test func aSwarmNodesAutoRenderNeverAsksThePaidRouter() async throws {
+        let (harness, server) = try await Self.route { Self.answer() }
+        defer { server.stop(); harness.clean() }
+        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let prompt = "a fox sprinting through long grass"
+
+        let (clip, image) = try await MediaRouter.$override.withValue(harness.service) {
+            try await PaidLanes.$allowed.withValue(false) {
+                (
+                    try await model.mediaRoutedVideo(
+                        prompt: prompt, explicitModelID: "auto", seconds: nil
+                    ),
+                    try await model.mediaRoutedImage(.init(prompt: prompt, modelID: "auto"))
+                )
+            }
+        }
+        #expect(clip == nil)
+        #expect(image.request.modelID == nil)
+        #expect(image.reason == nil)
+        #expect(server.requests.isEmpty)
+        #expect(await harness.service.ledger().month().total.calls == 0)
+
+        let owner = try await MediaRouter.$override.withValue(harness.service) {
+            try await model.mediaRoutedVideo(prompt: prompt, explicitModelID: "auto", seconds: nil)
+        }
+        #expect(owner?.modelID == "ltx2-distilled")
+        #expect(server.requests.count == 1)
+    }
+
     /// B3. `localOnly` says this prompt must not leave the Mac. Routing it would send it to
     /// TypeSafe, which is exactly what the caller forbade.
     @Test func aLocalOnlyImageRequestNeverReachesJev() async throws {

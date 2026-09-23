@@ -121,6 +121,67 @@ struct SwarmPaidLaneTests {
         #expect(typeSafe.requests.count == 1)
     }
 
+    /// A render the swarm names a cloud provider's model for would be billed to the owner's
+    /// account. It is refused before the host is asked — on every render route the swarm
+    /// can reach, on both listeners, in any spelling of the namespace — while a model the
+    /// swarm does render, and `auto`, still reach it, and the owner's own token and a paired
+    /// phone send the same body through untouched.
+    @Test func theSwarmSecretCannotNameACloudModelForARender() async throws {
+        let swarm = "test-shared-swarm-secret"
+        try await BuddyMediaFixture.withServer(swarmToken: swarm) { fixture in
+            let picture = try fixture.writeOutput(
+                named: "kettle.png", bytes: BuddyMediaRoutesTests.pngBytes(count: 64)
+            )
+            let mediaID = try #require(
+                await fixture.registry.register(path: picture.path, within: [fixture.outputs.path])
+            )
+            let routes = [
+                "/image/plan", "/image/generate", "/mesh/plan", "/mesh/generate", "/video/generate",
+            ]
+            func body(_ model: String) -> String {
+                #"{"prompt":"a kettle","mediaID":"\#(mediaID)","modelID":"\#(model)"}"#
+            }
+
+            for client in [fixture.phone, fixture.local] {
+                for route in routes {
+                    for model in ["cloud/gmi/flux-pro", "Cloud/OpenRouter/a-video-model", " cloud/x"] {
+                        let (status, answer) = try await client.call(
+                            "POST", route, token: swarm, body: body(model)
+                        )
+                        #expect(status == 403, "\(route) \(model)")
+                        #expect(
+                            (try? JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: answer))?
+                                .error == ControlServer.paidMediaIsNotForPeers
+                        )
+                    }
+                }
+            }
+            #expect(await fixture.host.modelsAsked.isEmpty)
+
+            for route in routes {
+                for model in ["flux1-schnell", "auto"] {
+                    #expect(try await fixture.phone.status(
+                        "POST", route, token: swarm, body: body(model)
+                    ) == 200, "\(route) \(model)")
+                }
+            }
+            #expect(await fixture.host.modelsAsked.count == routes.count * 2)
+            #expect(await fixture.host.modelsAsked.allSatisfy { !$0.hasPrefix("cloud/") })
+
+            // Whoever else asks is not the swarm, and the rule is not theirs.
+            let phone = try await fixture.pair()
+            for route in routes {
+                #expect(try await fixture.phone.status(
+                    "POST", route, token: phone.token, body: body("cloud/gmi/flux-pro")
+                ) == 200)
+                #expect(try await fixture.local.status(
+                    "POST", route, token: fixture.local.token, body: body("cloud/gmi/flux-pro")
+                ) == 200)
+            }
+            #expect(await fixture.host.modelsAsked.count == routes.count * 4)
+        }
+    }
+
     /// A flagged answer to a swarm node's chat may be re-run on the owner's hardware, never
     /// on a cloud model billed to the owner — whether the owner picked one or the gateway
     /// merely lists one.

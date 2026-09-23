@@ -587,4 +587,15 @@ extension BuddyHostError: ControlStatusError {}
 /// has to remember to.
 public enum PaidLanes {
     @TaskLocal public static var allowed = true
+
+    /// Whether a model id names a lane billed to the owner's own account: the cloud
+    /// namespace, `cloud/<provider>/<model>`, which is the gateway's spelling for a model a
+    /// bring-your-own-key provider runs. Any capitalisation, and whether or not the rest
+    /// names a real model — a peer asking for one is refused for asking, not for asking
+    /// well.
+    public static func namesPaidModel(_ modelID: String?) -> Bool {
+        guard let modelID else { return false }
+        return modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased().hasPrefix("cloud/")
+    }
 }

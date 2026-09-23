@@ -939,6 +939,9 @@ actor MediaTestHost: ControlHost {
     private var meshOutput: (glb: String?, obj: String?) = (nil, nil)
     /// A sentence `POST /mesh/generate` fails with, when a test wants one.
     private var meshFailure: String?
+    /// The model every render or plan was asked for, in order — what a test counts to
+    /// prove a refusal came before the host was reached.
+    private(set) var modelsAsked: [String] = []
 
     init(roots: [String]) { self.roots = roots }
 
@@ -979,6 +982,7 @@ actor MediaTestHost: ControlHost {
 
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse {
         lastMeshImagePath = request.imagePath
+        modelsAsked.append(request.modelID ?? "")
         if let meshFailure { throw ControlHostError.badRequest(meshFailure) }
         return .init(
             glbPath: meshOutput.glb, objPath: meshOutput.obj, elapsedSeconds: 1, model: "fixture"
@@ -989,6 +993,7 @@ actor MediaTestHost: ControlHost {
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
         lastImagePath = request.initImagePath
+        modelsAsked.append(request.modelID ?? "")
         return .init(
             path: imageOutput ?? request.initImagePath ?? "", elapsedSeconds: 1,
             peakMemoryBytes: nil, predictedPeakBytes: 1, model: "fixture"
@@ -999,6 +1004,7 @@ actor MediaTestHost: ControlHost {
     /// plans and the test that proves it has to get past the gate.
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
         lastImagePath = request.initImagePath
+        modelsAsked.append(request.modelID ?? "")
         return .init(
             width: 1024, height: 1024, steps: 8, quantization: "8-bit",
             peakBytes: 1, peakPhase: "Decode", budgetBytes: 2, verdict: "fits",
@@ -1053,6 +1059,7 @@ actor MediaTestHost: ControlHost {
     func meshModels() async -> [ControlAPI.MeshModel] { [] }
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan {
         lastMeshImagePath = request.imagePath
+        modelsAsked.append(request.modelID ?? "")
         return .init(
             model: "fixture", peakBytes: 1, peakPhase: "Bake", budgetBytes: 2,
             verdict: "fits", isRemote: false, phases: [], suggestions: [], notes: []
@@ -1064,6 +1071,7 @@ actor MediaTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoResponse {
         // Reached only when the subject resolved; the path-from-a-device test asserts it
         // is never reached at all.
+        modelsAsked.append(request.modelID ?? "")
         if videoQueuePaused { throw ControlAPI.VideoQueuePaused() }
         lastImagePath = request.imagePath
         return .init(file: queueFile ?? "", node: "fixture", model: "fixture", elapsedSeconds: 1)

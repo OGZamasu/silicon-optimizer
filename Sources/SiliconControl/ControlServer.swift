@@ -834,6 +834,20 @@ public actor ControlServer {
         "This device is paired for chat only. Pair it again with full control from "
             + "Settings → Silicon Buddy on the Mac."
 
+    /// What a swarm node is told when it names a cloud provider's model for a render.
+    public static let paidMediaIsNotForPeers =
+        "A swarm node may not spend this Mac's cloud provider accounts. Name a model this "
+            + "Mac or its swarm renders (GET /image/models, /mesh/models or /video/models), or "
+            + "\"auto\", which for a swarm node chooses among those only."
+
+    /// The render routes, and the one field of their bodies that picks who renders.
+    static let routesNamingAModel: Set<String> = [
+        "/image/plan", "/image/generate", "/mesh/plan", "/mesh/generate",
+        "/video/generate", "/video/queue",
+    ]
+
+    private struct NamedModel: Decodable { var modelID: String? }
+
     /// What a swarm node is told when it names the TypeSafe lane on `/decide`.
     public static let paidLanesAreNotForPeers =
         "A swarm node may not spend this Mac's TypeSafe (Jev) budget. Ask with provider "
@@ -1413,6 +1427,18 @@ public actor ControlServer {
         // engine in it and two of them have a second parameter as well.
         if segments.first == "agent" {
             return await routeAgent(request, segments: segments, as: caller, on: origin)
+        }
+
+        // A render the swarm names a cloud model for would run on the owner's account, which
+        // a node borrowing this Mac's hardware may not spend — the render-route half of what
+        // `PaidLanes` does for Jev. Refused here, before the host or anything it routes to is
+        // asked, and on every render route at once rather than remembered per case. `auto`
+        // is not refused: for a peer it is chosen among free lanes only.
+        if caller == .swarm, request.method == "POST",
+           Self.routesNamingAModel.contains(request.path),
+           let asked = try? JSONDecoder().decode(NamedModel.self, from: request.body),
+           PaidLanes.namesPaidModel(asked.modelID) {
+            return .error(403, Self.paidMediaIsNotForPeers)
         }
 
         do {
