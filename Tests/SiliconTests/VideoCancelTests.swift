@@ -245,6 +245,53 @@ struct VideoCancelTests {
         #expect(!CancelNodeProtocol.state.calls().contains("POST /v1/text-to-video"))
     }
 
+    @Test func aSecondCancelWhileTheFirstIsPendingSaysSo() async throws {
+        CancelNodeProtocol.state.reset(answer: .body(202, #"{"cancel":"requested","status":"running"}"#))
+        let request = template()
+        defer { try? FileManager.default.removeItem(at: request.outputDirectory) }
+        let (queue, item) = try acceptedQueue(request)
+        let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
+        let node = peer(actions: ["cancel"])
+        try queue.beginCancel(item.id)
+        for _ in 0..<2 {
+            do {
+                _ = try await model.cancelVideoRender(item.id, peers: [node])
+                Issue.record("A second cancel must not be sent while the first is pending")
+            } catch { #expect(error.localizedDescription.contains("already in progress")) }
+            #expect(throws: (any Error).self) { try queue.beginCancel(item.id) }
+        }
+        #expect(CancelNodeProtocol.state.calls().isEmpty)
+        #expect(queue.items[0].cancel?.state == .sending)
+        // Once the node answered "requested", asking again still says it is in progress.
+        try queue.recordCancel(item.id, outcome: .requested(nil), following: false)
+        #expect(VideoBatchQueue.cancelRefusal(queue.items[0])?.contains("already in progress") == true)
+    }
+
+    /// Owner policy: the swarm secret may drive the queue like any client, but not throw
+    /// away a render. The Mac's own token and a full-scope phone keep the verb.
+    @Test func aSwarmPeerMayNotCancelButTheOwnersCredentialsMay() async throws {
+        let secret = "swarm-secret-for-the-cancel-fixture"
+        try await withAgentServer(swarmToken: secret) { fixture in
+            let full = try await fixture.pair(name: "Studio phone")
+            let cancel = #"{"action":"cancel","id":"9C2F-0005"}"#
+            let (refused, body) = try await fixture.local.call(
+                "POST", "/video/queue/control", token: secret, body: cancel
+            )
+            #expect(refused == 403)
+            #expect(String(decoding: body, as: UTF8.self).contains("may not cancel"))
+            // The rest of the queue's verbs stay open to a peer.
+            #expect(try await fixture.local.status(
+                "POST", "/video/queue/control", token: secret, body: #"{"action":"pause"}"#
+            ) == 200)
+            #expect(try await fixture.local.status(
+                "POST", "/video/queue/control", token: fixture.local.token, body: cancel
+            ) == 200)
+            #expect(try await fixture.phone.status(
+                "POST", "/video/queue/control", token: full.token, body: cancel
+            ) == 200)
+        }
+    }
+
     @Test func aCancelInterruptedByARelaunchIsUnknownNotConfirmed() throws {
         let request = template()
         defer { try? FileManager.default.removeItem(at: request.outputDirectory) }

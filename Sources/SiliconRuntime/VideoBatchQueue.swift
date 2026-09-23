@@ -368,18 +368,37 @@ public final class VideoBatchQueue {
     /// Only a clip whose job the node accepted can be cancelled by ID, and only while
     /// it may still be running there.
     public nonisolated static func mayCancel(_ item: VideoQueueItem) -> Bool {
+        cancelRefusal(item) == nil
+    }
+
+    /// Why this clip cannot be cancelled now, in words that say what to do instead; nil
+    /// when it can. A cancel already on its way is the common case: say so, rather than
+    /// that the clip is not cancellable.
+    public nonisolated static func cancelRefusal(_ item: VideoQueueItem) -> String? {
+        switch item.cancel?.state {
+        case .sending, .requested:
+            return "A cancel for this clip is already in progress. Its outcome will show on the clip; there is no need to ask again."
+        case .confirmed:
+            return "This clip's render is already cancelled."
+        case .completed:
+            return "This clip's render already finished, so there is nothing left to cancel."
+        case .failed:
+            return "This clip's render had already failed, so there is nothing left to cancel."
+        case .unsupported, .unknown, nil:
+            break
+        }
         guard item.nodeJob != nil, item.nodeURL != nil,
-              item.status == .rendering || item.canReconnect else { return false }
-        return ![.sending, .requested, .confirmed, .completed, .failed].contains(item.cancel?.state)
+              item.status == .rendering || item.canReconnect else {
+            return "Only a clip the node has accepted, and that may still be rendering, can be cancelled."
+        }
+        return nil
     }
 
     /// Saved before the request is sent, so a relaunch mid-request says "unknown", never
     /// nothing.
     public func beginCancel(_ id: String, now: Date = Date()) throws {
         try update(id) { item in
-            guard Self.mayCancel(item) else {
-                throw VideoRuntimeError.failed("Only a clip the node has accepted, and that may still be rendering, can be cancelled.")
-            }
+            if let refusal = Self.cancelRefusal(item) { throw VideoRuntimeError.failed(refusal) }
             item.cancel = VideoCancelRecord(state: .sending, requestedAt: now)
         }
     }

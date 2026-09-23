@@ -221,6 +221,7 @@ extension AppModel {
         guard let item = videoBatchQueue.items.first(where: { $0.id == id }) else {
             throw ControlHostError.badRequest("That queue item no longer exists.")
         }
+        if let refusal = VideoBatchQueue.cancelRefusal(item) { throw ControlHostError.badRequest(refusal) }
         guard Self.canCancelVideo(item, among: peers ?? swarmPeers), let job = item.nodeJob,
               let base = item.nodeURL, let nodeName = item.nodeName else {
             throw ControlHostError.badRequest("This clip's node does not offer to cancel its render. Use stop_following: the app stops waiting and keeps the receipt, but the node may still finish the render.")

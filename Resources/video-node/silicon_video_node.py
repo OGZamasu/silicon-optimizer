@@ -930,9 +930,11 @@ class RenderQueue:
                 owned = self.processes.get(job_id)
         if phosphene_job_id:
             return self._cancel_phosphene(job_id, phosphene_job_id)
-        if owned is not None:
-            owned.terminate()
         deadline = time.monotonic() + CANCEL_CONFIRM_SECONDS
+        if owned is not None:
+            # Its SIGTERM grace and SIGKILL escalation run beside this answer, so the
+            # request never waits longer than the confirmation window.
+            threading.Thread(target=owned.terminate, name=f"cancel-{job_id}", daemon=True).start()
         while time.monotonic() < deadline:
             with self.lock:
                 if self.jobs[job_id].get("status") == "cancelled":

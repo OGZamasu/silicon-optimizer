@@ -282,6 +282,9 @@ struct ContractExportTests {
             #expect(bodies[action]?["confirmNewRender"] == nil, "\(action)")
         }
         #expect(control.errors[400] == ControlServer.unknownQueueAction)
+        #expect(control.errorVariants.contains {
+            $0.0 == 403 && $0.1 == "swarm" && $0.2 == ControlServer.cancelIsNotForPeers
+        })
     }
 
     /// The optional fields a phone reads off a queue item and off a lane — populated in
@@ -311,6 +314,15 @@ struct ContractExportTests {
         #expect(running["mediaID"] == nil || running["mediaID"] is NSNull)
         // Whether `cancel` applies is the Mac's answer, per item; a phone never infers it.
         #expect(running["canCancel"] as? Bool == false)
+        let cancellable = try #require(items.first { $0["canCancel"] as? Bool == true })
+        #expect(cancellable["nodeJobID"] as? String != nil)
+        // The verb's example names that row, not one that could not be cancelled.
+        let control = try #require(
+            Self.routes.first { $0.method == "POST" && $0.path == "/video/queue/control" }
+        )
+        let example = try #require(control.requests.first { $0.0 == "cancel" }).1
+        let cancelBody = try JSONSerialization.jsonObject(with: try example.encode()) as? [String: Any]
+        #expect(cancelBody?["id"] as? String == cancellable["id"] as? String)
         // A confirmed cancel: its own status, and the node's words for it.
         let cancelled = try #require(items.first { $0["status"] as? String == "cancelled" })
         #expect(cancelled["cancelState"] as? String == "confirmed")
@@ -901,8 +913,8 @@ struct ContractExportTests {
         var summary: String
         var request: Example?
         /// More request shapes than one, for a route whose body is a verb rather than a
-        /// payload. `POST /video/queue/control` has six, and a generated client that has
-        /// only ever seen `pause` has to guess the other five — including which of them
+        /// payload. `POST /video/queue/control` has seven, and a generated client that has
+        /// only ever seen `pause` has to guess the other six — including which of them
         /// need an `id` and what `confirmNewRender` is for.
         var requests: [(String, Example)] = []
         var response: Example?
@@ -2232,11 +2244,14 @@ struct ContractExportTests {
                 ))),
                 // Asks the node to stop this one render — only where the item's
                 // `canCancel` is true. Never resubmits, whatever the node answers.
-                ("cancel", .of(ControlAPI.VideoQueueControl(action: "cancel", id: "9C2F-0004"))),
+                ("cancel", .of(ControlAPI.VideoQueueControl(action: "cancel", id: "9C2F-0005"))),
                 ("clear_finished", .of(ControlAPI.VideoQueueControl(action: "clear_finished"))),
             ],
             response: .of(exampleVideoQueue),
-            errors: [400: ControlServer.unknownQueueAction]
+            errors: [400: ControlServer.unknownQueueAction],
+            // A swarm peer may pause or retry, but `cancel` throws away GPU work, and a
+            // node's secret is not a person deciding to.
+            errorVariants: [(403, "swarm", ControlServer.cancelIsNotForPeers)]
         ),
         Route(
             method: "POST", path: "/video/generate", auth: "device",
@@ -2778,6 +2793,17 @@ struct ContractExportTests {
                 outputDirectory: "/Users/you/Movies/Silicon/Lisbon", error: nil,
                 uncertainSubmission: false, cancelState: "confirmed",
                 cancelDetail: "Cancelled; the renderer was stopped.", canCancel: false
+            ),
+            // Stopped following, receipt kept, and its node advertises cancel: the one row
+            // a client may offer Cancel render on.
+            .init(
+                id: "9C2F-0005", batchID: "9C2F", title: "Lisbon",
+                prompt: "Laundry lines over the Alfama steps", scene: 5, variation: 1,
+                seed: 424_246, modelID: "ltx2-distilled", seconds: 5, resolution: "720p",
+                h3Turbo: nil, status: "failed", nodeJobID: "job-1191", file: nil,
+                outputDirectory: "/Users/you/Movies/Silicon/Lisbon",
+                error: "Stopped following. The node may still be rendering; use Reconnect / download to retrieve the same job, or check the node before rendering again.",
+                uncertainSubmission: false, canCancel: true
             ),
         ]
     )
