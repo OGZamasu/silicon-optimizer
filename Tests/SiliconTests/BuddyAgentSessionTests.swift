@@ -1148,6 +1148,89 @@ struct BuddyAgentSessionTests {
         #expect(await names(peer.stream) == ["heartbeat"])
     }
 
+    /// A peer may keep its event stream for status and heartbeats, but that stream must
+    /// not recover owner queue entries, conversation identifiers, or model download
+    /// details after the HTTP owner routes have been scoped away.
+    @Test func ownerActivityFramesDoNotReachSwarmPeers() async throws {
+        let hub = BuddyEventHub()
+        let mac = await hub.subscribe(as: .thisMac)
+        let full = await hub.subscribe(as: .device(id: "full", scope: .full))
+        let chat = await hub.subscribe(as: .device(id: "chat", scope: .chat))
+        let peer = await hub.subscribe(as: .peer)
+
+        await hub.post(.job(.init(
+            id: "owner-video", kind: "video", status: "done",
+            title: "Owner's private prompt", mediaID: "owner-media-id"
+        )))
+        await hub.post(.verdict(.init(
+            verdict: "annotate", conversationID: "owner-conversation-id",
+            messageID: "owner-message-id"
+        )))
+        await hub.post(.download(.init(
+            id: "owner-model", name: "Owner model", fraction: 0.5,
+            bytesReceived: 1, bytesExpected: 2, bytesPerSecond: 1,
+            error: "owner download error"
+        )))
+        await hub.post(.heartbeat(.init(at: "2026-09-22T10:00:00Z")))
+        for subscriber in [mac, full, chat, peer] { await hub.cancel(subscriber.id) }
+
+        func names(_ stream: AsyncStream<BuddyEvent.Frame>) async -> [String] {
+            var result: [String] = []
+            for await frame in stream { result.append(frame.name) }
+            return result
+        }
+        #expect(await names(mac.stream) == ["job", "verdict", "download", "heartbeat"])
+        #expect(await names(full.stream) == ["job", "verdict", "download", "heartbeat"])
+        #expect(await names(chat.stream) == ["job", "verdict", "download", "heartbeat"])
+        #expect(await names(peer.stream) == ["heartbeat"])
+    }
+
+    /// The actual SSE listener assigns the shared bearer the peer audience. Hidden
+    /// frames must not arrive over the wire or turn into a spurious resync notice.
+    @Test func ownerActivityFramesStayOffThePeerEventWire() async throws {
+        let hub = BuddyEventHub()
+        try await withServer(
+            host: BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false),
+            swarmToken: Self.swarmSecret, hub: hub
+        ) { fixture in
+            let received = Recorder()
+            let reader = Task {
+                try await fixture.local.events(
+                    "GET", "/events", token: Self.swarmSecret, body: nil
+                ) { frames in
+                    received.set(frames)
+                    return frames.contains {
+                        $0.name == "heartbeat" && $0.data.contains("peer-visible")
+                    }
+                }
+            }
+            defer { reader.cancel() }
+            #expect(try await received.waitFor { !$0.isEmpty })
+
+            for index in 0..<(BuddyEventHub.bufferedFrames + 8) {
+                await hub.post(.job(.init(
+                    id: "owner-job-\(index)", kind: "video", status: "done",
+                    title: "private owner title", mediaID: "owner-media-id"
+                )))
+            }
+            await hub.post(.verdict(.init(
+                verdict: "annotate", conversationID: "private-conversation-id",
+                messageID: "private-message-id"
+            )))
+            await hub.post(.download(.init(
+                id: "owner-model", name: "private model", fraction: 0.5,
+                bytesReceived: 1, bytesExpected: 2, bytesPerSecond: 1,
+                error: "private download error"
+            )))
+            await hub.post(.heartbeat(.init(at: "peer-visible")))
+            _ = try await reader.value
+            #expect(received.frames.allSatisfy {
+                $0.name != "job" && $0.name != "verdict"
+                    && $0.name != "download" && $0.name != "resync"
+            })
+        }
+    }
+
     /// A stalled reader's buffer holds real frames, not announcements. Drops are counted
     /// where they happen and handed to the reader; nothing is appended to the stream to say
     /// so, where each announcement would push out one more real frame to make room.

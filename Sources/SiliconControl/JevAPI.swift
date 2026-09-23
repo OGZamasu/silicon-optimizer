@@ -576,3 +576,15 @@ public protocol ControlStatusError: Error {
 }
 
 extension BuddyHostError: ControlStatusError {}
+
+/// Whether the request being answered may spend the owner's money on a paid lane.
+///
+/// Task-local, like `PhoneModelSeams`, and bound by the control server for one request at a
+/// time: a swarm node borrows this Mac's hardware, not its owner's TypeSafe account, so
+/// everything its request sets off — a decision, a chat's verification, a render's routing —
+/// runs with this false. Every other caller, and everything the app does by itself, sees the
+/// default. `JevService` is the one door to a paid Jev call and asks it there, so no feature
+/// has to remember to.
+public enum PaidLanes {
+    @TaskLocal public static var allowed = true
+}

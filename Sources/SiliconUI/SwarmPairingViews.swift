@@ -18,6 +18,7 @@ struct SwarmInviteSheet: View {
                 Label(startupError, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                Button("Retry Invite") { self.startupError = model.startPairingInvite() }
             } else if model.pairingDelivered {
                 delivered
             } else if let request = model.pairingRequest {
@@ -75,12 +76,40 @@ struct SwarmInviteSheet: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 10) {
-                Spacer()
-                Button("Deny") { model.denyPairing(request.id) }
-                Button("Let Them In") { model.approvePairing(request.id) }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
+            switch model.pairingApprovalState {
+            case .minting(let id) where id == request.id:
+                Label("Creating this member's keys…", systemImage: "key")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Deny") { model.denyPairing(request.id) }
+                }
+            case .cancelling(let id) where id == request.id:
+                Label("Revoking new keys before declining…", systemImage: "clock")
+                    .foregroundStyle(.secondary)
+            case .committing(let id) where id == request.id,
+                 .committed(let id) where id == request.id:
+                Label("Approved. Waiting for their Mac to collect the keys…",
+                      systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+            case .idle:
+                HStack(spacing: 10) {
+                    Spacer()
+                    Button("Deny") { model.denyPairing(request.id) }
+                    if model.pairingCleanupNeeded == nil {
+                        Button("Let Them In") { model.approvePairing(request.id) }
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+                if model.pairingCleanupNeeded != nil {
+                    Label("Resolve the previous member-key cleanup before approving anyone else.",
+                          systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+            default:
+                Label("Finishing the previous request…", systemImage: "clock")
+                    .foregroundStyle(.secondary)
             }
         }
     }
