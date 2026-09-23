@@ -137,8 +137,8 @@ public actor QwenCodeRuntime {
             let floor = Self.minimumNodeVersion
             var message = "Qwen Code needs Node.js \(floor.major).\(floor.minor) or newer "
                 + "with npm 11.19 or newer. "
-            if let path = discovery.rejectedPath, let version = discovery.rejectedVersion {
-                message += "Found \(version) at \(path), which is incompatible. "
+            if let rejection = discovery.rejectionSentence {
+                message += rejection
             } else {
                 message += "None was found. "
             }

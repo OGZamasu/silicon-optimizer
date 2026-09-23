@@ -85,6 +85,19 @@ public actor HarnessRuntime {
         /// The newest candidate rejected for version compatibility, when none qualified.
         public var rejectedPath: String?
         public var rejectedVersion: String?
+        /// That candidate's Node was new enough, but the npm beside it was not — the
+        /// usual state of a Node 22 install, and fixed by updating npm, not Node.
+        public var rejectedForNpm = false
+
+        /// The sentence a failure message gives about the rejected candidate, if any.
+        public var rejectionSentence: String? {
+            guard let rejectedPath, let rejectedVersion else { return nil }
+            if rejectedForNpm {
+                return "Found \(rejectedVersion) at \(rejectedPath), but the npm beside it is "
+                    + "older than 11.19 — update it with `npm install -g npm@11`. "
+            }
+            return "Found \(rejectedVersion) at \(rejectedPath), which is incompatible. "
+        }
     }
 
     /// Finds the newest usable Node.js the way a person would, because a GUI app inherits
@@ -169,7 +182,7 @@ public actor HarnessRuntime {
     ) -> NodeDiscovery {
         var probed = Set<String>()
         var best: (url: URL, version: (Int, Int, Int))?
-        var rejected: (path: String, version: (Int, Int, Int))?
+        var rejected: (path: String, version: (Int, Int, Int), npm: Bool)?
 
         var all = candidates
         if let extraCandidate, !extraCandidate.isEmpty { all.append(extraCandidate) }
@@ -178,13 +191,15 @@ public actor HarnessRuntime {
             let resolved = URL(fileURLWithPath: candidate).resolvingSymlinksInPath().path
             guard probed.insert(resolved).inserted else { continue }
             guard let version = nodeVersion(at: candidate) else { continue }
-            if qualifies(version, nodeAt: candidate, minimumVersion: minimumVersion,
-                         requiresNpm11: requiresNpm11) {
+            let nodeQualifies = meetsFloor(version, minimumVersion, requiresNpm11: requiresNpm11)
+            if nodeQualifies, !requiresNpm11 || AgentPackageInstaller.supportsAuditedNpm(
+                beside: URL(fileURLWithPath: candidate)
+            ) {
                 if best == nil || version > best!.version {
                     best = (URL(fileURLWithPath: candidate), version)
                 }
             } else if rejected == nil || version > rejected!.version {
-                rejected = (candidate, version)
+                rejected = (candidate, version, nodeQualifies)
             }
         }
 
@@ -192,7 +207,8 @@ public actor HarnessRuntime {
         return NodeDiscovery(
             node: nil,
             rejectedPath: rejected?.path,
-            rejectedVersion: rejected.map { "v\($0.version.0).\($0.version.1).\($0.version.2)" }
+            rejectedVersion: rejected.map { "v\($0.version.0).\($0.version.1).\($0.version.2)" },
+            rejectedForNpm: rejected?.npm ?? false
         )
     }
 
@@ -635,8 +651,8 @@ public actor HarnessRuntime {
             let floor = Self.harnessMinimumNodeVersion
             var message = "The harness needs Node.js \(floor.major).\(floor.minor) or newer "
                 + "with npm 11.19 or newer. "
-            if let path = discovery.rejectedPath, let version = discovery.rejectedVersion {
-                message += "Found \(version) at \(path), which is incompatible. "
+            if let rejection = discovery.rejectionSentence {
+                message += rejection
             } else {
                 message += "None was found. "
             }

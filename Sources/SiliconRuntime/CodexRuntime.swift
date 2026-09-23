@@ -292,8 +292,8 @@ public actor CodexRuntime {
         guard let node = discovery.node else {
             var message = "Codex needs Node.js 20.17 or newer within the 20.x line, "
                 + "or Node.js 22.9 or newer, with npm 11.19 or newer. "
-            if let path = discovery.rejectedPath, let version = discovery.rejectedVersion {
-                message += "Found \(version) at \(path), which is incompatible. "
+            if let rejection = discovery.rejectionSentence {
+                message += rejection
             } else {
                 message += "None was found. "
             }

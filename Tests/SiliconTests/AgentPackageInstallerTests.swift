@@ -297,3 +297,169 @@ struct AgentPackageInstallerTests {
         }
     }
 }
+
+/// What the app ships and how it tidies up, checked without npm, so these run everywhere.
+@Suite("Bundled agent package locks")
+struct BundledAgentPackageLockTests {
+    static let packages: [AgentPackage] = [.harness, .qwen, .codex, .pi]
+
+    private static let sourceRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // SiliconTests
+        .deletingLastPathComponent()  // Tests
+        .deletingLastPathComponent()  // repository
+        .appendingPathComponent("Resources/agent-packages", isDirectory: true)
+
+    private static func files(_ package: AgentPackage) -> (manifest: URL, lock: URL) {
+        let directory = sourceRoot.appendingPathComponent(package.id, isDirectory: true)
+        return (directory.appendingPathComponent("package.json"),
+                directory.appendingPathComponent("package-lock.json"))
+    }
+
+    /// The locks the app bundles pass the same check a launch makes: the package and version
+    /// each runtime names, every entry from the public registry with a SHA-512 integrity.
+    @Test(arguments: packages.map(\.id))
+    func eachBundledLockPassesTheLaunchCheck(_ id: String) throws {
+        let package = try #require(Self.packages.first { $0.id == id })
+        let (manifest, lock) = Self.files(package)
+        try AgentPackageInstaller.validateLock(
+            package, manifest: manifest, lock: lock, allowLocalArtifacts: false
+        )
+    }
+
+    /// A strict install fails on an install script the allowlist does not name, and an
+    /// allowlist entry is pinned to one version — so the two must describe the same
+    /// packages, or a version bump either breaks every launch or approves nothing.
+    @Test(arguments: packages.map(\.id))
+    func theInstallScriptAllowlistNamesExactlyTheLockedScripts(_ id: String) throws {
+        let package = try #require(Self.packages.first { $0.id == id })
+        let (manifest, lock) = Self.files(package)
+        let manifestJSON = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any]
+        )
+        let allowed = Set(((manifestJSON["allowScripts"] as? [String: Bool]) ?? [:])
+            .filter(\.value).keys)
+        let lockJSON = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: lock)) as? [String: Any]
+        )
+        let packages = try #require(lockJSON["packages"] as? [String: [String: Any]])
+        var scripted = Set<String>()
+        for (path, entry) in packages where entry["hasInstallScript"] as? Bool == true {
+            let name = (entry["name"] as? String)
+                ?? String(path.components(separatedBy: "node_modules/").last ?? "")
+            scripted.insert("\(name)@\(entry["version"] as? String ?? "")")
+        }
+        #expect(allowed == scripted)
+    }
+
+    @Test func aLockPointingAwayFromTheRegistryIsRefused() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "silicon-lock-host-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (manifest, lock) = Self.files(.codex)
+        let copiedManifest = directory.appendingPathComponent("package.json")
+        let copiedLock = directory.appendingPathComponent("package-lock.json")
+        try FileManager.default.copyItem(at: manifest, to: copiedManifest)
+        let text = try String(contentsOf: lock, encoding: .utf8)
+        #expect(text.contains("https://registry.npmjs.org/@openai/codex/-/codex-0.148.0.tgz"))
+        try text.replacingOccurrences(
+            of: "https://registry.npmjs.org/@openai/codex/-/codex-0.148.0.tgz",
+            with: "https://registry.example.invalid/@openai/codex/-/codex-0.148.0.tgz"
+        ).write(to: copiedLock, atomically: true, encoding: .utf8)
+
+        #expect(throws: AgentPackageInstallError.self) {
+            try AgentPackageInstaller.validateLock(
+                .codex, manifest: copiedManifest, lock: copiedLock, allowLocalArtifacts: false
+            )
+        }
+    }
+
+    /// Quitting the app kills the sidecar without waiting to delete its tree, so trees are
+    /// cleared at the next install instead: those whose owner is gone, and ownerless ones
+    /// old enough to be a launch that died. Live owners, fresh claims and the cache stay.
+    @Test func abandonedInstallTreesAreClearedAndLiveOnesKept() throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent(
+            "silicon-agent-trees-\(UUID().uuidString)", isDirectory: true
+        )
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: root) }
+
+        let exited = Process()
+        exited.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try exited.run()
+        exited.waitUntilExit()
+
+        func tree(_ name: String, owner: Int32?, created: Date? = nil) throws -> URL {
+            let directory = root.appendingPathComponent(name, isDirectory: true)
+            try manager.createDirectory(
+                at: directory.appendingPathComponent("node_modules"),
+                withIntermediateDirectories: true
+            )
+            if let owner {
+                try Data("\(owner)\n".utf8).write(
+                    to: directory.appendingPathComponent(AgentPackageInstaller.ownerFileName)
+                )
+            }
+            if let created {
+                try manager.setAttributes([.creationDate: created], ofItemAtPath: directory.path)
+            }
+            return directory
+        }
+        let now = Date()
+        let live = try tree("harness-\(UUID().uuidString)", owner: getpid())
+        let abandoned = try tree("codex-\(UUID().uuidString)", owner: exited.processIdentifier)
+        let beingCreated = try tree("qwen-\(UUID().uuidString)", owner: nil)
+        let diedCreating = try tree(
+            "pi-\(UUID().uuidString)", owner: nil, created: now.addingTimeInterval(-7_200)
+        )
+        let cache = try tree("cache", owner: nil, created: now.addingTimeInterval(-7_200))
+
+        AgentPackageInstaller.pruneAbandonedInstallations(in: root, now: now)
+
+        #expect(manager.fileExists(atPath: live.path))
+        #expect(!manager.fileExists(atPath: abandoned.path))
+        #expect(manager.fileExists(atPath: beingCreated.path))
+        #expect(!manager.fileExists(atPath: diedCreating.path))
+        #expect(manager.fileExists(atPath: cache.path))
+    }
+
+    /// Node 22 ships npm 10: that Node is new enough and its npm is not, and the message
+    /// has to say which one to update.
+    @Test func aNodeRejectedForItsNpmSaysToUpdateNpm() throws {
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory.appendingPathComponent(
+            "silicon-npm-rejection-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? manager.removeItem(at: directory) }
+        func candidate(_ name: String, node: String, npm: String) throws -> String {
+            let folder = directory.appendingPathComponent(name, isDirectory: true)
+            try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+            for (tool, output) in [("node", "v\(node)"), ("npm", npm)] {
+                let url = folder.appendingPathComponent(tool)
+                try "#!/bin/sh\necho \(output)\n".write(to: url, atomically: true, encoding: .utf8)
+                try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            }
+            return folder.appendingPathComponent("node").path
+        }
+
+        let oldNpm = try candidate("old-npm", node: "22.22.0", npm: "10.9.8")
+        let npmRejected = HarnessRuntime.pick(
+            from: [oldNpm], includingRejected: nil,
+            minimumVersion: HarnessRuntime.harnessMinimumNodeVersion, requiresNpm11: true
+        )
+        #expect(npmRejected.node == nil)
+        #expect(npmRejected.rejectedForNpm)
+        #expect(npmRejected.rejectionSentence?.contains("npm install -g npm@11") == true)
+
+        let oldNode = try candidate("old-node", node: "20.10.0", npm: "11.19.0")
+        let nodeRejected = HarnessRuntime.pick(
+            from: [oldNode], includingRejected: nil,
+            minimumVersion: HarnessRuntime.harnessMinimumNodeVersion, requiresNpm11: true
+        )
+        #expect(nodeRejected.node == nil)
+        #expect(!nodeRejected.rejectedForNpm)
+        #expect(nodeRejected.rejectionSentence?.contains("incompatible") == true)
+    }
+}

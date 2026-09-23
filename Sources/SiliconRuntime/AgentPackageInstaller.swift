@@ -60,7 +60,7 @@ enum AgentPackageInstallError: LocalizedError {
         case .npmTooOld(let found):
             return "Verified agent packages need npm 11.19.0 or newer to enforce the audited "
                 + "install-script allowlist (found \(found)). Update npm with "
-                + "`npm install -g npm@11.19.0` (and Node.js if required), then try again."
+                + "`npm install -g npm@11` (and Node.js if required), then try again."
         case .npmFailed(let name, let status, let detail):
             return "Could not install the verified \(name) package (npm ci exited \(status)). "
                 + "The first install needs network access unless npm has cached every "
@@ -80,9 +80,13 @@ struct InstalledAgentPackage: Sendable {
 
 /// Reinstalls from the bundled integrity lock before every launch. The fresh directory
 /// prevents a previous agent run or a project-local package from becoming the next binary.
-/// A normal stop/exit removes it; force-quit can leave an orphaned tree. We deliberately
-/// do not age-delete old trees here, since another app instance may still be running one.
+/// A normal stop/exit removes it. Quitting the app cannot wait for that, and a crash never
+/// gets the chance, so each tree records the app process that built it and the next
+/// install removes trees whose process is gone — never one another running copy still uses.
 enum AgentPackageInstaller {
+    /// Names the process that owns an installed tree, as a decimal pid.
+    static let ownerFileName = ".silicon-owner"
+
     static func install(
         _ package: AgentPackage, node: URL, sourceRoot: URL? = nil,
         destinationRoot: URL? = nil, allowLocalArtifacts: Bool = false
@@ -118,6 +122,7 @@ enum AgentPackageInstaller {
             for: .applicationSupportDirectory, in: .userDomainMask
         )[0].appendingPathComponent("SiliconOptimizer/agent-packages", isDirectory: true)
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        pruneAbandonedInstallations(in: root)
         let staging = root.appendingPathComponent("\(package.id)-\(UUID().uuidString)",
                                               isDirectory: true)
         try manager.createDirectory(at: staging, withIntermediateDirectories: false)
@@ -125,6 +130,9 @@ enum AgentPackageInstaller {
         defer {
             if !installedSuccessfully { try? manager.removeItem(at: staging) }
         }
+        // Claimed before anything else lands in it, so a pruner in another launch never
+        // mistakes this tree for one left behind.
+        try Data("\(getpid())\n".utf8).write(to: staging.appendingPathComponent(ownerFileName))
         try manager.copyItem(at: manifest, to: staging.appendingPathComponent("package.json"))
         try manager.copyItem(at: lock, to: staging.appendingPathComponent("package-lock.json"))
 
@@ -189,6 +197,38 @@ enum AgentPackageInstaller {
         else { throw AgentPackageInstallError.missingBin(package.name) }
         installedSuccessfully = true
         return InstalledAgentPackage(bin: bin, directory: staging)
+    }
+
+    /// Removes installed trees nobody can be running: their owner process has exited, or
+    /// they never got an owner and are over an hour old (a launch that died while creating
+    /// one). A live owner — this app, or another copy of it — keeps its trees; a reused pid
+    /// only postpones a removal to a later install. The shared npm cache is not a tree.
+    static func pruneAbandonedInstallations(in root: URL, now: Date = Date()) {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey]
+        ) else { return }
+        for entry in entries where isInstallationName(entry.lastPathComponent) {
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            else { continue }
+            let owner = (try? String(
+                contentsOf: entry.appendingPathComponent(ownerFileName), encoding: .utf8
+            )).flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if let owner {
+                if owner > 0, kill(owner, 0) == 0 || errno == EPERM { continue }
+            } else {
+                let created = (try? entry.resourceValues(forKeys: [.creationDateKey]))?
+                    .creationDate ?? now
+                guard now.timeIntervalSince(created) > 3600 else { continue }
+            }
+            try? manager.removeItem(at: entry)
+        }
+    }
+
+    /// `<package id>-<UUID>`, the only shape `installSynchronously` creates.
+    private static func isInstallationName(_ name: String) -> Bool {
+        guard name.count > 37 else { return false }
+        return name.dropLast(36).hasSuffix("-") && UUID(uuidString: String(name.suffix(36))) != nil
     }
 
     /// Discovery uses a credential-free, bounded probe before ranking Node candidates.
@@ -311,7 +351,7 @@ enum AgentPackageInstaller {
             .appendingPathComponent("Resources/agent-packages", isDirectory: true)
     }
 
-    private static func validateLock(
+    static func validateLock(
         _ package: AgentPackage, manifest: URL, lock: URL, allowLocalArtifacts: Bool
     ) throws {
         guard let manifestJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest))
@@ -339,7 +379,9 @@ enum AgentPackageInstaller {
                   integrity.hasPrefix("sha512-"),
                   let resolved = entry["resolved"] as? String,
                   let url = URL(string: resolved),
-                  (url.scheme == "https" && url.host != nil)
+                  // Every reviewed artifact came from the public registry; a lock that
+                  // points anywhere else is not the lock that was reviewed.
+                  (url.scheme == "https" && url.host == "registry.npmjs.org")
                     || (allowLocalArtifacts && url.scheme == "file")
             else { throw AgentPackageInstallError.invalidLock(package.name) }
         }
