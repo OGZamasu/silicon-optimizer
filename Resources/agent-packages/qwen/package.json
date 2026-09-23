@@ -1,0 +1,11 @@
+{
+  "name": "silicon-qwen-sidecar",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@qwen-code/qwen-code": "0.21.14"
+  },
+  "allowScripts": {
+    "@qwen-code/audio-capture@0.21.14": true
+  }
+}

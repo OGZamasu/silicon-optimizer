@@ -32,10 +32,10 @@ export const SOURCE_SEARCH_DIRS = Object.freeze([
 /**
  * Directories that are never project source.
  *
- * `.impeccable` is the critical entry, and it is not cosmetic. Progressive
- * publication stages each revision as `.impeccable/live/artifacts/
- * <id>-r<n>.<source-ext>`, and those artifacts carry the very marker accept
- * searches for. The walk reaches `.` for any project whose source is not under
+ * `.impeccable` is the critical entry, and it is not cosmetic. Historical
+ * publication staged source-bearing revisions under `.impeccable/live/artifacts/`
+ * (now quarantined outside the app root on upgrade); those artifacts carried
+ * the very marker accept searches for. The walk reaches `.` for any project whose source is not under
  * one of the privileged roots above (this repo's own site lives in
  * `site/pages/`), and dot-directories sort before letters, so the artifact was
  * found *before* the real file. isGeneratedFile then declined the accept, and

@@ -588,14 +588,17 @@ public actor PhoneModelStore {
         progress.begin(.fetching, at: Self.size(of: partial) ?? 0)
         let resolution = ModelResolver.Resolution(
             repository: entry.repository,
-            // No digest for the downloader: `seal` below hashes what arrived, once, and is
-            // the only thing that can make it servable.
-            files: [.init(path: entry.file, size: Bytes(entry.sizeBytes), sha256: nil)],
+            // Give the downloader the published digest so a resumed partial is checked
+            // before reuse. `seal` still performs the final serving/receipt checks below.
+            files: [.init(path: entry.file, size: Bytes(entry.sizeBytes), sha256: entry.sha256)],
             projector: nil,
             revision: entry.commit
         )
+        // The downloader's own check reads free space through `volumes` too, like every
+        // other check this store makes.
         let downloader = ModelDownloader(
-            publicFilesFrom: source(), redirects: HuggingFaceClient.isHubRedirect
+            publicFilesFrom: source(), redirects: HuggingFaceClient.isHubRedirect,
+            availableCapacity: volumes.availableCapacity
         )
         _ = try await downloader.download(resolution, to: root) { progress.note($0) }
         try Task.checkCancellation()

@@ -48,6 +48,15 @@ struct RemoteArtifactSecurityTests {
         #expect(policy.resolve("https://localhost/a.mp3", relativeTo: base) == nil)
         #expect(policy.resolve("https://artifact.test/a.mp3", relativeTo: base) == nil)
 
+        // Special-use ranges that share a first octet with public space. Two of these used
+        // to pass: the check listed two ranges per line, and a comma binds looser than `||`.
+        for host in ["192.0.0.8", "192.0.2.1", "198.18.0.1", "198.19.255.254", "198.51.100.7"] {
+            #expect(policy.resolve("https://\(host)/a.mp3", relativeTo: base) == nil, "\(host)")
+        }
+        for host in ["192.0.1.1", "198.17.0.1", "198.20.0.1"] {
+            #expect(policy.resolve("https://\(host)/a.mp3", relativeTo: base) != nil, "\(host)")
+        }
+
         // The provider does not publish CDN ownership in this repository. Public hostnames
         // remain compatible while the GMI audio transfer validates each connected address.
         #expect(policy.resolve("https://undocumented-cdn.example.net/a.mp3", relativeTo: base) != nil)
@@ -103,13 +112,20 @@ struct RemoteArtifactSecurityTests {
         #expect(throws: RemoteTransferError.self) {
             try PublicHTTPSArtifactTransfer.enforceDirect(
                 environment: [:], proxyEntries: direct,
-                systemSettings: ["__SCOPED__": ["en0": [
-                    kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1,
-                ]]]
+                systemSettings: [kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1]
             )
         }
         try PublicHTTPSArtifactTransfer.enforceDirect(
             environment: [:], proxyEntries: direct, systemSettings: [:]
+        )
+        // WPAD or PAC on an interface that is not the primary one does not describe the
+        // route this transfer takes, so it no longer locks the download out.
+        try PublicHTTPSArtifactTransfer.enforceDirect(
+            environment: [:], proxyEntries: direct,
+            systemSettings: ["__SCOPED__": ["en1": [
+                kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 1,
+                kCFNetworkProxiesProxyAutoConfigEnable as String: 1,
+            ]]]
         )
     }
 

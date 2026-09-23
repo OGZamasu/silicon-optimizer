@@ -41,11 +41,21 @@ take longer than twelve hours.
 - **Stop following…** pauses future submissions and interrupts the app's active
   wait/download. It **does not stop the remote GPU render**. Its saved receipt
   remains available through **Reconnect / download**; if interrupted before a
-  receipt arrived, check the node before explicitly rendering again. The former
-  composer's Cancel button also only interrupted local polling. Use the node's
-  own controls to stop GPU work. Safe, capability-gated cancel-by-job-ID is
-  [tracked separately](https://github.com/OGZamasu/silicon-optimizer/issues/25);
-  the adapter must not call Phosphene's global stop and risk stopping another job.
+  receipt arrived, check the node before explicitly rendering again. It is
+  offered for every node.
+- **Cancel render…** asks the clip's own node to stop that one render. It
+  appears only where that node advertises job cancellation for the lane
+  (`supported_job_actions: ["cancel"]`): the bundled adapter does for LTX, which
+  it runs as its own process. It does not for H3, because a render Phosphene has
+  started can only be stopped by its global stop, which may hit another job;
+  there, and on nodes that do not advertise it, Stop following is the choice.
+  The request is saved before it is sent, and the clip then shows what happened:
+  **cancelled** (confirmed; the queue moves on, nothing is paused), **cancel
+  requested** (the queue keeps following the same job until the node confirms),
+  **finished first** (the clip is kept), **could not stop** or **not confirmed**
+  (the render may still be running). A relaunch mid-request reads "not
+  confirmed". No answer ever resubmits the clip: a failed cancel keeps its
+  receipt, and **Render again** on a cancelled clip is a new, deliberate job.
 - Quitting saves the queue. The accepted node job can continue, but the app must
   reopen to download it and dispatch later clips. It reconnects to the original
   node/job ID instead of submitting another render.
@@ -171,8 +181,9 @@ and [step handling](https://github.com/mrbizarro/phosphene/blob/main/mlx_ltx_pan
 Higher H3 **Size** increases the generation canvas and/or export work and may
 increase memory as well as time. A 1080p export is not native 1080p generation.
 Start with 480p variations and test a selected shot before increasing size for
-a whole batch. The standalone LTX adapter currently falls back to 720p delivery
-for a 1080p request; use 480p or 720p pending [the separate resolution fix](https://github.com/OGZamasu/silicon-optimizer/issues/21). Do not
+a whole batch. The standalone LTX adapter delivers a 1080p request at 1920×1080
+by scaling its 768×448 canvas — the same generated detail as 720p in a larger
+file — and says so in the job's `delivery` status and the clip's sidecar. Do not
 arbitrarily increase LTX's distilled step schedule and assume higher quality.
 
 Renderer references: [Phosphene](https://github.com/mrbizarro/phosphene) and
@@ -204,8 +215,12 @@ Authenticated Control API equivalents:
 - `GET /video/queue`: durable history and output paths.
 - `POST /video/queue/control`: for example `{"action":"pause"}` or
   `{"action":"retry","id":"<queue-item-id>"}`. Actions are `pause`, `resume`,
-  `retry`, `remove`, `stop_following`, and `clear_finished`. `stop_following`
-  requires the actively followed item ID and never cancels the remote GPU job.
+  `retry`, `remove`, `stop_following`, `cancel`, and `clear_finished`.
+  `stop_following` requires the actively followed item ID and never cancels the
+  remote GPU job. `cancel` applies only to items whose `canCancel` is true, and
+  records the node's answer in the item's `cancelState` (`requested`,
+  `confirmed`, `completed`, `failed`, `unsupported` or `unknown`); a confirmed
+  cancel gives the item the status `cancelled`.
   Explicit new-render confirmation is
   `confirmNewRender: true`; the MCP spelling is `confirm_new_render`.
 
@@ -250,6 +265,13 @@ overflow requests, exercise authenticated status/queue controls, and verify slot
 reuse after success, renderer errors, malformed input and two waves of client
 disconnects. App tests cover waiters surviving pauses, result receipts outliving
 cleared history, and Stop following/reconnect without a second render submission.
+Cancellation tests cover an unadvertised node (no request is sent), a followed
+render confirmed cancelled while the next clip waits, a requested cancel
+followed across a relaunch to either a cancelled or a completed job, refused,
+unknown and dropped answers keeping the receipt, and a cancel that arrives after
+completion. The node's own tests stop a real stand-in renderer process and
+check that a bystander process survives, and cover queued jobs, the race with
+publishing, Phosphene's queued-versus-running jobs, repeats and restarts.
 Ordering tests cover mixed finished statuses, retries and legacy receipts. Filesystem regressions
 cover recents after clear/relaunch, bounded shallow discovery, and safe reference
 cleanup including persistence failures, shared receipts, symlinks and sibling media.

@@ -145,10 +145,13 @@ public enum RemoteURLPolicy: Sendable {
         if a == 169, b == 254 { return false }
         if a == 172, (16...31).contains(b) { return false }
         if a == 192, b == 168 { return false }
-        if a == 192, b == 0, c == 0 || a == 192, b == 0, c == 2 { return false }
-        if a == 198, b == 18 || a == 198, b == 19 || a == 198, b == 51, c == 100 {
-            return false
-        }
+        // One range per line: a comma binds looser than `||`, so the two-ranges-per-line form
+        // this replaces tested only 192.0.2/24 and 198.51.100/24 and let 192.0.0/24 and
+        // 198.18/15 through.
+        if a == 192, b == 0, c == 0 { return false }
+        if a == 192, b == 0, c == 2 { return false }
+        if a == 198, b == 18 || b == 19 { return false }
+        if a == 198, b == 51, c == 100 { return false }
         if a == 203, b == 0, c == 113 { return false }
         return true
     }

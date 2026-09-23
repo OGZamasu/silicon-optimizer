@@ -481,6 +481,10 @@ struct MemoryPlanBreakdown: View {
                               value: plan.expertWeights.formatted)
                 }
                 LegendRow(color: .teal, label: "KV cache", value: plan.kvCache.formatted)
+                if plan.recurrentState > .zero {
+                    LegendRow(color: .cyan, label: "Recurrent state",
+                              value: plan.recurrentState.formatted)
+                }
                 LegendRow(color: .mint, label: "Compute buffers",
                           value: plan.computeBuffers.formatted)
                 if plan.streamedFromDisk > .zero {
@@ -512,6 +516,9 @@ struct MemoryPlanBreakdown: View {
             result.append(.init(label: "Experts", bytes: plan.expertWeights, color: .indigo))
         }
         result.append(.init(label: "KV cache", bytes: plan.kvCache, color: .teal))
+        if plan.recurrentState > .zero {
+            result.append(.init(label: "State", bytes: plan.recurrentState, color: .cyan))
+        }
         result.append(.init(label: "Compute", bytes: plan.computeBuffers, color: .mint))
         return result
     }

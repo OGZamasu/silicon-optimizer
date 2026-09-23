@@ -422,7 +422,9 @@ public actor VoiceRuntime {
         return environment
     }
 
-    private func run(
+    /// Runs one child to completion. Internal so a test can stand a harmless process in
+    /// for a model and check that cancelling one job leaves another running.
+    func run(
         executable: URL, arguments: [String], hubCache: URL? = nil,
         onStage: @escaping @Sendable (String) -> Void
     ) async throws -> String {

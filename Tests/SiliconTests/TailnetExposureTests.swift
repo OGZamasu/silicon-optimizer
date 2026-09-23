@@ -3,6 +3,18 @@ import Network
 import Testing
 @testable import SiliconControl
 
+extension Trait where Self == ConditionTrait {
+    /// The real-interface proof is opt-in: `SILICON_LIVE_TAILNET_TESTS=1 swift test`. Its
+    /// verdict depends on this Mac's tailscale and on whether the test host may connect to
+    /// its own tailnet address, and a default run must not depend on either (#75).
+    static var liveTailnetOptIn: ConditionTrait {
+        .enabled(
+            if: ProcessInfo.processInfo.environment["SILICON_LIVE_TAILNET_TESTS"] == "1",
+            "Set SILICON_LIVE_TAILNET_TESTS=1 to prove the bind against this Mac's real interfaces"
+        )
+    }
+}
+
 /// Reaching this Mac from anywhere but this Mac: one listener, on the tailscale address,
 /// shared by the swarm and Silicon Buddy.
 ///
@@ -37,7 +49,7 @@ struct TailnetExposureTests {
 
             // (That the loopback listener does not answer at this Mac's own network
             // address is proved against the real interfaces in
-            // `neitherListenerAnswersAtThisMacsLANAddress`, which needs one to exist.)
+            // `neitherListenerAnswersAtThisMacsLANAddress`, which is opt-in.)
 
             // The wildcard cannot be reached by asking for it, either.
             await #expect(throws: ControlServer.TailnetBindError.self) {
@@ -275,6 +287,188 @@ struct TailnetExposureTests {
         }
     }
 
+    /// The shared secret may borrow this Mac for direct work, but it is not the owner's
+    /// control token. The same role applies on the tailnet and on loopback, where old
+    /// tools can still present the shared secret.
+    @Test func theSwarmSecretCannotReachOwnerConversationsModelsOrQueue() async throws {
+        try await withExposedServer { fixture in
+            let (created, body) = try await fixture.local.call(
+                "POST", "/conversations", token: fixture.local.token,
+                body: #"{"title":"Owner notes"}"#
+            )
+            #expect(created == 200)
+            let conversation = try JSONDecoder().decode(
+                ControlAPI.ConversationSummary.self, from: body
+            )
+
+            let ownerRoutes: [(String, String, String?)] = [
+                ("GET", "/conversations", nil),
+                ("POST", "/conversations", #"{"title":"Peer"}"#),
+                ("GET", "/conversations/\(conversation.id)", nil),
+                ("POST", "/conversations/\(conversation.id)/messages",
+                 #"{"content":"Peer reply","images":[]}"#),
+                ("POST", "/load", "{}"),
+                ("POST", "/unload", nil),
+                ("GET", "/video/queue", nil),
+                ("POST", "/video/queue", "{}"),
+                ("POST", "/video/queue/control", #"{"action":"pause"}"#),
+                ("GET", "/swarm/peers/another-node/status", nil),
+                ("GET", "/jev", nil),
+                ("GET", "/jev/guardrails/recent", nil),
+                ("GET", "/jev/calibration", nil),
+                ("GET", "/decisions", nil),
+                ("POST", "/recommend", #"{"task":"private work"}"#),
+                ("POST", "/benchmark", nil),
+            ]
+            for client in [fixture.peer, fixture.local] {
+                for (method, path, requestBody) in ownerRoutes {
+                    let (status, refusal) = try await client.call(
+                        method, path, token: Bench.swarmToken, body: requestBody
+                    )
+                    #expect(status == 403, "\(method) \(path) on port \(client.port)")
+                    #expect(try JSONDecoder().decode(
+                        ControlAPI.ErrorResponse.self, from: refusal
+                    ).error == ControlServer.swarmRouteRefusal)
+                }
+            }
+
+            // Neither the local owner nor an owner-approved full-control phone loses
+            // their existing view of conversations and the queue.
+            #expect(try await fixture.local.status(
+                "GET", "/conversations", token: fixture.local.token
+            ) == 200)
+            #expect(try await fixture.local.status(
+                "GET", "/video/queue", token: fixture.local.token
+            ) == 200)
+            try await fixture.allowDevices(true)
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status(
+                "GET", "/conversations", token: paired.token
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "GET", "/video/queue", token: paired.token
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "POST", "/video/queue/control", token: paired.token,
+                body: #"{"action":"pause"}"#
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "GET", "/conversations", token: nil
+            ) == 401)
+            #expect(try await fixture.peer.status(
+                "GET", "/video/queue", token: "guessed"
+            ) == 401)
+
+            // Discovery and direct work are still what a peer credential is for.
+            for path in ["/status", "/v1/node", "/swarm", "/video/models"] {
+                #expect(try await fixture.peer.status(
+                    "GET", path, token: Bench.swarmToken
+                ) == 200, "\(path)")
+            }
+            #expect(try await fixture.peer.status(
+                "POST", "/chat", token: Bench.swarmToken,
+                body: #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            ) == 200)
+            #expect(try await fixture.peer.status(
+                "POST", "/video/generate", token: Bench.swarmToken,
+                body: #"{"prompt":"a peer render"}"#
+            ) != 403)
+            #expect(try await fixture.peer.status(
+                "GET", "/media/not-an-id", token: Bench.swarmToken
+            ) == 404)
+        }
+    }
+
+    /// A peer borrows this Mac's hardware, not its owner's TypeSafe account. Naming the paid
+    /// lane is refused outright on both listeners; everything else it may ask — `auto`, a
+    /// chat, a streamed chat — reaches the app with the paid lanes shut, which is where the
+    /// app's one door to Jev reads it. The owner and a paired phone keep them open.
+    @Test func theSwarmSecretCannotSpendTheOwnersJev() async throws {
+        try await withExposedServer { fixture in
+            let question = #"{"state":"s","questions":{"q":{"type":"noul"}},"provider":"#
+            for client in [fixture.peer, fixture.local] {
+                for path in ["/decide", "/v1/systemone"] {
+                    for provider in [#""typesafe""#, #""TypeSafe""#] {
+                        let (status, response) = try await client.call(
+                            "POST", path, token: Bench.swarmToken, body: question + provider + "}"
+                        )
+                        #expect(status == 403, "\(path) \(provider) on port \(client.port)")
+                        #expect(try JSONDecoder().decode(
+                            ControlAPI.ErrorResponse.self, from: response
+                        ).error == ControlServer.paidLanesAreNotForPeers)
+                    }
+                }
+            }
+            #expect(await fixture.host.paidLanesOnDecide.isEmpty)
+
+            let chat = #"{"messages":[{"role":"user","content":"hi","images":[]}]}"#
+            for client in [fixture.peer, fixture.local] {
+                #expect(try await client.status(
+                    "POST", "/decide", token: Bench.swarmToken, body: question + #""auto"}"#
+                ) == 200)
+                #expect(try await client.status(
+                    "POST", "/chat", token: Bench.swarmToken, body: chat
+                ) == 200)
+                _ = try await client.events(
+                    "POST", "/chat/stream", token: Bench.swarmToken, body: chat
+                ) { $0.contains { $0.name == "finished" } }
+            }
+            #expect(await fixture.host.paidLanesOnDecide == [false, false])
+            #expect(await fixture.host.paidLanesOnChat == [false, false, false, false])
+
+            // The owner, and a phone the owner paired, are not peers.
+            #expect(try await fixture.local.status(
+                "POST", "/decide", token: fixture.local.token, body: question + #""typesafe"}"#
+            ) == 200)
+            try await fixture.allowDevices(true)
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status(
+                "POST", "/chat", token: paired.token, body: chat
+            ) == 200)
+            #expect(await fixture.host.paidLanesOnDecide == [false, false, true])
+            #expect(await fixture.host.paidLanesOnChat == [false, false, false, false, true])
+        }
+    }
+
+    /// A peer cannot load a model, so an install would only spend this Mac's disk and
+    /// bandwidth on its behalf. The shared bearer is refused every install — into the
+    /// active library or anywhere else — on both listeners that accept it, while the owner
+    /// and a full-control phone keep theirs.
+    @Test func theSwarmSecretCannotInstallModels() async throws {
+        try await withExposedServer { fixture in
+            for client in [fixture.peer, fixture.local] {
+                for body in [
+                    #"{"modelID":"catalog-model"}"#,
+                    #"{"modelID":"catalog-model","directory":null}"#,
+                    #"{"modelID":"catalog-model","directory":"/tmp/swarm-override"}"#,
+                    #"{"modelID":"catalog-model","directory":""}"#,
+                ] {
+                    let (status, response) = try await client.call(
+                        "POST", "/install", token: Bench.swarmToken, body: body
+                    )
+                    #expect(status == 403, "\(body) on port \(client.port)")
+                    #expect(try JSONDecoder().decode(
+                        ControlAPI.ErrorResponse.self, from: response
+                    ).error == ControlServer.swarmRouteRefusal)
+                }
+            }
+            #expect(await fixture.host.installRequests.isEmpty)
+
+            #expect(try await fixture.local.status(
+                "POST", "/install", token: fixture.local.token,
+                body: #"{"modelID":"catalog-model"}"#
+            ) == 200)
+            try await fixture.allowDevices(true)
+            let paired = try await fixture.pair()
+            #expect(try await fixture.peer.status(
+                "POST", "/install", token: paired.token, body: #"{"modelID":"catalog-model"}"#
+            ) == 200)
+            let installs = await fixture.host.installRequests
+            #expect(installs.count == 2)
+            #expect(installs.allSatisfy { $0.directory == nil })
+        }
+    }
+
     /// The mirror image, and the reason the swarm toggle still means something once Silicon
     /// Buddy can raise the same socket by itself: "let other Silicon nodes reach this Mac",
     /// turned off, has to keep them out even while the listener is up for the phones.
@@ -388,18 +582,24 @@ struct TailnetExposureTests {
 
     /// The security property against the real interfaces rather than a stand-in: a listener
     /// pinned to this Mac's tailscale address answers there and nowhere else, and loopback
-    /// answers nowhere but loopback. Skipped, visibly, on a machine without both addresses
-    /// — a check that quietly passes because it found nothing to test is worse than absent.
-    @Test(
-        .enabled(
-            if: TailnetExposureTests.machineTailnetAddress != nil
-                && TailnetExposureTests.nonLoopbackIPv4() != nil,
-            "This Mac needs both a tailscale address and an ordinary LAN address"
-        )
-    )
+    /// answers nowhere but loopback.
+    ///
+    /// Opt-in (`liveTailnetOptIn`), like the other proofs that depend on more than this
+    /// process. Having both addresses does not mean this process can connect to its own
+    /// tailscale address — that depends on tailscale and on the host's network permissions,
+    /// and a default run that timed out on it was reporting the machine, not the bind. Opted
+    /// in, nothing is skipped: a missing address or an unreachable listener fails, each with
+    /// its own reason, apart from the isolation claim itself.
+    @Test(.liveTailnetOptIn)
     func neitherListenerAnswersAtThisMacsLANAddress() async throws {
-        let tailnet = try #require(Self.machineTailnetAddress)
-        let lan = try #require(Self.nonLoopbackIPv4())
+        let tailnet = try #require(
+            Self.machineTailnetAddress,
+            "Prerequisite: this Mac has no tailscale address — is tailscale running and logged in?"
+        )
+        let lan = try #require(
+            Self.nonLoopbackIPv4(),
+            "Prerequisite: this Mac has no ordinary LAN address to prove the bind against"
+        )
         let bench = try await Bench(discovering: tailnet)
         defer { bench.tearDown() }
         let port = try await BuddyControlTests.freeLoopbackPort()
@@ -407,10 +607,20 @@ struct TailnetExposureTests {
             exposeToTailnet: true, swarmToken: Bench.swarmToken, tailnetPort: port
         )
         let local = try await bench.loopbackClient()
-        try await Self.waitUntil { await bench.server.tailnetEndpoint != nil }
+        let bound = (try? await Self.waitUntil { await bench.server.tailnetEndpoint != nil }) != nil
+        let bindProblem = await bench.server.tailnetError ?? "no reason given"
+        try #require(bound, "Prerequisite: the tailnet listener did not come up: \(bindProblem)")
 
-        // Reachable where it is meant to be…
-        try await Self.waitUntil { await Self.answers(host: tailnet, port: port) }
+        // Reachable where it is meant to be — the prerequisite for the claim below meaning
+        // anything, and reported as such rather than as a bare timeout.
+        let reachable = (try? await Self.waitUntil {
+            await Self.answers(host: tailnet, port: port)
+        }) != nil
+        #expect(reachable, """
+            Prerequisite: bound to this Mac's tailscale address, but this process could not \
+            connect to it there. Is tailscale up, and may this host connect to its own \
+            tailnet address?
+            """)
         // …and nowhere else. A 0.0.0.0 bind would answer both of these.
         #expect(!(await Self.answers(host: lan, port: port)))
         #expect(!(await Self.answers(host: lan, port: local.port)))
@@ -589,8 +799,8 @@ struct TailnetExposureTests {
         throw TailnetTestError.timeout
     }
 
-    /// This Mac's real tailscale address, asked once. Only the test that proves the bind
-    /// against real interfaces uses it, and only when it exists.
+    /// This Mac's real tailscale address, asked once. Only the opted-in test that proves the
+    /// bind against real interfaces uses it, so a default run never runs the tailscale CLI.
     static let machineTailnetAddress = SwarmPairing.tailnetIPv4()
 
     // MARK: - Reaching this Mac by its own network address

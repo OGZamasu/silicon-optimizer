@@ -1,4 +1,5 @@
 import Foundation
+import SiliconControl
 
 /// Photoreal portrait animation: a still picture of a character, driven by a recorded
 /// performance, through LivePortrait.
@@ -55,7 +56,7 @@ public actor PortraitAnimator {
             return Installation(
                 isInstalled: false,
                 detail: "Photoreal animation isn't set up yet. It installs LivePortrait "
-                    + "and about 2 GB of weights."
+                    + "and about 660 MB of weights."
             )
         }
         guard manager.fileExists(atPath: weights.path) else {
@@ -65,6 +66,54 @@ public actor PortraitAnimator {
             )
         }
         return Installation(isInstalled: true, detail: "Ready.")
+    }
+
+    /// The install, as commands. LivePortrait at its reviewed commit, checked before use; a
+    /// Python 3.11 environment, because its pinned wheels stop there; the hash-locked
+    /// dependencies, build tools first so its one source-only package (imageio-ffmpeg)
+    /// builds with a locked setuptools rather than whatever an isolated build would fetch;
+    /// and the weights at a reviewed revision, each checked against its digest.
+    public nonisolated static func installPlan(
+        uv: URL, git: URL, locks: URL = PinnedInstall.defaultLockRoot(),
+        environment: URL = PortraitAnimator.environment
+    ) -> [PinnedInstall.Command] {
+        let source = PinnedInstall.livePortrait
+        let version = PinnedInstall.livePortraitPython
+        let repository = environment.appendingPathComponent("LivePortrait")
+        let venv = environment.appendingPathComponent("venv", isDirectory: true)
+        let python = venv.appendingPathComponent("bin/python3")
+        var commands = PinnedInstall.fetch(source, into: repository, git: git)
+        // uv refuses to make an environment over an existing one, so a rerun keeps a
+        // 3.11 environment and replaces any other — it is the app's, not the user's.
+        let current = FileManager.default.isExecutableFile(atPath: python.path)
+            ? PinnedInstall.pythonVersion(ofVirtualEnvironment: venv) : nil
+        if current != version {
+            commands.append(PinnedInstall.Command(
+                label: "Making its Python environment",
+                executable: uv, arguments: ["venv", "--clear", "--python", version, venv.path]
+            ))
+        }
+        commands.append(PinnedInstall.uvPipInstall(
+            uv: uv, python: python,
+            lock: PinnedInstall.lock("build", for: source, python: version, in: locks),
+            label: "Installing its build tools"
+        ))
+        var install = PinnedInstall.uvPipInstall(
+            uv: uv, python: python,
+            lock: PinnedInstall.lock("requirements", for: source, python: version, in: locks),
+            label: "Installing its tools (several minutes)",
+            noBuildIsolation: true, anyIndex: true
+        )
+        install.workingDirectory = repository
+        commands.append(install)
+        let pretrained = repository.appendingPathComponent("pretrained_weights", isDirectory: true)
+        for file in PinnedInstall.livePortraitWeights {
+            commands.append(PinnedInstall.fetch(
+                file, to: pretrained.appendingPathComponent(file.path),
+                label: "Fetching the weights (about 660 MB): \((file.path as NSString).lastPathComponent)"
+            ))
+        }
+        return commands
     }
 
     /// Animates `portrait` with the motion in `driving`, writing an MP4 into

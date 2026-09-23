@@ -77,6 +77,7 @@ public final class AppModel {
     /// State of the DeepSeek Harness sidecar that serves the agentic chat.
     public internal(set) var harnessState: RuntimeState = .idle
     var harnessRuntime: HarnessRuntime?
+    var harnessLifecycleGeneration = 0
     /// Ports for this app session, resolved once from the persisted choice after checking it
     /// is still free — a crashed predecessor can leave a squatter on it.
     var resolvedHarnessPorts: (web: Int, inference: Int)?
@@ -103,6 +104,23 @@ public final class AppModel {
     var pairingRequest: PendingPairing?
     var pairingDelivered = false
     var pairingPollTask: Task<Void, Never>?
+    enum PairingApprovalState: Equatable {
+        case idle
+        case minting(String)
+        case cancelling(String)
+        case committing(String)
+        case committed(String)
+    }
+    var pairingApprovalState: PairingApprovalState = .idle
+    var pairingApprovalTask: Task<Void, Never>?
+    var pairingStopTask: Task<Void, Never>?
+    var pairingApprovalAdmin: String?
+    struct PairingCleanupNeeded {
+        var clientName: String
+        var peers: [SwarmPeer]
+        var admin: String?
+    }
+    var pairingCleanupNeeded: PairingCleanupNeeded?
     /// The code shown on the joiner's screen while awaiting the owner's decision.
     var joinCode: String?
 
@@ -139,6 +157,7 @@ public final class AppModel {
     /// State of the Qwen Code sidecar behind the Chat tab's Qwen engine.
     public internal(set) var qwenState: RuntimeState = .idle
     var qwenRuntime: QwenCodeRuntime?
+    var qwenLifecycleGeneration = 0
     var resolvedQwenPort: Int?
     var qwenProcessID: Int32?
     var qwenTerminationRegistered = false
@@ -1072,6 +1091,9 @@ public final class AppModel {
         public var enabled: Bool?
         public var settings: [String: String] = [:]
         public var supportedParameters: [String] = []
+        /// Per-job operations the node offers for this lane, such as `cancel`. Absent on
+        /// older nodes, which is read as "not offered" — never guessed.
+        public var supportedJobActions: [String] = []
     }
 
     /// One GPU job on a peer, as its queue reports it (hub #128). `running` jobs carry
@@ -1529,7 +1551,8 @@ public final class AppModel {
                     description: entry["description"] as? String,
                     enabled: entry["enabled"] as? Bool,
                     settings: settings,
-                    supportedParameters: entry["supported_parameters"] as? [String] ?? []
+                    supportedParameters: entry["supported_parameters"] as? [String] ?? [],
+                    supportedJobActions: entry["supported_job_actions"] as? [String] ?? []
                 )
             }
         }
@@ -2058,6 +2081,8 @@ public final class AppModel {
     let cloudAudioRuntime: CloudAudioRuntime
     @ObservationIgnored var cloudAudioTask: Task<Void, Never>?
     @ObservationIgnored var cloudAudioJobID: UUID?
+    /// The local speech, music or sound-effect job, kept so Cancel stops that job itself.
+    @ObservationIgnored var localVoiceTask: Task<Void, Never>?
     /// Which model the Music card composes with — local by default, and only ever a remote
     /// one if someone picked it.
     public var selectedMusicModel = VoiceCatalog.minimaxMusic.id
@@ -2096,10 +2121,6 @@ public final class AppModel {
             speakOnProvider(entry: entry, text: text)
             return
         }
-        isSpeaking = true
-        voiceStage = "Starting"
-        voiceError = nil
-        noteActivity()
 
         let request = SpeechRequest(
             entryID: entry.id,
@@ -2110,20 +2131,7 @@ public final class AppModel {
             hubCache: settings.resolvedEngineCacheDirectory,
             outputDirectory: settings.resolvedVoiceOutputDirectory
         )
-        Task {
-            defer {
-                isSpeaking = false
-                voiceStage = nil
-            }
-            do {
-                let result = try await voiceRuntime.speak(request) { stage in
-                    Task { @MainActor in self.voiceStage = stage }
-                }
-                speechResults.insert(result, at: 0)
-            } catch {
-                voiceError = error.localizedDescription
-            }
-        }
+        runAudioJob(request)
     }
 
     public func transcribe(_ audio: URL) {
@@ -2148,13 +2156,19 @@ public final class AppModel {
         }
     }
 
+    /// Stops the job the Voice card's Cancel belongs to — the one `isSpeaking` is about —
+    /// and nothing else. `VoiceRuntime.cancel()` terminates whichever process that runtime
+    /// started last, which can be a transcription running beside the job being cancelled.
     public func cancelVoice() {
         if let cloudAudioTask, let cloudAudioJobID {
             cloudAudioTask.cancel()
             voiceStage = "Stopping…"
             Task { await cloudAudioRuntime.cancel(jobID: cloudAudioJobID) }
+            return
         }
-        Task { await voiceRuntime.cancel() }
+        // The runtime's wait loop notices its own task's cancellation and terminates the
+        // process that task started.
+        localVoiceTask?.cancel()
     }
 
     // MARK: - Music and sound effects
@@ -2197,21 +2211,29 @@ public final class AppModel {
     }
 
     private func runAudioJob(_ request: SpeechRequest) {
+        startLocalVoiceJob {
+            try await self.voiceRuntime.speak(request) { stage in
+                Task { @MainActor in self.voiceStage = stage }
+            }
+        }
+    }
+
+    /// One local audio job — speech, music or a sound effect — kept in `localVoiceTask` so
+    /// the card's Cancel stops exactly this one.
+    func startLocalVoiceJob(_ work: @escaping @MainActor () async throws -> SpeechResult) {
         guard !isSpeaking else { return }
         isSpeaking = true
         voiceStage = "Starting"
         voiceError = nil
         noteActivity()
-        Task {
+        localVoiceTask = Task {
             defer {
                 isSpeaking = false
                 voiceStage = nil
+                localVoiceTask = nil
             }
             do {
-                let result = try await voiceRuntime.speak(request) { stage in
-                    Task { @MainActor in self.voiceStage = stage }
-                }
-                speechResults.insert(result, at: 0)
+                speechResults.insert(try await work(), at: 0)
             } catch {
                 voiceError = error.localizedDescription
             }
@@ -2632,6 +2654,11 @@ public final class AppModel {
         if let remembered = Tab(rawValue: settings.lastTab) { selectedTab = remembered }
         reapAbandonedServers()
         selector = RuntimeSelector.discover()
+        // A PrismML fork fetched before its archive was pinned is no longer run; replace it
+        // with the reviewed one (12 MB, digest-checked) so installed ternary models load.
+        if PrismRuntime.needsVerifiedRefetch() && !hasPrismTernaryRuntime {
+            installPrismRuntime()
+        }
         imageRuntime = MFluxRuntime.locate()
         RuntimeLocator.customPaths = settings.customRuntimePaths
 
@@ -3368,7 +3395,7 @@ public final class AppModel {
     /// is retried.
     public func installPrismRuntime() {
         if let current = prismRuntimeInstall, current.error == nil { return }
-        prismRuntimeInstall = PrismRuntimeInstall(stage: "Finding the newest PrismML build")
+        prismRuntimeInstall = PrismRuntimeInstall(stage: "Preparing reviewed PrismML build")
         Task { [weak self] in
             do {
                 _ = try await PrismRuntime.install { progress in
@@ -3503,15 +3530,16 @@ public final class AppModel {
     /// - Parameter saveTo: A folder to save this model's files under instead of Silicon
     ///   Optimizer's own managed library directory — an external drive, say. The library's index
     ///   still lives where it always does; only these files move. Pass `nil` for the default.
-    /// For every file a resolution wants, a same-named file of the same size already in the
-    /// library is cloned into `destination` (an APFS clone: instant, no extra space). The
-    /// downloader then finds it present and valid and skips it. Best effort — a failed
-    /// clone just means a download.
+    /// For files with a published digest, a same-named, same-size library file is cloned
+    /// into `destination` (an APFS clone: instant, no extra space). The downloader hashes
+    /// the clone against the target digest before reuse. Files without a digest cannot be
+    /// proven identical, so they are fetched rather than cloned.
     func cloneIdenticalFiles(of resolution: ModelResolver.Resolution, into destination: URL) {
         var wanted = resolution.files
         if let projector = resolution.projector { wanted.append(projector) }
         let candidates = installedModels.flatMap { $0.allFiles + [$0.projectorFile].compactMap { $0 } }
         for file in wanted {
+            guard file.sha256 != nil else { continue }
             let name = (file.path as NSString).lastPathComponent
             let target = destination.appendingPathComponent(name)
             guard !FileManager.default.fileExists(atPath: target.path),
@@ -3571,6 +3599,7 @@ public final class AppModel {
                 // The projector is downloaded alongside the weights, so exclude it from the
                 // weights list the runtime is handed.
                 let weights = files.filter { $0 != projector }
+                try Task.checkCancellation()
                 _ = try await self.library.register(
                     entry: entry, quantization: quantization,
                     files: weights, projector: projector,

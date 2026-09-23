@@ -80,10 +80,9 @@ struct LongContextDefaultsTests {
     }
 
     @Test func automaticRecommendationsUseAdjustedDefaults() throws {
-        // A smaller synthetic shape lets this test exercise the resident recommendation
-        // path at 128K independently of the catalog's conservative hybrid KV estimate.
-        var entry = ModelCatalog.bonsai2_27B
-        entry.shape.blockCount = 16
+        // The catalog entry itself, now that its KV cache is planned for the 16 blocks that
+        // keep one (#26); this used to shrink the shape to 16 blocks to get a 128K plan.
+        let entry = ModelCatalog.bonsai2_27B
         let recommendation = try #require(configurator().best(for: entry))
         #expect(recommendation.configuration.contextLength == 131_072)
         #expect(recommendation.configuration.kvCachePrecision == .q8_0)

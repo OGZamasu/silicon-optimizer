@@ -9,14 +9,14 @@ import SiliconCore
 actor ServerProcess {
 
     private var process: Process?
-    private var logBuffer: [String] = []
-    private var logHandler: (@Sendable (String) -> Void)?
     /// The app always supervises through the shared registry; tests inject their own so
     /// their assertions never see another suite's children.
     private let registry: ChildProcessRegistry
     /// What became of the child, written the moment it happens and readable without an
     /// `await`. See `Ending`.
     private let ending = Ending()
+    /// Everything the child has written. See `Output`.
+    private let output = Output()
 
     init(registry: ChildProcessRegistry = .shared) {
         self.registry = registry
@@ -73,13 +73,118 @@ actor ServerProcess {
         var hasEnded: Bool { snapshot != nil }
     }
 
+    /// The child's output, taken in on the pipe's own queue and kept behind a lock.
+    ///
+    /// Each read used to hop onto the actor in a `Task` of its own. Nothing ordered those
+    /// tasks against the termination handler, so a load that saw the process end and asked
+    /// for its log could be answered before the last read had landed — and the last thing a
+    /// runtime writes before it exits is the line that says why. Taken in here, a read is
+    /// in the log by the time the handler returns, in the order it arrived. The end of the
+    /// pipe is recorded too, because the exit and the last bytes arrive as two separate
+    /// events in either order: the log of a finished child waits for the second one.
+    private final class Output: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        private var onLine: (@Sendable (String) -> Void)?
+        private var closed = false
+        private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+        private var nextWaiter = 0
+
+        func listen(_ handler: (@Sendable (String) -> Void)?) {
+            lock.lock()
+            onLine = handler
+            lock.unlock()
+        }
+
+        func take(_ data: Data) {
+            let arrived = String(decoding: data, as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+                .filter { !$0.isEmpty }
+            lock.lock()
+            lines.append(contentsOf: arrived)
+            if lines.count > ServerProcess.maximumLogLines {
+                lines.removeFirst(lines.count - ServerProcess.maximumLogLines)
+            }
+            let handler = onLine
+            lock.unlock()
+            // Outside the lock: a handler is free to ask for the log.
+            if let handler { arrived.forEach(handler) }
+        }
+
+        /// Nothing more is coming — the pipe reached its end, or the app stopped reading it —
+        /// so anyone waiting for the rest of the output has all of it there will be.
+        func close() {
+            lock.lock()
+            closed = true
+            onLine = nil
+            let pending = waiters.values
+            waiters = [:]
+            lock.unlock()
+            pending.forEach { $0.resume() }
+        }
+
+        /// Waits for `close()`, but not forever: a grandchild that inherited the pipe can
+        /// hold it open long after the child is gone, and a failed load should not wait on
+        /// that to say what it already knows. Not cancellable on purpose — a cancelled load
+        /// still wants the last line its runtime wrote.
+        func drain(within allowance: Duration) async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                guard !closed else {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                let id = nextWaiter
+                nextWaiter += 1
+                waiters[id] = continuation
+                lock.unlock()
+                Task {
+                    try? await Task.sleep(for: allowance)
+                    self.giveUp(on: id)
+                }
+            }
+        }
+
+        private func giveUp(on id: Int) {
+            lock.lock()
+            let continuation = waiters.removeValue(forKey: id)
+            // Once is enough: a pipe that outlived the allowance will not be waited on again.
+            if continuation != nil { closed = true }
+            lock.unlock()
+            continuation?.resume()
+        }
+
+        var text: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return lines.joined(separator: "\n")
+        }
+    }
+
     /// Keeps the tail of the log bounded; a long generation session would otherwise grow it
     /// without limit.
     private static let maximumLogLines = 500
 
+    /// How long the log of a finished child waits for output still in the pipe. The last
+    /// bytes normally follow the exit within a millisecond; this is the bound for a pipe
+    /// something else is still holding.
+    private static let drainAllowance: Duration = .seconds(2)
+
     var isRunning: Bool { process?.isRunning ?? false }
 
-    var log: String { logBuffer.joined(separator: "\n") }
+    /// What the child has written, most recent last.
+    ///
+    /// Once the child has ended this includes everything it wrote before it did — which is
+    /// the part a failed load reads, and the part that used to go missing (#76).
+    var log: String {
+        get async {
+            let childIsGone = ending.hasEnded || process.map { !$0.isRunning } ?? false
+            if childIsGone { await output.drain(within: Self.drainAllowance) }
+            return output.text
+        }
+    }
 
     func start(
         executable: URL,
@@ -107,15 +212,20 @@ actor ServerProcess {
         process.standardError = pipe
         process.standardInput = FileHandle.nullDevice
 
-        self.logHandler = onLogLine
-
-        // readabilityHandler fires on an arbitrary queue, so hop back onto the actor to touch
-        // any state.
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // readabilityHandler fires on the handle's own queue; `Output` is safe to fill from
+        // there directly, which is what keeps the last read ahead of anyone asking for it.
+        let output = self.output
+        output.listen(onLogLine)
+        pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let text = String(decoding: data, as: UTF8.self)
-            Task { await self?.append(text) }
+            guard !data.isEmpty else {
+                // End of file: every byte the child wrote has been read. Left in place, the
+                // handler would go on firing, empty, until somebody stopped the process.
+                handle.readabilityHandler = nil
+                output.close()
+                return
+            }
+            output.take(data)
         }
 
         // Nothing on macOS makes a child die with its parent, so every spawn is recorded where
@@ -148,20 +258,6 @@ actor ServerProcess {
         self.process = process
     }
 
-    private func append(_ text: String) {
-        let lines = text
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-            .filter { !$0.isEmpty }
-        for line in lines {
-            logBuffer.append(line)
-            logHandler?(line)
-        }
-        if logBuffer.count > Self.maximumLogLines {
-            logBuffer.removeFirst(logBuffer.count - Self.maximumLogLines)
-        }
-    }
-
     /// Stops the child, and records that it was this app that asked.
     ///
     /// The reason is not bookkeeping: "we unloaded it" and "it died" are the two answers a
@@ -171,6 +267,9 @@ actor ServerProcess {
         guard let process, process.isRunning else { return }
 
         (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        // Nobody is reading any more, so the end of the pipe will never be seen; nothing
+        // should wait for it.
+        output.close()
         process.terminate()
 
         // Give the server a moment to release its Metal allocations cleanly. A SIGKILL leaves
@@ -184,7 +283,6 @@ actor ServerProcess {
         }
         registry.unregister(pid: process.processIdentifier)
         self.process = nil
-        self.logHandler = nil
     }
 
     /// Process identifier, or nil when nothing is running.

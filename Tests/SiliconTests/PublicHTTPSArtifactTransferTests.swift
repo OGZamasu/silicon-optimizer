@@ -5,7 +5,7 @@ import Foundation
 import Testing
 @testable import SiliconRuntime
 
-@Suite("Public HTTPS artifact transport", .serialized)
+@Suite("Public HTTPS artifact transport", .serialized, .timeLimit(.minutes(2)))
 struct PublicHTTPSArtifactTransferTests {
     @Test func invalidTimeoutsFailBeforeNetworkOrFileCreation() async {
         let directory = FileManager.default.temporaryDirectory
@@ -299,6 +299,9 @@ final class FixtureTLSHTTPServer: @unchecked Sendable {
     let certificate: URL
     let port: UInt16
     private let process: Process
+    /// The server's stdin. Nothing is written; holding it open is what keeps the server
+    /// alive, so it exits on its own if this process ends without running `deinit`.
+    private let lifeline = Pipe()
     /// Signalled when the server exits. `waitUntilExit` spins the calling thread's run loop
     /// for a notification delivered to the launching thread's, so an async test that
     /// resumed on another cooperative thread would wait in `deinit` forever.
@@ -339,7 +342,10 @@ final class FixtureTLSHTTPServer: @unchecked Sendable {
         process.arguments = ["-u", script.path, certificate.path, key.path]
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = FileHandle.standardError
+        // Not the test run's own stderr: a server that outlived this process would hold it
+        // open, and `swift test` waits for EOF on it before it reports anything.
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = lifeline
         process.terminationHandler = { [exited] _ in exited.signal() }
         try process.run()
 

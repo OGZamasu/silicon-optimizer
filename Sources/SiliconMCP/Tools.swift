@@ -64,7 +64,9 @@ enum Tools {
     static func describeQueue(_ queue: ControlAPI.VideoQueueView) -> String {
         let pending = queue.items.filter { ["pending", "submitting", "rendering"].contains($0.status) }.count
         let failed = queue.items.filter { $0.status == "failed" }.count
-        var lines = ["Video queue: \(queue.paused ? "paused" : "running"), \(pending) queued/running, \(failed) failed, \(queue.items.count) total."]
+        let cancelled = queue.items.filter { $0.status == "cancelled" }.count
+        var lines = ["Video queue: \(queue.paused ? "paused" : "running"), \(pending) queued/running, \(failed) failed, "
+            + (cancelled > 0 ? "\(cancelled) cancelled, " : "") + "\(queue.items.count) total."]
         if let message = queue.message { lines.append(message) }
         let visible = queue.items.filter { $0.status != "completed" } + queue.items.filter { $0.status == "completed" }.reversed()
         for item in visible.prefix(100) {
@@ -73,6 +75,10 @@ enum Tools {
             if let steps = item.h3Steps { lines.append("  sampling: Full, \(steps) points / \(steps - 1) passes per window") }
             if let file = item.file { lines.append("  file: \(file)") }
             if let job = item.nodeJobID { lines.append("  node job: \(job)") }
+            if item.canCancel == true { lines.append("  can cancel: the node offers to stop this render") }
+            if let state = item.cancelState {
+                lines.append("  cancel: \(state)" + (item.cancelDetail.map { " — \($0)" } ?? ""))
+            }
             if let error = item.error { lines.append("  \(error)") }
         }
         if visible.count > 100 { lines.append("Showing 100 items. Full history is in the app and GET /video/queue.") }
@@ -532,10 +538,10 @@ enum Tools {
         ),
         Tool(
             name: "video_queue",
-            description: "Inspect or control the persistent queue. Pause stops future dispatch, not the active render. stop_following also stops the app waiting for the active clip, but does NOT cancel the remote GPU job; its receipt is preserved. Retry reconnects to a saved non-terminal job. Check the node and obtain user approval before confirm_new_render=true for an uncertain submission. Remove only affects unsubmitted entries; clear_finished keeps media and manifests.",
+            description: "Inspect or control the persistent queue. Pause stops future dispatch, not the active render. stop_following also stops the app waiting for the active clip, but does NOT cancel the remote GPU job; its receipt is preserved. cancel asks the clip's node to stop that one render, and only applies to items listed as \"can cancel\" (their node advertises job cancellation); it reports whether the node confirmed, is stopping, had already finished, or could not stop it, and never resubmits. Everywhere else stop_following is the only option. Retry reconnects to a saved non-terminal job. Check the node and obtain user approval before confirm_new_render=true for an uncertain submission. Remove only affects unsubmitted entries; clear_finished keeps media and manifests.",
             properties: [
-                "action": .object(["type": .string("string"), "enum": .array(["status", "pause", "resume", "retry", "remove", "stop_following", "clear_finished"].map(JSONValue.string)), "description": .string("Default status.")]),
-                "id": property("string", "Queue item ID for retry, remove or stop_following."),
+                "action": .object(["type": .string("string"), "enum": .array(["status", "pause", "resume", "retry", "remove", "stop_following", "cancel", "clear_finished"].map(JSONValue.string)), "description": .string("Default status.")]),
+                "id": property("string", "Queue item ID for retry, remove, stop_following or cancel."),
                 "confirm_new_render": property("boolean", "Explicit user confirmation to create a new render after checking the original job."),
             ], required: []
         ),
@@ -1297,6 +1303,9 @@ enum Tools {
             lines.append("  Experts:         \(bytes(plan.expertsBytes))")
         }
         lines.append("  KV cache:        \(bytes(plan.kvCacheBytes))")
+        if let state = plan.recurrentStateBytes, state > 0 {
+            lines.append("  Recurrent state: \(bytes(state))")
+        }
         lines.append("  Compute buffers: \(bytes(plan.computeBytes))")
         if plan.streamedFromDiskBytes > 0 {
             lines.append("  Streamed from disk: \(bytes(plan.streamedFromDiskBytes))")
