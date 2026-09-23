@@ -87,6 +87,9 @@ public actor CloudAudioRuntime {
     private let artifactDownload: ArtifactDownload
     private var activeJobIDs = Set<UUID>()
     private var cancelledJobIDs = Set<UUID>()
+    /// Each job's work, so cancelling a job stops the submission, poll or download that is in
+    /// flight instead of waiting for it to come back to a checkpoint.
+    private var work: [UUID: Task<CloudAudioResult, Error>] = [:]
 
     /// Source URL, destination, byte limit, budget and timeout in; the published file out.
     /// The app always uses the resolved-address transport, which is not URLSession, so a
@@ -110,11 +113,15 @@ public actor CloudAudioRuntime {
         self.artifactDownload = artifactDownload
     }
 
-    public func cancel() { cancelledJobIDs.formUnion(activeJobIDs) }
+    public func cancel() {
+        for jobID in activeJobIDs { cancel(jobID: jobID) }
+    }
 
     /// A delayed cancellation must not stop the next job after the old one has finished.
     public func cancel(jobID: UUID) {
-        if activeJobIDs.contains(jobID) { cancelledJobIDs.insert(jobID) }
+        guard activeJobIDs.contains(jobID) else { return }
+        cancelledJobIDs.insert(jobID)
+        work[jobID]?.cancel()
     }
 
     private func checkCancellation(jobID: UUID) throws {
@@ -205,7 +212,36 @@ public actor CloudAudioRuntime {
         defer {
             activeJobIDs.remove(jobID)
             cancelledJobIDs.remove(jobID)
+            work[jobID] = nil
         }
+        let job = Task {
+            try await run(request, base: base, apiKey: apiKey, jobID: jobID, onProgress: onProgress)
+        }
+        work[jobID] = job
+        let result: CloudAudioResult
+        do {
+            result = try await withTaskCancellationHandler {
+                try await job.value
+            } onCancel: {
+                job.cancel()
+            }
+        } catch where cancelledJobIDs.contains(jobID) || job.isCancelled {
+            // URLSession, the transport or a checkpoint: whichever noticed first, a stopped
+            // job reports one thing.
+            throw CloudAudioError.cancelled
+        }
+        // A cancellation that arrived as the work finished still wins over its audio.
+        guard !cancelledJobIDs.contains(jobID), !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: result.audio)
+            throw CloudAudioError.cancelled
+        }
+        return result
+    }
+
+    private func run(
+        _ request: CloudAudioRequest, base: URL, apiKey: String, jobID: UUID,
+        onProgress: @escaping @Sendable (NodeJobProgress) -> Void
+    ) async throws -> CloudAudioResult {
         try checkCancellation(jobID: jobID)
         let started = Date()
         onProgress(.stage(request.kind == .music ? "Sending the lyrics" : "Sending the text"))

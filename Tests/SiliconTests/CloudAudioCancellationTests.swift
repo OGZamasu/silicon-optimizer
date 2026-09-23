@@ -197,7 +197,7 @@ struct CloudAudioCancellationTests {
         // The fixture holds a download for 30 seconds; stopping well inside that is the
         // transfer being cut short rather than finished and thrown away.
         #expect(ContinuousClock.now - cancelled < .seconds(5))
-        #expect(CloudAudioStubState.shared.hasStopped(phase))
+        #expect(await pollUntil { CloudAudioStubState.shared.hasStopped(phase) })
         #expect(model.speechResults.isEmpty)
         #expect(model.voiceError == "Cancelled.")
         let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
@@ -213,6 +213,45 @@ struct CloudAudioCancellationTests {
             #expect(try Data(contentsOf: audio) == Data("audio".utf8))
         }
         #expect(CloudAudioStubState.shared.count(.download) == 1)
+    }
+
+    /// The runtime's own signal has to stop work in flight, not just be noticed at the next
+    /// checkpoint: a held request or download would otherwise run on to its timeout.
+    @Test(arguments: CloudAudioPhase.allCases)
+    func cancellingTheJobStopsItsWorkWithoutTheCallerBeingCancelled(
+        phase: CloudAudioPhase
+    ) async throws {
+        let server = try FixtureTLSHTTPServer()
+        CloudAudioStubState.shared.reset(
+            holding: phase, artifactOrigin: "https://cdn.example.com:\(server.port)"
+        )
+        let runtime = runtime(server)
+        let directory = server.directory.appendingPathComponent("direct")
+        let base = try #require(CloudProvider.gmi.jobsBaseURL)
+        let jobID = UUID()
+        let job = Task {
+            try await runtime.generate(
+                CloudAudioRequest(model: "held", kind: .speech, text: "held",
+                                  outputDirectory: directory),
+                base: base, apiKey: "test-key", jobID: jobID, onProgress: { _ in }
+            )
+        }
+        #expect(await pollUntil { reached(phase, in: directory) })
+
+        let cancelled = ContinuousClock.now
+        await runtime.cancel(jobID: jobID)
+        do {
+            _ = try await job.value
+            Issue.record("A cancelled job must not return audio")
+        } catch CloudAudioError.cancelled {
+            // Expected, whichever layer stopped first.
+        } catch {
+            Issue.record("Expected a cancellation error, received \(error)")
+        }
+        #expect(ContinuousClock.now - cancelled < .seconds(5))
+        #expect(await pollUntil { CloudAudioStubState.shared.hasStopped(phase) })
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        #expect(leftovers.isEmpty)
     }
 
     @Test func cancellingAnOlderOverlappingJobLeavesTheNewerOneAlone() async throws {
