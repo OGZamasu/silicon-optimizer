@@ -1274,6 +1274,8 @@ public final class AgentEventPump {
     private var startRequests = 0
     /// What the running loop is watching. See `WatchTarget`.
     private var watching: WatchTarget?
+    /// What the running loop last read of `PaidLanes.allowed`. See `BuddyEventPump`.
+    private(set) var paidLanesOpenInLoop: Bool?
 
     public init() {}
 
@@ -1290,38 +1292,43 @@ public final class AgentEventPump {
         watching = target
         let mine = UUID()
         generation = mine
-        task = Task { [weak self, weak model] in
-            while !Task.isCancelled {
-                guard let self, let model else { break }
-                let requestsBefore = self.startRequests
-                let audience = await hub.agentAudienceCount
-                if audience == 0, self.startRequests == requestsBefore {
-                    if self.generation == mine { self.stop() }
-                    return
-                }
-                // Taken before the reading, so a phone that arrives after it is picked up
-                // on the next one rather than being handed an opening older than frames it
-                // has already been sent.
-                let newcomers = await hub.takeNewAgentSubscribers()
-                for snapshot in model.agentSnapshots() {
-                    BuddyAgentSessions.shared.reconcile(snapshot)
-                    let changes = BuddyAgentSessions.shared.frames(from: snapshot)
-                    if !changes.isEmpty {
-                        // Not to the newcomers: their opening, below, is this same reading,
-                        // and changes leading up to it would arrive with smaller numbers
-                        // than it after it.
-                        await hub.post(changes, excluding: newcomers)
+        // Started by a subscriber's request, like `BuddyEventPump`, and for the same reason
+        // with the paid lanes open: see `PaidLanes.forTheApp`.
+        task = PaidLanes.forTheApp {
+            Task { [weak self, weak model] in
+                while !Task.isCancelled {
+                    guard let self, let model else { break }
+                    self.paidLanesOpenInLoop = PaidLanes.allowed
+                    let requestsBefore = self.startRequests
+                    let audience = await hub.agentAudienceCount
+                    if audience == 0, self.startRequests == requestsBefore {
+                        if self.generation == mine { self.stop() }
+                        return
                     }
-                    if !newcomers.isEmpty {
-                        await hub.post(
-                            BuddyAgentSessions.shared.openingFrames(for: snapshot),
-                            to: newcomers
-                        )
+                    // Taken before the reading, so a phone that arrives after it is picked up
+                    // on the next one rather than being handed an opening older than frames it
+                    // has already been sent.
+                    let newcomers = await hub.takeNewAgentSubscribers()
+                    for snapshot in model.agentSnapshots() {
+                        BuddyAgentSessions.shared.reconcile(snapshot)
+                        let changes = BuddyAgentSessions.shared.frames(from: snapshot)
+                        if !changes.isEmpty {
+                            // Not to the newcomers: their opening, below, is this same reading,
+                            // and changes leading up to it would arrive with smaller numbers
+                            // than it after it.
+                            await hub.post(changes, excluding: newcomers)
+                        }
+                        if !newcomers.isEmpty {
+                            await hub.post(
+                                BuddyAgentSessions.shared.openingFrames(for: snapshot),
+                                to: newcomers
+                            )
+                        }
                     }
+                    guard (try? await Task.sleep(for: interval)) != nil else { break }
                 }
-                guard (try? await Task.sleep(for: interval)) != nil else { break }
+                if self?.generation == mine { self?.task = nil }
             }
-            if self?.generation == mine { self?.task = nil }
         }
     }
 

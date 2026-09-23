@@ -558,6 +558,9 @@ public final class BuddyEventPump {
     /// new subscriber would find a pump that had just decided to stop and a handle that was
     /// not yet free, and get nothing but heartbeats for the rest of the session.
     private var startRequests = 0
+    /// What the running loop last read of `PaidLanes.allowed`. Read by the test that proves
+    /// the request that happened to start the loop does not decide it for the loop's life.
+    private(set) var paidLanesOpenInLoop: Bool?
 
     public init() {}
 
@@ -578,24 +581,29 @@ public final class BuddyEventPump {
         watching = target
         let mine = UUID()
         generation = mine
-        task = Task { [weak self, weak model] in
-            var previous: Snapshot?
-            while !Task.isCancelled {
-                guard let self, let model else { break }
-                let requestsBefore = self.startRequests
-                let subscribers = await hub.subscriberCount
-                if self.shouldStop(subscribers: subscribers, requestsAtCheck: requestsBefore) {
-                    // No await between the decision and the handle, so a `start` racing
-                    // this either bumped the counter above or is yet to run at all.
-                    if self.generation == mine { self.task = nil }
-                    return
+        // Whoever subscribes first starts this loop, and the swarm may be first: see
+        // `PaidLanes.forTheApp`.
+        task = PaidLanes.forTheApp {
+            Task { [weak self, weak model] in
+                var previous: Snapshot?
+                while !Task.isCancelled {
+                    guard let self, let model else { break }
+                    self.paidLanesOpenInLoop = PaidLanes.allowed
+                    let requestsBefore = self.startRequests
+                    let subscribers = await hub.subscriberCount
+                    if self.shouldStop(subscribers: subscribers, requestsAtCheck: requestsBefore) {
+                        // No await between the decision and the handle, so a `start` racing
+                        // this either bumped the counter above or is yet to run at all.
+                        if self.generation == mine { self.task = nil }
+                        return
+                    }
+                    let current = await model.buddyEventSnapshot()
+                    for event in Self.changes(from: previous, to: current) { await hub.post(event) }
+                    previous = current
+                    guard (try? await Task.sleep(for: interval)) != nil else { break }
                 }
-                let current = await model.buddyEventSnapshot()
-                for event in Self.changes(from: previous, to: current) { await hub.post(event) }
-                previous = current
-                guard (try? await Task.sleep(for: interval)) != nil else { break }
+                if self?.generation == mine { self?.task = nil }
             }
-            if self?.generation == mine { self?.task = nil }
         }
     }
 

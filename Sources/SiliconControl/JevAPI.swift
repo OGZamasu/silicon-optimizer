@@ -598,4 +598,16 @@ public enum PaidLanes {
         return modelID.trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased().hasPrefix("cloud/")
     }
+
+    /// Runs `start` with the lanes open, for work that belongs to the app rather than to the
+    /// request that happened to set it going.
+    ///
+    /// A `Task` keeps its creator's task-locals for its whole life. A pump or a worker that
+    /// is started lazily, by whichever request needs it first, would otherwise keep a swarm
+    /// node's `false` long after that request had ended — and every feature it served
+    /// afterwards, the owner's included, would find the paid lanes shut with nothing to say
+    /// why. Whatever such a task does for a peer is still narrowed where it is delivered.
+    public static func forTheApp<T>(_ start: () throws -> T) rethrows -> T {
+        try $allowed.withValue(true, operation: start)
+    }
 }
