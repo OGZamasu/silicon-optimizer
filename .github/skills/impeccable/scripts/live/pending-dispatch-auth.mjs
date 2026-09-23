@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLivePrivateDir } from '../lib/impeccable-paths.mjs';
+import { getLivePrivateDir, grantsGroupOrOtherAccess } from '../lib/impeccable-paths.mjs';
 
 const AUTH_FIELD = 'privateDispatchMac';
 
@@ -18,7 +18,7 @@ export function createPendingDispatchAuth(cwd = process.cwd()) {
     if (error?.code !== 'EEXIST') throw error;
   }
   const stat = fs.lstatSync(keyPath);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
+  if (!stat.isFile() || stat.isSymbolicLink() || grantsGroupOrOtherAccess(stat)) {
     throw new Error(`Private Live dispatch key is unsafe: ${keyPath}`);
   }
   const key = fs.readFileSync(keyPath);

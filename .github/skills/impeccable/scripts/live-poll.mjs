@@ -14,7 +14,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { completionAckForAcceptResult, completionTypeForAcceptResult } from './live/completion.mjs';
-import { readLiveServerInfo } from './lib/impeccable-paths.mjs';
+import { liveHelperBase, readLiveServerInfo } from './lib/impeccable-paths.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
 import { instructionsForEvent } from './live/instructions.mjs';
 
@@ -250,7 +250,9 @@ export function buildAcceptScriptArgs(event) {
   const scriptArgs = event.type === 'discard'
     ? ['--id', String(event.id), '--discard']
     : ['--id', String(event.id), '--variant', String(event.variantId)];
-  if (event.pageUrl) scriptArgs.push('--page-url', String(event.pageUrl));
+  // No page-supplied free text rides here: live-accept matches flags anywhere
+  // in argv, so a pageUrl of "--discard" would turn an approved Accept into a
+  // discard. live-accept no longer reads --page-url anyway.
   if (event.type === 'accept' && event.paramValues && Object.keys(event.paramValues).length > 0) {
     scriptArgs.push('--param-values', JSON.stringify(event.paramValues));
   }
@@ -373,7 +375,7 @@ Harness note:
   }
 
   const info = readServerInfo();
-  const base = `http://localhost:${info.port}`;
+  const base = liveHelperBase(info.port);
 
   if (args.includes('--evidence')) {
     const id = args[args.indexOf('--evidence') + 1];

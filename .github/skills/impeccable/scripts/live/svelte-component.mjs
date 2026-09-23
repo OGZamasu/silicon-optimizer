@@ -28,6 +28,7 @@ import {
   splitSelectorList,
 } from './accept-css.mjs';
 import { verifyAcceptedSource } from './accept-verify.mjs';
+import { grantsGroupOrOtherAccess } from '../lib/impeccable-paths.mjs';
 
 // Preview modules stay under node_modules on purpose: SvelteKit restricts
 // vite's server.fs.allow to src/lib, src/routes, .svelte-kit, and
@@ -140,7 +141,7 @@ export function quarantineLegacySvelteComponentSessions(cwd, privateRoot) {
     }
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()
-        || (stat.mode & 0o077) !== 0
+        || grantsGroupOrOtherAccess(stat)
         || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
       throw new Error(`Svelte quarantine directory is not private: ${dir}`);
     }

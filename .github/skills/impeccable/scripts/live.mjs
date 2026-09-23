@@ -23,7 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTargetSelection } from './context.mjs';
 import { resolveFiles } from './live-inject.mjs';
-import { readLiveServerInfo } from './lib/impeccable-paths.mjs';
+import { liveControllerUrl, readLiveServerInfo } from './lib/impeccable-paths.mjs';
 import { resolveSurfaceBrief } from './lib/surface-briefs.mjs';
 import { resolveLiveTarget } from './live-target.mjs';
 import { bootInstructions } from './live/instructions.mjs';
@@ -189,7 +189,7 @@ The agent should then:
   console.log(JSON.stringify({
     ok: true,
     serverPort: serverInfo.port,
-    controllerUrl: `http://localhost:${serverInfo.port}/control#token=${encodeURIComponent(serverInfo.token)}`,
+    controllerUrl: liveControllerUrl(serverInfo.port, serverInfo.token),
     pageFiles: resolvedFiles,
     liveConfigPath: checkResult.path,
     configDrift: drift,

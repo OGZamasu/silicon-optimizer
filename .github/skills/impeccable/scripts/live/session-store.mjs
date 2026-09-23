@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLiveSessionsDir, safeSessionId } from '../lib/impeccable-paths.mjs';
+import { getLiveSessionsDir, grantsGroupOrOtherAccess, safeSessionId } from '../lib/impeccable-paths.mjs';
 import { COMPLETED_SESSION_PHASES, GENERATION_FENCED_SESSION_PHASES } from './vocabulary.mjs';
 
 const COMPLETED_PHASES = new Set(COMPLETED_SESSION_PHASES);
@@ -25,7 +25,7 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
   const rootDir = getLiveSessionsDir(cwd);
   fs.mkdirSync(rootDir, { recursive: true, mode: 0o700 });
   const rootStat = fs.lstatSync(rootDir);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || (rootStat.mode & 0o077) !== 0) {
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || grantsGroupOrOtherAccess(rootStat)) {
     throw new Error(`Private Live session directory is not owner-only: ${rootDir}`);
   }
 

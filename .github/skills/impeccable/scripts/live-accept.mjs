@@ -402,7 +402,7 @@ function buildCarbonizeReplacement({
     lines.push(bodyIndent + (isJsx ? '`}</style>' : '</style>'));
     if (paramValues && Object.keys(paramValues).length > 0) {
       lines.push(
-        bodyIndent + commentSyntax.open + ' impeccable-param-values ' + id + ': ' + JSON.stringify(paramValues) + ' ' + commentSyntax.close,
+        bodyIndent + commentSyntax.open + ' impeccable-param-values ' + id + ': ' + inertCommentJson(paramValues) + ' ' + commentSyntax.close,
       );
     }
     lines.push(bodyIndent + commentSyntax.open + ' impeccable-carbonize-end ' + id + ' ' + commentSyntax.close);
@@ -911,6 +911,17 @@ function writeAcceptReceipt(cwd, id, receipt) {
   fs.writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', 'utf-8');
   fs.renameSync(temporary, file);
   return value;
+}
+
+// Param values come from the inspected page and land inside an HTML, JSX or
+// CSS comment in source. `<`, `>` and `*/` can only occur inside JSON
+// strings, so escaping them keeps the JSON valid (it parses back to the same
+// values) while nothing in it can close the comment or open a tag.
+export function inertCommentJson(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/\*\//g, '*\\/');
 }
 
 function argVal(args, flag) {

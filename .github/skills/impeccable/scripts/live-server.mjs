@@ -49,6 +49,8 @@ import {
   getLiveAnnotationsDir,
   IMPECCABLE_COMMAND_PREFIX,
   isLiveServerPidReachable,
+  liveControllerUrl,
+  liveHelperBase,
   livePrivateDirIsVolatile,
   migrateLegacyLivePrivateArtifacts,
   readLiveServerInfo,
@@ -220,10 +222,23 @@ const PERSISTED_PENDING_TYPES = new Set([
   'generate', 'accept', 'accept_intent', 'discard', 'steer',
   'carbonize_cleanup', 'variant_mount_failed',
 ]);
-const PAGE_ACTION_TYPES = new Set([
-  'generate', 'accept', 'discard', 'steer', 'prefetch',
-  'carbonize_cleanup', 'exit', 'variant_mount_failed',
-]);
+// Exactly the fields live-browser.js sends for each action it may propose.
+// Approval turns a proposal into a controller event, and the agent trusts
+// helper-authored fields on such events as plumbing (a scaffold names the
+// file and lines to rewrite; `_instructions` is "the authoritative next
+// step"), so anything else is dropped before the controller reviews it.
+// `carbonize_cleanup` is agent-side work; the browser never proposes it.
+const PAGE_PROPOSAL_FIELDS = Object.freeze({
+  generate: new Set(['type', 'id', 'mode', 'action', 'freeformPrompt', 'count', 'pageUrl',
+    'element', 'insert', 'placeholder', 'comments', 'strokes', 'screenshotPath', 'clientSentAt']),
+  accept: new Set(['type', 'id', 'variantId', 'paramValues', 'pageUrl', 'clientSentAt']),
+  discard: new Set(['type', 'id', 'orphaned']),
+  steer: new Set(['type', 'id', 'message', 'pageUrl']),
+  variant_mount_failed: new Set(['type', 'id', 'variant', 'url', 'error']),
+  prefetch: new Set(['type', 'pageUrl']),
+  exit: new Set(['type']),
+});
+const PAGE_ACTION_TYPES = new Set(Object.keys(PAGE_PROPOSAL_FIELDS));
 const MAX_PENDING_PAGE_APPROVALS = 8;
 const MAX_PAGE_APPROVAL_BYTES = MAX_LIVE_JSON_BYTES;
 const MAX_PENDING_PAGE_APPROVAL_BYTES = 2 * MAX_LIVE_JSON_BYTES;
@@ -275,19 +290,9 @@ function recordPageApprovalOutcome(id, status, body) {
   timer.unref?.();
 }
 
-// Fields the helper and the poll client write for the agent, which trusts
-// them as plumbing: a scaffold names the file and lines to rewrite, and
-// `_instructions` is "the authoritative next step". Approval turns a page
-// proposal into a controller event, so the page must never author these.
-// `token` is the page credential echoed by sendEvent, not proposal content.
-const HELPER_AUTHORED_EVENT_FIELDS = new Set([
-  'scaffold', 'scaffoldAttempted', 'scaffoldDurationMs', 'scaffoldError',
-  'generationReadyAt', 'privateDispatchMac', 'token',
-]);
-
 function pageProposal(msg) {
-  return Object.fromEntries(Object.entries(msg)
-    .filter(([key]) => !key.startsWith('_') && !HELPER_AUTHORED_EVENT_FIELDS.has(key)));
+  const allowed = PAGE_PROPOSAL_FIELDS[msg.type];
+  return Object.fromEntries(Object.entries(msg).filter(([key]) => allowed.has(key)));
 }
 
 function queuePageApproval(res, msg) {
@@ -2004,7 +2009,7 @@ if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
   try {
     const { info } = readLiveServerInfo(process.cwd()) || {};
-    const res = await fetch(`http://localhost:${info.port}/stop?token=${info.token}`, {
+    const res = await fetch(`${liveHelperBase(info.port)}/stop`, {
       method: 'POST',
       headers: { 'X-Impeccable-Token': info.token },
     });
@@ -2149,10 +2154,9 @@ httpServer.listen(state.port, '127.0.0.1', () => {
     token: state.token,
     pageToken: state.pageToken,
   });
-  const url = `http://localhost:${state.port}`;
-  console.log(`\nImpeccable live server running on ${url}`);
-  console.log(`Controller: ${url}/control#token=${state.token}\n`);
-  console.log(`Script: ${url}/live.js`);
+  console.log(`\nImpeccable live server running on ${liveHelperBase(state.port)}`);
+  console.log(`Controller: ${liveControllerUrl(state.port, state.token)}\n`);
+  console.log(`Script: http://localhost:${state.port}/live.js`);
   console.log('Inject: managed by live-inject.mjs; Astro source tags use is:inline automatically.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });

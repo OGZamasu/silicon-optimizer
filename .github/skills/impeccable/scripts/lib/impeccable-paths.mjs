@@ -56,6 +56,19 @@ export function getLiveServerPath(cwd = process.cwd(), options = {}) {
   return path.join(getLiveDir(cwd, options), 'server.json');
 }
 
+/**
+ * Base URL for requests that carry the controller credential. The helper
+ * listens on 127.0.0.1 only, and `localhost` may resolve to ::1 first, where
+ * any local process can listen on the same port number and would receive it.
+ */
+export function liveHelperBase(port) {
+  return `http://127.0.0.1:${Number(port)}`;
+}
+
+export function liveControllerUrl(port, token) {
+  return `${liveHelperBase(port)}/control#token=${encodeURIComponent(token)}`;
+}
+
 export function getLiveControllerPath(cwd = process.cwd(), options = {}) {
   const root = fs.realpathSync(path.resolve(resolveProjectRoot(cwd, options)));
   const digest = createHash('sha256').update(root).digest('hex');
@@ -77,13 +90,23 @@ export function getLiveControllerPath(cwd = process.cwd(), options = {}) {
   return path.join(directory, `${digest}.controller.json`);
 }
 
+/**
+ * True when a private Live entry is open to group or other users. Windows has
+ * no POSIX mode bits: libuv reports every writable entry as 0o666, and the
+ * per-user profile directories these paths live in are private by ACL, so the
+ * check would refuse every start there. POSIX keeps it.
+ */
+export function grantsGroupOrOtherAccess(stat) {
+  return process.platform !== 'win32' && (stat.mode & 0o077) !== 0;
+}
+
 function ensurePrivateControllerDirectory(filePath) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) {
+      || grantsGroupOrOtherAccess(stat)) {
     throw new Error('Impeccable controller directory is not private');
   }
 }
@@ -92,7 +115,7 @@ function assertPrivateDirectory(dir) {
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink()
       || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
-      || (stat.mode & 0o077) !== 0) {
+      || grantsGroupOrOtherAccess(stat)) {
     throw new Error(`Impeccable private data directory is not owner-only: ${dir}`);
   }
 }
