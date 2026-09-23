@@ -69,6 +69,22 @@ public struct VideoRequest: Sendable, Codable {
     }
 }
 
+/// A node's answer to `POST /v1/jobs/{id}/cancel`, read from its `cancel` field.
+public enum VideoCancelOutcome: Sendable, Equatable {
+    /// Confirmed: the render is stopped and will never be published.
+    case cancelled(String?)
+    /// Accepted; the node is stopping it. The job's own status confirms it later.
+    case requested(String?)
+    /// It had already finished (or was publishing); the clip is available.
+    case completed(String?)
+    /// It had already failed.
+    case alreadyFailed(String?)
+    /// The node cannot stop this job without risking other work; nothing changed.
+    case unsupported(String?)
+    /// No usable answer: unreachable, an unknown job, or a node that does not speak this.
+    case unknown(String?)
+}
+
 public struct VideoNodeJob: Sendable, Codable, Equatable {
     public var id: String
     public var submittedAt: Date
@@ -135,9 +151,11 @@ public actor NodeVideoRuntime {
 
     private var session: URLSession
     private var cancelled = false
+    private let pollInterval: Duration
 
-    public init(session: URLSession? = nil) {
+    public init(session: URLSession? = nil, pollInterval: Duration = .seconds(5)) {
         self.session = session ?? URLSession(configuration: Self.sessionConfiguration())
+        self.pollInterval = pollInterval
     }
 
     static func sessionConfiguration() -> URLSessionConfiguration {
@@ -203,7 +221,7 @@ public actor NodeVideoRuntime {
         var firstPoll = true
         while firstPoll || Date() < deadline {
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
-            if !firstPoll { try? await Task.sleep(for: .seconds(5)) }
+            if !firstPoll { try? await Task.sleep(for: pollInterval) }
             firstPoll = false
             if cancelled || Task.isCancelled { throw VideoRuntimeError.cancelled }
 
@@ -231,7 +249,12 @@ public actor NodeVideoRuntime {
             }
             let state = rawState.lowercased()
             Self.log.notice("video job \(jobID, privacy: .public): status=\(state, privacy: .public)")
-            if ["failed", "error", "cancelled"].contains(state) {
+            if state == "cancelled" {
+                let detail = ((status["cancel"] as? [String: Any])?["detail"] as? String
+                    ?? status["error"] as? String).map { String($0.prefix(512)) }
+                throw VideoNodeCancelled(detail)
+            }
+            if ["failed", "error"].contains(state) {
                 let detail = (status["error"] as? String ?? status["detail"] as? String)
                     .map { String($0.prefix(512)) }
                 throw VideoNodeFailed(detail ?? "The node reported the job failed.")
@@ -261,6 +284,49 @@ public actor NodeVideoRuntime {
             "Video job \(jobID) did not finish within the 12-hour queue/render limit. "
             + "Check the node's job status before submitting again; an older node may still be rendering."
         )
+    }
+
+    /// Asks the node to stop one job, by its ID, and says what the node answered.
+    ///
+    /// Only for a lane whose capability advertises `supported_job_actions: ["cancel"]`:
+    /// an older node may answer this path with anything, so an answer without a `cancel`
+    /// field is `unknown`, never taken as success. Nothing here resubmits or stops
+    /// following; the caller decides what each answer means for its receipt.
+    public func cancelJob(_ job: VideoNodeJob, node baseURL: URL, token: String?) async -> VideoCancelOutcome {
+        guard let jobURL = RemotePathIdentifier.appending(
+            job.id, to: baseURL.appendingPathComponent("v1/jobs")
+        ) else {
+            return .unknown("The saved job ID cannot be sent to the node.")
+        }
+        var request = URLRequest(url: jobURL.appendingPathComponent("cancel"))
+        request.httpMethod = "POST"
+        // The node waits for its renderer to confirm the stop before answering.
+        request.timeoutInterval = 60
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await RemoteHTTP.data(
+                for: request, session: session, policy: .peerHost(baseURL), credentialOrigin: baseURL
+            )
+        } catch {
+            return .unknown("Could not reach the node, so the render may still be running.")
+        }
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let detail = (json?["detail"] as? String).map { String($0.prefix(512)) }
+        Self.log.notice("video job \(job.id, privacy: .public): cancel answered \(code) \((json?["cancel"] as? String) ?? "-", privacy: .public)")
+        switch json?["cancel"] as? String {
+        case "cancelled": return .cancelled(detail)
+        case "requested": return .requested(detail)
+        case "completed": return .completed(detail)
+        case "failed": return .alreadyFailed(detail)
+        case "unsupported": return .unsupported(detail)
+        case "unknown": return .unknown(detail ?? "The node does not know this job.")
+        default:
+            return .unknown(Self.reason(in: data).map { "The node did not confirm the cancel: \($0)" }
+                ?? "The node did not confirm the cancel (HTTP \(code)). The render may still be running.")
+        }
     }
 
     /// Sends a portrait and a performance to a node that can animate one with the

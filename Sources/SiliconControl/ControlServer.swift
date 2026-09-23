@@ -2024,9 +2024,9 @@ public actor ControlServer {
     /// The verbs `POST /video/queue/control` has, in the one sentence it refuses an
     /// unknown one with. Here rather than beside the switch that implements them because
     /// the contract export has to publish the same list, and two hand-written copies of a
-    /// six-item set drift the first time a seventh is added.
+    /// seven-item set drift the first time an eighth is added.
     public static let unknownQueueAction =
-        "Use pause, resume, retry, remove, stop_following, or clear_finished."
+        "Use pause, resume, retry, remove, stop_following, cancel, or clear_finished."
 
     /// What a chat-only device is told when it asks for a render rather than a poster.
     /// Its own sentence, not the general chat-only one, because the route it is being
