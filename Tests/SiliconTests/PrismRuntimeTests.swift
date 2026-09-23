@@ -98,22 +98,55 @@ struct PrismRuntimeTests {
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
+    /// An asset with the reviewed name and different bytes. It is a well-formed build that
+    /// would unpack and pass the probe, so only the digest check stands between it and a
+    /// launch — and the marker proves nothing inside it ever ran.
     @Test func refusesChangedArchiveBeforeUnpackingOrLaunching() async throws {
         let server = try LoopbackServer()
         defer { server.stop() }
-        let actual = Data("unreviewed archive".utf8)
-        server.set("/tampered.tar.gz", actual, contentType: "application/gzip")
-        let pick = PrismRuntime.Pick(
-            tag: "prism-test", name: "tampered.tar.gz",
-            url: URL(string: "http://127.0.0.1:\(server.port)/tampered.tar.gz")!,
-            size: Int64(actual.count), sha256: Self.sha256(Data("reviewed archive".utf8))
-        )
-        let root = FileManager.default.temporaryDirectory
+        let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("prism-reject-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        await #expect(throws: PrismRuntime.InstallError.self) {
-            try await PrismRuntime.install(root: root, pick: pick) { _ in }
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let marker = scratch.appendingPathComponent("launched")
+        let payload = scratch.appendingPathComponent("payload/llama-prism-test", isDirectory: true)
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
+        let script = payload.appendingPathComponent("llama-server")
+        try Data("""
+            #!/bin/sh
+            # types: q4_K tq1_0 pq2_0 ptq1_0
+            /usr/bin/touch '\(marker.path)'
+            echo 'version: 0.2.0-dev (build 1, commit abc)'
+
+            """.utf8).write(to: script)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: script.path
+        )
+        let tarball = scratch.appendingPathComponent("llama-prism-test-bin-macos-arm64.tar.gz")
+        try Self.run("/usr/bin/tar", [
+            "-czf", tarball.path, "-C", payload.deletingLastPathComponent().path,
+            "llama-prism-test",
+        ])
+        let altered = try Data(contentsOf: tarball)
+        server.set("/download/llama-prism-test-bin-macos-arm64.tar.gz", altered,
+                   contentType: "application/gzip")
+        let pick = PrismRuntime.Pick(
+            tag: "prism-test", name: "llama-prism-test-bin-macos-arm64.tar.gz",
+            url: URL(string: "http://127.0.0.1:\(server.port)/download/llama-prism-test-bin-macos-arm64.tar.gz")!,
+            size: Int64(altered.count), sha256: Self.sha256(Data("the reviewed archive".utf8))
+        )
+
+        let root = scratch.appendingPathComponent("root", isDirectory: true)
+        let stages = StageLog()
+        do {
+            try await PrismRuntime.install(root: root, pick: pick) { stages.add($0.stage) }
+            Issue.record("an archive whose bytes differ from the reviewed digest was installed")
+        } catch PrismRuntime.InstallError.integrityMismatch(let name) {
+            #expect(name == pick.name)
         }
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+        #expect(!stages.all.contains { $0.contains("Unpacking") })
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
