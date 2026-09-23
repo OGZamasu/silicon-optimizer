@@ -307,10 +307,14 @@ mesh and video generation, uploads, and fetching a result by its media id. It do
 grant access to the owner's conversations, model installs or loading, or the Mac's global
 video queue, and it never spends the owner's money: `/decide` with `provider: "typesafe"`
 is refused, `auto` answers it from the free lanes only, no Jev call is made on its behalf
-(verification, routing or the decide cascade), and a flagged answer is never re-run on a
-cloud model for it. The peer event stream remains available for status, but
+(verification, routing or the decide cascade), a flagged answer is never re-run on a
+cloud model for it, and a render or plan that names a cloud provider's model (`cloud/…`)
+is refused before anything is asked. The peer event stream remains available for status, but
 omits owner queue jobs, model download progress, and conversation verdicts. Those owner controls
-require this Mac's local control token or an appropriately paired device.
+require this Mac's local control token or an appropriately paired device. A model you
+imported from your own disk has the file's path as its id; the swarm, which cannot load it,
+is told `external:` and a token instead, the same one on `/installed`, `/status` and
+`/events`, for as long as the app runs.
 
 A device token being refused on loopback is what keeps a phone that has left the house, or
 been lost with its token on it, from authenticating through some local process on the Mac;
@@ -371,6 +375,15 @@ of posters costs one fetch each rather than one per scroll. Results are the one 
 responses this server lets a client keep — `Cache-Control: private, max-age=3600`, which is
 what makes the `ETag` worth having; everything else stays `no-store`.
 
+**Names, not paths.** Those answers still say which file a render made, but to a device or
+a swarm node they say it by name: an image's `path`, a mesh's `glbPath` and `objPath`, a
+clip's `file`, and a queue item's `file` and `outputDirectory` are the last component only.
+A path on this Mac names your account and how your disk is laid out, and neither caller can
+open one here anyway — it fetches by `mediaID`. A warning, detail, error or refusal that
+mentions one of the app's output, upload or poster folders names it the same way, and your
+home folder as `~`, and so does a `/chat/stream` refusal. This Mac's own control token — the
+MCP bridge and local scripts, which open those files — still gets absolute paths.
+
 **Scope is decided per id, not per route.** A full-control device may fetch anything it has
 an id for. A chat-only device may fetch the poster frames and is refused the renders
 themselves: a device paired for chat is one that was lent out or left at the office, and
@@ -408,6 +421,13 @@ seven days** — an upload is working material for one render, not a library —
 runs both on arrival and on a queue poll, at most hourly, so a device that uploads once and
 then only ever polls does not leave a picture behind for good. The answer says `expiresAt`,
 so an app can say "available until" rather than discover the 404 a week later.
+
+Each sender has an **allowance** of uploads waiting at once: 200 files or 1 GiB per paired
+device, and 32 files or 128 MiB for the swarm secret — every node holding it shares the one.
+Past that an upload is a `429` saying so, with `Retry-After` set to when the oldest expires,
+and nothing is written; an upload past its week stops counting before the sweep reaches it.
+This Mac's own control token has no allowance. The per-request ceiling stops one upload
+from filling the disk; this stops a thousand small ones, a week at a time.
 
 `POST /mesh/plan`, `POST /mesh/generate`, `POST /image/plan`, `POST /image/generate` and
 `POST /video/generate` then take `uploadID` or `mediaID` in place of a path, resolved on

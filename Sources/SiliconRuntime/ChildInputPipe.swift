@@ -20,3 +20,19 @@ extension Pipe {
         return pipe
     }
 }
+
+extension FileHandle {
+    /// Writes to a descriptor this process did not make — its own standard error, above all
+    /// — and says whether the bytes went, instead of ending the process when nobody reads.
+    ///
+    /// Launched with stderr piped to a reader that has since exited (`… 2>&1 | head`, a log
+    /// collector that crashed), a diagnostic line is a SIGPIPE, and the non-throwing
+    /// `write(_:)` raises on the `EPIPE` besides. So the same per-descriptor
+    /// `F_SETNOSIGPIPE` as `Pipe.childInput()` is set first — here, because this descriptor
+    /// was handed to us rather than made — and the throwing write's error is the answer.
+    @discardableResult
+    public func writeUnlessNobodyIsReading(_ data: Data) -> Bool {
+        _ = fcntl(fileDescriptor, F_SETNOSIGPIPE, 1)
+        return (try? write(contentsOf: data)) != nil
+    }
+}

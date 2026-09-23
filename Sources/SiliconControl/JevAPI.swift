@@ -587,4 +587,27 @@ extension BuddyHostError: ControlStatusError {}
 /// has to remember to.
 public enum PaidLanes {
     @TaskLocal public static var allowed = true
+
+    /// Whether a model id names a lane billed to the owner's own account: the cloud
+    /// namespace, `cloud/<provider>/<model>`, which is the gateway's spelling for a model a
+    /// bring-your-own-key provider runs. Any capitalisation, and whether or not the rest
+    /// names a real model — a peer asking for one is refused for asking, not for asking
+    /// well.
+    public static func namesPaidModel(_ modelID: String?) -> Bool {
+        guard let modelID else { return false }
+        return modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased().hasPrefix("cloud/")
+    }
+
+    /// Runs `start` with the lanes open, for work that belongs to the app rather than to the
+    /// request that happened to set it going.
+    ///
+    /// A `Task` keeps its creator's task-locals for its whole life. A pump or a worker that
+    /// is started lazily, by whichever request needs it first, would otherwise keep a swarm
+    /// node's `false` long after that request had ended — and every feature it served
+    /// afterwards, the owner's included, would find the paid lanes shut with nothing to say
+    /// why. Whatever such a task does for a peer is still narrowed where it is delivered.
+    public static func forTheApp<T>(_ start: () throws -> T) rethrows -> T {
+        try $allowed.withValue(true, operation: start)
+    }
 }

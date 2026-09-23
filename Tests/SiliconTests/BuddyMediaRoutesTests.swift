@@ -681,7 +681,9 @@ struct BuddyMediaRoutesTests {
                     "GET", "/video/queue", token: paired.token
                 ).1
             )
-            #expect(stray.items.first?.file == elsewhere.path)
+            // Named, not located: a phone is told the file's name and never the folders
+            // above it. See `MacPathRedactionTests`.
+            #expect(stray.items.first?.file == "stray.mp4")
             #expect(stray.items.first?.mediaID == nil)
             #expect(stray.items.first?.mediaURL == nil)
         }
@@ -932,10 +934,33 @@ actor MediaTestHost: ControlHost {
     private(set) var installRequests: [ControlAPI.LoadRequest] = []
     /// The owner's pause button on the video queue, as a synchronous render meets it.
     private var videoQueuePaused = false
+    /// What a render says it wrote, when a test wants it to have written something.
+    private var imageOutput: String?
+    private var meshOutput: (glb: String?, obj: String?) = (nil, nil)
+    /// A sentence `POST /mesh/generate` fails with, when a test wants one.
+    private var meshFailure: String?
+    /// The model every render or plan was asked for, in order — what a test counts to
+    /// prove a refusal came before the host was reached.
+    private(set) var modelsAsked: [String] = []
+    /// What `/installed` and `/status` answer, and the status posted when `/events` opens.
+    private var installedList: [ControlAPI.InstalledModel] = []
+    private var currentStatus: ControlAPI.Status?
+    /// A sentence `/chat/stream` fails with, before its first frame or after one token.
+    private var chatFailure: (sentence: String, afterAToken: Bool)?
 
     init(roots: [String]) { self.roots = roots }
 
     func setVideoQueuePaused(_ paused: Bool) { videoQueuePaused = paused }
+    func setImageOutput(_ path: String?) { imageOutput = path }
+    func setMeshOutput(glb: String?, obj: String?) { meshOutput = (glb, obj) }
+    func setMeshFailure(_ sentence: String?) { meshFailure = sentence }
+    func setInstalled(_ models: [ControlAPI.InstalledModel], status: ControlAPI.Status?) {
+        installedList = models
+        currentStatus = status
+    }
+    func setChatFailure(_ sentence: String, afterAToken: Bool) {
+        chatFailure = (sentence, afterAToken)
+    }
 
     func setQueueFile(_ path: String?) { queueFile = path }
     func forgetMesh() { lastMeshImagePath = nil }
@@ -969,16 +994,21 @@ actor MediaTestHost: ControlHost {
 
     func generateMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshResponse {
         lastMeshImagePath = request.imagePath
-        return .init(glbPath: nil, objPath: nil, elapsedSeconds: 1, model: "fixture")
+        modelsAsked.append(request.modelID ?? "")
+        if let meshFailure { throw ControlHostError.badRequest(meshFailure) }
+        return .init(
+            glbPath: meshOutput.glb, objPath: meshOutput.obj, elapsedSeconds: 1, model: "fixture"
+        )
     }
 
     func generateImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
         lastImagePath = request.initImagePath
+        modelsAsked.append(request.modelID ?? "")
         return .init(
-            path: request.initImagePath ?? "", elapsedSeconds: 1, peakMemoryBytes: nil,
-            predictedPeakBytes: 1, model: "fixture"
+            path: imageOutput ?? request.initImagePath ?? "", elapsedSeconds: 1,
+            peakMemoryBytes: nil, predictedPeakBytes: 1, model: "fixture"
         )
     }
 
@@ -986,6 +1016,7 @@ actor MediaTestHost: ControlHost {
     /// plans and the test that proves it has to get past the gate.
     func planImage(_ request: ControlAPI.ImageRequest) async throws -> ControlAPI.ImagePlan {
         lastImagePath = request.initImagePath
+        modelsAsked.append(request.modelID ?? "")
         return .init(
             width: 1024, height: 1024, steps: 8, quantization: "8-bit",
             peakBytes: 1, peakPhase: "Decode", budgetBytes: 2, verdict: "fits",
@@ -999,11 +1030,13 @@ actor MediaTestHost: ControlHost {
     func profile() async -> ControlAPI.Profile { fatalError("Unexpected test route") }
     func metrics() async -> ControlAPI.Metrics { fatalError("Unexpected test route") }
     func status() async -> ControlAPI.Status {
-        .init(state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
-              expertStreaming: false, lastGenerationTokensPerSecond: nil)
+        currentStatus ?? .init(
+            state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+            expertStreaming: false, lastGenerationTokensPerSecond: nil
+        )
     }
     func catalog(category: String?, onlyRunnable: Bool) async -> [ControlAPI.CatalogModel] { [] }
-    func installed() async -> [ControlAPI.InstalledModel] { [] }
+    func installed() async -> [ControlAPI.InstalledModel] { installedList }
     func recommend(category: String?, task: String?) async -> ControlAPI.CatalogModel? { nil }
     func plan(_ request: ControlAPI.PlanRequest) async throws -> ControlAPI.Plan {
         throw BuddyTestError.unexpectedRoute
@@ -1040,6 +1073,7 @@ actor MediaTestHost: ControlHost {
     func meshModels() async -> [ControlAPI.MeshModel] { [] }
     func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan {
         lastMeshImagePath = request.imagePath
+        modelsAsked.append(request.modelID ?? "")
         return .init(
             model: "fixture", peakBytes: 1, peakPhase: "Bake", budgetBytes: 2,
             verdict: "fits", isRemote: false, phases: [], suggestions: [], notes: []
@@ -1051,6 +1085,7 @@ actor MediaTestHost: ControlHost {
     ) async throws -> ControlAPI.VideoResponse {
         // Reached only when the subject resolved; the path-from-a-device test asserts it
         // is never reached at all.
+        modelsAsked.append(request.modelID ?? "")
         if videoQueuePaused { throw ControlAPI.VideoQueuePaused() }
         lastImagePath = request.imagePath
         return .init(file: queueFile ?? "", node: "fixture", model: "fixture", elapsedSeconds: 1)
@@ -1066,7 +1101,14 @@ actor MediaTestHost: ControlHost {
     func chatStream(
         _ request: ControlAPI.ChatRequest
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
-        throw BuddyTestError.unexpectedRoute
+        guard let chatFailure else { throw BuddyTestError.unexpectedRoute }
+        guard chatFailure.afterAToken else {
+            throw ControlHostError.badRequest(chatFailure.sentence)
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.token("Hello"))
+            continuation.finish(throwing: ControlHostError.badRequest(chatFailure.sentence))
+        }
     }
     func conversationList() async -> [ControlAPI.ConversationSummary] { [] }
     func createConversation(title: String?) async -> ControlAPI.ConversationSummary {
@@ -1080,7 +1122,10 @@ actor MediaTestHost: ControlHost {
     ) async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error> {
         throw BuddyHostError.noSuchConversation(id)
     }
-    func beginEventUpdates(postingTo hub: BuddyEventHub) async {}
+    /// What the app's pump does first for a new subscriber: tell it the status.
+    func beginEventUpdates(postingTo hub: BuddyEventHub) async {
+        if let currentStatus { await hub.post(.status(currentStatus)) }
+    }
 }
 
 

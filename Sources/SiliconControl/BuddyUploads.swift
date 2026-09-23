@@ -21,6 +21,66 @@ public enum BuddyUploads {
     /// other.
     public static let maximumBytes = 24 * 1_048_576
 
+    /// How much one sender may have waiting on this Mac at once.
+    ///
+    /// `maximumBytes` stops one upload from being a disk-filler; this stops a thousand of
+    /// them. Each upload is kept for a week, so without it a sender that never stopped
+    /// would hold as much of the owner's disk as it could post in seven days — the same
+    /// spend that took `POST /install` away from the swarm secret. Counted per sender,
+    /// because that is who a refusal can usefully be addressed to.
+    public struct Allowance: Sendable, Equatable {
+        public var files: Int
+        public var bytes: Int
+
+        public init(files: Int, bytes: Int) {
+            self.files = files
+            self.bytes = bytes
+        }
+
+        /// A paired phone: a week of photographs somebody might start renders from, with
+        /// room to spare. Forty-odd uploads at the full 24 MiB, far more at a phone
+        /// camera's usual few.
+        public static let device = Allowance(files: 200, bytes: 1_024 * 1_048_576)
+
+        /// The swarm secret. A node sends this Mac a picture to render from; it has no album
+        /// to keep here, and every node holding the secret shares the one allowance.
+        public static let swarm = Allowance(files: 32, bytes: 128 * 1_048_576)
+    }
+
+    /// What one sender's folder holds now.
+    public struct Usage: Sendable, Equatable {
+        public var files: Int
+        public var bytes: Int
+        /// When the oldest of them was written — which is when room next comes free.
+        public var oldest: Date?
+    }
+
+    /// Live uploads only. A file past its week that the sweep has not reached yet is not
+    /// counted against anyone: it is already gone as far as its sender is concerned.
+    public static func usage(
+        ofBucket bucket: String, at root: URL = BuddyUploads.root, now: Date = Date(),
+        lifetime: TimeInterval = BuddyUploads.lifetime
+    ) -> Usage {
+        var usage = Usage(files: 0, bytes: 0, oldest: nil)
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey, .fileSizeKey, .contentModificationDateKey,
+        ]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: deviceRoot(bucket, at: root), includingPropertiesForKeys: Array(keys)
+        ) else { return usage }
+        for file in files {
+            guard let values = try? file.resourceValues(forKeys: keys),
+                  values.isRegularFile == true
+            else { continue }
+            let modified = values.contentModificationDate ?? now
+            guard now.timeIntervalSince(modified) <= lifetime else { continue }
+            usage.files += 1
+            usage.bytes += values.fileSize ?? 0
+            usage.oldest = min(usage.oldest ?? modified, modified)
+        }
+        return usage
+    }
+
     public static var root: URL {
         if let override = ProcessInfo.processInfo.environment["SILICON_BUDDY_UPLOADS"] {
             return URL(fileURLWithPath: override)

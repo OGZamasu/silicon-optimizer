@@ -758,6 +758,12 @@ public actor ControlServer {
             }
         }
 
+        /// Whether this caller is told where on this Mac a file is. The Mac's own token
+        /// only — the one credential whose callers can open a path here, and the same one
+        /// `mayNamePaths` lets send one. Everyone else is told file names and media ids.
+        /// See `MacPathRedaction`.
+        var seesMacPaths: Bool { self == .control }
+
         /// New owner-facing routes are not made reachable from a legacy shared swarm
         /// credential merely by being added to the server's switch. Direct jobs remain
         /// usable; queue administration does not, and neither does `POST /install`: a peer
@@ -813,6 +819,7 @@ public actor ControlServer {
     /// the narrow one, because the only safe reading of "who is this?" with no answer is
     /// "not somebody with full control".
     static func narrowed(_ status: ControlAPI.Status, for caller: Caller?) -> ControlAPI.Status {
+        if caller == .swarm { return status.forPeers }
         guard caller?.seesRuntimeLogs == true else { return status.withoutPrivilegedDetail }
         return status
     }
@@ -827,6 +834,20 @@ public actor ControlServer {
     public static let chatOnlyRefusal =
         "This device is paired for chat only. Pair it again with full control from "
             + "Settings → Silicon Buddy on the Mac."
+
+    /// What a swarm node is told when it names a cloud provider's model for a render.
+    public static let paidMediaIsNotForPeers =
+        "A swarm node may not spend this Mac's cloud provider accounts. Name a model this "
+            + "Mac or its swarm renders (GET /image/models, /mesh/models or /video/models), or "
+            + "\"auto\", which for a swarm node chooses among those only."
+
+    /// The render routes, and the one field of their bodies that picks who renders.
+    static let routesNamingAModel: Set<String> = [
+        "/image/plan", "/image/generate", "/mesh/plan", "/mesh/generate",
+        "/video/generate", "/video/queue",
+    ]
+
+    private struct NamedModel: Decodable { var modelID: String? }
 
     /// What a swarm node is told when it names the TypeSafe lane on `/decide`.
     public static let paidLanesAreNotForPeers =
@@ -994,6 +1015,13 @@ public actor ControlServer {
         let segments = request.path.split(separator: "/").map(String.init)
         let host = self.host
         let hub = self.events
+        // A chat that fails says why in the host's words, which are written for the owner
+        // and may quote a folder — the same rule as the buffered routes' refusals.
+        let media = self.media
+        let shown: @Sendable (String) async -> String = { sentence in
+            guard caller?.seesMacPaths == false, sentence.contains("/") else { return sentence }
+            return MacPathRedaction(roots: await media.roots()).scrub(sentence)
+        }
 
         let body: EventSource
         if request.method == "POST", segments == ["chat", "stream"] {
@@ -1002,7 +1030,7 @@ public actor ControlServer {
                 return .refused(.error(400, "Could not read the chat request."))
             }
             body = EventSource { writer in
-                await Self.pumpChat(writer) { try await host.chatStream(chat) }
+                await Self.pumpChat(writer, shown: shown) { try await host.chatStream(chat) }
             }
         } else if request.method == "POST",
                   let id = Self.parameter(segments, matching: ["conversations", "*", "messages"]) {
@@ -1011,7 +1039,7 @@ public actor ControlServer {
                 return .refused(.error(400, "Could not read the message."))
             }
             body = EventSource { writer in
-                await Self.pumpChat(writer) {
+                await Self.pumpChat(writer, shown: shown) {
                     try await host.replyInConversation(id: id, to: message)
                 }
             }
@@ -1083,9 +1111,11 @@ public actor ControlServer {
     }
 
     /// Turns a chat stream into SSE frames. A failure becomes a final `error` event rather
-    /// than a dropped connection, so a phone can show the sentence instead of guessing.
+    /// than a dropped connection, so a phone can show the sentence instead of guessing —
+    /// the sentence as `shown` lets this caller read it.
     private static func pumpChat(
         _ writer: EventStreamWriter,
+        shown: @Sendable (String) async -> String,
         _ open: @Sendable () async throws -> AsyncThrowingStream<ControlAPI.ChatStreamEvent, any Error>
     ) async {
         do {
@@ -1111,10 +1141,10 @@ public actor ControlServer {
             // The client hung up. There is nobody left to tell.
         } catch let error as BuddyHostError {
             await writer.refuse(
-                status: error.status, message: error.localizedDescription
+                status: error.status, message: await shown(error.localizedDescription)
             )
         } catch {
-            await writer.refuse(status: 400, message: error.localizedDescription)
+            await writer.refuse(status: 400, message: await shown(error.localizedDescription))
         }
     }
 
@@ -1409,6 +1439,18 @@ public actor ControlServer {
             return await routeAgent(request, segments: segments, as: caller, on: origin)
         }
 
+        // A render the swarm names a cloud model for would run on the owner's account, which
+        // a node borrowing this Mac's hardware may not spend — the render-route half of what
+        // `PaidLanes` does for Jev. Refused here, before the host or anything it routes to is
+        // asked, and on every render route at once rather than remembered per case. `auto`
+        // is not refused: for a peer it is chosen among free lanes only.
+        if caller == .swarm, request.method == "POST",
+           Self.routesNamingAModel.contains(request.path),
+           let asked = try? JSONDecoder().decode(NamedModel.self, from: request.body),
+           PaidLanes.namesPaidModel(asked.modelID) {
+            return .error(403, Self.paidMediaIsNotForPeers)
+        }
+
         do {
             switch (request.method, request.path) {
             case ("GET", "/conversations"):
@@ -1424,7 +1466,10 @@ public actor ControlServer {
             case ("GET", "/status"):
                 return try .encode(Self.narrowed(await host.status(), for: caller))
             case ("GET", "/installed"):
-                return try .encode(await host.installed())
+                // An imported model's id is a path on this Mac. A phone loads by it; the
+                // swarm cannot load at all, so it is told a token. See `ImportedModelID`.
+                let installed = await host.installed()
+                return try .encode(caller == .swarm ? installed.map(\.forPeers) : installed)
             case ("GET", "/catalog"):
                 return try .encode(await host.catalog(
                     category: request.query["category"],
@@ -1496,12 +1541,12 @@ public actor ControlServer {
                                             as: caller)
                 ))
             case ("POST", "/image/generate"):
-                return try .encode(await media.decorated(
+                return try .encode(await shown(await media.decorated(
                     await host.generateImage(
                         try await resolvedImage(request.decode(ControlAPI.ImageRequest.self),
                                                 as: caller)
                     )
-                ))
+                ), to: caller))
             case ("GET", "/swarm"):
                 return try .encode(await host.swarm())
             case ("GET", "/v1/node"):
@@ -1514,17 +1559,21 @@ public actor ControlServer {
                 // The one thing a phone keeps doing, and so the right place to hang a
                 // sweep that would otherwise only ever run when something new arrives.
                 await sweepUploadsIfDue()
-                return try .encode(await media.decorated(await host.videoQueue()))
+                return try .encode(await shown(
+                    await media.decorated(await host.videoQueue()), to: caller
+                ))
             case ("POST", "/video/queue"):
-                return try .encode(await media.decorated(await host.enqueueVideos(
+                return try .encode(await shown(await media.decorated(await host.enqueueVideos(
                     try request.decode(ControlAPI.VideoQueueRequest.self)
-                )))
+                )), to: caller))
             case ("POST", "/video/queue/control"):
                 let control = try request.decode(ControlAPI.VideoQueueControl.self)
                 guard control.action != "cancel" || caller != .swarm else {
                     return .error(403, Self.cancelIsNotForPeers)
                 }
-                return try .encode(await media.decorated(await host.controlVideoQueue(control)))
+                return try .encode(await shown(
+                    await media.decorated(await host.controlVideoQueue(control)), to: caller
+                ))
             case ("POST", "/video/generate"):
                 guard activeSynchronousVideos < Self.maximumSynchronousVideos else {
                     if caller == .swarm {
@@ -1535,13 +1584,13 @@ public actor ControlServer {
                 activeSynchronousVideos += 1
                 defer { activeSynchronousVideos -= 1 }
                 do {
-                    return try .encode(await media.decorated(
+                    return try .encode(await shown(await media.decorated(
                         await host.generateVideo(
                             try await resolvedVideo(
                                 request.decode(ControlAPI.VideoGenerateRequest.self), as: caller
                             )
                         )
-                    ))
+                    ), to: caller))
                 } catch is ControlAPI.VideoQueuePaused where caller == .swarm {
                     // Like the 429 above: a peer cannot resume the queue or add to it, so it
                     // is not told to.
@@ -1553,12 +1602,12 @@ public actor ControlServer {
                                            as: caller)
                 ))
             case ("POST", "/mesh/generate"):
-                return try .encode(await media.decorated(
+                return try .encode(await shown(await media.decorated(
                     await host.generateMesh(
                         try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
                                                as: caller)
                     )
-                ))
+                ), to: caller))
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):
@@ -1654,10 +1703,26 @@ public actor ControlServer {
             // A host that knows what status it means gets to say so. Everything else is a
             // 400, which is right for "you asked wrong" and wrong for anything a client
             // could act on — which is why this branch exists.
-            return .error(error.status, error.localizedDescription)
+            return .error(error.status, await shown(error.localizedDescription, to: caller))
         } catch {
-            return .error(400, error.localizedDescription)
+            return .error(400, await shown(error.localizedDescription, to: caller))
         }
+    }
+
+    /// A render's answer, or the queue, as this caller may see it: the Mac's own token gets
+    /// the paths its scripts open, everyone else file names beside the media ids.
+    private func shown<Answer: MacPathBearing>(
+        _ answer: Answer, to caller: Caller
+    ) async -> Answer {
+        guard !caller.seesMacPaths else { return answer }
+        return answer.withoutMacPaths(MacPathRedaction(roots: await media.roots()))
+    }
+
+    /// A refusal as this caller may read it. The host writes its errors for the owner, and
+    /// "No image at …" quotes the folder it looked in.
+    private func shown(_ sentence: String, to caller: Caller) async -> String {
+        guard !caller.seesMacPaths, sentence.contains("/") else { return sentence }
+        return MacPathRedaction(roots: await media.roots()).scrub(sentence)
     }
 
     // MARK: - The Chat tab's agent sessions
@@ -2174,6 +2239,26 @@ public actor ControlServer {
     public static let uploadNotSaved =
         "This Mac could not save that upload. Check the Mac has free space, then try again."
 
+    /// What a sender that already has its whole allowance waiting here is told. A 429
+    /// rather than a 413: this upload is not too big, there are too many before it — and
+    /// `Retry-After` says when the oldest of them expires.
+    public static func uploadAllowanceSpent(_ allowance: BuddyUploads.Allowance) -> String {
+        "This Mac is already keeping as many uploads from this sender as it will hold at "
+            + "once (\(allowance.files) files or \(allowance.bytes / 1_048_576) MiB). Start "
+            + "the render from an uploadID or mediaID you already have, or send this again "
+            + "once older uploads expire — each is kept for seven days."
+    }
+
+    /// How much this caller may have waiting here. The Mac's own token has no allowance:
+    /// its uploads are the owner's own, onto the owner's own disk.
+    private static func uploadAllowance(for caller: Caller) -> BuddyUploads.Allowance? {
+        switch caller {
+        case .control: nil
+        case .swarm: .swarm
+        case .device: .device
+        }
+    }
+
     /// Which folder a caller's uploads go in.
     ///
     /// A device's own id, so revoking a phone and deleting what it sent are one gesture.
@@ -2201,6 +2286,20 @@ public actor ControlServer {
         }
         guard let kind = MediaSniffer.kind(of: payload) else {
             return .error(415, Self.unreadableUpload)
+        }
+        // Checked and written with no suspension between them, so two uploads racing on
+        // this actor cannot both see the last free slot.
+        if let allowance = Self.uploadAllowance(for: caller) {
+            let held = BuddyUploads.usage(ofBucket: Self.bucket(for: caller), at: uploadsRoot)
+            if held.files + 1 > allowance.files || held.bytes + payload.count > allowance.bytes {
+                var refusal = HTTPResponse.error(429, Self.uploadAllowanceSpent(allowance))
+                if let oldest = held.oldest {
+                    let free = oldest.addingTimeInterval(BuddyUploads.lifetime)
+                        .timeIntervalSinceNow
+                    refusal.extraHeaders["Retry-After"] = "\(max(1, Int(free.rounded(.up))))"
+                }
+                return refusal
+            }
         }
         let uploadID = UUID().uuidString
         let destination: URL

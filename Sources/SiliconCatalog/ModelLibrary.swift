@@ -280,6 +280,11 @@ public actor ModelLibrary {
         installed.reduce(Bytes.zero) { $0 + $1.sizeOnDisk }
     }
 
+    /// What an imported model's id starts with; the rest is its file's absolute path.
+    /// `ImportedModelID` in SiliconControl keeps the same word, and a test holds the two
+    /// together.
+    public static let externalIDPrefix = "external:"
+
     /// Imports a GGUF file the user already has, without copying it.
     public func importExternal(file: URL, name: String? = nil) throws -> InstalledModel {
         // The models this Mac keeps for a paired phone are passed along, never run here —
@@ -293,7 +298,7 @@ public actor ModelLibrary {
         let shape = GGUFReader().shape(from: metadata)
         let quantization = Quantization.inferred(fromFilename: file.lastPathComponent) ?? .q4_K_M
         let model = InstalledModel(
-            id: "external:\(file.path)",
+            id: Self.externalIDPrefix + file.path,
             name: name ?? metadata.name ?? file.deletingPathExtension().lastPathComponent,
             catalogID: nil,
             quantization: quantization,
