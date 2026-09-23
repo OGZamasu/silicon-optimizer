@@ -126,9 +126,9 @@ public actor LayaRuntime {
     /// A closure because this target cannot see the app's settings object, and because the
     /// owner can move the library while the app is running — a captured path would then be
     /// pointing at the old drive.
-    private var libraryProvider: @Sendable () -> URL? = { nil }
+    private var libraryProvider: @Sendable () async -> URL? = { nil }
     /// Where the driver script was installed to, out of the app bundle.
-    private var scriptProvider: @Sendable () -> URL? = { nil }
+    private var scriptProvider: @Sendable () async -> URL? = { nil }
     private var sidecar: LayaSidecar?
     private var activeCheckpoint: LayaCheckpoint?
     private var lastUsed = Date()
@@ -143,8 +143,8 @@ public actor LayaRuntime {
     public init() {}
 
     public func configure(
-        library: @escaping @Sendable () -> URL?,
-        script: @escaping @Sendable () -> URL?
+        library: @escaping @Sendable () async -> URL?,
+        script: @escaping @Sendable () async -> URL?
     ) {
         libraryProvider = library
         scriptProvider = script
@@ -199,8 +199,8 @@ public actor LayaRuntime {
 
     // MARK: What is installed
 
-    public func installation(checkpoint: LayaCheckpoint = .default) -> LayaInstallation {
-        Self.installation(
+    public func installation(checkpoint: LayaCheckpoint = .default) async -> LayaInstallation {
+        await Self.installation(
             checkpoint: checkpoint, library: libraryProvider(),
             script: scriptProvider()
         )
@@ -366,7 +366,7 @@ public actor LayaRuntime {
         isInstalling = true
         defer { isInstalling = false }
 
-        guard let library = libraryProvider() else { throw LayaInstallError.noModelLibrary }
+        guard let library = await libraryProvider() else { throw LayaInstallError.noModelLibrary }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: library.path, isDirectory: &isDirectory),
               isDirectory.boolValue
@@ -495,7 +495,7 @@ public actor LayaRuntime {
         _ checkpoint: LayaCheckpoint,
         progress: @escaping @Sendable (LayaInstallProgress) -> Void = { _ in }
     ) async throws {
-        guard let library = libraryProvider() else { throw LayaInstallError.noModelLibrary }
+        guard let library = await libraryProvider() else { throw LayaInstallError.noModelLibrary }
         try await fetch(
             checkpoint,
             python: Self.pythonPath(environment: Self.environmentDirectory(library: library)),
@@ -619,10 +619,10 @@ public actor LayaRuntime {
         }
         if sidecar != nil { await unload() }
 
-        guard let library = libraryProvider() else {
+        guard let library = await libraryProvider() else {
             throw LayaSidecarError.pythonMissing("no model library is configured")
         }
-        guard let script = scriptProvider() else {
+        guard let script = await scriptProvider() else {
             throw LayaSidecarError.scriptMissing("laya_sidecar.py")
         }
         let environment = Self.environmentDirectory(library: library)
