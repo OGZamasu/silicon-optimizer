@@ -213,6 +213,9 @@ public final class AppModel {
     internal(set) var swarmMembers: [SwarmMember] = []
     internal(set) var swarmMembersLoaded = false
     var codexRuntime: CodexRuntime?
+    /// Which start or stop the Codex callbacks belong to. Bumped by each one, so a stop
+    /// that finishes late cannot mark a newer session idle.
+    var codexLifecycleGeneration = 0
     /// The rendered conversation: agent prose, commands, file changes, tool calls.
     public internal(set) var codexItems: [CodexChatItem] = []
     /// Approvals Codex is waiting on, oldest first.
