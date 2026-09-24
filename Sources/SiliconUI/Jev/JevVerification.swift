@@ -508,15 +508,36 @@ extension AppModel {
     /// Settings, where the row says what is sent and to whom.
     func verificationEscalationTarget(excluding: String? = nil) async -> String? {
         await JevBootstrap.ready()
-        let chosen = await JevService.shared.settings().verificationEscalationModel
-        // `gatewayServableModels()`, not `gatewayModels()`: the latter offers the virtual
-        // `silicon/auto`, and "escalate to whatever routing picks" is not an escalation —
-        // it is a coin toss that may land on the model that just answered. Skipped
-        // entirely when the owner has already named one, so drawing a settings row cannot
-        // be what walks the library and the swarm.
-        let models = chosen?.isEmpty == false ? [] : await gatewayServableModels()
-        return Self.escalationTarget(
-            chosen: chosen, from: models, excluding: excluding, paidAllowed: PaidLanes.allowed
+        return await Self.verificationEscalationTarget(
+            settings: await JevService.shared.settings(), excluding: excluding,
+            peersAllowed: PaidLanes.allowed,
+            // `gatewayServableModels()`, not `gatewayModels()`: the latter offers the
+            // virtual `silicon/auto`, and "escalate to whatever routing picks" is not an
+            // escalation — it is a coin toss that may land on the model that just answered.
+            servable: { await self.gatewayServableModels() }
+        )
+    }
+
+    /// The same, with the settings and the model list handed in.
+    ///
+    /// A third rule on top of the two above: **Always local means no cloud re-run either.**
+    /// The pin's promise is "never the cloud", and an escalation sends the whole
+    /// conversation, images included, to whoever runs the model. So with verification
+    /// pinned Always local a flagged answer is re-run only on the owner's own serving node,
+    /// even when a cloud model is named in Settings — it is then annotated instead, which is
+    /// what an answer with nowhere allowed to go always gets.
+    static func verificationEscalationTarget(
+        settings: JevSettings, excluding: String?, peersAllowed: Bool,
+        servable: () async -> [GatewayAPI.Model]
+    ) async -> String? {
+        let chosen = settings.verificationEscalationModel
+        // Skipped entirely when the owner has already named one, so drawing a settings row
+        // cannot be what walks the library and the swarm.
+        let models = chosen?.isEmpty == false ? [] : await servable()
+        let paidAllowed = peersAllowed
+            && settings.laneOverride(.verification) != .alwaysLocal
+        return escalationTarget(
+            chosen: chosen, from: models, excluding: excluding, paidAllowed: paidAllowed
         )
     }
 }

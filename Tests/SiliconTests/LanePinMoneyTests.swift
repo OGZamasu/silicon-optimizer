@@ -327,6 +327,38 @@ struct VerificationLanePinTests {
         #expect(await harness.service.ledger().month().total.calls == 0)
     }
 
+    /// "Always local" is "never the cloud", and a re-run sends the whole conversation to
+    /// whoever runs the model. So a flagged answer pinned Always local is re-run only on the
+    /// owner's own serving node — never on a cloud model, even one named in Settings.
+    @Test func alwaysLocalNeverReRunsAFlaggedAnswerOnTheCloud() async {
+        let node = GatewayAPI.Model(
+            id: "node/studio/qwen3.8-27b", displayName: "node", where_: "studio",
+            contextWindow: nil, serving: true
+        )
+        var settings = JevSettings()
+        settings.verificationEscalationModel = "cloud/open-router/gpt-5.5"
+
+        // Unpinned, the owner's named cloud model is honoured, as it always was.
+        #expect(await AppModel.verificationEscalationTarget(
+            settings: settings, excluding: nil, peersAllowed: true, servable: { [node] }
+        ) == "cloud/open-router/gpt-5.5")
+
+        settings.laneOverrides[.verification] = .alwaysLocal
+        #expect(await AppModel.verificationEscalationTarget(
+            settings: settings, excluding: nil, peersAllowed: true, servable: { [node] }
+        ) == nil, "a cloud model named in Settings was used under Always local")
+
+        // The owner's own node is still a place a flagged answer may go.
+        settings.verificationEscalationModel = nil
+        #expect(await AppModel.verificationEscalationTarget(
+            settings: settings, excluding: nil, peersAllowed: true, servable: { [node] }
+        ) == "node/studio/qwen3.8-27b")
+        settings.verificationEscalationModel = "node/studio/qwen3.8-27b"
+        #expect(await AppModel.verificationEscalationTarget(
+            settings: settings, excluding: nil, peersAllowed: true, servable: { [] }
+        ) == "node/studio/qwen3.8-27b")
+    }
+
     @Test func offJudgesNothing() async throws {
         let (harness, server) = try await everythingOnHarness(
             "a switched-off verification sent a chat answer to TypeSafe"

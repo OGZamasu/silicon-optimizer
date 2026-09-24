@@ -1453,6 +1453,8 @@ feature that quietly started doing that the first time a local answer looked thi
 making that decision for you. So a cloud target is only ever used when you name one in
 Settings, where the row says what is sent and to whom; and `POST /jev`, which can change it,
 takes this Mac's own control token, so a paired phone can see the setting but not make it.
+With verification pinned **Always local** in Settings → Decisions not even a named cloud model
+is used: a flagged answer is re-run on a machine of your own, or only annotated.
 
 The re-run goes through this Mac's own loopback gateway, so it starts a sleeping node, holds
 the cloud key and lands in the activity ledger like any other request — and it is capped at
