@@ -204,6 +204,8 @@ public final class AppModel {
     public internal(set) var piCurrentModel: String?
     var piRuntime: PiRuntime?
     var piEventTask: Task<Void, Never>?
+    /// Which start of Pi a runtime state belongs to; see `applyPiRuntimeState`.
+    var piLifecycleGeneration = 0
     var piStreamingItem: PiItem?
     var piThinkingItem: PiItem?
 
@@ -259,6 +261,10 @@ public final class AppModel {
     /// Whether the credential comes from the user's Keychain, as in the running app, or arrived
     /// with injected settings, as in tests and previews, which must never reach for it.
     private let readsCredentialsFromKeychain: Bool
+    /// Where Hugging Face's own rules put the hub cache for a child that inherits this app's
+    /// environment — MFLUX, when no library is set. A scratch directory under injected
+    /// settings; see `init`.
+    @ObservationIgnored var fallbackHuggingFaceHub: URL
 
     /// The Keychain read in flight, so work that needs the token can wait for it rather than
     /// run without one.
@@ -491,19 +497,32 @@ public final class AppModel {
 
     public func isImageModelInstalled(_ entry: DiffusionEntry) -> Bool {
         _ = imageLibraryVersion
-        return DiffusionInstaller.isInstalled(entry)
+        return DiffusionInstaller.isInstalled(entry, hub: imageModelHub)
     }
 
     public func installedImageModelSize(_ entry: DiffusionEntry) -> Bytes {
         _ = imageLibraryVersion
-        return DiffusionInstaller.installedSize(entry.repository)
+        return DiffusionInstaller.installedSize(entry.repository, hub: imageModelHub)
     }
 
+    /// The hub cache image models are downloaded into, found in and removed from: the one
+    /// MFLUX reads. `hub` in the library's engine cache when a library is set — MFLUX is run
+    /// with `HF_HOME` there — and otherwise `fallbackHuggingFaceHub`.
+    var imageModelHub: URL {
+        settings.resolvedEngineCacheDirectory.map { HuggingFaceHub.directory(home: $0) }
+            ?? fallbackHuggingFaceHub
+    }
+
+    /// Downloads into the cache MFLUX is run against (`MFluxRuntime`'s `hubCache`), so the
+    /// first render finds what was installed rather than fetching it again.
     private func imageInstaller() -> DiffusionInstaller? {
         guard let mflux = (imageRuntime ?? MFluxRuntime.locate())?.executable,
               let hf = DiffusionInstaller.locate(besideMFlux: mflux) else { return nil }
         let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
-        return DiffusionInstaller(executable: hf, token: token)
+        return DiffusionInstaller(
+            executable: hf, token: token, home: settings.resolvedEngineCacheDirectory,
+            hub: imageModelHub
+        )
     }
 
     public func installImageModel(_ entry: DiffusionEntry) {
@@ -547,7 +566,7 @@ public final class AppModel {
     }
 
     public func uninstallImageModel(_ entry: DiffusionEntry) {
-        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository)
+        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository, hub: imageModelHub)
         try? FileManager.default.removeItem(at: directory)
         imageLibraryVersion += 1
     }
@@ -1861,12 +1880,18 @@ public final class AppModel {
         public var stage: String = "Starting…"
         public var error: String?
         var task: Task<Void, Never>?
+        /// Set by Stop. The job stays listed, saying so, until its process has exited, so the
+        /// Install button cannot come back and start a second copy beside the one still dying.
+        var stopping = false
         @ObservationIgnored var lastStageUpdate = Date.distantPast
 
         init(id: String) { self.id = id }
     }
 
     public private(set) var repairs: [String: RepairJob] = [:]
+    /// Where the running repairs' processes are kept for Stop and for quitting. Tests give a
+    /// model its own, so stopping everything in one cannot reach another suite's steps.
+    @ObservationIgnored var runningRepairs = RepairProcess.Running.shared
 
     public struct RepairStep: Sendable {
         public var executable: URL
@@ -1907,42 +1932,65 @@ public final class AppModel {
         let job = RepairJob(id: id)
         repairs[id] = job
 
+        let running = runningRepairs
         job.task = Task { [weak self] in
+            var completed = 0
             for step in steps {
-                await MainActor.run { job.stage = step.label }
-                let outcome = await Self.runProcess(step: step) { line in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        let job = self.repairs[id]
-                        guard let job, Date().timeIntervalSince(job.lastStageUpdate) > 0.25
-                        else { return }
-                        job.lastStageUpdate = Date()
-                        job.stage = "\(step.label) \(line)"
+                if Task.isCancelled { break }
+                await MainActor.run { if !job.stopping { job.stage = step.label } }
+                let process = RepairProcess(running: running)
+                let outcome = await withTaskCancellationHandler {
+                    await Self.runProcess(step: step, process: process) { line in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            let job = self.repairs[id]
+                            guard let job, !job.stopping,
+                                  Date().timeIntervalSince(job.lastStageUpdate) > 0.25
+                            else { return }
+                            job.lastStageUpdate = Date()
+                            job.stage = "\(step.label) \(line)"
+                        }
                     }
+                } onCancel: {
+                    process.stop()
                 }
-                if Task.isCancelled { return }
+                process.exited()
                 if let failure = outcome {
+                    // A step Stop killed fails too; that is the stop, not something to show.
+                    if Task.isCancelled { break }
                     await MainActor.run { job.error = failure }
                     return
                 }
+                completed += 1
             }
+            // Stopped or not, the step's process has exited by now, so the job can go and the
+            // Install button come back.
             await MainActor.run {
-                guard let self else { return }
+                guard let self, self.repairs[id] === job else { return }
                 self.repairs[id] = nil
-                onSuccess()
+                if completed == steps.count { onSuccess() }
             }
         }
     }
 
+    /// Stops a running repair, or clears a failed one so it can be tried again.
     public func cancelRepair(_ id: String) {
-        repairs[id]?.task?.cancel()
-        repairs[id] = nil
+        guard let job = repairs[id] else { return }
+        guard job.error == nil, let task = job.task else {
+            repairs[id] = nil
+            return
+        }
+        job.stopping = true
+        job.stage = "Stopping…"
+        task.cancel()
     }
 
     /// Runs one process to completion off the main actor; returns nil on success or a
-    /// human-sized failure message.
+    /// human-sized failure message. `process` learns the pid as it starts, which is how Stop
+    /// and quitting reach it.
     private nonisolated static func runProcess(
-        step: RepairStep, onLine: @Sendable @escaping (String) -> Void
+        step: RepairStep, process handle: RepairProcess = RepairProcess(),
+        onLine: @Sendable @escaping (String) -> Void
     ) async -> String? {
         await withCheckedContinuation { continuation in
             let process = Process()
@@ -1977,6 +2025,7 @@ public final class AppModel {
             }
             do {
                 try process.run()
+                handle.launched(process)
             } catch {
                 continuation.resume(returning: error.localizedDescription)
             }
@@ -2944,6 +2993,13 @@ public final class AppModel {
         // ordinary application loads the document here and fetches the credential once it is
         // running: see `loadHuggingFaceToken()`.
         self.readsCredentialsFromKeychain = settings == nil
+        // The same line again for the Hugging Face cache: a model built with injected settings
+        // gets a scratch hub, so no test can resolve `~/.cache/huggingface` — on some Macs a
+        // link into a real model library — and remove an image model from it.
+        self.fallbackHuggingFaceHub = settings == nil
+            ? HuggingFaceHub.directory(home: nil)
+            : FileManager.default.temporaryDirectory
+                .appendingPathComponent("silicon-test-hub-\(UUID().uuidString)", isDirectory: true)
         self.settings = settings ?? Settings.load()
         self.videoRuntime = videoRuntime
         self.cloudAudioRuntime = cloudAudioRuntime
@@ -3051,6 +3107,7 @@ public final class AppModel {
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in
             ChildProcessRegistry.terminateAll()
+            RepairProcess.stopAll()
         }
     }
 

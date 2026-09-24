@@ -2,10 +2,55 @@ import Foundation
 import Testing
 @testable import SiliconRuntime
 
-@Suite("Verified agent packages", .serialized,
-       .enabled(if: HarnessRuntime.locateNode(
-           minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
-       ).node != nil))
+enum AgentPackageFixtureNode {
+    /// The Node the fixtures build and install with: a real `node` binary with npm 11.19 or
+    /// newer beside it, and never a version manager's shim. What discovery finds can be one —
+    /// vite-plus's is — and a shim run with the fresh `HOME` every fixture has first downloads
+    /// a whole runtime into it, about 210 MB a fixture. The runtimes version managers keep are
+    /// real binaries, so their folders are listed for candidates; nothing in them is written.
+    /// With no real Node that qualifies, the suite is skipped rather than going online.
+    static let node: URL? = {
+        let manager = FileManager.default
+        let home = manager.homeDirectoryForCurrentUser
+        var candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/opt/local/bin/node"]
+        candidates += (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map { "\($0)/node" }
+        for (versions, binary) in [
+            (".nvm/versions/node", "bin/node"),
+            (".local/share/fnm/node-versions", "installation/bin/node"),
+            (".volta/tools/image/node", "bin/node"),
+            (".vite-plus/js_runtime/node", "bin/node"),
+        ] {
+            let folder = home.appendingPathComponent(versions, isDirectory: true)
+            for version in (try? manager.contentsOfDirectory(atPath: folder.path)) ?? [] {
+                candidates.append(folder.appendingPathComponent(version).appendingPathComponent(binary).path)
+            }
+        }
+        return HarnessRuntime.pick(
+            from: candidates.filter(isNodeBinary), includingRejected: nil,
+            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
+        ).node
+    }()
+
+    /// Whether `path` is Node itself: resolving to a Mach-O file named `node`. A shim resolves
+    /// to its manager's binary (`vp`, `volta-shim`, `mise`) or is a script.
+    private static func isNodeBinary(_ path: String) -> Bool {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        guard resolved.lastPathComponent == "node",
+              let handle = try? FileHandle(forReadingFrom: resolved)
+        else { return false }
+        defer { try? handle.close() }
+        guard let magic = try? handle.read(upToCount: 4), magic.count == 4 else { return false }
+        return [[0xcf, 0xfa, 0xed, 0xfe], [0xca, 0xfe, 0xba, 0xbe]].contains(Array(magic))
+    }
+}
+
+/// The fixtures here are built and installed with a real Node and npm on this Mac, because the
+/// allowlist and integrity checks are npm's own; every artifact is a local tarball, so nothing
+/// is fetched. Where a test only needs `node --version` to answer, its `node` is a script that
+/// does just that. The probes get a minute, for a Mac under load.
+@Suite("Verified agent packages", .serialized, .longVersionProbes,
+       .enabled(if: AgentPackageFixtureNode.node != nil))
 struct AgentPackageInstallerTests {
     private struct Fixture {
         let root: URL
@@ -39,9 +84,7 @@ struct AgentPackageInstallerTests {
     private func fixture(
         checkInstallEnvironment: Bool = false, scriptMarker: URL? = nil
     ) throws -> Fixture {
-        let node = try #require(HarnessRuntime.locateNode(
-            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
-        ).node)
+        let node = try #require(AgentPackageFixtureNode.node)
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent(
             "silicon-agent-package-test-\(UUID().uuidString)", isDirectory: true
@@ -99,6 +142,15 @@ struct AgentPackageInstallerTests {
             ),
             node: node
         )
+    }
+
+    /// A `node` that answers `--version` with `version` and does nothing else, in `bin`.
+    private func scriptedNode(in bin: URL, version: String = "v24.0.0") throws -> URL {
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let node = bin.appendingPathComponent("node")
+        try "#!/bin/sh\necho \(version)\n".write(to: node, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
+        return node
     }
 
     private func run(
@@ -199,9 +251,7 @@ struct AgentPackageInstallerTests {
             .write(to: lock)
 
         let fakeBin = fixture.root.appendingPathComponent("fake-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin)
         let marker = fixture.root.appendingPathComponent("npm-was-called")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
@@ -293,7 +343,12 @@ struct AgentPackageInstallerTests {
         try Data("\(exited.processIdentifier)\n".utf8)
             .write(to: leftover.appendingPathComponent(AgentPackageInstaller.ownerFileName))
 
-        let (fakeNode, npmCalled) = try failingNpm(beside: fixture)
+        // Answering with the Node line the tree was installed for, which is part of its key.
+        let record = try #require(JSONSerialization.jsonObject(with: Data(contentsOf:
+            first.directory.appendingPathComponent(AgentPackageInstaller.manifestFileName)
+        )) as? [String: Any])
+        let nodeLine = try #require((record["identity"] as? [String: Any])?["node"] as? String)
+        let (fakeNode, npmCalled) = try failingNpm(beside: fixture, answering: "v\(nodeLine).0.0")
         let second = try await AgentPackageInstaller.install(
             fixture.package, node: fakeNode, sourceRoot: fixture.sourceRoot,
             destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
@@ -362,12 +417,12 @@ struct AgentPackageInstallerTests {
         #expect(FileManager.default.fileExists(atPath: second.bin.path))
     }
 
-    /// A Node beside an npm that records being called and fails.
-    private func failingNpm(beside fixture: Fixture) throws -> (node: URL, marker: URL) {
+    /// A Node answering `version`, beside an npm that records being called and fails.
+    private func failingNpm(
+        beside fixture: Fixture, answering version: String
+    ) throws -> (node: URL, marker: URL) {
         let fakeBin = fixture.root.appendingPathComponent("failing-npm-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin, version: version)
         let marker = fixture.root.appendingPathComponent("npm-was-called")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
@@ -382,9 +437,7 @@ struct AgentPackageInstallerTests {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let fakeBin = fixture.root.appendingPathComponent("fake-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin)
         let marker = fixture.root.appendingPathComponent("npm-ci-was-called")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\nif [ \"$1\" = --version ]; then echo \(version); exit 0; fi\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
@@ -409,9 +462,7 @@ struct AgentPackageInstallerTests {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let fakeBin = fixture.root.appendingPathComponent("fake-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin)
         let marker = fixture.root.appendingPathComponent("npm-started")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.19.0; exit 0; fi\n/usr/bin/touch \"\(marker.path)\"\nexec /bin/sleep 30\n".write(
@@ -464,6 +515,24 @@ struct AgentPackageInstallerTests {
             #expect(!entries.contains { $0.hasPrefix("fixture-") })
         }
     }
+}
+
+/// Gives every version probe in a suite a minute: see "Verified agent packages".
+struct LongVersionProbes: SuiteTrait, TestTrait, TestScoping {
+    var isRecursive: Bool { true }
+
+    func provideScope(
+        for test: Test, testCase: Test.Case?,
+        performing function: @Sendable () async throws -> Void
+    ) async throws {
+        try await AgentPackageInstaller.$versionProbeDeadline.withValue(60) {
+            try await function()
+        }
+    }
+}
+
+extension Trait where Self == LongVersionProbes {
+    static var longVersionProbes: Self { Self() }
 }
 
 /// What the npm cancellation test waits for.
@@ -729,5 +798,143 @@ struct BundledAgentPackageLockTests {
 
         try manager.removeItem(at: tree.appendingPathComponent(AgentPackageInstaller.manifestFileName))
         #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "no record")
+    }
+}
+
+/// The verified tree is keyed by the Node's major version, and a start deletes the trees for
+/// other keys. A start whose `node --version` never answered — Stop pressed during "Looking
+/// for Node.js…", or a Node slow to launch — must not make up a key and delete the real tree
+/// with it. Checked with a stand-in `node` and `npm`, so no real npm runs.
+@Suite("Agent package trees and an unanswered Node probe", .serialized)
+struct AgentPackageTreeProbeTests {
+    private struct Stage {
+        let root: URL
+        let sourceRoot: URL
+        let destinationRoot: URL
+        let node: URL
+        let slowNode: URL
+        let killedNode: URL
+        let probing: URL
+        let package = AgentPackage(
+            id: "fixture", name: "fixture-agent", version: "1.0.0",
+            binPath: "node_modules/fixture-agent/bin/agent.js"
+        )
+
+        init() throws {
+            let manager = FileManager.default
+            let root = manager.temporaryDirectory.appendingPathComponent(
+                "silicon-agent-probe-\(UUID().uuidString)", isDirectory: true
+            )
+            self.root = root
+            sourceRoot = root.appendingPathComponent("manifests", isDirectory: true)
+            destinationRoot = root.appendingPathComponent("installed", isDirectory: true)
+            let manifests = sourceRoot.appendingPathComponent("fixture", isDirectory: true)
+            try manager.createDirectory(at: manifests, withIntermediateDirectories: true)
+            try manager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+            let dependencies = ["fixture-agent": "1.0.0"]
+            try JSONSerialization.data(withJSONObject: [
+                "name": "silicon-fixture-sidecar", "private": true, "version": "1.0.0",
+                "dependencies": dependencies,
+            ], options: [.sortedKeys]).write(to: manifests.appendingPathComponent("package.json"))
+            try JSONSerialization.data(withJSONObject: [
+                "lockfileVersion": 3,
+                "packages": [
+                    "": ["dependencies": dependencies],
+                    "node_modules/fixture-agent": [
+                        "version": "1.0.0",
+                        "resolved": "https://registry.npmjs.org/fixture-agent/-/fixture-agent-1.0.0.tgz",
+                        "integrity": "sha512-" + String(repeating: "A", count: 86) + "==",
+                    ],
+                ],
+            ], options: [.sortedKeys]).write(to: manifests.appendingPathComponent("package-lock.json"))
+
+            // A Node that answers at once, and one that takes a minute to (and says when it has
+            // started to). Beside each, an npm whose `ci` lays out the package's entry point.
+            let probing = root.appendingPathComponent("probing")
+            self.probing = probing
+            func tools(_ name: String, nodeScript: String) throws -> URL {
+                let bin = root.appendingPathComponent(name, isDirectory: true)
+                try manager.createDirectory(at: bin, withIntermediateDirectories: true)
+                let npm = """
+                    #!/bin/sh
+                    if [ "$1" = --version ]; then echo 11.19.0; exit 0; fi
+                    /bin/mkdir -p node_modules/fixture-agent/bin
+                    echo "process.exit(0)" > node_modules/fixture-agent/bin/agent.js
+                    """
+                for (tool, script) in [("node", nodeScript), ("npm", npm)] {
+                    let url = bin.appendingPathComponent(tool)
+                    try "\(script)\n".write(to: url, atomically: true, encoding: .utf8)
+                    try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+                }
+                return bin.appendingPathComponent("node")
+            }
+            node = try tools("fast", nodeScript: "#!/bin/sh\necho v24.3.0")
+            slowNode = try tools("slow", nodeScript: """
+                #!/bin/sh
+                : > "\(probing.path)"
+                exec /bin/sleep 60
+                """)
+            killedNode = try tools("killed", nodeScript: "#!/bin/sh\nkill -9 $$")
+        }
+
+        func install(node: URL) async throws -> InstalledAgentPackage {
+            try await AgentPackageInstaller.install(
+                package, node: node, sourceRoot: sourceRoot, destinationRoot: destinationRoot
+            )
+        }
+    }
+
+    @Test func stoppingDuringTheNodeProbeKeepsTheVerifiedTree() async throws {
+        let stage = try Stage()
+        defer { try? FileManager.default.removeItem(at: stage.root) }
+        let first = try await stage.install(node: stage.node)
+        #expect(!first.reused)
+
+        let start = Task { try await stage.install(node: stage.slowNode) }
+        let deadline = Date().addingTimeInterval(30)
+        while !FileManager.default.fileExists(atPath: stage.probing.path), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(FileManager.default.fileExists(atPath: stage.probing.path), "the probe never started")
+        start.cancel()
+        await #expect(throws: CancellationError.self) { try await start.value }
+
+        #expect(FileManager.default.fileExists(atPath: first.bin.path),
+                "a cancelled start deleted the verified tree")
+        let again = try await stage.install(node: stage.node)
+        #expect(again.reused, "the next start installed from scratch")
+        #expect(again.directory == first.directory)
+    }
+
+    /// Killed by a signal — `killall node`, memory pressure, a code-signing kill — a probe has
+    /// not answered either.
+    @Test func aNodeProbeKilledBySignalKeepsTheVerifiedTree() async throws {
+        let stage = try Stage()
+        defer { try? FileManager.default.removeItem(at: stage.root) }
+        let first = try await stage.install(node: stage.node)
+
+        await #expect(throws: AgentPackageInstallError.self) {
+            try await stage.install(node: stage.killedNode)
+        }
+        #expect(FileManager.default.fileExists(atPath: first.bin.path),
+                "a probe killed by a signal deleted the verified tree")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: stage.destinationRoot.path)
+        #expect(entries.filter { $0.hasPrefix("fixture-") } == [first.directory.lastPathComponent],
+                "a tree was made for a Node version nobody read")
+    }
+
+    @Test func aNodeProbeThatTimesOutKeepsTheVerifiedTree() async throws {
+        let stage = try Stage()
+        defer { try? FileManager.default.removeItem(at: stage.root) }
+        let first = try await stage.install(node: stage.node)
+
+        await #expect(throws: AgentPackageInstallError.self) {
+            try await stage.install(node: stage.slowNode)
+        }
+        #expect(FileManager.default.fileExists(atPath: first.bin.path),
+                "a start whose Node never answered deleted the verified tree")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: stage.destinationRoot.path)
+        #expect(entries.filter { $0.hasPrefix("fixture-") } == [first.directory.lastPathComponent],
+                "a tree was made for a Node version nobody read")
     }
 }
