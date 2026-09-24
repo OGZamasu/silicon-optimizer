@@ -1301,6 +1301,17 @@ public actor ControlServer {
         stillAuthorized: @escaping @Sendable () async -> Bool = { true }
     ) async {
         guard (try? await writer.open()) != nil else { return }
+        // The first heartbeat goes out here, before there is a subscription for anything to
+        // arrive on. It is what tells a client the stream is up, and clients read it as the
+        // first frame. Started beside the forwarder, it raced whatever the hub already held
+        // — a host posts its current state the moment it is asked to watch — and lost
+        // whenever the scheduler ran the forwarder first.
+        let heartbeat: @Sendable () -> ControlAPI.HeartbeatEvent = {
+            ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
+        }
+        guard await stillAuthorized(),
+              (try? await writer.send(.heartbeat(heartbeat()))) != nil
+        else { return }
         let subscription = await hub.subscribe(as: audience)
         // Strictly after subscribing: a host that starts watching its own state and finds
         // no subscribers would stop again before this reader ever registered.
@@ -1317,12 +1328,10 @@ public actor ControlServer {
                 }
             }
             group.addTask {
-                var beat = ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
                 while !Task.isCancelled {
-                    guard await stillAuthorized() else { return }
-                    guard (try? await writer.send(.heartbeat(beat))) != nil else { return }
                     guard (try? await Task.sleep(for: heartbeatInterval)) != nil else { return }
-                    beat = ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
+                    guard await stillAuthorized() else { return }
+                    guard (try? await writer.send(.heartbeat(heartbeat()))) != nil else { return }
                 }
             }
             // Whichever half ends first ends the response: a broken write means the socket
