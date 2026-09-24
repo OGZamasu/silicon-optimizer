@@ -631,9 +631,14 @@ private struct DiffusionCatalogRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Badge(text: entry.license, systemImage: "doc.text")
                     HStack(spacing: 10) {
                         Label(entry.parameterLabel, systemImage: "number")
-                        Label("\(entry.shape.defaultSteps) steps", systemImage: "arrow.trianglehead.2.clockwise")
+                        Label(
+                            entry.stepChoices.map { "\($0.map(String.init).joined(separator: " or ")) steps" }
+                                ?? "\(entry.shape.defaultSteps) steps",
+                            systemImage: "arrow.trianglehead.2.clockwise"
+                        )
                         // The peak, not the download size: it is what decides whether this is
                         // worth the disk in the first place.
                         Label(

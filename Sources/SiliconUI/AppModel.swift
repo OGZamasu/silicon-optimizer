@@ -679,8 +679,10 @@ public final class AppModel {
             )
         }
 
+        var configuration = imageConfiguration
+        configuration.steps = entry.normalizedSteps(configuration.steps)
         imageQueue.append(ImageJob(
-            prompt: imagePrompt, configuration: imageConfiguration,
+            prompt: imagePrompt, configuration: configuration,
             modelID: entry.id, modelName: entry.name
         ))
         imagePrompt = ""
@@ -740,27 +742,67 @@ public final class AppModel {
 
     /// The node that can render an image right now, if any.
     public var imageCapableNode: PeerStatus? {
-        swarmPeers.first { peer in
-            peer.reachable && peer.capabilities.contains {
-                Self.isImageCapability($0) && $0.ready && $0.enabled != false
+        Self.imageNode(for: nil, among: swarmPeers)
+    }
+
+    /// The image models a node's `text-to-image` capability says it has installed: the
+    /// comma-separated `models` in its settings (silicon-node, hub #136). The ids are the
+    /// catalogue's own — `qwen-image`, `qwen-image-2.1-pruna` — so a match means the same
+    /// model. Empty when the node does not say.
+    nonisolated static func advertisedImageModels(_ capability: PeerCapability) -> [String] {
+        (capability.settings["models"] ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// The node for an image of `modelID`: one that advertises that very model, if any does,
+    /// and otherwise the first that renders images at all — which renders with a model of its
+    /// own choosing, as every node job did before nodes named their models.
+    nonisolated static func imageNode(for modelID: String?, among peers: [PeerStatus]) -> PeerStatus? {
+        func imageCapability(_ peer: PeerStatus) -> PeerCapability? {
+            guard peer.reachable else { return nil }
+            return peer.capabilities.first {
+                isImageCapability($0) && $0.ready && $0.enabled != false
             }
         }
+        if let modelID, let exact = peers.first(where: { peer in
+            imageCapability(peer).map { advertisedImageModels($0).contains(modelID) } ?? false
+        }) {
+            return exact
+        }
+        return peers.first { imageCapability($0) != nil }
+    }
+
+    /// The model id to send a node with a job for `modelID`: that id when the node advertises
+    /// it, so it renders the same model; nil otherwise, for the node's own default.
+    nonisolated static func nodeImageModel(for modelID: String, on node: PeerStatus) -> String? {
+        let advertised = node.capabilities
+            .filter { isImageCapability($0) && $0.ready && $0.enabled != false }
+            .flatMap(advertisedImageModels)
+        return advertised.contains(modelID) ? modelID : nil
     }
 
     /// Where the next image job runs, honoring the user's choice. Auto means the
     /// strongest machine currently offering images — the fix for the swarm member
     /// whose weak Mac rendered locally and looked broken.
     var imageRenderTarget: PeerStatus? {
+        imageRenderTarget(for: nil)
+    }
+
+    /// The same, for a job of one model: a node that has that model beats one that does not.
+    func imageRenderTarget(for modelID: String?) -> PeerStatus? {
         switch settings.imageRenderLocation ?? "auto" {
         case "local": return nil
-        default: return imageCapableNode
+        default: return Self.imageNode(for: modelID, among: swarmPeers)
         }
     }
 
     private func runImageJob(_ job: ImageJob) {
+        let target = imageRenderTarget(for: job.modelID)
         if Self.shouldRouteImageRemotely(
-            localOnly: job.localOnly, hasCandidate: imageRenderTarget != nil
-        ), let node = imageRenderTarget {
+            localOnly: job.localOnly, hasCandidate: target != nil
+        ), let node = target {
             runImageJob(job, onNode: node)
             return
         }
@@ -892,9 +934,10 @@ public final class AppModel {
         } }
     }
 
-    /// The same job, rendered by a swarm node instead of this Mac (#136). The node
-    /// uses its own image models, so the local model choice doesn't travel; size,
-    /// steps and prompt do. Progress speaks the one line every swarm tool speaks.
+    /// The same job, rendered by a swarm node instead of this Mac (#136). The model travels
+    /// when the node advertises the same id — `qwen-image-2.1-pruna` renders as that on the
+    /// node too — and otherwise the node uses its own default; size, steps and prompt always
+    /// do. Progress speaks the one line every swarm tool speaks.
     private func runImageJob(_ job: ImageJob, onNode node: PeerStatus) {
         noteActivity()
         guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
@@ -917,6 +960,7 @@ public final class AppModel {
             height: job.configuration.height,
             steps: job.configuration.steps,
             seed: job.seed,
+            model: Self.nodeImageModel(for: job.modelID, on: node),
             outputDirectory: settings.resolvedImageOutputDirectory
         )
         let runtime = NodeImageRuntime()
@@ -971,7 +1015,9 @@ public final class AppModel {
                 self.imageState = .idle
                 self.imageProgress = nil
                 if !images.isEmpty {
-                    outcome = .success(QueuedImage(images: images, node: nodeName))
+                    outcome = .success(QueuedImage(
+                        images: images, node: nodeName, nodeModel: request.model
+                    ))
                 }
             } catch {
                 outcome = .failure(error)
