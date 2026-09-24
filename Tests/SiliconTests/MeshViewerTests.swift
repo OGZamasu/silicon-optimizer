@@ -324,17 +324,18 @@ struct MeshViewerTests {
     @Test func loadsATrellisGLB() throws {
         let url = ProcessInfo.processInfo.environment["SILICON_TEST_GLB"].map {
             URL(fileURLWithPath: $0)
-        } ?? Settings.defaultTrellisBaseDirectory.appendingPathComponent("test_shoe.glb")
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        } ?? Settings.discoverTrellisBaseDirectory()?.appendingPathComponent("test_shoe.glb")
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return }
         let scene = try MeshScene.load(url)
         #expect(geometryCount(scene.rootNode) > 0)
     }
 
     /// A Hunyuan3D output: geometry-only, written by hy3d's own GLB writer.
     @Test func loadsAHunyuanGLB() throws {
-        let url = Settings.defaultTrellisBaseDirectory
-            .appendingPathComponent("mcp_outputs/3bb25a58eac5.glb")
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let url = Settings.discoverTrellisBaseDirectory()?
+                .appendingPathComponent("mcp_outputs/3bb25a58eac5.glb"),
+              FileManager.default.fileExists(atPath: url.path)
+        else { return }
         let scene = try MeshScene.load(url)
         #expect(geometryCount(scene.rootNode) > 0)
     }

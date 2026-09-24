@@ -689,9 +689,7 @@ struct SettingsView: View {
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)
             } label: {
-                fieldLabel(
-                    "trellis2 folder", caption: Settings.defaultTrellisBaseDirectory.path
-                )
+                fieldLabel("trellis2 folder", caption: model.trellisBaseDirectory.path)
             }
             LabeledContent {
                 TextField(

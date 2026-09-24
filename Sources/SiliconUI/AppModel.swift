@@ -78,6 +78,16 @@ public final class AppModel {
     /// the selector's.
     @ObservationIgnored
     var makeRuntime: (@MainActor (RuntimeSelector.Selection) -> any InferenceRuntime)?
+    /// Where `trellisBaseDirectory` looks for the 3D engines: this Mac's home folder and
+    /// disks in the app, a temporary tree under a test.
+    @ObservationIgnored
+    var trellisSearchRoots: @MainActor () -> (home: URL, disks: [URL]) = {
+        (FileManager.default.homeDirectoryForCurrentUser, Settings.localDiskRoots())
+    }
+    /// How long a search that found nothing stands before the next one, so a Mac without the
+    /// engines is not searched on every redraw of the 3D tab.
+    @ObservationIgnored var trellisSearchInterval: Duration = .seconds(15)
+    @ObservationIgnored private var trellisSearchMiss: (at: ContinuousClock.Instant, fallback: URL)?
 
     /// User-supplied llama.cpp flags from Advanced mode, applied to the next load.
     public private(set) var extraArguments: [String] = []
@@ -950,6 +960,37 @@ public final class AppModel {
 
     public func refreshMeshInstallations() { meshLibraryVersion += 1 }
 
+    /// Where the 3D engines are: the folder Settings names, or — while it names none — a
+    /// `trellis2` folder with an engine in it at the top of the home folder or of a local disk
+    /// (`Settings.trellisBaseDirectory(home:disks:)`). Looked for when 3D needs it, not once at
+    /// launch, so a disk plugged in later is found; what is found is written into Settings,
+    /// where it shows and stays put. With none found, the home folder's `trellis2`, where the
+    /// 3D tab then says what is missing.
+    public var trellisBaseDirectory: URL {
+        if let configured = settings.configuredTrellisBaseDirectory { return configured }
+        if let miss = trellisSearchMiss, ContinuousClock.now - miss.at < trellisSearchInterval {
+            return miss.fallback
+        }
+        let roots = trellisSearchRoots()
+        guard let found = Settings.trellisBaseDirectory(home: roots.home, disks: roots.disks)
+        else {
+            let fallback = roots.home.appendingPathComponent("trellis2", isDirectory: true)
+            trellisSearchMiss = (.now, fallback)
+            return fallback
+        }
+        trellisSearchMiss = nil
+        // Written after the view update that asked, never during it.
+        Task { @MainActor [weak self] in
+            guard let self, self.settings.configuredTrellisBaseDirectory == nil else { return }
+            self.settings.trellisBaseDirectory = found.path
+            // Only the app's own settings document is written back. A model handed its
+            // settings — a test, a preview — keeps the choice in memory and away from the
+            // Keychain that `save()` also writes.
+            if self.readsCredentialsFromKeychain { self.settings.save() }
+        }
+        return found
+    }
+
     static func hunyuanWeightsSlot(for entryID: String) -> String {
         entryID == MeshCatalog.hunyuanTurbo.id ? "shape-large" : "shape-small"
     }
@@ -957,7 +998,7 @@ public final class AppModel {
     /// Whether a backend can run right now, and why not when it cannot.
     public func meshInstallation(for entry: MeshEntry) -> MeshInstallation {
         _ = meshLibraryVersion
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return MeshLocator.trellis(base: base)
@@ -1012,7 +1053,7 @@ public final class AppModel {
 
     /// The one-click fix when a backend's `missing` is `.weights`.
     public func meshWeightsDownload(for entry: MeshEntry) -> MeshInstaller.Download? {
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return MeshInstaller.Download(
@@ -1767,7 +1808,7 @@ public final class AppModel {
     /// The one-time hy3d build, run for the user — xcodebuild because command-line SwiftPM
     /// never compiles mlx-swift's Metal shaders.
     public func buildHy3DEngine() {
-        let package = settings.resolvedTrellisBaseDirectory
+        let package = trellisBaseDirectory
             .appendingPathComponent("hunyuan3d-swift")
         runRepair(id: "hy3d-build", steps: [
             RepairStep(
@@ -1886,7 +1927,7 @@ public final class AppModel {
     }
 
     func makeMeshRuntime(for entry: MeshEntry) -> (any MeshRuntime)? {
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return TrellisRuntime(base: base)

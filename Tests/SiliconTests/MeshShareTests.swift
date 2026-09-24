@@ -9,14 +9,15 @@ import UniformTypeIdentifiers
 @Suite("Mesh sharing")
 struct MeshShareTests {
 
-    private static let shoe = Settings.defaultTrellisBaseDirectory
+    private static let shoe = Settings.discoverTrellisBaseDirectory()?
         .appendingPathComponent("test_shoe.glb")
 
     @Test func spinsAFullTurnIntoALoopingGIF() async throws {
-        guard FileManager.default.fileExists(atPath: Self.shoe.path) else { return }
+        guard let shoe = Self.shoe, FileManager.default.fileExists(atPath: shoe.path)
+        else { return }
 
         let data = try await MeshShare.turntableGIF(
-            mesh: Self.shoe,
+            mesh: shoe,
             pose: nil,
             size: CGSize(width: 96, height: 96),
             frameCount: 12,

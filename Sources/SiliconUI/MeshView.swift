@@ -337,7 +337,7 @@ struct MeshView: View {
                 .controlSize(.small)
             } else if installation.missing == .engine, entry.backend == .hunyuan,
                       FileManager.default.fileExists(
-                          atPath: model.settings.resolvedTrellisBaseDirectory
+                          atPath: model.trellisBaseDirectory
                               .appendingPathComponent("hunyuan3d-swift").path
                       ) {
                 repairRow(id: "hy3d-build", buttonTitle: "Build it for me") {
