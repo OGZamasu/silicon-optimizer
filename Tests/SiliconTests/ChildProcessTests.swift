@@ -252,6 +252,50 @@ struct ChildProcessRegistryTests {
         #expect(abandoned.isRunning == false)
     }
 
+    /// The exec'd orphan and what it started, together: a Python server re-execs and may
+    /// start helpers of its own, and the next launch's reap takes its whole group. That reap
+    /// asks the identity first, so it only reaches the group because the identity survives
+    /// the exec.
+    @Test func aLaterLaunchReapsAnExecdOrphanAndWhatItStarted() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("group-reap-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let childFile = directory.appendingPathComponent("child.pid")
+        let stub = directory.appendingPathComponent("python3.13")
+        try "#!/bin/sh\n/bin/sleep 60 &\necho $! > '\(childFile.path)'\n/bin/sleep 1\nexec /bin/sleep 60\n"
+            .write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+        let url = directory.appendingPathComponent("children.json")
+
+        let launchOne = ChildProcessRegistry()
+        launchOne.open(at: url)
+        let process = Process()
+        process.executableURL = stub
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        defer { if process.isRunning { process.terminate() } }
+        launchOne.register(pid: process.processIdentifier)
+        try await waitForExec(process.processIdentifier)
+        let childPID = try #require(Int32(try String(contentsOf: childFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)))
+        let child = try #require(ChildProcessRegistry.identify(childPID))
+        // Only ever the child this test started, never a pid handed on since.
+        defer { if ChildProcessRegistry.isStillAlive(child) { kill(child.pid, SIGKILL) } }
+
+        // Launch one crashes; launch two finds the orphan under its recorded identity.
+        let launchTwo = ChildProcessRegistry()
+        let orphans = launchTwo.open(at: url)
+        #expect(orphans.map(\.pid) == [process.processIdentifier])
+        #expect(launchTwo.reap(orphans).count == 1)
+        for _ in 0..<400 where process.isRunning || ChildProcessRegistry.isStillAlive(child) {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(!process.isRunning, "the exec'd orphan survived the reap")
+        #expect(!ChildProcessRegistry.isStillAlive(child), "what the orphan started survived the reap")
+    }
+
     /// A crash between reading the file and acting on it must not lose the orphans: the file is
     /// the only record of them at that point, so the next launch has to be able to retry.
     @Test func theRecordSurvivesUntilTheReapActuallyHappens() throws {
