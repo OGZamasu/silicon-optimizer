@@ -395,6 +395,14 @@ public final class AppModel {
         public var configuration: ImageConfiguration
         public var modelID: String
         public var modelName: String
+        /// A control-API caller's seed. The composer has no seed field, so its jobs have none.
+        public var seed: Int?
+        /// A control-API caller that said the prompt must not leave this Mac. Nil follows the
+        /// Settings choice of where images render, as the composer's jobs always have.
+        public var localOnly: Bool?
+        /// Who is waiting for the result: nobody for the composer's own jobs, whose outcome
+        /// is on screen; a control-API call for the jobs it queued, which answers with it.
+        var waiter: RenderWaiter<QueuedImage>?
     }
 
     /// Jobs waiting for the current generation to finish. Only one MFLUX process runs at a time —
@@ -423,9 +431,17 @@ public final class AppModel {
     /// child process rather than merely stop listening to it — otherwise a stopped job's mflux
     /// process would keep running unseen while the next queued job starts a second one alongside
     /// it, fighting over the same memory budget.
-    private var activeImageRuntime: MFluxRuntime?
+    private var activeImageRuntime: (any ImageRuntime)?
     private var activeNodeImageRuntime: NodeImageRuntime?
     private var imageWasCancelled = false
+    /// Builds the runtime a local image job runs on. Tests swap this for one that renders
+    /// nothing, so the queue's rules can be checked without MFLUX or a model.
+    @ObservationIgnored var makeImageRuntime: @MainActor (AppModel) -> any ImageRuntime = {
+        MFluxRuntime(
+            installation: $0.imageRuntime, huggingFaceToken: $0.settings.huggingFaceToken,
+            hubCache: $0.settings.resolvedEngineCacheDirectory
+        )
+    }
 
     public var isGeneratingImage: Bool { imageTask != nil }
 
@@ -604,13 +620,38 @@ public final class AppModel {
         advanceImageQueue()
     }
 
+    /// Queues a job for a caller that answers with its result — the control API — and waits
+    /// for it to finish.
+    ///
+    /// The same queue as the composer's, deliberately. A render that ran beside it would be a
+    /// second MFLUX process fighting the first for the memory the plan was checked against,
+    /// invisible to Stop, to `isGeneratingImage` and so to the sleep assertion, and would
+    /// reset the Images tab's progress to idle under a job that was still running.
+    ///
+    /// Once queued the job belongs to the queue, as a clip belongs to the video queue: a
+    /// caller that stops waiting leaves it to finish, and its image lands in the gallery.
+    func renderQueued(_ job: ImageJob) async throws -> QueuedImage {
+        var job = job
+        let waiter = RenderWaiter<QueuedImage>()
+        job.waiter = waiter
+        imageQueue.append(job)
+        advanceImageQueue()
+        return try await waiter.wait()
+    }
+
     /// Removes one job that has not started running yet. The one already in flight cannot be
     /// removed this way — use `cancelImage()` for that.
     public func removeQueuedImageJob(_ id: ImageJob.ID) {
+        for job in imageQueue where job.id == id {
+            job.waiter?.finish(.failure(QueuedRenderError.removedFromQueue))
+        }
         imageQueue.removeAll { $0.id == id }
     }
 
     public func clearImageQueue() {
+        for job in imageQueue {
+            job.waiter?.finish(.failure(QueuedRenderError.removedFromQueue))
+        }
         imageQueue.removeAll()
     }
 
@@ -650,7 +691,9 @@ public final class AppModel {
     }
 
     private func runImageJob(_ job: ImageJob) {
-        if let node = imageRenderTarget {
+        if Self.shouldRouteImageRemotely(
+            localOnly: job.localOnly, hasCandidate: imageRenderTarget != nil
+        ), let node = imageRenderTarget {
             runImageJob(job, onNode: node)
             return
         }
@@ -666,20 +709,22 @@ public final class AppModel {
         )
         let request = ImageRequest(
             prompt: job.prompt, configuration: job.configuration,
-            seed: nil, output: output
+            seed: job.seed, output: output
         )
 
         imageState = .starting(stage: "Starting MFLUX…")
         imageProgress = nil
         imageWasCancelled = false
-        let runtime = MFluxRuntime(
-            installation: imageRuntime, huggingFaceToken: settings.huggingFaceToken,
-            hubCache: settings.resolvedEngineCacheDirectory
-        )
+        let runtime = makeImageRuntime(self)
         activeImageRuntime = runtime
 
         imageTask = Task { [weak self] in
+            // How the job ended, told to whoever is waiting on it once, on the way out —
+            // whichever way out it is. A caller left holding a connection for a render
+            // that is not coming is a phone that hangs.
+            var outcome: Result<QueuedImage, any Error> = .failure(ImageRuntimeError.noImageProduced)
             defer {
+                job.waiter?.finish(outcome)
                 Task { @MainActor in
                     guard let self else { return }
                     self.imageTask = nil
@@ -701,14 +746,19 @@ public final class AppModel {
                         generatedImages.insert(result, at: 0)
                         imageProgress = nil
                         imageState = .idle
-                        if routeNextImageToMesh {
+                        outcome = .success(QueuedImage(images: [result], node: nil))
+                        // The composer's hand-offs below are for the composer's own next
+                        // image. A control-API job that happened to finish first must not
+                        // take them.
+                        let isComposers = job.waiter == nil
+                        if isComposers, routeNextImageToMesh {
                             routeNextImageToMesh = false
                             meshInputImage = result.image
                             // The 3D flow sets revision state per click; leaving it set
                             // would quietly turn the Images tab into revision mode too.
                             imageConfiguration.initImage = nil
                         }
-                        if let personaID = routeNextImageToPersonaMouth {
+                        if isComposers, let personaID = routeNextImageToPersonaMouth {
                             routeNextImageToPersonaMouth = nil
                             imageConfiguration.initImage = nil
                             if var persona = settings.personas.first(
@@ -720,13 +770,25 @@ public final class AppModel {
                         }
                     }
                 }
+                // Stop cancels this task as well as the process, and a cancelled task's stream
+                // simply ends — so a stop can arrive here rather than in the catch below. An
+                // image that made it out before the stop is still the answer.
+                if let self, imageWasCancelled {
+                    imageState = .idle
+                    imageWasCancelled = false
+                    if case .failure = outcome {
+                        outcome = .failure(QueuedRenderError.stoppedOnMac)
+                    }
+                }
             } catch {
+                outcome = .failure(error)
                 guard let self else { return }
                 // A user-requested stop tears down the process the same way a real failure does
                 // — terminating it makes mflux exit non-zero — so it lands in this catch block
                 // too. Report it as idle rather than as a failure the user didn't cause.
                 if imageWasCancelled {
                     imageState = .idle
+                    outcome = .failure(QueuedRenderError.stoppedOnMac)
                 } else if case ImageRuntimeError.gated = error,
                           let entry = DiffusionCatalog.entry(id: job.modelID) {
                     // The fix is on a web page, so the alert must carry the way there —
@@ -734,18 +796,24 @@ public final class AppModel {
                     imageState = .failed(
                         message: "\(entry.name) needs its licence accepted on Hugging Face."
                     )
-                    alert = AlertContent(
-                        title: "\(entry.name) needs a licence agreement",
-                        message: gatedGuidance(for: entry),
-                        linkTitle: "Open licence page",
-                        linkURL: Self.licenceURL(for: entry.repository)
-                    )
+                    // A control-API caller is told in its answer. An alert on the Mac for a
+                    // render somebody else asked for is a dialog nobody here is waiting on.
+                    if job.waiter == nil {
+                        alert = AlertContent(
+                            title: "\(entry.name) needs a licence agreement",
+                            message: gatedGuidance(for: entry),
+                            linkTitle: "Open licence page",
+                            linkURL: Self.licenceURL(for: entry.repository)
+                        )
+                    }
                 } else {
                     imageState = .failed(message: error.localizedDescription)
-                    alert = AlertContent(
-                        title: "Could not generate \"\(job.prompt)\"",
-                        message: error.localizedDescription
-                    )
+                    if job.waiter == nil {
+                        alert = AlertContent(
+                            title: "Could not generate \"\(job.prompt)\"",
+                            message: error.localizedDescription
+                        )
+                    }
                 }
                 imageWasCancelled = false
             }
@@ -759,7 +827,9 @@ public final class AppModel {
         noteActivity()
         guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
         else {
-            imageState = .failed(message: "\(node.name)'s address didn't parse.")
+            let reason = "\(node.name)'s address didn't parse."
+            imageState = .failed(message: reason)
+            job.waiter?.finish(.failure(ImageRuntimeError.generationFailed(reason)))
             currentImageJob = nil
             advanceImageQueue()
             return
@@ -770,6 +840,7 @@ public final class AppModel {
             width: job.configuration.width,
             height: job.configuration.height,
             steps: job.configuration.steps,
+            seed: job.seed,
             outputDirectory: settings.resolvedImageOutputDirectory
         )
         let runtime = NodeImageRuntime()
@@ -790,10 +861,13 @@ public final class AppModel {
         }
 
         imageTask = Task { [weak self] in
+            // As on the local path: the caller, if any, is told once on the way out.
+            var outcome: Result<QueuedImage, any Error> = .failure(ImageRuntimeError.noImageProduced)
             // Mirrors the local path's defer: clear the machinery and advance the
             // queue, but never touch imageState here — a failure set below must
             // stay visible.
             defer {
+                job.waiter?.finish(outcome)
                 Task { @MainActor in
                     guard let self else { return }
                     self.imageTask = nil
@@ -808,17 +882,19 @@ public final class AppModel {
                 )
                 guard let self else { return }
                 let elapsed = result.elapsed
-                for image in result.images {
-                    self.generatedImages.insert(
-                        ImageResult(
-                            image: image, elapsed: elapsed,
-                            peakMemory: nil, stepsPerSecond: 0
-                        ), at: 0
-                    )
+                let images = result.images.map {
+                    ImageResult(image: $0, elapsed: elapsed, peakMemory: nil, stepsPerSecond: 0)
+                }
+                for image in images {
+                    self.generatedImages.insert(image, at: 0)
                 }
                 self.imageState = .idle
                 self.imageProgress = nil
+                if !images.isEmpty {
+                    outcome = .success(QueuedImage(images: images, node: nodeName))
+                }
             } catch {
+                outcome = .failure(error)
                 guard let self else { return }
                 let wasCancel = self.imageWasCancelled || error is CancellationError
                     || (error as? VideoRuntimeError).map {
@@ -828,13 +904,16 @@ public final class AppModel {
                     self.imageWasCancelled = false
                     self.imageState = .idle
                     self.imageProgress = nil
+                    outcome = .failure(QueuedRenderError.stoppedOnMac)
                     return
                 }
                 self.imageState = .failed(message: error.localizedDescription)
-                self.alert = AlertContent(
-                    title: "Could not generate \"\(job.prompt)\" on \(node.name)",
-                    message: error.localizedDescription
-                )
+                if job.waiter == nil {
+                    self.alert = AlertContent(
+                        title: "Could not generate \"\(job.prompt)\" on \(node.name)",
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
     }
@@ -925,6 +1004,8 @@ public final class AppModel {
         public var configuration: MeshConfiguration
         public var modelID: String
         public var modelName: String
+        /// Same as `ImageJob.waiter`: set for a control-API call, nil for the composer.
+        var waiter: RenderWaiter<MeshResult>?
     }
 
     public internal(set) var meshQueue: [MeshJob] = []
@@ -943,6 +1024,9 @@ public final class AppModel {
     private var meshTask: Task<Void, Never>?
     private var activeMeshRuntime: (any MeshRuntime)?
     private var meshWasCancelled = false
+    /// Stands in for `makeMeshRuntime(for:)` when set. Tests use it to run the mesh queue on a
+    /// runtime that renders nothing.
+    @ObservationIgnored var meshRuntimeFactory: (@MainActor (MeshEntry) -> (any MeshRuntime)?)?
     /// Bumped to re-run the filesystem install probes.
     public private(set) var meshLibraryVersion = 0
 
@@ -1886,6 +1970,7 @@ public final class AppModel {
     }
 
     func makeMeshRuntime(for entry: MeshEntry) -> (any MeshRuntime)? {
+        if let meshRuntimeFactory { return meshRuntimeFactory(entry) }
         let base = settings.resolvedTrellisBaseDirectory
         switch entry.backend {
         case .trellis:
@@ -1929,7 +2014,21 @@ public final class AppModel {
         advanceMeshQueue()
     }
 
+    /// The mesh twin of `renderQueued(_: ImageJob)`, and for the same reasons: one queue, one
+    /// Stop button, one process at a time.
+    func renderQueued(_ job: MeshJob) async throws -> MeshResult {
+        var job = job
+        let waiter = RenderWaiter<MeshResult>()
+        job.waiter = waiter
+        meshQueue.append(job)
+        advanceMeshQueue()
+        return try await waiter.wait()
+    }
+
     public func removeQueuedMeshJob(_ id: MeshJob.ID) {
+        for job in meshQueue where job.id == id {
+            job.waiter?.finish(.failure(QueuedRenderError.removedFromQueue))
+        }
         meshQueue.removeAll { $0.id == id }
     }
 
@@ -1944,8 +2043,13 @@ public final class AppModel {
         noteActivity()
         guard let entry = MeshCatalog.entry(id: job.modelID),
               let runtime = makeMeshRuntime(for: entry) else {
+            let reason = "No runtime available for \(job.modelName)."
             currentMeshJob = nil
-            meshState = .failed(message: "No runtime available for \(job.modelName).")
+            meshState = .failed(message: reason)
+            job.waiter?.finish(.failure(MeshRuntimeError.notInstalled(reason)))
+            // The next job still gets its turn: a caller queued behind this one is holding a
+            // connection, and nothing else would start it until somebody queued another.
+            advanceMeshQueue()
             return
         }
         let (directory, baseName) = nextMeshOutputLocation()
@@ -1960,7 +2064,10 @@ public final class AppModel {
         activeMeshRuntime = runtime
 
         meshTask = Task { [weak self] in
+            // Told to the caller once, on the way out, as on the image paths.
+            var outcome: Result<MeshResult, any Error> = .failure(MeshRuntimeError.noMeshProduced)
             defer {
+                job.waiter?.finish(outcome)
                 Task { @MainActor in
                     guard let self else { return }
                     self.meshTask = nil
@@ -1982,18 +2089,32 @@ public final class AppModel {
                         meshResults.insert(result, at: 0)
                         meshProgress = nil
                         meshState = .idle
+                        outcome = .success(result)
+                    }
+                }
+                // As with images: a stop that ends the stream ends the loop, not in the catch.
+                if let self, meshWasCancelled {
+                    meshState = .idle
+                    meshWasCancelled = false
+                    if case .failure = outcome {
+                        outcome = .failure(QueuedRenderError.stoppedOnMac)
                     }
                 }
             } catch {
+                outcome = .failure(error)
                 guard let self else { return }
                 if meshWasCancelled {
                     meshState = .idle
+                    outcome = .failure(QueuedRenderError.stoppedOnMac)
                 } else {
                     meshState = .failed(message: error.localizedDescription)
-                    alert = AlertContent(
-                        title: "Could not generate a 3D model",
-                        message: error.localizedDescription
-                    )
+                    // As with images: a caller is told in its answer, not by a dialog here.
+                    if job.waiter == nil {
+                        alert = AlertContent(
+                            title: "Could not generate a 3D model",
+                            message: error.localizedDescription
+                        )
+                    }
                 }
                 meshWasCancelled = false
             }
