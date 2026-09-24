@@ -257,13 +257,13 @@ struct SwarmView: View {
                         inspectorFact("Answers in", String(format: "%.0f ms", latency * 1000))
                     }
 
-                    if let llm = peer.llm, llm.availableModels.count > 1 {
+                    if let llm = peer.llm, llm.switchableModels.count > 1 {
                         Divider()
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Models it offers")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                            ForEach(llm.availableModels, id: \.self) { candidate in
+                            ForEach(llm.switchableModels, id: \.self) { candidate in
                                 HStack(spacing: 8) {
                                     Text(candidate)
                                         .font(.callout)
@@ -918,9 +918,9 @@ struct SwarmView: View {
             }
             .help("Start the chat model on \(peer.name)")
         }
-        if llm.availableModels.count > 1 {
+        if llm.switchableModels.count > 1 {
             Menu("Switch") {
-                ForEach(llm.availableModels, id: \.self) { candidate in
+                ForEach(llm.switchableModels, id: \.self) { candidate in
                     Button(candidate) {
                         Task { await model.setPeerLLM(peer, running: true, model: candidate) }
                     }

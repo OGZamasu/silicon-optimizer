@@ -1140,8 +1140,47 @@ public final class AppModel {
         /// that offer more than one started advertising it with #133.
         public var engine: String?
         /// Models the peer could serve instead. Empty until nodes ship a list endpoint;
-        /// the loaded model then stands alone in the switcher.
+        /// the loaded model then stands alone in the switcher. Nodes list *files* here
+        /// ("qwen3_8_27b.ninfer"); `switchableModels` is the same list by model id.
         public var availableModels: [String] = []
+
+        /// What the peer could switch to, by the ids its start route takes: the loaded
+        /// model first, then every listed file that is not that model. A one-model node
+        /// lists its file and serves its id — one model, not a menu of two.
+        public var switchableModels: [String] {
+            var ids: [String] = []
+            if let model { ids.append(model) }
+            for file in availableModels {
+                let id = nodeModelID(for: file)
+                if !ids.contains(where: { GatewayAPI.modelNamesMatch($0, id) }) {
+                    ids.append(id)
+                }
+            }
+            return ids
+        }
+
+        /// The model id a node's `POST /v1/llm/start` expects, for a model this Mac may
+        /// hold under either spelling.
+        ///
+        /// The node turns the `model` it is sent into a file name — dots and dashes to
+        /// underscores, `.ninfer` appended — so "qwen3.8-27b" finds qwen3_8_27b.ninfer,
+        /// and a file name sent as-is looks for qwen3_8_27b_ninfer.ninfer. It looks only
+        /// after stopping the model it was serving, so a wrong spelling here takes the
+        /// node's chat down for every member of the swarm. The loaded model goes by the
+        /// id the node serves it under; any other file by its name without the extension,
+        /// which is the id the node gives a file it starts.
+        public func nodeModelID(for name: String) -> String {
+            Self.nodeModelID(for: name, serving: model)
+        }
+
+        static func nodeModelID(for name: String, serving model: String?) -> String {
+            if let model, GatewayAPI.modelNamesMatch(model, name) { return model }
+            let suffix = ".ninfer"
+            if name.lowercased().hasSuffix(suffix), name.count > suffix.count {
+                return String(name.dropLast(suffix.count))
+            }
+            return name
+        }
     }
 
     public struct PeerStatus: Identifiable, Sendable {
@@ -1394,7 +1433,11 @@ public final class AppModel {
         }
         if model != nil || contextLength != nil {
             var payload: [String: Any] = [:]
-            if let model { payload["model"] = model }
+            // By id, whatever spelling the caller had: menus list the node's files, and a
+            // gateway id can end in one.
+            if let model {
+                payload["model"] = PeerLLM.nodeModelID(for: model, serving: peer.llm?.model)
+            }
             // Honored once the node ships hub #127; older nodes ignore the field and
             // start at their own profile — the card shows whatever they actually chose.
             if let contextLength { payload["context_length"] = contextLength }
