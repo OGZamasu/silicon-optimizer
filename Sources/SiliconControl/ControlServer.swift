@@ -24,6 +24,9 @@ public actor ControlServer {
     private var port: Int = 0
     /// The shared swarm secret, accepted alongside the per-launch token when set.
     private var swarmToken: String?
+    /// Every connection the swarm secret is holding open right now, so that `stop()` can
+    /// end them. See there.
+    private var swarmConnections: [UUID: NWConnection] = [:]
     /// Whether the owner has asked for the swarm to reach this Mac, and a swarm token
     /// exists for it to authenticate with. Exposure without one is refused outright.
     public private(set) var swarmExposureRequested = false
@@ -274,6 +277,19 @@ public actor ControlServer {
         tailnetOwners = []
         tailnetAddress = nil
         closeTailnetListener()
+        // Cancelling a listener leaves the connections it already accepted open, and the
+        // app stops this server precisely when the swarm is turned off or its secret
+        // changes. A node's `/events` stream or chat stream would otherwise go on being
+        // served — status frames, heartbeats, tokens — by a server that no longer honours
+        // the secret it was opened with. The secret goes with the server, and so does
+        // everything it admitted.
+        //
+        // Only the swarm's. A paired device's streams are ended by the registry when it is
+        // revoked or suspended, and still hold a valid token here; the Mac's own tools may
+        // be waiting on a render that a settings change should not throw away.
+        swarmToken = nil
+        for connection in swarmConnections.values { connection.cancel() }
+        swarmConnections.removeAll()
         try? FileManager.default.removeItem(at: handshakeURL)
     }
 
@@ -625,6 +641,17 @@ public actor ControlServer {
             }
 
             let caller = await identify(request, from: origin)
+            // Held where `stop()` can end it. A stop that landed while this request was being
+            // identified has already ended everything it could see, and this one was not
+            // there to be seen — so it is refused here instead.
+            var swarmTicket: UUID?
+            if caller == .swarm {
+                guard swarmToken != nil else { return }
+                let ticket = UUID()
+                swarmConnections[ticket] = connection
+                swarmTicket = ticket
+            }
+            defer { if let swarmTicket { swarmConnections[swarmTicket] = nil } }
             // Everything this request sets off runs with the paid lanes shut when a swarm
             // node asked — streams and the synchronous render's task included, because both
             // are started inside this scope. See `PaidLanes`.
