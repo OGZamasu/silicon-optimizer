@@ -48,8 +48,11 @@ struct MFluxVersionTests {
         ]
         for entry in DiffusionCatalog.all {
             let executable = MFluxArguments.executableName(for: entry.id)
-            #expect(installed.contains(executable), "\(entry.id) runs \(executable)")
+            // An adapter entry runs the app's runner on the environment's own Python.
+            let expected = entry.adapter == nil ? installed : [MFluxArguments.adapterInterpreter]
+            #expect(expected.contains(executable), "\(entry.id) runs \(executable)")
         }
+        #expect(MFluxArguments.executableName(for: "qwen-image-2.1") == "mflux-generate-qwen-2.1")
     }
 
     /// The other families keep the aliases 0.20.0 still resolves to the same repositories.

@@ -469,7 +469,7 @@ public final class AppModel {
     @ObservationIgnored var makeImageRuntime: @MainActor (AppModel) -> any ImageRuntime = {
         MFluxRuntime(
             installation: $0.imageRuntime, huggingFaceToken: $0.settings.huggingFaceToken,
-            hubCache: $0.settings.resolvedEngineCacheDirectory
+            hubCache: $0.settings.resolvedEngineCacheDirectory, hub: $0.imageModelHub
         )
     }
 

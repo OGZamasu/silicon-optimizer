@@ -294,6 +294,16 @@ if [[ -f Resources/laya/laya_sidecar.py ]]; then
     cp Resources/laya/laya_sidecar.py "$BUNDLE/Contents/Resources/laya/"
 fi
 
+# The Qwen-Image 2.1 adapter runner: merges a few-step LoRA into MFLUX's Qwen-Image 2.1 and
+# samples on the adapter's own schedule, which no MFLUX entry point does. Run with the pinned
+# MFLUX environment's Python; a source file for the same reason the sidecar above is. Its
+# tests stay in the repository.
+if [[ -f Resources/qwen21/silicon_qwen21.py ]]; then
+    echo "==> Embedding the Qwen-Image 2.1 adapter runner"
+    mkdir -p "$BUNDLE/Contents/Resources/qwen21"
+    cp Resources/qwen21/silicon_qwen21.py "$BUNDLE/Contents/Resources/qwen21/"
+fi
+
 # The licences travel with the binaries they cover.
 if [[ -f THIRD_PARTY_LICENSES.md ]]; then
     cp THIRD_PARTY_LICENSES.md "$BUNDLE/Contents/Resources/"
