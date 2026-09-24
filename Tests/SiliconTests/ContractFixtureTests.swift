@@ -37,14 +37,32 @@ struct ContractFixtureTests {
         return abs(value - expected) < 0.01
     }
 
+    /// The fixtures the contract's README lists in its Files table. The table travels with
+    /// the fixtures from silicon-node, so it is the list of what the directory should hold —
+    /// which a count typed in here was not, the day the node added two.
+    private static func documentedFixtures() throws -> [String] {
+        let readme = try String(
+            contentsOf: contractDirectory.appendingPathComponent("README.md"), encoding: .utf8
+        )
+        let names = readme.split(separator: "\n").compactMap { line in
+            line.firstMatch(of: /^\| `([^`\/]+\.json)` \|/).map { String($0.1) }
+        }
+        return Set(names).sorted()
+    }
+
     /// Both repositories check this digest, so editing the fixtures on one side without
     /// copying the directory to the other fails a build rather than passing quietly.
+    ///
+    /// The digest covers whatever is on disk, so the set of files is checked against the
+    /// README first: a fixture dropped or added with the digest recomputed would match it.
     @Test func theContractCopyMatchesTheCanonicalChecksum() throws {
         let files = try FileManager.default
             .contentsOfDirectory(at: Self.contractDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        #expect(files.count == 6)
+        let documented = try Self.documentedFixtures()
+        #expect(!documented.isEmpty)
+        #expect(files.map(\.lastPathComponent) == documented)
 
         var digest = SHA256()
         for file in files {
