@@ -827,6 +827,20 @@ public actor ControlServer {
         return status
     }
 
+    /// Why a chat's images are refused, or nil. Asked by all three chat routes, before the
+    /// host sees the request.
+    ///
+    /// Every caller sends pictures inline — see `ControlAPI.ChatImages`; an address is what
+    /// the runtime would go and fetch. Everyone but this Mac's own token is also held to what
+    /// a paired phone may attach, on `POST /chat` as on the streams: a swarm node's body
+    /// ceiling is sixteen megabytes. The local token keeps only its body ceiling, because
+    /// the MCP bridge attaches files of up to ten megabytes, past a phone's per-image cap.
+    static func chatImageRefusal(_ images: [String], as caller: Caller?) -> String? {
+        if let refusal = ControlAPI.ChatImages.refusal(forImages: images) { return refusal }
+        guard caller != .control else { return nil }
+        return BuddyLimits.refusal(forImages: images)
+    }
+
     /// Why a task in the query string is refused. Exported so the contract fixture and the
     /// server cannot drift into promising different sentences.
     public static let taskBelongsInAPost =
@@ -1032,6 +1046,9 @@ public actor ControlServer {
             guard let chat = try? request.decode(ControlAPI.ChatRequest.self) else {
                 return .refused(.error(400, "Could not read the chat request."))
             }
+            if let refusal = Self.chatImageRefusal(chat.messages.flatMap(\.images), as: caller) {
+                return .refused(.error(400, refusal))
+            }
             body = EventSource { writer in
                 await Self.pumpChat(writer, shown: shown) { try await host.chatStream(chat) }
             }
@@ -1040,6 +1057,9 @@ public actor ControlServer {
             guard caller != nil else { return .refused(unauthorized) }
             guard let message = try? request.decode(ControlAPI.NewMessageRequest.self) else {
                 return .refused(.error(400, "Could not read the message."))
+            }
+            if let refusal = Self.chatImageRefusal(message.images, as: caller) {
+                return .refused(.error(400, refusal))
             }
             body = EventSource { writer in
                 await Self.pumpChat(writer, shown: shown) {
@@ -1614,7 +1634,11 @@ public actor ControlServer {
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):
-                return try .encode(await host.chat(try request.decode(ControlAPI.ChatRequest.self)))
+                let chat = try request.decode(ControlAPI.ChatRequest.self)
+                if let refusal = Self.chatImageRefusal(chat.messages.flatMap(\.images), as: caller) {
+                    return .error(400, refusal)
+                }
+                return try .encode(await host.chat(chat))
             case ("POST", "/decide"), ("POST", "/v1/systemone"):
                 // The second path is TypeSafe's own, so a client written for Jev can be
                 // pointed here with only its base URL changed.
