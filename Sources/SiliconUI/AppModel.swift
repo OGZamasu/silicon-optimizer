@@ -1175,7 +1175,7 @@ public final class AppModel {
         }
     }
 
-    public private(set) var swarmPeers: [PeerStatus] = []
+    public internal(set) var swarmPeers: [PeerStatus] = []
     public private(set) var isRefreshingSwarm = false
     private var swarmPollTask: Task<Void, Never>?
     /// When the swarm was last polled, so a stale view can be seen for what it is
