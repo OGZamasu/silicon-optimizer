@@ -393,9 +393,9 @@ public struct MemoryPlanner: Sendable {
             // Pick the largest pool that fits the budget, leaving the rest of the plan intact.
             let available = plan.budget - plan.nonExpertWeights - plan.kvCache
                 - plan.recurrentState - plan.computeBuffers
-            let affordable = perSlot.rawValue > 0
-                ? Int(available.rawValue / perSlot.rawValue) : 0
-            let slots = max(8, min(moe.expertCount - 1, affordable))
+            let slots = max(
+                8, Self.affordableExpertSlots(in: plan, shape: shape, quantization: quantization)
+            )
             // Ordered with the comparison last: `a < b, c > .zero` parses as a generic argument
             // list and fails to compile.
             if available > .zero, slots < moe.expertCount {
@@ -414,7 +414,8 @@ public struct MemoryPlanner: Sendable {
                     saving: saving,
                     cost: "Prompt processing drops sharply: the micro-batch must fall to "
                         + "\(maxUBatch) tokens. Generation slows modestly.",
-                    kind: .enableExpertStreaming
+                    kind: .enableExpertStreaming,
+                    expertSlots: slots
                 ))
             }
         }

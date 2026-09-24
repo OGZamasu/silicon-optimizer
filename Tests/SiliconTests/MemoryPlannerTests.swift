@@ -58,6 +58,24 @@ struct ExpertSlotTests {
                 "slots=\(slots) predicted \(plan.resident.formatted), expected ~\(expectedGiB) GiB")
     }
 
+    /// The streaming suggestion carries the pool Apply sets, and it is the one its title names.
+    /// A plan that is tight but has room for every expert still gets one short of them all —
+    /// a pool holding every expert streams nothing. The model sheet worked the number out again
+    /// as `min(experts, affordable)`, so this very suggestion, "127 of 128", applied 128.
+    @Test func theStreamingSuggestionCarriesThePoolItNames() throws {
+        let plan = MemoryPlanner(profile: m3Max36).plan(
+            shape: qwen30BA3B, quantization: .q4_K_M,
+            configuration: LoadConfiguration(contextLength: 65_536)
+        )
+        let suggestion = try #require(plan.remediations.first { $0.kind == .enableExpertStreaming })
+        let slots = try #require(suggestion.expertSlots)
+        let experts = try #require(qwen30BA3B.moe).expertCount
+        #expect(slots == experts - 1)
+        #expect(suggestion.title.contains("(\(slots) of \(experts) resident)"))
+        #expect(plan.remediations.filter { $0.kind != .enableExpertStreaming }
+            .allSatisfy { $0.expertSlots == nil })
+    }
+
     @Test func streamingReducesResidentMemory() {
         let planner = MemoryPlanner(profile: m3Pro36)
         let base = LoadConfiguration(contextLength: 32_768)
