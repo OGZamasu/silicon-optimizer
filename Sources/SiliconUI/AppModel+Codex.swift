@@ -334,7 +334,9 @@ extension AppModel {
     /// "Auto-approve calls Jev rates safe" is on. `.confirm` always waits for the person.
     /// And a screening that could not happen at all waits for the person too — an
     /// unavailable guardrail must never read as a yes.
-    func screenCodexApproval(_ approvalID: UUID, using service: JevService = .shared) async {
+    func screenCodexApproval(
+        _ approvalID: UUID, using service: JevService = .shared, router: DecisionRouter? = nil
+    ) async {
         guard let pending = codexApprovals.first(where: { $0.id == approvalID }) else { return }
 
         // Read before screening rather than after: whether a `.act` would be answered
@@ -352,7 +354,8 @@ extension AppModel {
             recentTranscript: recentCodexToolResults(),
             protecting: [CodexRuntime.homeDirectory.path],
             autoApproveArmed: autoApprove,
-            using: service
+            using: service,
+            router: router
         )
 
         // The person may have decided while the screening was in flight. Their answer wins,
@@ -361,7 +364,8 @@ extension AppModel {
         codexApprovals[index].screening = screening
         let approval = codexApprovals[index]
 
-        guard autoApprove, let verdict = screening.verdict else { return }
+        // Only Jev's own verdict is answered for the person; a free lane's waits for them.
+        guard autoApprove, screening.answeredByJev, let verdict = screening.verdict else { return }
 
         switch verdict {
         case .act:

@@ -59,6 +59,16 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// Whether this ability runs only once the owner has switched it on — Jev's master
+    /// switch and its own — whichever lane would then answer it.
+    ///
+    /// Guardrails and verification hold an agent's tool calls and grade chat answers. Both
+    /// are off by default and promise that off means off, so a local lane being installed
+    /// must not start either on a Mac that never switched it on. The other abilities are
+    /// advice their feature can take or leave, and a free local lane answers them whether
+    /// or not their Jev switch is on.
+    public var runsOnlyWhenSwitchedOn: Bool { self == .guardrails || self == .verification }
+
     /// Whether the app actually calls Jev for this yet. The rest are shown in Settings as
     /// the roadmap — off, captioned "coming" — so the owner can see where this is going
     /// rather than meeting eight new toggles at once later.
@@ -139,8 +149,15 @@ public protocol JevQuestionSet {
 }
 
 extension JevQuestionSet {
-    /// Asks this set's questions through the one door, so the feature toggle, the budget,
-    /// the cache and the ledger all apply without the caller remembering them.
+    /// Asks this set's questions through the router, so the lane the owner chose for this
+    /// ability is the one that answers — and, when that lane is Jev, through the one door,
+    /// so the feature toggle, the budget, the cache and the ledger all apply without the
+    /// caller remembering them.
+    ///
+    /// Through the router rather than straight at `JevService`, like the features that
+    /// build their own questions: a set asked directly would be answered by Jev whatever
+    /// the Decisions panel says, which billed "Always local" guardrails and verification
+    /// to TypeSafe and left the local lane the panel named for them unasked.
     ///
     /// - Parameter service: the app leaves this alone. A feature's own tests pass a
     ///   `JevService` pointed at a loopback server, so a question set can be exercised
@@ -148,7 +165,14 @@ extension JevQuestionSet {
     public static func ask(
         state: JSONContent, cacheKey: String? = nil, using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await ask(state: state, cacheKey: cacheKey, via: .router(for: service))
+    }
+
+    /// The same, through a given router — a test's, with lanes registered on it.
+    public static func ask(
+        state: JSONContent, cacheKey: String? = nil, via router: DecisionRouter
+    ) async throws -> ControlAPI.DecideResponse {
+        try await router.decide(
             feature, state: state, questions: questions, cacheKey: cacheKey
         )
     }
@@ -318,6 +342,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
     )
 
     public func isOn(_ feature: JevFeature) -> Bool { features[feature] ?? false }
+
+    /// The master switch and this feature's own, both on.
+    public func isTurnedOn(_ feature: JevFeature) -> Bool { enabled && isOn(feature) }
 
     /// What the owner has said about this feature's lane. Absent means automatic.
     public func laneOverride(_ feature: JevFeature) -> DecisionLaneOverride {
@@ -707,6 +734,9 @@ public enum JevError: Error, LocalizedError, Equatable {
     /// The request being answered came from a swarm node, which may not spend the owner's
     /// Jev budget. Nothing was sent. See `PaidLanes`.
     case notForPeers
+    /// The owner pinned this ability away from Jev in Settings → Decisions — `Always local`
+    /// or `Off`. Nothing was sent.
+    case pinnedAwayFromJev(JevFeature, DecisionLaneOverride)
 
     public var errorDescription: String? {
         switch self {
@@ -731,6 +761,12 @@ public enum JevError: Error, LocalizedError, Equatable {
             )
         case .notForPeers:
             "Jev answers for this Mac's owner, not for swarm nodes, so nothing was sent to it."
+        case .pinnedAwayFromJev(let feature, .off):
+            "\(feature.displayName) is switched off in Settings → Decisions, so nothing was "
+            + "sent to Jev."
+        case .pinnedAwayFromJev(let feature, let override):
+            "\(feature.displayName) is set to \(override.displayName) in Settings → Decisions, "
+            + "so nothing was sent to Jev."
         }
     }
 }
@@ -923,11 +959,13 @@ public actor JevService {
         )
     }
 
-    /// Whether this feature would answer right now. Five conditions, all cheap: no network,
-    /// and no Keychain prompt. The first is who is asking — never a swarm node's request.
+    /// Whether this feature would answer right now. Six conditions, all cheap: no network,
+    /// and no Keychain prompt. The first is who is asking — never a swarm node's request —
+    /// and the second is the owner's pin for this ability in Settings → Decisions.
     public func isAvailable(_ feature: JevFeature) -> Bool {
         guard PaidLanes.allowed else { return false }
         let settings = settings()
+        guard settings.laneOverride(feature).allowsJev else { return false }
         guard settings.enabled, settings.isOn(feature), hasKey() else { return false }
         return (remainingBudgetUSD(settings) ?? .infinity) > 0
     }
@@ -961,8 +999,9 @@ public actor JevService {
 
     /// One request to Jev, governed.
     ///
-    /// Everything that can refuse does so before a socket is opened: the feature's switch,
-    /// the budget, the size of the state, the shape of the questions, the presence of a key.
+    /// Everything that can refuse does so before a socket is opened: the ability's pin in
+    /// Settings → Decisions, the feature's switch, the budget, the size of the state, the
+    /// shape of the questions, the presence of a key.
     /// What is left is a single request — Jev reads the state once and answers every
     /// question against it in parallel, so a feature should ask all of its questions here
     /// rather than calling repeatedly.
@@ -994,6 +1033,12 @@ public actor JevService {
         // the owner's paid lane, and not from what that lane answered the owner either.
         guard PaidLanes.allowed else { throw JevError.notForPeers }
         let settings = settings()
+        // Then the owner's pin, and here rather than only in the router: this is the one
+        // door every paid call goes through, so an ability set to "Always local" or "Off"
+        // cannot reach TypeSafe from any path — a question set, `/decide`, a calibration,
+        // the bench — whether or not that path remembered to consult the router first.
+        let pin = settings.laneOverride(feature)
+        guard pin.allowsJev else { throw JevError.pinnedAwayFromJev(feature, pin) }
         guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
 
         let request = ControlAPI.DecideRequest(

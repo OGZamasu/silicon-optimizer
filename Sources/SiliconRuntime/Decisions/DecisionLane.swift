@@ -119,6 +119,13 @@ public enum DecisionLaneOverride: String, Codable, Sendable, CaseIterable, Hasha
         }
     }
 
+    /// Whether Jev may answer an ability pinned this way at all.
+    ///
+    /// `JevService` refuses on this before it reads anything else, which is what makes
+    /// `alwaysLocal` and `off` hold for every path to a paid call rather than only for the
+    /// ones that route through `DecisionLanePolicy`.
+    public var allowsJev: Bool { self == .automatic || self == .alwaysJev }
+
     public var summary: String {
         switch self {
         case .automatic:

@@ -1212,7 +1212,9 @@ it did before. With it on, calls are screened and you decide. With **Auto-approv
 rates safe** on as well, the safe ones run and the refused ones are declined without asking,
 and anything Jev wants reviewed still waits for you. A screening that could not happen at all
 — no key, budget spent, TypeSafe unreachable — always falls back to you and never to a
-silent yes.
+silent yes. When a free lane screened the call instead — Laya, with the guardrail pinned
+**Always local** in Settings → Decisions or Jev unable to answer — its verdict is on the card
+under its own name, and you still decide.
 
 ### Media routing
 

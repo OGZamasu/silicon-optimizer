@@ -164,7 +164,9 @@ extension AppModel {
         var abilities: [ControlAPI.DecisionAbility] = []
         for feature in JevFeature.allCases {
             let entry = totals.features[feature.rawValue] ?? JevLedger.Entry()
-            let lane = await DecisionRouter.shared.lane(for: feature)
+            let lane = await Self.answeringLane(
+                for: feature, settings: settings, router: .shared
+            )
             let last = await DecisionRouter.shared.lastAnswer(for: feature)
             abilities.append(.init(
                 id: feature.rawValue,
@@ -325,8 +327,22 @@ extension AppModel {
         return "\(ready.name), with \(ready.checkpoints.joined(separator: ", "))."
     }
 
+    /// The lane the panel names for an ability: the router's choice, except that an ability
+    /// which runs only once switched on is answered by nobody while it is off, whatever lanes
+    /// are installed. Naming a lane for it then would be the panel claiming Laya screens
+    /// tool calls on a Mac where nothing screens them.
+    static func answeringLane(
+        for feature: JevFeature, settings: JevSettings, router: DecisionRouter
+    ) async -> DecisionLaneID? {
+        if feature.runsOnlyWhenSwitchedOn, !settings.isTurnedOn(feature) { return nil }
+        return await router.lane(for: feature)
+    }
+
     /// Why nothing would answer a feature. Written for a person reading a settings row.
     static func whyNothingAnswers(_ feature: JevFeature, settings: JevSettings) -> String {
+        if feature.runsOnlyWhenSwitchedOn, !settings.isTurnedOn(feature) {
+            return "Switched off in Settings → TypeSafe (Jev)."
+        }
         switch settings.laneOverride(feature) {
         case .off:
             return "Switched off for this ability."
