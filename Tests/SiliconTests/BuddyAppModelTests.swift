@@ -343,6 +343,32 @@ struct BuddyAppModelTests {
         #expect(stopped.fraction == 0.97)
     }
 
+    /// TRELLIS.2 counts as able to run once its environment is set up — it fetches its own
+    /// 13 GB of weights mid-run if they are not there. A weights download stopped at the
+    /// Mac leaves exactly that state, and must reach a phone as stopped, not arrived.
+    @Test func aStoppedWeightsDownloadForARunnableModelIsNotArrived() throws {
+        var settings = Settings()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-trellis-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        settings.trellisBaseDirectory = folder.path
+        let python = folder.appendingPathComponent("trellis-mac/.venv/bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: python)
+        let model = BuddyTestStore.model(settings: settings)
+        let installation = model.meshInstallation(for: MeshCatalog.trellis2)
+        try #require(installation.isInstalled && installation.missing == .weights)
+
+        let settled = model.settledDownload(.init(
+            id: MeshCatalog.trellis2.id, name: MeshCatalog.trellis2.name, fraction: 0.3,
+            bytesReceived: 3, bytesExpected: 10, bytesPerSecond: 1
+        ))
+        #expect(settled.error == BuddyEventPump.downloadStopped)
+        #expect(settled.fraction == 0.3)
+    }
+
     // MARK: - The Settings section
 
     /// A phone sending a hundred photographs is refused before any of them reach a model.

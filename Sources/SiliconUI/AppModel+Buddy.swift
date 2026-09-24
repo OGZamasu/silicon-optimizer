@@ -453,10 +453,17 @@ extension AppModel {
     /// are the ones `activeTransfers` hands out: `<entry>@<quantization>` for a language
     /// model, which is also its library id, and the catalog entry's own id for an image or
     /// 3D model.
+    ///
+    /// A 3D model counts only when nothing is missing. `isInstalled` alone is "can run", and
+    /// TRELLIS.2 can run without its weights — it fetches them itself — so a stopped weights
+    /// download would otherwise be announced as arrived.
     func hasInstalled(downloadID id: String) -> Bool {
         if installedModels.contains(where: { $0.id == id }) { return true }
         if let entry = DiffusionCatalog.entry(id: id) { return isImageModelInstalled(entry) }
-        if let entry = MeshCatalog.entry(id: id) { return meshInstallation(for: entry).isInstalled }
+        if let entry = MeshCatalog.entry(id: id) {
+            let installation = meshInstallation(for: entry)
+            return installation.isInstalled && installation.missing == .nothing
+        }
         return false
     }
 
