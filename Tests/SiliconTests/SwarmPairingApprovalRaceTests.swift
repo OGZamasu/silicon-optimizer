@@ -25,7 +25,8 @@ struct SwarmPairingApprovalRaceTests {
         let server = PairingServer(hostName: "Owner")
         let port = try await BuddyControlTests.freeLoopbackPort()
         try await server.start(on: "127.0.0.1", port: port)
-        try await Task.sleep(for: .milliseconds(100))
+        // Once the listener answers, not after a pause that a busy machine can outlast.
+        _ = try await SwarmPairingFlowTests.firstHello(port: port)
         let receipt = try await PairingClient.requestJoin(
             host: "127.0.0.1", name: "Joiner", port: port
         )

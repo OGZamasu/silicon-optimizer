@@ -1516,7 +1516,9 @@ struct BuddyAgentSessionTests {
     /// An `AppModel` with a ledger of its own. The address it lives at may be one an
     /// earlier test's used, so what was remembered about that one is forgotten first.
     static func freshModel() -> AppModel {
-        let model = AppModel(settings: .init())
+        // Not `AppModel(settings:)`: that opens the owner's own video queue, which the
+        // `/events` watcher reads and publishes into the owner's media table.
+        let model = BuddyTestStore.model()
         BuddyAgentSessions.shared.forget(model)
         return model
     }

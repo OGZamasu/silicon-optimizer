@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import SiliconCatalog
+import SiliconCore
 import Testing
 @testable import SiliconControl
 @testable import SiliconRuntime
@@ -21,10 +23,10 @@ struct BuddyAppModelTests {
     /// any test runs; this checks it actually took, because the cost of it not having is a
     /// stranger's chat history.
     private func isolatedModel() -> AppModel {
-        BuddyTestStore.redirect()
+        let model = BuddyTestStore.model()
         let redirected = ProcessInfo.processInfo.environment["SILICON_CONVERSATIONS_PATH"]
         #expect(redirected?.contains("silicon-test-conversations") == true)
-        return AppModel(settings: .init())
+        return model
     }
 
     // MARK: - Conversations
@@ -154,6 +156,57 @@ struct BuddyAppModelTests {
 
     // MARK: - What a subscriber is told
 
+    /// Every phone is owed an opening, not only the one that started the watcher. One that
+    /// subscribes while it is already running — a second device, or the same phone back
+    /// from a dropped connection — used to hear only what changed after it arrived, and a
+    /// Mac sitting still changes nothing: no status, no downloads, no renders.
+    @Test func aPhoneThatJoinsARunningWatcherIsToldTheCurrentState() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-opening-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        BuddyTestStore.redirect()
+        let model = AppModel(
+            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: .init()
+        )
+        let hub = BuddyEventHub()
+        let pump = BuddyEventPump()
+        defer { pump.stop() }
+        // In memory: nothing here may add entries to the owner's media table.
+        let registry = MediaRegistry(url: nil)
+
+        let first = await hub.subscribe(as: .device(id: "first", scope: .full))
+        pump.start(watching: model, hub: hub, interval: .milliseconds(20), registry: registry)
+        #expect(await Self.nextFrame(of: first.stream, within: .seconds(5)) == "status")
+        // Long enough for several readings in which nothing moves.
+        try await Task.sleep(for: .milliseconds(200))
+
+        // What the server does for every stream it opens: subscribe, then ask it to watch.
+        let second = await hub.subscribe(as: .device(id: "second", scope: .chat))
+        pump.start(watching: model, hub: hub, interval: .milliseconds(20), registry: registry)
+        #expect(await Self.nextFrame(of: second.stream, within: .seconds(5)) == "status")
+        // And the first, which has it already, is not sent it again.
+        #expect(await Self.nextFrame(of: first.stream, within: .milliseconds(300)) == nil)
+    }
+
+    /// The name of the next frame on a subscription, or nil if none comes in time.
+    private static func nextFrame(
+        of stream: AsyncStream<BuddyEvent.Frame>, within limit: Duration
+    ) async -> String? {
+        let reader = Task { () -> String? in
+            for await frame in stream { return frame.name }
+            return nil
+        }
+        // Cancelling the read ends it with nil, which is the answer when nothing came.
+        let timer = Task {
+            try? await Task.sleep(for: limit)
+            reader.cancel()
+        }
+        defer { timer.cancel() }
+        return await reader.value
+    }
+
     @Test func theWatcherAnnouncesOnlyWhatMoved() {
         let idle = ControlAPI.Status(
             state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
@@ -185,11 +238,177 @@ struct BuddyAppModelTests {
         #expect(BuddyEventPump.changes(from: first, to: moved).map(\.name)
             == ["status", "download"])
 
-        // A finished download stops being mentioned rather than being announced as gone;
-        // the phone's own list is what forgets it.
+        // A download that has gone from the reading is announced once more, as over — a
+        // phone holds on to it until a frame says so — and is not mentioned after that.
         var without = moved
         without.downloads = [:]
-        #expect(BuddyEventPump.changes(from: moved, to: without).isEmpty)
+        #expect(BuddyEventPump.changes(from: moved, to: without).map(\.name) == ["download"])
+        #expect(BuddyEventPump.changes(from: without, to: without).isEmpty)
+    }
+
+    /// What leaves the reading is news as well. A phone keeps every transfer and render it
+    /// was told about until a frame says it is over, so one that simply stopped being
+    /// mentioned stayed "happening now" on it for ever. Each gets exactly one closing frame
+    /// — a download as it ended, a render taken out of the queue as cancelled — and one
+    /// whose last frame already said it was over gets none.
+    @Test func whatLeavesTheReadingIsAnnouncedAsOverOnce() {
+        let idle = ControlAPI.Status(
+            state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+            expertStreaming: false, lastGenerationTokensPerSecond: nil
+        )
+        let fetching = ControlAPI.DownloadEvent(
+            id: "qwen3-coder@Q4_K_M", name: "Qwen3-Coder", fraction: 0.4,
+            bytesReceived: 400, bytesExpected: 1000, bytesPerSecond: 50
+        )
+        let broken = ControlAPI.DownloadEvent(
+            id: "flux2-klein-4b", name: "FLUX.2 klein", fraction: 0.1, bytesReceived: 10,
+            bytesExpected: 100, bytesPerSecond: 0, error: "The network went away."
+        )
+        let waiting = ControlAPI.JobEvent(
+            id: "clip-1", kind: "video", status: "pending", title: "Opening shot"
+        )
+        let rendering = ControlAPI.JobEvent(
+            id: "clip-2", kind: "video", status: "rendering", title: "The tram",
+            fraction: 0.5, stage: "video-denoise 15/30"
+        )
+        let done = ControlAPI.JobEvent(
+            id: "clip-3", kind: "video", status: "completed", title: "The river",
+            mediaID: "bWVkaWEtY2xpcC1leGFt"
+        )
+        let before = BuddyEventPump.Snapshot(
+            status: idle,
+            downloads: [fetching.id: fetching, broken.id: broken],
+            jobs: [waiting.id: waiting, rendering.id: rendering, done.id: done]
+        )
+        let after = BuddyEventPump.Snapshot(status: idle, downloads: [:], jobs: [:])
+
+        func downloads(_ events: [BuddyEvent]) -> [ControlAPI.DownloadEvent] {
+            events.compactMap { if case .download(let download) = $0 { download } else { nil } }
+        }
+        func jobs(_ events: [BuddyEvent]) -> [ControlAPI.JobEvent] {
+            events.compactMap { if case .job(let job) = $0 { job } else { nil } }
+        }
+
+        let stopped = BuddyEventPump.changes(from: before, to: after)
+        #expect(downloads(stopped).map(\.id) == [fetching.id])
+        #expect(downloads(stopped).first?.error == BuddyEventPump.downloadStopped)
+        #expect(downloads(stopped).first?.bytesPerSecond == 0)
+        #expect(jobs(stopped).map(\.id) == [waiting.id, rendering.id])
+        for job in jobs(stopped) {
+            #expect(job.status == "cancelled")
+            #expect(job.reason == BuddyEventPump.removedFromQueue)
+            #expect(job.fraction == nil && job.stage == nil && job.mediaID == nil)
+        }
+
+        // A transfer that arrived says so, the way a phone model's does: all of it, nothing
+        // wrong.
+        let arrived = downloads(
+            BuddyEventPump.changes(from: before, to: after, settling: BuddyEventPump.arrived)
+        )
+        #expect(arrived.first?.fraction == 1)
+        #expect(arrived.first?.bytesReceived == 1000)
+        #expect(arrived.first?.error == nil)
+
+        #expect(BuddyEventPump.changes(from: after, to: after).isEmpty)
+    }
+
+    /// How a download that left the transfer list ended is read off what is installed now:
+    /// the model it was fetching is here, or it is not.
+    @Test func aDownloadThatLeftIsSettledByWhatIsInstalledNow() throws {
+        BuddyTestStore.redirect()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-settle-\(UUID())")
+        let model = AppModel(
+            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: .init()
+        )
+        model.installedModels = [InstalledModel(
+            id: "qwen3-coder@Q4_K_M", name: "Qwen3-Coder", catalogID: "qwen3-coder",
+            quantization: .q4_K_M, format: .gguf,
+            primaryFile: folder.appendingPathComponent("qwen3-coder.gguf"), allFiles: [],
+            projectorFile: nil, sizeOnDisk: .zero, installedAt: Date(), shape: nil,
+            capabilities: []
+        )]
+        func last(_ id: String) -> ControlAPI.DownloadEvent {
+            .init(
+                id: id, name: id, fraction: 0.97, bytesReceived: 970, bytesExpected: 1000,
+                bytesPerSecond: 80
+            )
+        }
+
+        let arrived = model.settledDownload(last("qwen3-coder@Q4_K_M"))
+        #expect(arrived.fraction == 1 && arrived.error == nil)
+        let stopped = model.settledDownload(last("qwen3-coder@Q8_0"))
+        #expect(stopped.error == BuddyEventPump.downloadStopped)
+        #expect(stopped.fraction == 0.97)
+    }
+
+    /// A clip that finishes and is cleared from the queue inside one reading was never seen
+    /// to end by the watcher. It is announced as it ended — completed, with its file — and
+    /// not as a clip somebody removed.
+    @Test func aClipClearedBeforeTheWatcherSawItEndIsAnnouncedAsItEnded() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-cleared-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let videos = folder.appendingPathComponent("Videos")
+        let queue = VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json"))
+        let item = try queue.enqueueSingle(VideoRequest(
+            entryID: "ltx2-distilled", prompt: "A tram", seconds: 5, resolution: "720p",
+            outputDirectory: videos
+        ))
+        try queue.begin(item.id, nodeName: "fixture", nodeURL: URL(string: "http://node.test")!)
+        try queue.accepted(item.id, job: .init(id: "job-1"))
+        let model = BuddyTestStore.model(in: folder, videoQueue: queue)
+
+        let before = await model.buddyEventSnapshot()
+        #expect(before.jobs[item.id]?.status == "rendering")
+
+        let clip = videos.appendingPathComponent("tram.mp4")
+        try FileManager.default.createDirectory(at: videos, withIntermediateDirectories: true)
+        try Data("clip".utf8).write(to: clip)
+        try queue.complete(item.id, result: VideoResult(
+            file: clip, modelName: "LTX-2", prompt: "A tram", elapsed: 12
+        ))
+        _ = try await model.controlVideoQueue(.init(action: "clear_finished"))
+        #expect(queue.items.isEmpty)
+
+        let after = await model.buddyEventSnapshot()
+        let sent = BuddyEventPump.changes(from: before, to: after).compactMap { event in
+            if case .job(let job) = event { job } else { nil }
+        }
+        #expect(sent.map(\.id) == [item.id])
+        #expect(sent.first?.status == "completed")
+        #expect(sent.first?.mediaID != nil)
+        #expect(sent.first?.reason == nil)
+        // Read once: the reading after says nothing more about it.
+        let later = await model.buddyEventSnapshot()
+        #expect(BuddyEventPump.changes(from: after, to: later).isEmpty)
+    }
+
+    /// TRELLIS.2 counts as able to run once its environment is set up — it fetches its own
+    /// 13 GB of weights mid-run if they are not there. A weights download stopped at the
+    /// Mac leaves exactly that state, and must reach a phone as stopped, not arrived.
+    @Test func aStoppedWeightsDownloadForARunnableModelIsNotArrived() throws {
+        var settings = Settings()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-trellis-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        settings.trellisBaseDirectory = folder.path
+        let python = folder.appendingPathComponent("trellis-mac/.venv/bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: python)
+        let model = BuddyTestStore.model(settings: settings)
+        let installation = model.meshInstallation(for: MeshCatalog.trellis2)
+        try #require(installation.isInstalled && installation.missing == .weights)
+
+        let settled = model.settledDownload(.init(
+            id: MeshCatalog.trellis2.id, name: MeshCatalog.trellis2.name, fraction: 0.3,
+            bytesReceived: 3, bytesExpected: 10, bytesPerSecond: 1
+        ))
+        #expect(settled.error == BuddyEventPump.downloadStopped)
+        #expect(settled.fraction == 0.3)
     }
 
     // MARK: - The Settings section
@@ -391,6 +610,46 @@ enum BuddyTestStore {
     }()
 
     static func redirect() { _ = redirected }
+
+    /// An `AppModel` that reads and writes nothing of the owner's.
+    ///
+    /// `AppModel(settings:)` alone opens the owner's own video queue, and the `/events`
+    /// watcher reads that queue and publishes every finished file in it into the shared
+    /// media table — which it then saves, to the owner's `media.json`. So this one has an
+    /// empty queue, output folders, a media table and a Hugging Face cache of its own, all
+    /// under a temporary folder nothing else uses, and the conversation store redirected as
+    /// every suite's is.
+    ///
+    /// - Parameters:
+    ///   - folder: Where it all goes; a fresh temporary folder unless the test needs to
+    ///     know where, to put clips in its queue under its video folder.
+    ///   - videoQueue: A queue the test has filled, stored in that folder too.
+    @MainActor
+    static func model(
+        settings: Settings = .init(),
+        in folder: URL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-model-\(UUID())"),
+        videoQueue: VideoBatchQueue? = nil
+    ) -> AppModel {
+        redirect()
+        var settings = settings
+        settings.imageOutputDirectory = folder.appendingPathComponent("Images").path
+        settings.meshOutputDirectory = folder.appendingPathComponent("Meshes").path
+        settings.videoOutputDirectory = folder.appendingPathComponent("Videos").path
+        // With none named, the 3D check looks for engines across the home folder and every
+        // local disk. A test names its own, unless it set one up itself.
+        if settings.trellisBaseDirectory.isEmpty {
+            settings.trellisBaseDirectory = folder.appendingPathComponent("engines").path
+        }
+        let model = AppModel(
+            videoQueue: videoQueue
+                ?? VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: settings
+        )
+        model.eventMediaRegistry = MediaRegistry(url: nil)
+        model.trellisHubCache = folder.appendingPathComponent("hub")
+        return model
+    }
 }
 
 /// Applied to every suite that builds an `AppModel`, because any of them can schedule the
@@ -421,7 +680,7 @@ struct BuddyLiveEventTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let model = AppModel(settings: .init())
+        let model = BuddyTestStore.model()
         let hub = BuddyEventHub()
         let handshakeURL = directory.appendingPathComponent("control.json")
         let server = ControlServer(

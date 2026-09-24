@@ -68,13 +68,8 @@ struct SharedTaskPaidLaneTests {
     // MARK: - Helpers
 
     private static func model() -> AppModel {
-        let model = AppModel(
-            videoQueue: VideoBatchQueue(
-                storeURL: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("paid-lane-queue-\(UUID()).json")
-            ),
-            settings: .init()
-        )
+        // Its own queue, output folders and media table: the pump publishes what it finds.
+        let model = BuddyTestStore.model()
         BuddyAgentSessions.shared.forget(model)
         return model
     }

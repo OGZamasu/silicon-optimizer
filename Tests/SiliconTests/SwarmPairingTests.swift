@@ -112,6 +112,23 @@ struct SwarmPairingFlowTests {
         try await BuddyControlTests.freeLoopbackPort()
     }
 
+    /// The server's first hello, once its listener answers one. Asked for rather than slept
+    /// for: a fixed pause after `start` was usually enough and, in a full suite on a busy
+    /// machine, sometimes was not. Bounded, so a listener that never comes up fails the test
+    /// rather than hanging it.
+    static func firstHello(
+        port: Int, within limit: Duration = .seconds(10)
+    ) async throws -> PairingHello {
+        let deadline = ContinuousClock.now + limit
+        while true {
+            if let hello = await PairingClient.hello(host: "127.0.0.1", port: port) {
+                return hello
+            }
+            guard ContinuousClock.now < deadline else { throw ListenerNeverAnswered() }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     @Test("hello, knock, code, approve, deliver once")
     func approvedFlow() async throws {
         let release = SwarmConfig(
@@ -123,9 +140,8 @@ struct SwarmPairingFlowTests {
         let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
-        try await Task.sleep(for: .milliseconds(300))
 
-        let hello = try #require(await PairingClient.hello(host: "127.0.0.1", port: port))
+        let hello = try await Self.firstHello(port: port)
         #expect(hello.name == "Owner Mac")
         #expect(hello.accepting)
 
@@ -176,7 +192,7 @@ struct SwarmPairingFlowTests {
         let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
-        try await Task.sleep(for: .milliseconds(300))
+        _ = try await Self.firstHello(port: port)
 
         let receipt = try await PairingClient.requestJoin(
             host: "127.0.0.1", name: "Joiner", port: port
@@ -199,7 +215,7 @@ struct SwarmPairingFlowTests {
         let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
-        try await Task.sleep(for: .milliseconds(300))
+        _ = try await Self.firstHello(port: port)
 
         let deniedReceipt = try await PairingClient.requestJoin(
             host: "127.0.0.1", name: "Uncooperative Joiner", port: port
@@ -238,7 +254,7 @@ struct SwarmPairingFlowTests {
         let port = try await freePort()
         try await server.start(on: "127.0.0.1", port: port)
         defer { Task { await server.stop() } }
-        try await Task.sleep(for: .milliseconds(300))
+        _ = try await Self.firstHello(port: port)
 
         _ = try await PairingClient.requestJoin(
             host: "127.0.0.1", name: "Slowpoke", port: port
@@ -249,6 +265,8 @@ struct SwarmPairingFlowTests {
         #expect(hello?.accepting == true)
     }
 }
+private struct ListenerNeverAnswered: Error {}
+
 @Suite("Per-peer bearer resolution")
 struct SwarmBearerTests {
 

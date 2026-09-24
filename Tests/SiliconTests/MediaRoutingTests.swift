@@ -900,7 +900,7 @@ struct MediaRoutingAppTests {
     /// The app's own candidate list, not a hand-written one: this is the test that notices
     /// `videoRoutingCandidates()` handing the policy something it cannot use.
     @Test func theAppOffersTheWholeCatalogWithReadinessFromTheSwarm() {
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let candidates = model.videoRoutingCandidates()
         #expect(candidates.map(\.id) == VideoCatalog.all.map(\.id))
         // No swarm in a test, so nothing is ready — and that is what makes an adult prompt
@@ -915,7 +915,7 @@ struct MediaRoutingAppTests {
         let (harness, server) = try await Self.route { Self.answer() }
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         model.selectedVideoModel = VideoCatalog.wan22.id
         let view = try await MediaRouter.$override.withValue(harness.service) {
             try await model.enqueueVideos(ControlAPI.VideoQueueRequest(
@@ -951,7 +951,7 @@ struct MediaRoutingAppTests {
         await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         model.selectedVideoModel = VideoCatalog.wan22.id
         model.videoSeconds = 3
         let view = try await MediaRouter.$override.withValue(harness.service) {
@@ -975,7 +975,7 @@ struct MediaRoutingAppTests {
     /// F12. The image half: "auto" resolves to a real entry, the steps come with it, and a
     /// step count the caller named outranks the router's.
     @Test func anAutoImageRequestIsRoutedAndKeepsWhatTheCallerNamed() async throws {
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         // Whichever entries this machine has: the point is that the router's pick is used,
         // not that a particular model is installed on whoever runs the tests.
         let candidate = try #require(model.imageRoutingCandidates().first)
@@ -1004,7 +1004,7 @@ struct MediaRoutingAppTests {
     @Test func aSwarmNodesAutoRenderNeverAsksThePaidRouter() async throws {
         let (harness, server) = try await Self.route { Self.answer() }
         defer { server.stop(); harness.clean() }
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let prompt = "a fox sprinting through long grass"
 
         let (clip, image) = try await MediaRouter.$override.withValue(harness.service) {
@@ -1042,7 +1042,7 @@ struct MediaRoutingAppTests {
         }
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let routed = try await MediaRouter.$override.withValue(harness.service) {
             try await model.mediaRoutedImage(
                 .init(prompt: "a fox", modelID: "auto", localOnly: true)
@@ -1062,7 +1062,7 @@ struct MediaRoutingAppTests {
         await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let routed = try await MediaRouter.$override.withValue(harness.service) {
             try await model.mediaRoutedImage(.init(prompt: "a fox", modelID: "auto"))
         }
@@ -1084,7 +1084,7 @@ struct MediaRoutingAppTests {
         // The app's own default, not this test's: zero would make the point vacuous.
         try await harness.service.update { $0.cacheMinutes = 10 }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         try await MediaRouter.$override.withValue(harness.service) {
             _ = try await model.mediaRoutedImage(.init(prompt: "a fox", modelID: "auto"))
             _ = try await model.mediaRoutedImage(.init(prompt: "a fox", modelID: "auto"))
@@ -1095,7 +1095,7 @@ struct MediaRoutingAppTests {
 
     /// The image candidates are the ones this Mac could actually start on.
     @Test func imageCandidatesAreTheInstalledOnesOrTheCatalog() {
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let candidates = model.imageRoutingCandidates()
         #expect(!candidates.isEmpty)
         #expect(candidates.allSatisfy { !$0.isUncensored })
@@ -1121,7 +1121,7 @@ struct MediaRoutingAppTests {
             settings.composerAutoRoute = true
         }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         model.selectedVideoModel = VideoCatalog.hailuoH3.id
         model.videoSeconds = 10
         model.videoSampling = .turbo
@@ -1152,7 +1152,7 @@ struct MediaRoutingAppTests {
     /// F16. An MCP caller that passed `model_id: "auto"` has no queue to read, so the
     /// synchronous response is the only place it can learn what it got.
     @Test func theSynchronousVideoResponseCarriesTheRoutingLine() async throws {
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("routing-response-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1188,7 +1188,7 @@ struct MediaRoutingAppTests {
         }
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         model.selectedVideoModel = VideoCatalog.wan22.id
         model.videoSeconds = 3
         model.videoPrompt = "a fox sprinting"
@@ -1217,7 +1217,7 @@ struct MediaRoutingAppTests {
         }
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         let view = try await MediaRouter.$override.withValue(harness.service) {
             try await model.enqueueVideos(ControlAPI.VideoQueueRequest(
                 prompts: ["a fox"], modelID: VideoCatalog.hailuoH3.id, seconds: 15
@@ -1233,7 +1233,7 @@ struct MediaRoutingAppTests {
         let (harness, server) = try await Self.route { Self.answer() }
         defer { server.stop(); harness.clean() }
 
-        let model = AppModel(videoQueue: freshQueue(), settings: .init())
+        let model = freshModel()
         _ = try await MediaRouter.$override.withValue(harness.service) {
             try await model.enqueueVideos(
                 ControlAPI.VideoQueueRequest(prompts: ["a fox"], modelID: "auto")
@@ -1323,10 +1323,22 @@ struct MediaRoutingAppTests {
         #expect(AppModel.merged("tight", "Auto → FLUX") == "Auto → FLUX · tight")
     }
 
-    private func freshQueue() -> VideoBatchQueue {
-        VideoBatchQueue(
-            storeURL: FileManager.default.temporaryDirectory
-                .appendingPathComponent("routing-queue-\(UUID()).json")
+    /// A model with its own queue and output folders. Enqueueing a clip writes its batch's
+    /// manifest into the video folder, and the default one is the owner's own
+    /// `~/Movies/Silicon Optimizer`.
+    private func freshModel() -> AppModel {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("routing-\(UUID())")
+        var settings = Settings()
+        settings.videoOutputDirectory = folder.appendingPathComponent("Videos").path
+        settings.imageOutputDirectory = folder.appendingPathComponent("Images").path
+        settings.meshOutputDirectory = folder.appendingPathComponent("Meshes").path
+        // And its own 3D engine folder: with none named, the check searches the home folder
+        // and every local disk.
+        settings.trellisBaseDirectory = folder.appendingPathComponent("engines").path
+        return AppModel(
+            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: settings
         )
     }
 }

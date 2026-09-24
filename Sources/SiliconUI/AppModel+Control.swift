@@ -888,6 +888,59 @@ public enum ControlHostError: Error, LocalizedError, ControlStatusError {
 
 // MARK: - Image generation over the control API
 
+/// A control-API caller waiting on a job in the Images or 3D queue.
+///
+/// Settled exactly once, however the job ends — finished, failed, stopped at the Mac, or
+/// taken out of the queue before its turn — so a caller is never left holding a
+/// connection for a render that is not coming. A caller that stops waiting settles it
+/// too; the job itself stays in the queue.
+@MainActor
+final class RenderWaiter<Value: Sendable> {
+    private var continuation: CheckedContinuation<Value, any Error>?
+    private var outcome: Result<Value, any Error>?
+
+    /// First writer wins, so the backstop a runner fires on its way out cannot overwrite
+    /// the result it has already delivered.
+    func finish(_ result: Result<Value, any Error>) {
+        guard outcome == nil else { return }
+        outcome = result
+        continuation?.resume(with: result)
+        continuation = nil
+    }
+
+    func wait() async throws -> Value {
+        try await withTaskCancellationHandler {
+            if let outcome { return try outcome.get() }
+            return try await withCheckedThrowingContinuation { continuation = $0 }
+        } onCancel: {
+            Task { @MainActor in self.finish(.failure(CancellationError())) }
+        }
+    }
+}
+
+/// What a queued image job made, for the caller waiting on it.
+struct QueuedImage: Sendable {
+    var images: [ImageResult]
+    /// The node that rendered it, or nil when this Mac did.
+    var node: String?
+}
+
+/// Why a queued control-API render ended without a result when the render itself did not
+/// fail: the owner, at the Mac, decided otherwise.
+enum QueuedRenderError: Error, LocalizedError, Equatable {
+    /// Taken out of the queue before its turn.
+    case removedFromQueue
+    /// Stopped with the Stop button while it was rendering.
+    case stoppedOnMac
+
+    var errorDescription: String? {
+        switch self {
+        case .removedFromQueue: "Removed from the queue on the Mac before it started."
+        case .stoppedOnMac: "Stopped on the Mac before it finished."
+        }
+    }
+}
+
 extension AppModel {
 
     public func imageModels() async -> [ControlAPI.ImageModel] {
@@ -934,66 +987,32 @@ extension AppModel {
     }
 
     /// The image render itself, with the model and the settings already decided.
+    ///
+    /// Through the Images tab's queue, like the composer's own jobs: one MFLUX process at a
+    /// time, visible there, stopped by its Stop button, and covered by the sleep assertion.
+    /// Where it renders — this Mac or a node — is decided when its turn comes, by the same
+    /// rule, with the caller's `localOnly` carried on the job.
     private func generateRoutedImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
         let (entry, configuration) = try resolveImage(request)
-
-        // Routing before the MFLUX guard, deliberately: a Mac without MFLUX — or a
-        // weak one — is exactly the machine that should hand the job to a node.
-        let candidateNode = imageRenderTarget
-        if Self.shouldRouteImageRemotely(
-            localOnly: request.localOnly, hasCandidate: candidateNode != nil
-        ), let node = candidateNode {
-            return try await generateImageOnNode(
-                request, configuration: configuration, node: node
-            )
-        }
-
-        guard let installation = imageRuntime ?? MFluxRuntime.locate() else {
-            throw ImageRuntimeError.notInstalled
-        }
         let predicted = diffusionPlan(for: entry, configuration: configuration)
 
         // Warn rather than refuse: the estimate is not always right, and a hard block leaves
         // someone unable to run a model that would in fact work, with no way to proceed.
         let warning = predicted.verdict.isUsable ? nil : refusalMessage(for: entry, plan: predicted)
 
-        noteActivity()
-        let output = nextImageOutputURL()
-        let carrier = InstalledModel(
-            id: entry.id, name: entry.name, catalogID: entry.id,
-            quantization: configuration.quantization, format: .mlx,
-            primaryFile: output, allFiles: [], projectorFile: nil,
-            sizeOnDisk: .zero, installedAt: Date(), shape: nil, capabilities: []
-        )
+        // The token is read from the Keychain at launch. A request that arrives before that
+        // has finished waits for it here, rather than reaching a gated model without it.
+        _ = await huggingFaceToken()
 
-        imageState = .starting(stage: "Starting MFLUX…")
-        defer { imageState = .idle; imageProgress = nil }
-
-        var result: ImageResult?
-        let token = await huggingFaceToken()
+        let finished: QueuedImage
         do {
-            for try await event in try await MFluxRuntime(
-                installation: installation, huggingFaceToken: token,
-                hubCache: settings.resolvedEngineCacheDirectory
-            ).generate(
-                ImageRequest(
-                    prompt: request.prompt, configuration: configuration,
-                    seed: request.seed, output: output
-                ),
-                model: carrier
-            ) {
-                switch event {
-                case .stage(let stage): imageState = .starting(stage: stage)
-                case .step(let index, let total):
-                    imageProgress = (index, total)
-                    imageState = .starting(stage: "Denoising \(index)/\(total)…")
-                case .finished(let finished):
-                    result = finished
-                    generatedImages.insert(finished, at: 0)
-                }
-            }
+            finished = try await renderQueued(ImageJob(
+                prompt: request.prompt, configuration: configuration,
+                modelID: entry.id, modelName: entry.name,
+                seed: request.seed, localOnly: request.localOnly
+            ))
         } catch ImageRuntimeError.gated {
             // An agent needs the same things a person does: which model, and where the
             // licence lives.
@@ -1002,12 +1021,24 @@ extension AppModel {
                     + " Licence page: https://huggingface.co/\(entry.repository)"
             )
         }
+        guard let first = finished.images.first else { throw ImageRuntimeError.noImageProduced }
 
-        guard let result else { throw ImageRuntimeError.noImageProduced }
+        // A node's answer names the machine, so agents and ledgers see where it ran (#136).
+        // It used the node's own models, so this Mac's plan and warning are not about it.
+        if let node = finished.node {
+            return ControlAPI.ImageResponse(
+                path: first.image.path,
+                elapsedSeconds: first.elapsed,
+                peakMemoryBytes: nil,
+                predictedPeakBytes: 0,
+                model: "text-to-image on \(node)",
+                warning: nil
+            )
+        }
         return ControlAPI.ImageResponse(
-            path: result.image.path,
-            elapsedSeconds: result.elapsed,
-            peakMemoryBytes: result.peakMemory?.rawValue,
+            path: first.image.path,
+            elapsedSeconds: first.elapsed,
+            peakMemoryBytes: first.peakMemory?.rawValue,
             predictedPeakBytes: predicted.peak.rawValue,
             model: entry.name,
             warning: warning
@@ -1018,61 +1049,6 @@ extension AppModel {
         localOnly: Bool?, hasCandidate: Bool
     ) -> Bool {
         localOnly != true && hasCandidate
-    }
-
-    /// The control-API image path, rendered by a node (#136): same response shape,
-    /// the model field names the machine so agents and ledgers see where it ran.
-    private func generateImageOnNode(
-        _ request: ControlAPI.ImageRequest,
-        configuration: ImageConfiguration,
-        node: PeerStatus
-    ) async throws -> ControlAPI.ImageResponse {
-        guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
-        else {
-            throw ImageRuntimeError.generationFailed("\(node.name)'s address didn't parse.")
-        }
-        noteActivity()
-        imageState = .starting(stage: "Sending to \(node.name)…")
-        defer { imageState = .idle; imageProgress = nil }
-
-        let runtime = NodeImageRuntime()
-        let nodeRequest = NodeImageRequest(
-            prompt: request.prompt,
-            width: configuration.width,
-            height: configuration.height,
-            steps: configuration.steps,
-            seed: request.seed,
-            outputDirectory: settings.resolvedImageOutputDirectory
-        )
-        let nodeName = node.name
-        let result = try await runtime.generate(
-            nodeRequest, node: base, token: swarmConfig?.bearer(forPeer: node.name)
-        ) { progress in
-            Task { @MainActor [weak self] in
-                self?.imageState = .starting(
-                    stage: progress.line(fallback: "Rendering on \(nodeName)")
-                )
-            }
-        }
-        guard let first = result.images.first else {
-            throw ImageRuntimeError.noImageProduced
-        }
-        for url in result.images {
-            generatedImages.insert(
-                ImageResult(
-                    image: url, elapsed: result.elapsed,
-                    peakMemory: nil, stepsPerSecond: 0
-                ), at: 0
-            )
-        }
-        return ControlAPI.ImageResponse(
-            path: first.path,
-            elapsedSeconds: result.elapsed,
-            peakMemoryBytes: nil,
-            predictedPeakBytes: 0,
-            model: "text-to-image on \(node.name)",
-            warning: nil
-        )
     }
 
     // MARK: - Mapping
@@ -1184,14 +1160,16 @@ extension AppModel {
     }
 
     public func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan {
-        let (entry, configuration) = try resolveMesh(request)
-        return describe(meshPlan(for: entry, configuration: configuration), entry: entry)
+        let (entry, configuration, note) = try resolveMesh(request)
+        var plan = describe(meshPlan(for: entry, configuration: configuration), entry: entry)
+        if let note { plan.notes.insert(note, at: 0) }
+        return plan
     }
 
     public func generateMesh(
         _ request: ControlAPI.MeshRequest
     ) async throws -> ControlAPI.MeshResponse {
-        let (entry, configuration) = try resolveMesh(request)
+        let (entry, configuration, note) = try resolveMesh(request)
         // Optional on the wire since devices got `uploadID`/`mediaID`, which the control
         // server resolves into this field before the request reaches here. Nothing this
         // side can do with a request that still has none.
@@ -1208,7 +1186,7 @@ extension AppModel {
         guard installation.isInstalled else {
             throw MeshRuntimeError.notInstalled(installation.detail)
         }
-        guard let runtime = makeMeshRuntime(for: entry) else {
+        guard makeMeshRuntime(for: entry) != nil else {
             throw MeshRuntimeError.notInstalled(installation.detail)
         }
 
@@ -1217,38 +1195,25 @@ extension AppModel {
             "\(entry.name) was predicted to peak at \(predicted.peak.formatted) against a "
             + "\(predicted.budget.formatted) budget; expect swapping."
 
-        noteActivity()
-        let (directory, baseName) = nextMeshOutputLocation()
-        meshState = .starting(stage: "Starting \(entry.name)…")
-        defer { meshState = .idle; meshProgress = nil }
-
-        var result: MeshResult?
-        for try await event in try await runtime.generate(MeshRequest(
+        // Through the 3D tab's queue, for the same reasons as `generateRoutedImage`.
+        let result = try await renderQueued(MeshJob(
             image: image, configuration: configuration,
-            outputDirectory: directory, baseName: baseName
-        )) {
-            switch event {
-            case .stage(let stage): meshState = .starting(stage: stage)
-            case .progress(let fraction): meshProgress = fraction
-            case .finished(let finished):
-                result = finished
-                meshResults.insert(finished, at: 0)
-            }
-        }
-
-        guard let result else { throw MeshRuntimeError.noMeshProduced }
+            modelID: entry.id, modelName: entry.name
+        ))
         return ControlAPI.MeshResponse(
             glbPath: result.glb?.path,
             objPath: result.obj?.path,
             elapsedSeconds: result.elapsed,
             model: entry.name,
-            warning: warning
+            warning: Self.merged(warning, note)
         )
     }
 
+    /// The model, the settings it will run with, and a note when a setting was changed on
+    /// the way — a texture larger than the model bakes, taken down to the largest it does.
     private func resolveMesh(
         _ request: ControlAPI.MeshRequest
-    ) throws -> (MeshEntry, MeshConfiguration) {
+    ) throws -> (MeshEntry, MeshConfiguration, note: String?) {
         let entry: MeshEntry
         if let id = request.modelID {
             guard let match = MeshCatalog.entry(id: id) else {
@@ -1263,19 +1228,83 @@ extension AppModel {
             } ?? MeshCatalog.hunyuanMini
         }
 
+        // Every knob the chosen model reads is checked against what its backend takes before
+        // anything is queued. They go to a Python script or a Swift CLI as arguments, and an
+        // octree of 100,000 or a million steps from a paired phone or a swarm peer is not a
+        // render — it is the GPU and the memory budget taken until somebody notices.
+        //
+        // A knob the model does not read is left alone, as the 3D tab leaves it: the phone
+        // apps send one set of settings whatever the model, and refusing Hunyuan a texture
+        // size it never looks at would turn a working render into a 400.
         var configuration = MeshConfiguration()
         configuration.steps = entry.defaultSteps
-        if let pipeline = request.pipelineType { configuration.pipelineType = pipeline }
-        if let textureSize = request.textureSize { configuration.textureSize = textureSize }
-        if let steps = request.steps { configuration.steps = steps }
-        if let quantize = request.quantize { configuration.quantize = quantize }
-        if let octree = request.octree { configuration.octree = octree }
+        var note: String?
+        if entry.supportsPipelineType, let pipeline = request.pipelineType {
+            guard Self.meshPipelines.contains(pipeline) else {
+                throw ControlHostError.badRequest(
+                    "pipelineType must be one of " + Self.meshPipelines.joined(separator: ", ")
+                        + "."
+                )
+            }
+            configuration.pipelineType = pipeline
+        }
+        if entry.supportsTextureSize, let textureSize = request.textureSize {
+            let largest = Self.meshTextureSizes.max() ?? 2048
+            if textureSize > largest {
+                // The Android app offers 4096 for every model. Refusing it would break a
+                // client already in people's hands, and the largest the model bakes is the
+                // nearest thing to what was asked for.
+                configuration.textureSize = largest
+                note = "\(entry.name) bakes textures up to \(largest) px, so this one is "
+                    + "\(largest) px rather than \(textureSize)."
+            } else {
+                guard Self.meshTextureSizes.contains(textureSize) else {
+                    throw ControlHostError.badRequest("textureSize must be 512, 1024 or 2048.")
+                }
+                configuration.textureSize = textureSize
+            }
+        }
+        if entry.supportsSteps, let steps = request.steps {
+            guard Self.meshSteps.contains(steps) else {
+                throw ControlHostError.badRequest(
+                    "3D steps must be between \(Self.meshSteps.lowerBound) and "
+                        + "\(Self.meshSteps.upperBound)."
+                )
+            }
+            configuration.steps = steps
+        }
+        if entry.supportsQuantization, let quantize = request.quantize {
+            guard Self.meshQuantizations.contains(quantize) else {
+                throw ControlHostError.badRequest("quantize must be 4 or 8, or left out for fp16.")
+            }
+            configuration.quantize = quantize
+        }
+        // The octree has no control in the 3D tab; only the Hunyuan decode reads it.
+        if entry.backend == .hunyuan, let octree = request.octree {
+            guard Self.meshOctrees.contains(octree) else {
+                throw ControlHostError.badRequest(
+                    "octree must be between \(Self.meshOctrees.lowerBound) and "
+                        + "\(Self.meshOctrees.upperBound)."
+                )
+            }
+            configuration.octree = octree
+        }
         if let budget = request.vertexBudget {
             configuration.vertexBudget = max(200, min(5000, budget))
         }
         configuration.seed = request.seed
-        return (entry, configuration)
+        return (entry, configuration, note)
     }
+
+    /// What the 3D tab offers, which is what the backends were measured with. The steps
+    /// range is wider than the tab's stepper, for an agent that wants a quick draft or a
+    /// slower pass, and still a bound. The octree is not in the tab at all (it sends 256);
+    /// its cost grows with the cube of the side, so it may be halved or doubled and no more.
+    static let meshPipelines = ["512", "1024", "1024_cascade"]
+    static let meshTextureSizes: Set<Int> = [512, 1024, 2048]
+    static let meshSteps = 1...100
+    static let meshQuantizations: Set<Int> = [4, 8]
+    static let meshOctrees = 64...512
 
     // MARK: - Video
 
