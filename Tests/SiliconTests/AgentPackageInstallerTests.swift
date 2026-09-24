@@ -2,7 +2,13 @@ import Foundation
 import Testing
 @testable import SiliconRuntime
 
-@Suite("Verified agent packages", .serialized,
+/// The fixtures here are built and installed with the Node and npm this Mac has, because the
+/// allowlist and integrity checks are npm's own. Where a test only needs `node --version` to
+/// answer, its `node` is a script that does just that: the Node discovery finds can be a
+/// version manager's shim, which given the fresh `HOME` the installer probes with first
+/// downloads a whole runtime — slow, not offline, and not the thing under test. The real
+/// Node's probes get a minute for the same reason.
+@Suite("Verified agent packages", .serialized, .longVersionProbes,
        .enabled(if: HarnessRuntime.locateNode(
            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
        ).node != nil))
@@ -99,6 +105,15 @@ struct AgentPackageInstallerTests {
             ),
             node: node
         )
+    }
+
+    /// A `node` that answers `--version` with `version` and does nothing else, in `bin`.
+    private func scriptedNode(in bin: URL, version: String = "v24.0.0") throws -> URL {
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let node = bin.appendingPathComponent("node")
+        try "#!/bin/sh\necho \(version)\n".write(to: node, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
+        return node
     }
 
     private func run(
@@ -199,9 +214,7 @@ struct AgentPackageInstallerTests {
             .write(to: lock)
 
         let fakeBin = fixture.root.appendingPathComponent("fake-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin)
         let marker = fixture.root.appendingPathComponent("npm-was-called")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
@@ -293,7 +306,12 @@ struct AgentPackageInstallerTests {
         try Data("\(exited.processIdentifier)\n".utf8)
             .write(to: leftover.appendingPathComponent(AgentPackageInstaller.ownerFileName))
 
-        let (fakeNode, npmCalled) = try failingNpm(beside: fixture)
+        // Answering with the Node line the tree was installed for, which is part of its key.
+        let record = try #require(JSONSerialization.jsonObject(with: Data(contentsOf:
+            first.directory.appendingPathComponent(AgentPackageInstaller.manifestFileName)
+        )) as? [String: Any])
+        let nodeLine = try #require((record["identity"] as? [String: Any])?["node"] as? String)
+        let (fakeNode, npmCalled) = try failingNpm(beside: fixture, answering: "v\(nodeLine).0.0")
         let second = try await AgentPackageInstaller.install(
             fixture.package, node: fakeNode, sourceRoot: fixture.sourceRoot,
             destinationRoot: fixture.destinationRoot, allowLocalArtifacts: true
@@ -362,12 +380,12 @@ struct AgentPackageInstallerTests {
         #expect(FileManager.default.fileExists(atPath: second.bin.path))
     }
 
-    /// A Node beside an npm that records being called and fails.
-    private func failingNpm(beside fixture: Fixture) throws -> (node: URL, marker: URL) {
+    /// A Node answering `version`, beside an npm that records being called and fails.
+    private func failingNpm(
+        beside fixture: Fixture, answering version: String
+    ) throws -> (node: URL, marker: URL) {
         let fakeBin = fixture.root.appendingPathComponent("failing-npm-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin, version: version)
         let marker = fixture.root.appendingPathComponent("npm-was-called")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
@@ -382,9 +400,7 @@ struct AgentPackageInstallerTests {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let fakeBin = fixture.root.appendingPathComponent("fake-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin)
         let marker = fixture.root.appendingPathComponent("npm-ci-was-called")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\nif [ \"$1\" = --version ]; then echo \(version); exit 0; fi\n/usr/bin/touch \"\(marker.path)\"\nexit 1\n".write(
@@ -409,9 +425,7 @@ struct AgentPackageInstallerTests {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let fakeBin = fixture.root.appendingPathComponent("fake-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
-        let fakeNode = fakeBin.appendingPathComponent("node")
-        try FileManager.default.createSymbolicLink(at: fakeNode, withDestinationURL: fixture.node)
+        let fakeNode = try scriptedNode(in: fakeBin)
         let marker = fixture.root.appendingPathComponent("npm-started")
         let fakeNpm = fakeBin.appendingPathComponent("npm")
         try "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.19.0; exit 0; fi\n/usr/bin/touch \"\(marker.path)\"\nexec /bin/sleep 30\n".write(
@@ -464,6 +478,24 @@ struct AgentPackageInstallerTests {
             #expect(!entries.contains { $0.hasPrefix("fixture-") })
         }
     }
+}
+
+/// Gives every version probe in a suite a minute: see "Verified agent packages".
+struct LongVersionProbes: SuiteTrait, TestTrait, TestScoping {
+    var isRecursive: Bool { true }
+
+    func provideScope(
+        for test: Test, testCase: Test.Case?,
+        performing function: @Sendable () async throws -> Void
+    ) async throws {
+        try await AgentPackageInstaller.$versionProbeDeadline.withValue(60) {
+            try await function()
+        }
+    }
+}
+
+extension Trait where Self == LongVersionProbes {
+    static var longVersionProbes: Self { Self() }
 }
 
 /// What the npm cancellation test waits for.
