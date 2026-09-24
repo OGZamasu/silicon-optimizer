@@ -721,10 +721,13 @@ public actor ControlServer {
                 request = try await HTTPRequest.read(
                     from: connection, deadlines: readDeadlines
                 ) { method, path, headers in
-                    await self.bodyLimit(
+                    try await self.bodyLimit(
                         forMethod: method, path: path, headers: headers, from: origin
                     )
                 }
+            } catch HTTPRequest.ParseError.unauthorized {
+                await refuse(unauthorized, on: connection)
+                return
             } catch HTTPRequest.ParseError.bodyTooLarge(let limit) {
                 await refuse(.error(
                     413, "That request body is larger than this device may send (\(limit) bytes)."
@@ -1099,7 +1102,7 @@ public actor ControlServer {
     /// time, and a route that does not write files has no use for a larger one.
     private func bodyLimit(
         forMethod method: String, path: String, headers: [String: String], from origin: Origin
-    ) async -> Int {
+    ) async throws -> Int {
         guard origin == .tailnet else { return HTTPRequest.maximumBody }
         guard let bearer = HTTPRequest.bearerToken(in: headers) else {
             // No bearer on the tailnet means `/buddy/pair`, the one route with nothing to
@@ -1113,14 +1116,25 @@ public actor ControlServer {
            honoursSwarmToken(from: origin) {
             return HTTPRequest.maximumBody
         }
-        // The raised ceiling is a property of a *caller*, not of a path. Asked here rather
-        // than after the body, and asked of the registry rather than of the request: an
-        // unknown bearer, a revoked device and a chat-only one all get the ordinary 4 MiB,
-        // so pointing 24 MiB at this route with a guessed token buys nothing. It costs one
-        // token lookup on one route.
-        if method == "POST", path == "/uploads",
-           let device = await buddy.authorize(bearer: bearer),
-           BuddyScope(rawValue: device.scope) == .full {
+        // Asked of the registry, before a byte of body is read: what a bearer nobody issued
+        // may send is what no bearer may. A body is given as long as it keeps arriving at a
+        // slow link's pace (`ReadDeadlines`), so four megabytes from anybody who made up a
+        // token was a connection slot held for four minutes.
+        guard let device = await buddy.authorize(bearer: bearer) else {
+            // An unknown token, a revoked device, the control token out here: the route
+            // would answer 401 whatever the body said. One too big for what no bearer may
+            // send is answered that now, unread — the same 401, which is what tells a
+            // revoked phone to pair again. A small one is read and routed as it always was,
+            // because `/health` and `/buddy/pair` answer whoever asks.
+            let declared = headers["content-length"].flatMap { Int($0) } ?? 0
+            guard declared <= BuddyLimits.unauthenticatedBodyBytes else {
+                throw HTTPRequest.ParseError.unauthorized
+            }
+            return BuddyLimits.unauthenticatedBodyBytes
+        }
+        // The raised ceiling is a property of a *caller*, not of a path: a chat-only device
+        // gets the ordinary 4 MiB here too.
+        if method == "POST", path == "/uploads", BuddyScope(rawValue: device.scope) == .full {
             return BuddyUploads.maximumBytes
         }
         return BuddyLimits.requestBodyBytes
@@ -2649,6 +2663,9 @@ struct HTTPRequest {
         /// A framing this server does not read — chunked, above all. Answered rather than
         /// dropped, because a client that gets nothing back cannot tell that from a crash.
         case lengthRequired
+        /// The headers already say the caller is nobody, and the body is more than nobody
+        /// may send. See `ControlServer.bodyLimit`.
+        case unauthorized
 
         var errorDescription: String? {
             switch self {
@@ -2656,6 +2673,7 @@ struct HTTPRequest {
             case .closed: "Connection closed."
             case .bodyTooLarge(let limit): "Request body over \(limit) bytes."
             case .lengthRequired: "A Content-Length is required."
+            case .unauthorized: "Invalid or missing control token."
             }
         }
     }
@@ -2673,7 +2691,7 @@ struct HTTPRequest {
     static func read(
         from connection: NWConnection,
         deadlines: ControlServer.ReadDeadlines = .standard,
-        maximumBody limit: @Sendable (String, String, [String: String]) async -> Int
+        maximumBody limit: @Sendable (String, String, [String: String]) async throws -> Int
             = { _, _, _ in maximumBody }
     ) async throws -> HTTPRequest {
         // The deadline moves on as the body arrives. See `ControlServer.ReadDeadlines`.
@@ -2714,7 +2732,7 @@ struct HTTPRequest {
         // The path without its query, which is what a route is: `/uploads?x=1` must get the
         // upload ceiling and `/uploads/../load` must not.
         let requestPath = URLComponents(string: "http://localhost\(target)")?.path ?? target
-        let allowed = await limit(method, requestPath, headers)
+        let allowed = try await limit(method, requestPath, headers)
         if let lengthValue = headers["content-length"] {
             guard let length = Int(lengthValue), length >= 0, body.count <= length else {
                 throw ParseError.malformed

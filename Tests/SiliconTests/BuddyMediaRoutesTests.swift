@@ -1600,7 +1600,8 @@ struct BuddyMediaEdgeTests {
 
     // MARK: - S3: the raised ceiling belongs to a caller, not to a path
 
-    /// Pointing 24 MiB at `/uploads` with a token nobody issued buys the ordinary 4 MiB.
+    /// Pointing 24 MiB at `/uploads` with a token nobody issued buys nothing: it is told 401
+    /// before the body is read, as any body over what no bearer may send is.
     @Test func onlyAnIdentifiedFullDeviceGetsTheRaisedCeiling() async throws {
         try await BuddyMediaFixture.withServer { fixture in
             let full = try await fixture.pair(name: "Studio phone")
@@ -1608,13 +1609,13 @@ struct BuddyMediaEdgeTests {
             let big = BuddyMediaRoutesTests.jpegBytes(count: 8 * 1_048_576)
             #expect(big.count > BuddyLimits.requestBodyBytes)
 
-            // A bearer that is not a device at all: refused on length, before the body.
+            // A bearer that is not a device at all: refused before the body, as nobody.
             let (guessed, why) = try await fixture.phone.call(
                 "POST", "/uploads", token: "guessed", data: big, contentType: "image/jpeg"
             )
-            #expect(guessed == 413)
+            #expect(guessed == 401)
             let sentence = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: why)
-            #expect(sentence.error.contains("\(BuddyLimits.requestBodyBytes)"))
+            #expect(sentence.error == "Invalid or missing control token.")
 
             // A chat-only device may not use this route at all, so it does not get its
             // ceiling either — refused on length rather than reaching the 403.
@@ -1622,14 +1623,15 @@ struct BuddyMediaEdgeTests {
                 "POST", "/uploads", token: chat.token, data: big, contentType: "image/jpeg"
             ) == 413)
 
-            // A revoked device is a bearer nobody issued, from the next request onward.
+            // A revoked device is a bearer nobody issued, from the next request onward — and
+            // is told so, which is what sends a phone back to pairing.
             #expect(try await fixture.phone.status(
                 "POST", "/uploads", token: full.token, data: big, contentType: "image/jpeg"
             ) == 200)
             _ = await fixture.devices.revoke(deviceID: full.deviceID)
             #expect(try await fixture.phone.status(
                 "POST", "/uploads", token: full.token, data: big, contentType: "image/jpeg"
-            ) == 413)
+            ) == 401)
         }
     }
 

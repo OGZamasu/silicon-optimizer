@@ -80,6 +80,63 @@ struct RequestReadDeadlineTests {
         }
     }
 
+    /// A body is read for as long as it keeps arriving at a slow link's pace, so how much a
+    /// caller may send is also how long it may hold a connection. Somebody with a token
+    /// nobody issued may send what somebody with no token may, and is told 401 before a byte
+    /// of anything larger is read — rather than holding a slot for minutes while four
+    /// megabytes trickle in.
+    @Test func anUnknownBearerIsAnsweredBeforeItsBodyIsRead() async throws {
+        let deadlines = ControlServer.ReadDeadlines(
+            headers: .seconds(5), idle: .seconds(2), minimumBytesPerSecond: 16 * 1024
+        )
+        try await withServer(deadlines) { fixture in
+            let raw = try await RawConnection.connect(port: fixture.tailnetPort)
+            defer { raw.close() }
+            try await raw.send(Self.head(
+                "POST", "/chat", token: "not-issued", length: BuddyLimits.requestBodyBytes
+            ))
+            let trickle = Task {
+                while !Task.isCancelled {
+                    try await Task.sleep(for: .milliseconds(500))
+                    try await raw.send(" ")
+                }
+            }
+            defer { trickle.cancel() }
+            let answer = try await Self.firstBytes(from: raw, within: .seconds(4))
+            #expect(answer.hasPrefix("HTTP/1.1 401"), "\(answer)")
+        }
+    }
+
+    /// And what that leaves alone: anybody's `/health` and `/buddy/pair`, whatever stale
+    /// token rides along; a paired phone's large request; and a revoked phone still hearing
+    /// 401, the answer that tells it to pair again, rather than "too large".
+    @Test func anUnknownBearerIsStillAnsweredAsItWasBefore() async throws {
+        try await withServer(.standard) { fixture in
+            let phone = fixture.phone
+            #expect(try await phone.status("GET", "/health", token: "not-issued") == 200)
+
+            let stale = "a-token-from-before-the-phone-was-revoked"
+            let invitation = await fixture.registry.invite(
+                host: "127.0.0.1", port: fixture.tailnetPort
+            )
+            #expect(try await phone.status(
+                "POST", "/buddy/pair", token: stale,
+                body: #"{"code":"\#(invitation.code)","deviceName":"Phone","platform":"ios"}"#
+            ) == 200)
+
+            let paired = try await fixture.pair()
+            let photo = "data:image/jpeg;base64," + String(repeating: "A", count: 1_500_000)
+            let chat = #"{"messages":[{"role":"user","content":"What is this?","images":[""#
+                + photo + #""]}]}"#
+            #expect(try await phone.status("POST", "/chat", token: paired.token, body: chat)
+                == 200)
+
+            #expect(await fixture.registry.revoke(deviceID: paired.deviceID))
+            #expect(try await phone.status("POST", "/chat", token: paired.token, body: chat)
+                == 401)
+        }
+    }
+
     @Test func theStandardCeilingLeavesRoomForAPhonesLargestUploadOnASlowLink() {
         let standard = ControlServer.ReadDeadlines.standard
         let start = ContinuousClock.now
@@ -118,25 +175,58 @@ struct RequestReadDeadlineTests {
         }
     }
 
+    /// The server under test, reachable on loopback and on a stand-in for the tailnet
+    /// listener, with its own device registry and every file in a temporary folder.
+    struct Fixture {
+        let port: Int
+        let token: String
+        let tailnetPort: Int
+        let registry: BuddyRegistry
+        let session: URLSession
+
+        var phone: TestClient { TestClient(port: tailnetPort, token: token, session: session) }
+
+        func pair() async throws -> ControlAPI.BuddyPairResponse {
+            let invitation = await registry.invite(host: "127.0.0.1", port: tailnetPort)
+            let (status, body) = try await phone.call(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(invitation.code)","deviceName":"Phone","platform":"ios"}"#
+            )
+            #expect(status == 200)
+            return try JSONDecoder().decode(ControlAPI.BuddyPairResponse.self, from: body)
+        }
+    }
+
     private func withDeadlines(
         _ deadlines: ControlServer.ReadDeadlines,
         _ body: (_ port: Int, _ token: String) async throws -> Void
+    ) async throws {
+        try await withServer(deadlines) { try await body($0.port, $0.token) }
+    }
+
+    private func withServer(
+        _ deadlines: ControlServer.ReadDeadlines, _ body: (Fixture) async throws -> Void
     ) async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("read-deadlines-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let handshakeURL = directory.appendingPathComponent("control.json")
+        let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
         let server = ControlServer(
             host: BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false),
-            handshakeURL: handshakeURL,
-            buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
+            handshakeURL: handshakeURL, buddy: registry,
             events: BuddyEventHub(), media: MediaRegistry(url: nil),
             uploadsRoot: directory.appendingPathComponent("uploads"),
             postersRoot: directory.appendingPathComponent("posters"),
             readDeadlines: deadlines,
             discoverTailnetAddress: { nil }
         )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
         try await server.start()
         defer { Task { await server.stop() } }
         let deadline = ContinuousClock.now + .seconds(5)
@@ -147,7 +237,14 @@ struct RequestReadDeadlineTests {
         let handshake = try JSONDecoder().decode(
             ControlAPI.Handshake.self, from: try Data(contentsOf: handshakeURL)
         )
-        try await body(handshake.port, handshake.token)
+        await registry.setAllowsTailnetDevices(true)
+        let tailnetPort = try await BuddyControlTests.bindTailnetListener(
+            on: server, avoiding: handshake.port
+        )
+        try await body(Fixture(
+            port: handshake.port, token: handshake.token, tailnetPort: tailnetPort,
+            registry: registry, session: session
+        ))
         await server.stop()
     }
 }
