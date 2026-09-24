@@ -197,9 +197,12 @@ indirect enum JSONValue: Codable, Equatable, Sendable {
         return nil
     }
 
+    /// A fraction is truncated, as it always was; a number no `Int` can hold is no number
+    /// at all, like a string that does not parse. `Int(_: Double)` traps on those — a
+    /// seed of 2^64-1 or 1e20 in any tool's arguments used to kill the bridge.
     var intValue: Int? {
         switch self {
-        case .number(let value): Int(value)
+        case .number(let value): Int(exactly: value.rounded(.towardZero))
         case .string(let value): Int(value)
         default: nil
         }
