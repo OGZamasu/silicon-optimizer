@@ -346,6 +346,66 @@ test('source-bearing legacy Live records migrate outside the dev-served app root
   assert.equal(migrateLegacyLivePrivateArtifacts(root).length, 0);
 });
 
+// The private Live directory is under the home folder, so for a project on an external disk
+// every move out of the app root crosses volumes, where rename(2) fails with EXDEV. Make every
+// rename between `appRoot` and anywhere else fail that way.
+function failRenamesLeaving(t, appRoot) {
+  const rename = fs.renameSync;
+  const crossed = [];
+  const inside = (entry) => {
+    const relative = path.relative(appRoot, path.resolve(String(entry)));
+    return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  fs.renameSync = (from, to) => {
+    if (inside(from) !== inside(to)) {
+      crossed.push(String(from));
+      throw Object.assign(new Error(`EXDEV: cross-device link not permitted, rename '${from}' -> '${to}'`),
+        { code: 'EXDEV', errno: -18, syscall: 'rename' });
+    }
+    return rename.call(fs, from, to);
+  };
+  t.after(() => { fs.renameSync = rename; });
+  return crossed;
+}
+
+test('legacy Live records migrate to private state on another volume', (t) => {
+  const root = fs.realpathSync(tempDir(t));
+  const outside = tempDir(t);
+  fs.writeFileSync(path.join(outside, 'kept.txt'), 'NOT FOLLOWED');
+  const liveDir = path.join(root, '.impeccable', 'live');
+  fs.mkdirSync(path.join(liveDir, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(liveDir, 'sessions', 'aabbccdd.jsonl'), 'SECRET JOURNAL');
+  fs.writeFileSync(path.join(liveDir, 'sessions', '.DS_Store'), 'SECRET UNKNOWN SIBLING');
+  fs.symlinkSync(outside, path.join(liveDir, 'sessions', 'linked'));
+  fs.writeFileSync(path.join(liveDir, 'pending-manual-edits.json'), 'SECRET DRAFT');
+  fs.mkdirSync(path.join(liveDir, 'artifacts', 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(liveDir, 'artifacts', 'nested', 'aabbccdd-r1.html'), 'SECRET ARTIFACT');
+  const crossed = failRenamesLeaving(t, root);
+
+  const moved = migrateLegacyLivePrivateArtifacts(root);
+  assert.ok(crossed.length >= 5, 'every move crossed volumes');
+  const privateDir = getLivePrivateDirPath(root);
+  assert.equal(fs.existsSync(path.join(liveDir, 'sessions')), false);
+  assert.equal(fs.existsSync(path.join(liveDir, 'pending-manual-edits.json')), false);
+  assert.equal(fs.existsSync(path.join(liveDir, 'artifacts')), false);
+  assert.equal(fs.readFileSync(path.join(privateDir, 'sessions', 'aabbccdd.jsonl'), 'utf8'), 'SECRET JOURNAL');
+  assert.equal(fs.statSync(path.join(privateDir, 'sessions', 'aabbccdd.jsonl')).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(path.join(privateDir, 'pending-manual-edits.json'), 'utf8'), 'SECRET DRAFT');
+  const quarantine = path.join(privateDir, 'quarantine');
+  const quarantined = fs.readdirSync(quarantine);
+  const artifacts = quarantined.find((name) => name.startsWith('legacy-artifacts-'));
+  assert.equal(fs.readFileSync(path.join(quarantine, artifacts, 'nested', 'aabbccdd-r1.html'), 'utf8'), 'SECRET ARTIFACT');
+  assert.equal(fs.statSync(path.join(quarantine, artifacts)).mode & 0o777, 0o700);
+  const unknown = quarantined.filter((name) => name.startsWith('legacy-unknown-')).map((name) => path.join(quarantine, name));
+  assert.equal(unknown.length, 2);
+  const link = unknown.find((entry) => fs.lstatSync(entry).isSymbolicLink());
+  assert.equal(fs.readlinkSync(link), outside, 'a symlink moves as the link, never its target');
+  assert.equal(fs.readFileSync(path.join(outside, 'kept.txt'), 'utf8'), 'NOT FOLLOWED');
+  assert.deepEqual(quarantined.filter((name) => !/^legacy-(artifacts|unknown)-/.test(name)), [], 'nothing half-moved is left behind');
+  assert.deepEqual(fs.readdirSync(path.join(privateDir, 'sessions')), ['aabbccdd.jsonl']);
+  assert.ok(moved.length >= 5);
+});
+
 test('private Live migration refuses a symlinked destination inside the app', (t) => {
   const root = tempDir(t);
   const privateDir = getLivePrivateDirPath(root);
@@ -1627,6 +1687,20 @@ test('Svelte wrap and insert remain source-preview/HMR without page-readable man
   assert.match(inserted.wrapperBlock, /data-impeccable-mode="insert"/);
   assert.equal(fs.readFileSync(sourceFile, 'utf8'), source);
   assert.equal(fs.existsSync(path.join(root, 'node_modules', '.impeccable-live')), false);
+});
+
+test('legacy detached Svelte previews are quarantined on another volume too', (t) => {
+  const root = fs.realpathSync(tempDir(t));
+  const privateRoot = tempDir(t);
+  const source = path.join(root, 'node_modules', '.impeccable-live', 'aabbccdd');
+  fs.mkdirSync(source, { recursive: true });
+  writeJson(path.join(source, 'manifest.json'), { id: 'aabbccdd', previewMode: 'svelte-component', originalMarkup: 'PRIVATE ROUTE SOURCE' });
+  const crossed = failRenamesLeaving(t, root);
+  const moved = quarantineLegacySvelteComponentSessions(root, privateRoot);
+  assert.equal(crossed.length, 1);
+  assert.equal(moved.length, 1);
+  assert.equal(fs.existsSync(path.join(root, 'node_modules', '.impeccable-live')), false);
+  assert.match(fs.readFileSync(path.join(moved[0].destination, 'aabbccdd', 'manifest.json'), 'utf8'), /PRIVATE ROUTE SOURCE/);
 });
 
 test('legacy detached Svelte previews are recoverably quarantined outside the dev root', (t) => {
