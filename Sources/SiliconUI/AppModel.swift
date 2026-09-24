@@ -1944,10 +1944,27 @@ public final class AppModel {
             let configured = settings.lato2ServiceURL
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard let url = URL(string: configured) else { return nil }
-            return Lato2Runtime(baseURL: url)
+            return Lato2Runtime(
+                baseURL: url, token: Self.lato2Credential(for: url, in: swarmConfig)
+            )
         case .unsupported:
             return nil
         }
+    }
+
+    /// The bearer the LATO.2 lane presents: whatever this Mac holds for the swarm peer at
+    /// that address — its own per-client token, else the shared one — exactly as the video,
+    /// image and chat lanes send it. The service URL is typed separately from the swarm, so
+    /// it is matched to a peer by origin; one that matches no peer gets nothing, because
+    /// the registry is also the list of places a swarm credential may go.
+    nonisolated static func lato2Credential(for url: URL, in config: SwarmConfig?) -> String? {
+        guard let config,
+              let peer = config.peers.first(where: { peer in
+                  URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+                      .map { RemoteURLPolicy.sameOrigin($0, url) } ?? false
+              })
+        else { return nil }
+        return config.bearer(forPeer: peer.name)
     }
 
     /// Queues the composer's current image. Same warn-don't-refuse policy as images.
