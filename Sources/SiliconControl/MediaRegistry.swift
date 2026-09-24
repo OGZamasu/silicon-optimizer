@@ -54,7 +54,15 @@ public actor MediaRegistry {
     private var entries: [String: Entry] = [:]
     /// Resolved path → id, so a second registration of the same file is the first one's id.
     private var byPath: [String: String] = [:]
+    /// When each id was last handed out or served, as a count of uses since launch. What
+    /// eviction goes by: see `evictLeastRecentlyUsedIfCrowded`. Memory only, because every
+    /// queue poll touches every id in it, and rewriting the file for that is the write per
+    /// second `dirty` exists to avoid. An id from the file that has not been used since
+    /// launch counts as the least recent of all.
+    private var lastUse: [String: UInt64] = [:]
+    private var uses: UInt64 = 0
     private let url: URL?
+    private let capacity: Int
     /// Set while a save is worth doing. Registration happens on every queue poll, and
     /// rewriting the file when nothing changed is a write per second for nothing.
     private var dirty = false
@@ -71,8 +79,13 @@ public actor MediaRegistry {
         return base.appendingPathComponent("SiliconOptimizer/media.json")
     }
 
-    public init(url: URL? = MediaRegistry.defaultURL) {
+    /// - Parameter maximumEntries: the ceiling, for the tests that cannot wait for ten
+    ///   thousand registrations. See `maximumEntries`.
+    public init(
+        url: URL? = MediaRegistry.defaultURL, maximumEntries: Int = MediaRegistry.maximumEntries
+    ) {
         self.url = url
+        self.capacity = max(1, maximumEntries)
         guard let url, let data = try? Data(contentsOf: url),
               let stored = try? Self.decoder.decode([Entry].self, from: data)
         else { return }
@@ -101,35 +114,58 @@ public actor MediaRegistry {
         guard let type = GatewayAPI.mediaContentTypes[
             URL(fileURLWithPath: resolved).pathExtension.lowercased()
         ] else { return nil }
-        if let existing = byPath[resolved] { return existing }
+        if let existing = byPath[resolved] {
+            noteUse(existing)
+            return existing
+        }
         let id = Self.makeID()
         let entry = Entry(
             id: id, path: resolved, contentType: type, registeredAt: Date(), kind: kind
         )
         entries[id] = entry
         byPath[resolved] = id
+        noteUse(id)
         dirty = true
-        evictOldestIfCrowded()
+        evictLeastRecentlyUsedIfCrowded()
         return id
     }
 
     /// How many ids this table keeps. A render a month ago is still fetchable if the file
     /// is still there, but a table that only ever grows is a file somebody finds in a year
-    /// wondering what it is — and the queue's own history stops at two thousand items.
-    public static let maximumEntries = 4000
+    /// wondering what it is.
+    ///
+    /// It has to hold more than one queue poll publishes. The queue keeps two thousand
+    /// items, and each finished clip is two ids — the result and its poster — so a full
+    /// queue alone is four thousand, which was this whole table: every render past that
+    /// pushed out an id the queue was still showing, the next poll minted it again, and a
+    /// phone's cached links broke one by one. The rest is room for renders, meshes and
+    /// uploads that a phone holds an id for.
+    public static let maximumEntries = 10_000
 
-    /// Drops the oldest registrations once the table is over its ceiling. Oldest rather
-    /// than least-used because there is no use to count: the loser is a link that has been
-    /// in a phone's list longest, and re-polling the queue mints it again.
-    private func evictOldestIfCrowded() {
-        guard entries.count > Self.maximumEntries else { return }
+    private func noteUse(_ id: String) {
+        uses += 1
+        lastUse[id] = uses
+    }
+
+    private func forget(_ entry: Entry) {
+        entries.removeValue(forKey: entry.id)
+        byPath.removeValue(forKey: entry.path)
+        lastUse.removeValue(forKey: entry.id)
+    }
+
+    /// Drops the ids used longest ago once the table is over its ceiling. By use rather
+    /// than by registration: an id the queue view publishes again on every poll is in use
+    /// however long ago it was minted, and dropping it only means minting it again — a new
+    /// id for the same file, and a link a phone had cached that now answers 404.
+    private func evictLeastRecentlyUsedIfCrowded() {
+        guard entries.count > capacity else { return }
         let doomed = entries.values
-            .sorted { $0.registeredAt < $1.registeredAt }
-            .prefix(entries.count - Self.maximumEntries)
-        for entry in doomed {
-            entries.removeValue(forKey: entry.id)
-            byPath.removeValue(forKey: entry.path)
-        }
+            .sorted {
+                let (left, right) = (lastUse[$0.id] ?? 0, lastUse[$1.id] ?? 0)
+                return left == right ? $0.registeredAt < $1.registeredAt : left < right
+            }
+            .prefix(entries.count - capacity)
+        for entry in doomed { forget(entry) }
     }
 
     /// What `GET /media/{id}` serves, or nil.
@@ -153,11 +189,11 @@ public actor MediaRegistry {
               resolved == entry.path,
               Self.isInside(resolved, roots: roots)
         else {
-            entries.removeValue(forKey: id)
-            byPath.removeValue(forKey: entry.path)
+            forget(entry)
             dirty = true
             return nil
         }
+        noteUse(id)
         return entry
     }
 
@@ -208,9 +244,8 @@ public actor MediaRegistry {
     /// Forgets every id whose file is gone. Called by the uploads sweep, so a device that
     /// uploaded a photograph a fortnight ago does not leave an id pointing at nothing.
     public func forgetMissingFiles() {
-        for (id, entry) in entries where !FileManager.default.fileExists(atPath: entry.path) {
-            entries.removeValue(forKey: id)
-            byPath.removeValue(forKey: entry.path)
+        for entry in entries.values where !FileManager.default.fileExists(atPath: entry.path) {
+            forget(entry)
             dirty = true
         }
         persist()
