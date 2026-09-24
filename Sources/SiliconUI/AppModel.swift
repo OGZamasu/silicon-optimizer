@@ -1169,6 +1169,9 @@ public final class AppModel {
         public var gpuConsumer: String?
         public var runningJob: PeerJob?
         public var pendingJobs: [PeerJob] = []
+        /// The node's decision lane, from the top-level `decisions` object in its
+        /// `/v1/node`. Nil when the node does not report one.
+        public var decisions: PeerDecisionLane?
 
         public var readyCapabilities: [String] {
             capabilities.filter(\.ready).map(\.id)
@@ -1582,6 +1585,7 @@ public final class AppModel {
                 .compactMap { Self.parseJob($0, running: false) }
         }
         status.gpuConsumer = (json["metrics"] as? [String: Any])?["gpu_consumer"] as? String
+        status.decisions = (json["decisions"] as? [String: Any]).map(Self.parseDecisions)
     }
 
     private nonisolated static func parseJob(
