@@ -58,7 +58,7 @@ if "$ROOT/Scripts/verify-vendor-runtime.sh" "$VENDOR" "$MANIFEST" >/dev/null 2>&
 fi
 
 # No hosted CI: every check runs on a Mac from this repository's own scripts (CONTRIBUTING.md).
-if [[ -n "$(find "$ROOT/.github/workflows" -type f 2>/dev/null)" ]]; then
+if [[ -n "$(find "$ROOT/.github/workflows" \( -type f -o -type l \) 2>/dev/null)" ]]; then
     echo "a GitHub Actions workflow was found; checks here run locally" >&2; exit 1
 fi
 if grep -E '(^|[[:space:]])npx[[:space:]]+wrangler' "$ROOT/Scripts/release.sh" "$ROOT/web/package.json"; then
