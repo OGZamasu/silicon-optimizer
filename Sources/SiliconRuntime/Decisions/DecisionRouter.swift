@@ -226,11 +226,24 @@ public actor DecisionRouter {
                     lane: id, peer: nil, at: Date(), latencyMS: nil,
                     questions: questions.count, failed: error.localizedDescription
                 )
-                // A lane that just failed is not ready, whatever it said two seconds ago.
-                readiness[id] = (false, Date())
+                // A lane that just failed is not ready, whatever it said two seconds ago —
+                // unless what failed was this request rather than the lane. A state longer
+                // than the checkpoint reads is refused with the lane perfectly well, and
+                // marking it down would take it away from every other ability's short
+                // states for the whole readiness window.
+                if !Self.isRefusalOfThisRequest(error) {
+                    readiness[id] = (false, Date())
+                }
             }
         }
         throw lastError ?? DecisionLaneError.nothingAvailable(feature)
+    }
+
+    /// Whether a lane's error is about the request it was given, not about the lane.
+    static func isRefusalOfThisRequest(_ error: any Error) -> Bool {
+        guard let error = error as? DecisionLaneError else { return false }
+        if case .stateTooLong = error { return true }
+        return false
     }
 
     private func run(

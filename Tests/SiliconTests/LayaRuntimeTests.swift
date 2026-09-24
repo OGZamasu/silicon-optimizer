@@ -1097,3 +1097,71 @@ struct LayaDriverScriptTests {
         await sidecar.stop()
     }
 }
+
+// MARK: - One long state, through the router
+
+/// `stateTooLong` is a refusal of one request by a lane that is perfectly well. The router's
+/// catch-all marked any lane that threw as not ready for the readiness window, so one ability's
+/// long state took Laya away from every other ability's short ones for two seconds.
+@Suite("A state Laya refuses, through the router", .serialized)
+struct LayaRefusalRoutingTests {
+
+    /// A fake sidecar that refuses any state containing LONG, the way the real one does a
+    /// state longer than its checkpoint reads.
+    private static func refusingRuntime(_ fake: FakeSidecar) async throws -> LayaRuntime {
+        let hook = "    if \"LONG\" in json.dumps(request.get(\"state\")):\n"
+            + "        print(json.dumps({\"id\": request.get(\"id\"), \"ok\": False, "
+            + "\"kind\": \"state_too_long\", \"error\": \"too long\", \"tokens\": 900, "
+            + "\"room\": 470}), flush=True)\n"
+            + "        continue\n"
+            + "    if behaviour == \"hang\":"
+        let source = FakeSidecar.source("ok")
+        try #require(source.contains("    if behaviour == \"hang\":"))
+        try source.replacingOccurrences(of: "    if behaviour == \"hang\":", with: hook)
+            .write(to: fake.script, atomically: true, encoding: .utf8)
+        return try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+    }
+
+    @Test func aRefusedLongStateLeavesLayaReadyForTheNextShortOne() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await Self.refusingRuntime(fake)
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(key: nil)   // Jev off and keyless: no paid lane exists
+        let router = DecisionRouter(service: harness.service)
+        await router.register(LayaLane(runtime: runtime, checkpoint: { .english }))
+        let questions = ControlAPI.DecideRequest.fixture().questions
+
+        await #expect(throws: DecisionLaneError.stateTooLong(
+            tokens: 900, limit: 470, checkpoint: LayaCheckpoint.english.displayName
+        )) {
+            _ = try await router.decide(.routing, state: .string("LONG routing state"), questions: questions)
+        }
+        let short = try await router.decide(.calibration, state: .string("short"), questions: questions)
+        #expect(short.provider == DecisionLaneID.laya.wireName)
+        await runtime.unload()
+    }
+
+    /// And the refusal still falls through: the long state goes to the next free lane.
+    @Test func aRefusedLongStateIsAnsweredByTheNextLane() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await Self.refusingRuntime(fake)
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(key: nil)
+        let router = DecisionRouter(service: harness.service)
+        await router.register(LayaLane(runtime: runtime, checkpoint: { .english }))
+        let oneToken = CountingLane(.oneToken)
+        await router.register(oneToken)
+        let questions = ControlAPI.DecideRequest.fixture().questions
+
+        let long = try await router.decide(.routing, state: .string("LONG routing state"), questions: questions)
+        #expect(long.provider == DecisionLaneID.oneToken.wireName)
+        let short = try await router.decide(.calibration, state: .string("short"), questions: questions)
+        #expect(short.provider == DecisionLaneID.laya.wireName)
+        #expect(await oneToken.count() == 1)
+        await runtime.unload()
+    }
+}
