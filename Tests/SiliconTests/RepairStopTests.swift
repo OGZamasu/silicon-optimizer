@@ -124,11 +124,13 @@ struct RepairStopTests {
         let sleeping = try SleepingStep()
         defer { sleeping.clean() }
         let model = AppModel(settings: .init())
+        // This model's own set of running steps, so "all" is only this test's.
+        model.runningRepairs = RepairProcess.Running()
         model.runRepair(id: "repair-quit-test", steps: [sleeping.step]) {}
         let (leader, child) = try await sleeping.pids()
 
-        // What the app's willTerminate observer calls, synchronously, as it quits.
-        RepairProcess.stopAll()
+        // What the app's willTerminate observer does, synchronously, as it quits.
+        model.runningRepairs.stopAll()
 
         try await Self.waitUntil("the step and its child exited") {
             !Self.isAlive(leader) && !Self.isAlive(child)

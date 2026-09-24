@@ -1770,6 +1770,9 @@ public final class AppModel {
     }
 
     public private(set) var repairs: [String: RepairJob] = [:]
+    /// Where the running repairs' processes are kept for Stop and for quitting. Tests give a
+    /// model its own, so stopping everything in one cannot reach another suite's steps.
+    @ObservationIgnored var runningRepairs = RepairProcess.Running.shared
 
     public struct RepairStep: Sendable {
         public var executable: URL
@@ -1810,12 +1813,13 @@ public final class AppModel {
         let job = RepairJob(id: id)
         repairs[id] = job
 
+        let running = runningRepairs
         job.task = Task { [weak self] in
             var completed = 0
             for step in steps {
                 if Task.isCancelled { break }
                 await MainActor.run { if !job.stopping { job.stage = step.label } }
-                let process = RepairProcess()
+                let process = RepairProcess(running: running)
                 let outcome = await withTaskCancellationHandler {
                     await Self.runProcess(step: step, process: process) { line in
                         Task { @MainActor in

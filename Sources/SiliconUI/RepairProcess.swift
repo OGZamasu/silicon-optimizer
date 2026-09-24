@@ -16,15 +16,40 @@ final class RepairProcess: @unchecked Sendable {
     /// How long a stopped step gets to exit on SIGTERM before it is killed outright.
     static let stopGrace: TimeInterval = 5
 
-    /// Every step that has started and not yet exited. Read from a `willTerminate` observer,
-    /// so a lock rather than an actor, as with `ChildProcessRegistry`.
-    private static let registryLock = NSLock()
-    nonisolated(unsafe) private static var running: [ObjectIdentifier: RepairProcess] = [:]
+    /// The steps that have started and not yet exited. Read from a `willTerminate` observer,
+    /// so a lock rather than an actor, as with `ChildProcessRegistry`. The app has one; a test
+    /// that stops "everything" makes its own, so it cannot reach another suite's steps.
+    final class Running: @unchecked Sendable {
+        static let shared = Running()
 
+        private let lock = NSLock()
+        private var steps: [ObjectIdentifier: RepairProcess] = [:]
+
+        fileprivate func add(_ step: RepairProcess) {
+            lock.withLock { steps[ObjectIdentifier(step)] = step }
+        }
+
+        fileprivate func remove(_ step: RepairProcess) {
+            lock.withLock { steps[ObjectIdentifier(step)] = nil }
+        }
+
+        /// Every step still running, as the app quits. Synchronous and SIGTERM only: this runs
+        /// from a `willTerminate` observer with the process about to exit underneath it.
+        func stopAll() {
+            let running = lock.withLock { Array(steps.values) }
+            for step in running { step.signal(SIGTERM) }
+        }
+    }
+
+    private let running: Running
     private let lock = NSLock()
     private var pid: pid_t = 0
     private var stopRequested = false
     private var hasExited = false
+
+    init(running: Running = .shared) {
+        self.running = running
+    }
 
     /// Called the moment the step's process has started.
     func launched(_ process: Process) {
@@ -37,7 +62,7 @@ final class RepairProcess: @unchecked Sendable {
             return stopRequested
         }
         guard let stopNow else { return }
-        Self.registryLock.withLock { Self.running[ObjectIdentifier(self)] = self }
+        running.add(self)
         // For the next launch's reaper, should this one crash rather than quit.
         ChildProcessRegistry.register(pid: pid)
         if stopNow { stop() }
@@ -49,7 +74,7 @@ final class RepairProcess: @unchecked Sendable {
             hasExited = true
             return self.pid
         }
-        Self.registryLock.withLock { Self.running[ObjectIdentifier(self)] = nil }
+        running.remove(self)
         if pid > 0 { ChildProcessRegistry.unregister(pid: pid) }
     }
 
@@ -68,17 +93,14 @@ final class RepairProcess: @unchecked Sendable {
         }
     }
 
-    /// Every step still running, as the app quits. Synchronous and SIGTERM only: this runs from
-    /// a `willTerminate` observer with the process about to exit underneath it.
-    static func stopAll() {
-        let steps = registryLock.withLock { Array(running.values) }
-        for step in steps { step.signal(SIGTERM) }
-    }
+    /// Every step the app has running, as it quits.
+    static func stopAll() { Running.shared.stopAll() }
 
     /// Signals the step's process group, or only the step when it is not a group leader. The
-    /// pid is read under the lock that `exited()` takes, so a step already reaped — whose pid
-    /// the kernel may have handed on — is never signalled.
-    private func signal(_ signal: Int32) {
+    /// pid is read under the lock that `exited()` takes, so a step reported as exited is never
+    /// signalled. Foundation reaps the process a moment before that report; a pid is not handed
+    /// on in so short a time, and the group check below would still have to match.
+    fileprivate func signal(_ signal: Int32) {
         lock.withLock {
             guard !hasExited, pid > 0 else { return }
             let group = getpgid(pid)
