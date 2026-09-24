@@ -4078,6 +4078,12 @@ public final class AppModel {
             )
             return
         }
+        send(text, images: images, to: runtime)
+    }
+
+    /// `send` once a model is known to be loaded: apart so the tests can answer from a runtime
+    /// of their own.
+    func send(_ text: String, images: [String], to runtime: any InferenceRuntime) {
         guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
         else { return }
         noteActivity()
@@ -4119,9 +4125,9 @@ public final class AppModel {
                     guard let self else { return }
                     switch event {
                     case .token(let token):
-                        self.append(token, toMessage: replyID, reasoning: false)
+                        self.append(token, to: replyID, in: answering, reasoning: false)
                     case .reasoningToken(let token):
-                        self.append(token, toMessage: replyID, reasoning: true)
+                        self.append(token, to: replyID, in: answering, reasoning: true)
                     case .finished(let metrics):
                         self.lastGeneration = metrics
                     }
@@ -4132,24 +4138,9 @@ public final class AppModel {
                 guard let self else { return }
                 self.append(
                     "\n\n_Generation failed: \(error.localizedDescription)_",
-                    toMessage: replyID, reasoning: false
+                    to: replyID, in: answering, reasoning: false
                 )
             }
-        }
-    }
-
-    private func append(_ token: String, toMessage id: UUID, reasoning: Bool) {
-        guard let conversationIndex = conversations.firstIndex(
-            where: { $0.id == selectedConversationID }
-        ), let messageIndex = conversations[conversationIndex].messages.firstIndex(
-            where: { $0.id == id }
-        ) else { return }
-
-        if reasoning {
-            conversations[conversationIndex].messages[messageIndex].reasoning =
-                (conversations[conversationIndex].messages[messageIndex].reasoning ?? "") + token
-        } else {
-            conversations[conversationIndex].messages[messageIndex].content += token
         }
     }
 

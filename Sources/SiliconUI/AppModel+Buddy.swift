@@ -286,8 +286,9 @@ extension AppModel {
     }
 
     /// Appends into a named conversation rather than the selected one: a phone can be
-    /// talking in a thread the Mac is not looking at.
-    private func append(
+    /// talking in a thread the Mac is not looking at, and the Mac's own Chat tab may have
+    /// moved to another thread since it asked.
+    func append(
         _ token: String, to messageID: UUID, in conversationID: Conversation.ID, reasoning: Bool
     ) {
         guard let conversation = conversations.firstIndex(where: { $0.id == conversationID }),
