@@ -359,6 +359,21 @@ struct DecisionRoutesTests {
                 ControlAPI.JevCalibration.self, from: laneBody
             ).lane == "laya")
 
+            // A word that is not a lane is a 400 with the same sentence POST gives it — not
+            // a 404 saying that lane has never been calibrated. A known lane with no run yet
+            // is still the 404.
+            let (unknown, unknownBody) = try await call(
+                "GET", "/jev/calibration?lane=quantum", port: port, token: control.token
+            )
+            #expect(unknown == 400)
+            #expect((try? JSONSerialization.jsonObject(with: unknownBody)
+                     as? [String: Any])?["error"] as? String
+                    == ControlAPI.DecisionLaneVocabulary.unknownLane("quantum"))
+            let (notYet, _) = try await call(
+                "GET", "/jev/calibration?lane=node", port: port, token: control.token
+            )
+            #expect(notYet == 404)
+
             // An empty body is the route as it always was.
             let (old, _) = try await call(
                 "POST", "/jev/calibrate", port: port, token: control.token

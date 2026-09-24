@@ -1645,7 +1645,15 @@ public actor ControlServer {
                 ))
             case ("GET", "/jev/calibration"):
                 // `?lane=` is additive: without it this is the route it has always been,
-                // answering for the lane that used to be the only one there was.
+                // answering for the lane that used to be the only one there was. A word that
+                // is not a lane is the caller's mistake, said as `POST /jev/calibrate` says
+                // it, rather than a 404 claiming that lane has simply never been calibrated.
+                if let lane = request.query["lane"],
+                   !ControlAPI.DecisionLaneVocabulary.lanes.contains(
+                       String(lane.split(separator: ":", maxSplits: 1).first ?? "")
+                   ) {
+                    return .error(400, ControlAPI.DecisionLaneVocabulary.unknownLane(lane))
+                }
                 guard let result = await host.decisionCalibration(
                     lane: request.query["lane"]
                 ) else {
