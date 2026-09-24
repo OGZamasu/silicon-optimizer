@@ -31,6 +31,8 @@ so a one-sided edit cannot pass review quietly.
 | `job-running.json` | …mid-render, with progress/step/ETA |
 | `job-done.json` | …finished, with `result_urls` |
 | `job-failed.json` | …failed, with a human-readable `error` |
+| `job-cancelled.json` | …cancelled, with a `cancel` object (and `error`, for older Macs) |
+| `job-cancel.json` | `POST /v1/jobs/{id}/cancel` — the answer, in its `cancel` field |
 
 ## Known asymmetry
 
@@ -46,11 +48,22 @@ change to both halves at once, not a fixture edit.
 
 - A queued job reports `status: "running"` with **no** `progress`. The
   Mac shows "waiting for the card", not a 0% bar.
-- `status` collapses the node's four internal states into three:
-  `running` (queued or running), `done`, `failed`.
+- `status` collapses the node's five internal states into four:
+  `running` (queued or running), `done`, `failed`, `cancelled`. A
+  cancelled job is its own terminal state, never a failure.
+- `POST /v1/jobs/{id}/cancel` answers in the body's `cancel` field —
+  `cancelled` 200, `requested` 202, `completed` / `failed` /
+  `unsupported` 409, `unknown` 404 — and repeats give the same answer.
+  A capability lists `supported_job_actions: ["cancel"]` where the Mac
+  may offer it.
 - `progress` is 0–1, not 0–100.
 - `result_urls` are node-relative paths, resolved against the peer's
   base URL by the caller.
+- The decision lane is advertised as the top-level `decisions` object of
+  `/v1/node`, not as a capability: `engine`, `endpoint` (where to POST a
+  decision), `available`, `loaded`, the `models` and `question_types` it
+  accepts, and the request `limits`. If it is ever also listed among the
+  capabilities, that entry's `kind` is `"decision"`.
 - `metrics.headroom_gb` is the one cross-platform ranking field: each
   platform computes it its own way (VRAM here, unified memory on the
   Mac), and the router only ever compares this number.

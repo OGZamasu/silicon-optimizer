@@ -1,0 +1,6 @@
+{
+  "cancel": "cancelled",
+  "detail": "The job is stopped and will not publish results.",
+  "job_id": "job-5a6b7c8d9e0f1a2b3c4d",
+  "status": "cancelled"
+}

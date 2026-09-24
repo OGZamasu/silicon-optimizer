@@ -1,0 +1,10 @@
+{
+  "cancel": {
+    "detail": "Cancelled while running.",
+    "state": "cancelled"
+  },
+  "elapsed_s": 41.6,
+  "error": "Cancelled while running.",
+  "job_id": "job-5a6b7c8d9e0f1a2b3c4d",
+  "status": "cancelled"
+}
