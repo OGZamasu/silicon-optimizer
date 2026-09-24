@@ -893,6 +893,44 @@ struct BuddyControlTests {
         }
     }
 
+    /// The route and the stream tell a device the same thing about a render that broke.
+    /// The server hands the hub its media folders when a stream opens, so a sentence that
+    /// quotes one names it by its own name, exactly as `GET /video/queue` would — and the
+    /// home folder is `~`, never the owner's account name.
+    @Test func aDeviceOnTheStreamIsToldAFailureWithoutThisMacsFolders() async throws {
+        let hub = BuddyEventHub()
+        try await withServer(hub: hub) { fixture in
+            let paired = try await fixture.pair()
+            let uploads = BuddyUploads.root
+            let reason = "Could not read \(uploads.path)/kettle.png "
+                + "(see \(NSHomeDirectory())/Library/Logs/ltx.log)"
+            let posting = Task {
+                while !Task.isCancelled {
+                    await hub.post(.job(.init(
+                        id: "clip-1", kind: "video", status: "failed", title: "Kettle",
+                        reason: reason
+                    )))
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            defer { posting.cancel() }
+
+            func reasonRead(by client: TestClient, token: String) async throws -> String? {
+                let events = try await client.events(
+                    "GET", "/events", token: token, body: nil
+                ) { $0.contains { $0.name == "job" } }
+                let job = try #require(events.first { $0.name == "job" })
+                return try JSONDecoder().decode(
+                    ControlAPI.JobEvent.self, from: Data(job.data.utf8)
+                ).reason
+            }
+            #expect(try await reasonRead(by: fixture.phone, token: paired.token)
+                == "Could not read \(uploads.lastPathComponent)/kettle.png "
+                    + "(see ~/Library/Logs/ltx.log)")
+            #expect(try await reasonRead(by: fixture.local, token: fixture.local.token) == reason)
+        }
+    }
+
     /// Revoking has to reach what a device is already holding. Waiting for its next request
     /// would leave an SSE subscription alive for as long as the phone cared to keep it.
     @Test func revokingADeviceEndsTheStreamItIsHolding() async throws {

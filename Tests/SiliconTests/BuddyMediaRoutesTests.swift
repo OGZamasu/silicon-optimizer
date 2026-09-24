@@ -1550,6 +1550,65 @@ struct BuddyMediaAppTests {
         #expect(queued.stage == nil)
         #expect(queued.fraction == nil)
     }
+
+    /// A render that breaks says why in the renderer's own words, and those are often a
+    /// traceback through the owner's folders. A device is told the sentence with this Mac's
+    /// folders taken out — what `GET /video/queue` already tells it — and this Mac's own
+    /// token, whose scripts open those paths, is told it as written. The same for a
+    /// download's error, which is the same kind of sentence on the same stream.
+    @Test func aFailuresSentenceReachesADeviceWithoutThisMacsFolders() async throws {
+        let hub = BuddyEventHub()
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("renders-\(UUID())")
+        await hub.useMediaRoots([output.path])
+        let mac = await hub.subscribe(as: .thisMac)
+        let phone = await hub.subscribe(as: .device(id: "phone", scope: .full))
+        let lentOut = await hub.subscribe(as: .device(id: "lent-out", scope: .chat))
+
+        let home = NSHomeDirectory()
+        let reason = "Traceback: File \"\(home)/Library/Application Support/ltx/run.py\", "
+            + "line 9: could not write \(output.path)/clip-0001.mp4"
+        let error = "No space left on the drive under \(home)/Models."
+        let stage = "Loading \(home)/Models/hunyuan3d/shape-small"
+        await hub.post(.job(ControlAPI.JobEvent(
+            id: "9C2F-0003", kind: "video", status: "failed", title: "Alfama", stage: stage,
+            reason: reason
+        )))
+        await hub.post(.download(ControlAPI.DownloadEvent(
+            id: "qwen3-coder@Q4_K_M", name: "Qwen3-Coder", fraction: 0.2, bytesReceived: 2,
+            bytesExpected: 10, bytesPerSecond: 0, error: error
+        )))
+
+        func firstTwo(
+            _ stream: AsyncStream<BuddyEvent.Frame>
+        ) async throws -> (ControlAPI.JobEvent, ControlAPI.DownloadEvent) {
+            var frames: [BuddyEvent.Frame] = []
+            for await frame in stream {
+                frames.append(frame)
+                if frames.count == 2 { break }
+            }
+            try #require(frames.map(\.name) == ["job", "download"])
+            return (
+                try JSONDecoder().decode(ControlAPI.JobEvent.self, from: frames[0].data),
+                try JSONDecoder().decode(ControlAPI.DownloadEvent.self, from: frames[1].data)
+            )
+        }
+
+        let (macJob, macDownload) = try await firstTwo(mac.stream)
+        #expect(macJob.reason == reason)
+        #expect(macJob.stage == stage)
+        #expect(macDownload.error == error)
+
+        for device in [phone, lentOut] {
+            let (job, download) = try await firstTwo(device.stream)
+            #expect(job.reason == "Traceback: File \"~/Library/Application Support/ltx/run.py\", "
+                + "line 9: could not write \(output.lastPathComponent)/clip-0001.mp4")
+            #expect(download.error == "No space left on the drive under ~/Models.")
+            #expect(job.stage == "Loading ~/Models/hunyuan3d/shape-small")
+            #expect(job.reason?.contains(home) == false)
+            #expect(job.reason?.contains(output.path) == false)
+        }
+    }
 }
 
 

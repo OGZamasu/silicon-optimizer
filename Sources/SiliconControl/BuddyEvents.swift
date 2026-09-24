@@ -102,6 +102,32 @@ public enum BuddyEvent: Sendable {
         guard case .status(let status) = self, status.failure?.detail != nil else { return nil }
         return .status(status.withoutPrivilegedDetail)
     }
+
+    /// The same frame with this Mac's folders taken out of the sentences in it, or nil when
+    /// there is nothing to take out.
+    ///
+    /// A failed render's `reason` and a failed download's `error` are written for the owner,
+    /// and what a renderer says when it breaks is often a traceback through the folders it
+    /// ran in — the owner's home folder, account name and all. `GET /video/queue` answers a
+    /// device with those same sentences scrubbed; this is that rule on the stream. A job's
+    /// `stage` goes the same way: some backends' progress lines are passed on as they print
+    /// them.
+    func withoutMacPaths(_ redaction: MacPathRedaction) -> BuddyEvent? {
+        switch self {
+        case .job(var job):
+            let quotesAPath = [job.reason, job.stage].contains { $0?.contains("/") == true }
+            guard quotesAPath else { return nil }
+            job.reason = job.reason.map(redaction.scrub)
+            job.stage = job.stage.map(redaction.scrub)
+            return .job(job)
+        case .download(var download):
+            guard let error = download.error, error.contains("/") else { return nil }
+            download.error = redaction.scrub(error)
+            return .download(download)
+        default:
+            return nil
+        }
+    }
 }
 
 /// Where the app posts what changed, and where every subscribed device reads it.
@@ -147,6 +173,11 @@ public actor BuddyEventHub {
         /// `GET /status` withholds `failure.detail` from these two, and a `status` frame is
         /// the same payload on a socket they are already holding.
         public var seesRuntimeLogs: Bool { hasFullControl }
+
+        /// Whether a frame may say where things are on this Mac. Only its own token: the
+        /// scripts and MCP tools behind it open those paths. A device fetches by media id
+        /// and is told names, the rule every render route already applies to its answers.
+        public var seesMacPaths: Bool { self == .thisMac }
     }
 
     private var listeners: [UUID: AsyncStream<BuddyEvent.Frame>.Continuation] = [:]
@@ -160,6 +191,9 @@ public actor BuddyEventHub {
     private var awaitingOpening: Set<UUID> = []
     /// When each paired device last used an agent route. See `agentWatcherCount`.
     private var agentActivity: [String: Date] = [:]
+    /// How sentences are scrubbed for the audiences that may not see this Mac's paths. The
+    /// home folder until the server says where its output folders are: see `useMediaRoots`.
+    private var redaction = MacPathRedaction(roots: [])
 
     /// How many frames a subscriber may fall behind before the oldest are dropped.
     public static let bufferedFrames = 32
@@ -167,6 +201,13 @@ public actor BuddyEventHub {
     public init() {}
 
     public var subscriberCount: Int { listeners.count }
+
+    /// The folders this Mac writes renders and uploads into, as the control server knows
+    /// them. Handed over by each `/events` request, so a folder the owner has moved since
+    /// is named by its own name, not its path, from the next stream on.
+    public func useMediaRoots(_ roots: [String]) {
+        redaction = MacPathRedaction(roots: roots)
+    }
 
     /// How many subscribers may be sent agent frames. The agent watcher runs only while
     /// this is above zero: sampling transcripts for an audience that may not see them
@@ -235,6 +276,10 @@ public actor BuddyEventHub {
             // model's id is a path on this Mac. `GET /status` tells a peer the same thing.
             var peerFrame: BuddyEvent.Frame?
             let narrowed = event.withoutPrivilegedDetail
+            // And one for a device, when a sentence in a job or download frame quotes a
+            // folder on this Mac.
+            var scrubbedFrame: BuddyEvent.Frame?
+            let scrubbed = event.withoutMacPaths(redaction)
             for (id, listener) in listeners where chosen(id) {
                 // Role filtering also applies to this side channel: peers cannot see
                 // owner activity by holding the event stream.
@@ -248,6 +293,17 @@ public actor BuddyEventHub {
                         peerFrame = BuddyEvent.Frame(name: shown.name, data: data)
                     }
                     if case .dropped = listener.yield(peerFrame!) {
+                        dropped[id, default: 0] += 1
+                    }
+                    continue
+                }
+
+                if let scrubbed, audience?.seesMacPaths != true {
+                    if scrubbedFrame == nil {
+                        guard let data = try? scrubbed.encoded() else { break }
+                        scrubbedFrame = BuddyEvent.Frame(name: scrubbed.name, data: data)
+                    }
+                    if case .dropped = listener.yield(scrubbedFrame!) {
                         dropped[id, default: 0] += 1
                     }
                     continue

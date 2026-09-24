@@ -1065,6 +1065,9 @@ public actor ControlServer {
             case .swarm: .peer
             }
             body = EventSource { writer in
+                // Where this Mac writes its renders now, so the sentences a device is sent
+                // name those folders the way `GET /video/queue` does.
+                await hub.useMediaRoots(await media.roots())
                 await Self.pumpEvents(
                     writer, hub: hub, host: host, audience: audience,
                     stillAuthorized: stillAuthorized
