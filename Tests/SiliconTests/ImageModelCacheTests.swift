@@ -85,16 +85,27 @@ struct ImageModelCacheTests {
     /// anything, least of all a removal: it gets a scratch hub of its own.
     @Test func aModelWithInjectedSettingsNeverResolvesTheRealCache() throws {
         let model = scratchModel()
-        defer { try? FileManager.default.removeItem(at: model.fallbackHuggingFaceHub) }
-        let scratch = FileManager.default.temporaryDirectory.standardizedFileURL.path + "/"
-        #expect(model.imageModelHub.standardizedFileURL.path.hasPrefix(scratch))
-        #expect(model.imageModelHub != HuggingFaceHub.directory(home: nil))
+        let hub = model.fallbackHuggingFaceHub
+        // Proved scratch before anything is written there or a removal is armed: were the
+        // fallback ever the real default again, this must stop, not delete it.
+        try requireScratch(hub)
+        try #require(model.imageModelHub == hub)
+        defer { try? FileManager.default.removeItem(at: hub) }
+        #expect(hub != HuggingFaceHub.directory(home: nil))
 
         let entry = throwawayEntry()
-        let repository = try placeWeights(for: entry, hub: model.imageModelHub)
+        let repository = try placeWeights(for: entry, hub: hub)
         #expect(model.isImageModelInstalled(entry))
         model.uninstallImageModel(entry)
         #expect(!FileManager.default.fileExists(atPath: repository.path))
+    }
+
+    /// Stops the test unless `url` is inside the temporary directory. Nothing here writes to, or
+    /// lets the code under test remove from, a hub that code chose until it is proved scratch.
+    private func requireScratch(_ url: URL) throws {
+        let scratch = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path + "/"
+        try #require(url.resolvingSymlinksInPath().path.hasPrefix(scratch),
+                     "\(url.path) is not a scratch directory; refusing to write to or remove it")
     }
 
     /// A catalog entry under a repository name nobody has, so that removing it — even through
@@ -120,6 +131,8 @@ struct ImageModelCacheTests {
         let model = scratchModel(settings)
         let hub = try #require(settings.resolvedEngineCacheDirectory)
             .appendingPathComponent("hub", isDirectory: true)
+        try requireScratch(hub)
+        try #require(model.imageModelHub == hub, "Remove would act on another hub")
         let entry = throwawayEntry()
         let repository = try placeWeights(for: entry, hub: hub)
 
@@ -143,6 +156,7 @@ struct ImageModelCacheTests {
         let model = scratchModel(settings)
         let hub = try #require(settings.resolvedEngineCacheDirectory)
             .appendingPathComponent("hub", isDirectory: true)
+        try requireScratch(hub)
         let entry = DiffusionCatalog.flux2Klein4B
         _ = try placeWeights(for: entry, hub: hub)
         #expect(model.imageRoutingCandidates().first { $0.id == entry.id }?.isReady == true,

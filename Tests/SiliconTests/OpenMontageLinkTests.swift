@@ -234,6 +234,7 @@ struct OpenMontageLinkTests {
         env.pythons = [URL(fileURLWithPath: "/opt/homebrew/bin/python3.12")]
         env.npm = URL(fileURLWithPath: "/usr/local/bin/npm")
         let checkout = OpenMontageLink.checkoutURL(in: env)
+        try #require(checkout.path.hasPrefix(env.home.path + "/"), "not the scratch home's checkout")
         try FileManager.default.createDirectory(
             at: checkout.appendingPathComponent(".git/objects"), withIntermediateDirectories: true)
         try "ref: refs/heads/main\n".write(
@@ -257,6 +258,8 @@ struct OpenMontageLinkTests {
         var env = try makeEnvironment()
         defer { cleanUp(env) }
         env.pythons = [URL(fileURLWithPath: "/opt/homebrew/bin/python3.12")]
+        try #require(OpenMontageLink.checkoutURL(in: env).path.hasPrefix(env.home.path + "/"),
+                     "not the scratch home's checkout")
         let checkout = try makeCheckout(in: env)
         try Data().write(to: checkout.appendingPathComponent(OpenMontageLink.setupMarkerName))
 
