@@ -189,6 +189,10 @@ public actor BuddyEventHub {
     /// watcher takes them on its next reading, so what a phone is opened with and what
     /// changes after it come from one reading, with nothing able to fall between the two.
     private var awaitingOpening: Set<UUID> = []
+    /// Every subscriber that has not been sent the opening reading of what the Mac is doing
+    /// — status, downloads, renders. The status watcher takes them on its next reading; see
+    /// `takeNewSubscribers`.
+    private var awaitingSnapshot: Set<UUID> = []
     /// When each paired device last used an agent route. See `agentWatcherCount`.
     private var agentActivity: [String: Date] = [:]
     /// How sentences are scrubbed for the audiences that may not see this Mac's paths. The
@@ -229,6 +233,7 @@ public actor BuddyEventHub {
             listeners[id] = continuation
         }
         audiences[id] = audience
+        awaitingSnapshot.insert(id)
         if audience.seesAgentSessions { awaitingOpening.insert(id) }
         return (id, stream)
     }
@@ -239,6 +244,7 @@ public actor BuddyEventHub {
         audiences.removeValue(forKey: id)
         dropped.removeValue(forKey: id)
         awaitingOpening.remove(id)
+        awaitingSnapshot.remove(id)
         listeners.removeValue(forKey: id)?.finish()
     }
 
@@ -255,6 +261,18 @@ public actor BuddyEventHub {
     /// In order, to exactly these subscribers, where they are allowed to see them.
     public func post(_ events: [BuddyEvent], to recipients: Set<UUID>) {
         deliver(events, to: { recipients.contains($0) })
+    }
+
+    /// The subscribers still owed the opening reading of what the Mac is doing, handed over
+    /// once.
+    ///
+    /// Every subscriber is owed one, not only whoever happened to start the watcher. A phone
+    /// that subscribes while it is already running — a second device, or the same one back
+    /// from a dropped connection — would otherwise hear only what changes after it arrived,
+    /// and a Mac sitting still changes nothing.
+    public func takeNewSubscribers() -> Set<UUID> {
+        defer { awaitingSnapshot.removeAll() }
+        return awaitingSnapshot
     }
 
     /// The agent subscribers still owed their opening frames, handed over once.

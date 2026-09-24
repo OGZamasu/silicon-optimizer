@@ -650,14 +650,17 @@ public final class BuddyEventPump {
 
     public var isRunning: Bool { task != nil }
 
+    /// - Parameter registry: Where finished files are published from; see
+    ///   `AppModel.buddyEventSnapshot(registry:)`.
     func start(
         watching model: AppModel, hub: BuddyEventHub = .shared,
-        interval: Duration = .seconds(1)
+        interval: Duration = .seconds(1), registry: MediaRegistry = .shared
     ) {
         startRequests += 1
         let target = WatchTarget(model: model, hub: hub)
         // Already doing exactly this: nothing to do, and starting a second loop would
-        // double every frame.
+        // double every frame. The subscriber that asked is still sent its opening: the
+        // running loop takes it from the hub on its next reading.
         if task != nil, watching == target { return }
         // Running against something else. Whatever it was watching, this is the reader
         // that is actually here, so the loop is re-pointed rather than turned away.
@@ -681,11 +684,20 @@ public final class BuddyEventPump {
                         if self.generation == mine { self.task = nil }
                         return
                     }
-                    let current = await model.buddyEventSnapshot()
-                    for event in Self.changes(
+                    // Taken before the reading, as the agent watcher does: a phone that
+                    // arrives after it is picked up on the next one, rather than handed an
+                    // opening older than frames it has already been sent.
+                    let newcomers = await hub.takeNewSubscribers()
+                    let current = await model.buddyEventSnapshot(registry: registry)
+                    let changes = Self.changes(
                         from: previous, to: current, settling: model.settledDownload
-                    ) {
-                        await hub.post(event)
+                    )
+                    if !changes.isEmpty { await hub.post(changes, excluding: newcomers) }
+                    // Whoever has just arrived is told all of this reading, whether or not
+                    // anything in it moved — the opening the loop's first reading used to
+                    // give only the subscriber that started it.
+                    if !newcomers.isEmpty {
+                        await hub.post(Self.changes(from: nil, to: current), to: newcomers)
                     }
                     previous = current
                     guard (try? await Task.sleep(for: interval)) != nil else { break }

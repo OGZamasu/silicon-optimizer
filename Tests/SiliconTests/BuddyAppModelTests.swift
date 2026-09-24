@@ -156,6 +156,57 @@ struct BuddyAppModelTests {
 
     // MARK: - What a subscriber is told
 
+    /// Every phone is owed an opening, not only the one that started the watcher. One that
+    /// subscribes while it is already running — a second device, or the same phone back
+    /// from a dropped connection — used to hear only what changed after it arrived, and a
+    /// Mac sitting still changes nothing: no status, no downloads, no renders.
+    @Test func aPhoneThatJoinsARunningWatcherIsToldTheCurrentState() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-opening-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        BuddyTestStore.redirect()
+        let model = AppModel(
+            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: .init()
+        )
+        let hub = BuddyEventHub()
+        let pump = BuddyEventPump()
+        defer { pump.stop() }
+        // In memory: nothing here may add entries to the owner's media table.
+        let registry = MediaRegistry(url: nil)
+
+        let first = await hub.subscribe(as: .device(id: "first", scope: .full))
+        pump.start(watching: model, hub: hub, interval: .milliseconds(20), registry: registry)
+        #expect(await Self.nextFrame(of: first.stream, within: .seconds(5)) == "status")
+        // Long enough for several readings in which nothing moves.
+        try await Task.sleep(for: .milliseconds(200))
+
+        // What the server does for every stream it opens: subscribe, then ask it to watch.
+        let second = await hub.subscribe(as: .device(id: "second", scope: .chat))
+        pump.start(watching: model, hub: hub, interval: .milliseconds(20), registry: registry)
+        #expect(await Self.nextFrame(of: second.stream, within: .seconds(5)) == "status")
+        // And the first, which has it already, is not sent it again.
+        #expect(await Self.nextFrame(of: first.stream, within: .milliseconds(300)) == nil)
+    }
+
+    /// The name of the next frame on a subscription, or nil if none comes in time.
+    private static func nextFrame(
+        of stream: AsyncStream<BuddyEvent.Frame>, within limit: Duration
+    ) async -> String? {
+        let reader = Task { () -> String? in
+            for await frame in stream { return frame.name }
+            return nil
+        }
+        // Cancelling the read ends it with nil, which is the answer when nothing came.
+        let timer = Task {
+            try? await Task.sleep(for: limit)
+            reader.cancel()
+        }
+        defer { timer.cancel() }
+        return await reader.value
+    }
+
     @Test func theWatcherAnnouncesOnlyWhatMoved() {
         let idle = ControlAPI.Status(
             state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
