@@ -319,9 +319,18 @@ struct ControlRenderQueueTests {
 
     // MARK: - What /events says when one ends
 
-    /// The Images and 3D queues are one frame each on `/events`, for the job running now.
-    /// When it ends the frame stays and says how — with the file to fetch when it made one —
-    /// rather than simply no longer being sent, which left a phone showing it running.
+    /// The one frame of a snapshot for a kind of render, whatever its id.
+    private func only(
+        _ kind: String, in snapshot: BuddyEventPump.Snapshot
+    ) throws -> ControlAPI.JobEvent {
+        let frames = snapshot.jobs.values.filter { $0.kind == kind }
+        try #require(frames.count == 1, "\(kind) frames: \(frames.map(\.id))")
+        return frames[0]
+    }
+
+    /// A render in the Images or 3D queue is a frame on `/events` while it runs. When it ends
+    /// the frame stays and says how — with the file to fetch when it made one — rather than
+    /// simply no longer being sent, which left a phone showing it running.
     @Test func aFinishedImageIsAnnouncedAsCompletedWithItsFile() async throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.folder) }
@@ -331,13 +340,14 @@ struct ControlRenderQueueTests {
         let call = Task { try await f.model.generateImage(imageRequest("a harbour")) }
         try await waitUntil { await f.renders.started.count == 1 }
         let running = await f.model.buddyEventSnapshot(registry: registry)
-        #expect(running.jobs["image"]?.status == "running")
+        #expect(try only("image", in: running).status == "running")
 
         try await f.renders.finish(0)
         _ = try await answer(call)
         try await waitUntil { !f.model.isGeneratingImage }
         let finished = await f.model.buddyEventSnapshot(registry: registry)
-        let frame = try #require(finished.jobs["image"])
+        let frame = try only("image", in: finished)
+        #expect(frame.id == (try only("image", in: running)).id)
         #expect(frame.status == "completed")
         #expect(frame.mediaID != nil)
         #expect(frame.mediaID == (await registry.id(forPath: (await f.renders.output(0)).path)))
@@ -359,8 +369,8 @@ struct ControlRenderQueueTests {
         try await waitUntil { await f.renders.started.count == 1 }
         f.model.cancelImage()
         try await waitUntil { !f.model.isGeneratingImage }
-        let stopped = try #require(
-            await f.model.buddyEventSnapshot(registry: registry).jobs["image"]
+        let stopped = try only(
+            "image", in: await f.model.buddyEventSnapshot(registry: registry)
         )
         #expect(stopped.status == "cancelled")
         #expect(stopped.reason == QueuedRenderError.stoppedOnMac.localizedDescription)
@@ -372,11 +382,58 @@ struct ControlRenderQueueTests {
         try await waitUntil { await f.renders.started.count == 2 }
         await f.renders.fail(1, MeshRuntimeError.generationFailed("The service ran out of memory."))
         try await waitUntil { !f.model.isGeneratingMesh }
-        let failed = try #require(
-            await f.model.buddyEventSnapshot(registry: registry).jobs["mesh"]
+        let failed = try only(
+            "mesh", in: await f.model.buddyEventSnapshot(registry: registry)
         )
         #expect(failed.status == "failed")
         #expect(failed.reason == "The service ran out of memory.")
+    }
+
+    /// Each render is a frame of its own. Phones take nothing after an ending for an id —
+    /// the Android app keeps a finished row finished — so under one id per queue every
+    /// render after the first stayed where the first one ended: its row, its file and its
+    /// "ready" notification. And one that ends as the next starts, inside a single reading,
+    /// is still announced as it ended rather than lost or called removed.
+    @Test func everyRenderIsAFrameOfItsOwnAndEachEndingIsAnnounced() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        let registry = MediaRegistry(url: nil)
+        func jobs(_ events: [BuddyEvent]) -> [ControlAPI.JobEvent] {
+            events.compactMap { if case .job(let job) = $0 { job } else { nil } }
+        }
+
+        f.model.imagePrompt = "one"
+        f.model.generateImage()
+        f.model.imagePrompt = "two"
+        f.model.generateImage()
+        try await waitUntil { await f.renders.started == ["one"] }
+        let first = await f.model.buddyEventSnapshot(registry: registry)
+        let one = try only("image", in: first)
+        #expect(one.status == "running")
+        #expect(one.kind == "image")
+
+        // The first ends and the second starts before the next reading.
+        try await f.renders.finish(0)
+        try await waitUntil { await f.renders.started.count == 2 }
+        let second = await f.model.buddyEventSnapshot(registry: registry)
+        let moved = jobs(BuddyEventPump.changes(from: first, to: second))
+        #expect(moved.count == 2)
+        #expect(moved.first { $0.id == one.id }?.status == "completed")
+        #expect(moved.first { $0.id == one.id }?.mediaID != nil)
+        let two = try #require(moved.first { $0.id != one.id })
+        #expect(two.status == "running")
+        #expect(two.kind == "image")
+
+        try await f.renders.finish(1)
+        try await waitUntil { !f.model.isGeneratingImage }
+        let third = await f.model.buddyEventSnapshot(registry: registry)
+        #expect(jobs(BuddyEventPump.changes(from: second, to: third)).map { "\($0.id) \($0.status)" }
+            == ["\(two.id) completed"])
+        // Nothing is announced as removed along the way, and a phone arriving now is told
+        // how the latest render went.
+        let fourth = await f.model.buddyEventSnapshot(registry: registry)
+        #expect(jobs(BuddyEventPump.changes(from: third, to: fourth)).isEmpty)
+        #expect(jobs(BuddyEventPump.changes(from: nil, to: fourth)).map(\.id) == [two.id])
     }
 
     // MARK: - The paid lanes

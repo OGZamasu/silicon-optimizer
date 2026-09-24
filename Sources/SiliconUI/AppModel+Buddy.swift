@@ -338,6 +338,10 @@ extension AppModel {
         registry: MediaRegistry? = nil
     ) async -> BuddyEventPump.Snapshot {
         let registry = registry ?? eventMediaRegistry
+        // Taken before anything is awaited, so an ending recorded while this reading is
+        // being built waits for the next one rather than falling between the two.
+        let imageEndings = self.imageEndings.take()
+        let meshEndings = self.meshEndings.take()
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
         let roots = await controlMediaRoots()
@@ -357,35 +361,36 @@ extension AppModel {
                 mediaID: mediaID
             )
         }
+        // One frame per render, under an id of its own: a phone takes nothing after an
+        // ending for an id, so reusing one would leave every render after the first where
+        // the first one finished.
         if let image = currentImageJob {
-            jobs["image"] = ControlAPI.JobEvent(
-                id: "image", kind: "image", status: "running", title: image.modelName,
+            let id = Self.renderJobID(kind: "image", job: image.id)
+            jobs[id] = ControlAPI.JobEvent(
+                id: id, kind: "image", status: "running", title: image.modelName,
                 fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil,
                 stage: imageState.stageLine
             )
-        } else if let ending = lastImageEnding {
-            var mediaID: String?
-            if let file = ending.file {
-                mediaID = await registry.register(path: file.path, within: roots)
-            }
-            jobs["image"] = Self.jobEvent(
-                id: "image", kind: "image", ending: ending, mediaID: mediaID
-            )
         }
         if let mesh = currentMeshJob {
-            jobs["mesh"] = ControlAPI.JobEvent(
-                id: "mesh", kind: "mesh", status: "running", title: mesh.modelName,
+            let id = Self.renderJobID(kind: "mesh", job: mesh.id)
+            jobs[id] = ControlAPI.JobEvent(
+                id: id, kind: "mesh", status: "running", title: mesh.modelName,
                 fraction: meshProgress,
                 stage: meshState.stageLine
             )
-        } else if let ending = lastMeshEnding {
-            var mediaID: String?
-            if let file = ending.file {
-                mediaID = await registry.register(path: file.path, within: roots)
+        }
+        // After the running ones, so an ending wins over a job that has only just stopped
+        // being current.
+        for (kind, endings) in [("image", imageEndings), ("mesh", meshEndings)] {
+            for ending in endings {
+                var mediaID: String?
+                if let file = ending.file {
+                    mediaID = await registry.register(path: file.path, within: roots)
+                }
+                let id = Self.renderJobID(kind: kind, job: ending.jobID)
+                jobs[id] = Self.jobEvent(id: id, kind: kind, ending: ending, mediaID: mediaID)
             }
-            jobs["mesh"] = Self.jobEvent(
-                id: "mesh", kind: "mesh", ending: ending, mediaID: mediaID
-            )
         }
         await registry.persist()
 
@@ -428,6 +433,12 @@ extension AppModel {
                 : item.status == VideoQueueStatus.cancelled.rawValue ? item.cancelDetail : nil,
             mediaID: mediaID
         )
+    }
+
+    /// The `job` id of one image or mesh render: its kind and the queue job's own id, so each
+    /// render is a row of its own on a phone. `kind` says which queue it came from, as ever.
+    nonisolated static func renderJobID(kind: String, job: UUID) -> String {
+        "\(kind)-\(job.uuidString)"
     }
 
     /// The last frame of an image or mesh job that has left its queue: the same three
@@ -572,13 +583,16 @@ enum VerdictRelay {
 
 // MARK: - How a render ended
 
-/// How the last job in the Images or 3D queue ended, kept for `/events`.
+/// How a job in the Images or 3D queue ended, kept for `/events`.
 ///
-/// Those queues are reported as one frame each, `image` and `mesh`, for the job running now.
-/// When it finishes there is no job running, and a frame that simply stopped being sent left
-/// a phone showing the render as running for ever — and with no file to fetch. So the frame
-/// stays, saying how the render ended in the video queue's words, until the next one starts.
+/// Those queues are reported as the job running now, and a job that has stopped running
+/// is not in them. A frame that simply stopped being sent left a phone showing the render as
+/// running for ever — and with no file to fetch — so the ending is kept: every one until the
+/// watcher has read it, however quickly the next job started, and the latest after that, so
+/// a phone that connects later is told how the last render went.
 struct RenderEnding: Sendable, Equatable {
+    /// The queue job it belongs to, which is what its `job` id is made from.
+    var jobID: UUID
     var status: VideoQueueStatus
     var title: String
     var reason: String?
@@ -587,7 +601,8 @@ struct RenderEnding: Sendable, Equatable {
 
     /// From a job's outcome: done with its file, stopped or taken out of the queue at the
     /// Mac, or failed with the renderer's own sentence.
-    init(title: String, outcome: Result<URL?, any Error>) {
+    init(jobID: UUID, title: String, outcome: Result<URL?, any Error>) {
+        self.jobID = jobID
         self.title = title
         switch outcome {
         case .success(let file):
@@ -600,6 +615,22 @@ struct RenderEnding: Sendable, Equatable {
             status = .failed
             reason = error.localizedDescription
         }
+    }
+}
+
+extension [RenderEnding] {
+    /// Adds one, keeping a handful: more than the watcher could leave unread between two
+    /// readings a second apart, and never a list that grows while nobody is watching.
+    mutating func record(_ ending: RenderEnding) {
+        append(ending)
+        if count > 8 { removeFirst(count - 8) }
+    }
+
+    /// Everything not read yet, for a reading, leaving the latest for the next — which is
+    /// what a phone that subscribes later is told.
+    mutating func take() -> [RenderEnding] {
+        defer { self = Array(suffix(1)) }
+        return self
     }
 }
 
