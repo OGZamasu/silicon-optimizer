@@ -1,3 +1,4 @@
+import CArtifactHTTP
 import Foundation
 import Network
 
@@ -113,20 +114,13 @@ public enum RemoteURLPolicy: Sendable {
                     && (Int(label) ?? 256) <= 255
             }) else { return false }
         }
-        if let address = IPv4Address(host) {
-            return isPublicIPv4(Array(address.rawValue))
-        }
-        if let address = IPv6Address(host) {
-            let bytes = Array(address.rawValue)
-            if bytes.prefix(10).allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
-                return isPublicIPv4(Array(bytes.suffix(4)))
-            }
-            // Only globally routable unicast, excluding the documentation prefix.
-            guard bytes.count == 16, bytes[0] & 0xe0 == 0x20 else { return false }
-            if bytes[0] == 0x20, bytes[1] == 0x01, bytes[2] == 0x0d, bytes[3] == 0xb8 {
-                return false
-            }
-            return true
+        if IPv4Address(host) != nil || IPv6Address(host) != nil {
+            // The very function the transfer applies to the address it connects to, so the
+            // URL check and the socket check cannot disagree. A Swift copy of it did: it
+            // passed ::ffff:-mapped, 6to4, Teredo and 3fff::/20 literals the socket then
+            // vetoed (the wrong error, and no fallback to the next URL), and refused NAT64
+            // literals the socket would have taken.
+            return host.withCString(silicon_artifact_public_ip) == 1
         }
 
         guard host.contains(".") else { return false }
@@ -135,25 +129,6 @@ public enum RemoteURLPolicy: Sendable {
             ".test", ".example",
         ]
         return host != "localhost" && !localSuffixes.contains(where: host.hasSuffix)
-    }
-
-    private static func isPublicIPv4(_ bytes: [UInt8]) -> Bool {
-        guard bytes.count == 4 else { return false }
-        let a = bytes[0], b = bytes[1], c = bytes[2]
-        if a == 0 || a == 10 || a == 127 || a >= 224 { return false }
-        if a == 100, (64...127).contains(b) { return false }
-        if a == 169, b == 254 { return false }
-        if a == 172, (16...31).contains(b) { return false }
-        if a == 192, b == 168 { return false }
-        // One range per line: a comma binds looser than `||`, so the two-ranges-per-line form
-        // this replaces tested only 192.0.2/24 and 198.51.100/24 and let 192.0.0/24 and
-        // 198.18/15 through.
-        if a == 192, b == 0, c == 0 { return false }
-        if a == 192, b == 0, c == 2 { return false }
-        if a == 198, b == 18 || b == 19 { return false }
-        if a == 198, b == 51, c == 100 { return false }
-        if a == 203, b == 0, c == 113 { return false }
-        return true
     }
 }
 
