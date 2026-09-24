@@ -827,6 +827,21 @@ public actor JevService {
 
     private var keyProvider: @Sendable () -> String? = { nil }
     private var keyIsSetProvider: (@Sendable () -> Bool)?
+    /// The key read under way, which every ask that needs the key while it is pending
+    /// waits on rather than starting a read of its own. See `readKey()`.
+    private var keyRead: Task<String?, Never>?
+    /// Bumped by `configure`, so a read that outlives the configuration it started under
+    /// cannot mark the new one refused.
+    private var keyGeneration = 0
+    /// Whether the last read found a key listed and could not have it — the consent dialog
+    /// answered Deny, or the item's access control refused this build. While this holds the
+    /// key reads as absent: asking again would put the same dialog up on every decision and
+    /// be refused the same way each time. `keyDidChange()`, a new `configure`, and the
+    /// Settings "Test connection" button each clear it.
+    private var keyReadRefused = false
+    /// How many asks have joined a read already under way. For tests, which otherwise
+    /// cannot tell an ask waiting on the shared read from one that has not reached it yet.
+    private(set) var joinedKeyReads = 0
     private var baseURL = SystemOneClient.typeSafeBaseURL
     private var session: URLSession?
     private var sleeper: @Sendable (TimeInterval) async -> Void = { seconds in
@@ -905,6 +920,15 @@ public actor JevService {
         ledgerWriteError = nil
         cache.removeAll()
         lastRetryDelays = []
+        keyRead = nil
+        keyGeneration += 1
+        keyReadRefused = false
+    }
+
+    /// The stored key changed — saved, replaced or removed — so a read that was refused
+    /// before is worth trying again.
+    public func keyDidChange() {
+        keyReadRefused = false
     }
 
     // MARK: Settings
@@ -971,8 +995,46 @@ public actor JevService {
     }
 
     private func hasKey() -> Bool {
+        if keyReadRefused { return false }
         if let keyIsSetProvider { return keyIsSetProvider() }
         return keyProvider() != nil
+    }
+
+    /// The Keychain's own queue. Serial, so a read waits behind a consent dialog that is
+    /// already up rather than stacking a second one on top of it.
+    private static let keychainQueue = DispatchQueue(label: "dev.siliconoptimizer.jev.key")
+
+    /// Reads the key without holding this actor while it does.
+    ///
+    /// Reading the secret can put a consent dialog on screen — after every rebuild, the
+    /// first read of the launch does — and `SecItemCopyMatching` blocks its thread until
+    /// somebody answers it. Done on this actor, that froze every other caller behind the
+    /// dialog: the gateway's pruning on every chat completion, `/v1/models`, `/decide`,
+    /// verification, even drawing Settings. So the read runs on a queue of its own, this
+    /// actor stays free while it waits, and asks that need the key meanwhile share the
+    /// one read rather than each raising a dialog of their own.
+    private func readKey() async -> String? {
+        if let keyRead {
+            joinedKeyReads += 1
+            return await keyRead.value
+        }
+        let provider = keyProvider
+        let generation = keyGeneration
+        let read = Task<String?, Never> {
+            await withCheckedContinuation { continuation in
+                Self.keychainQueue.async { continuation.resume(returning: provider()) }
+            }
+        }
+        keyRead = read
+        let key = await read.value
+        if keyRead == read { keyRead = nil }
+        // Listed, but not handed over: the person said no, or this build may not read it.
+        // Remembered, so the next decision does not raise the same dialog to be refused
+        // the same way.
+        if key == nil, generation == keyGeneration, keyIsSetProvider?() == true {
+            keyReadRefused = true
+        }
+        return key
     }
 
     /// Nil means no cap was set. Otherwise what is left of it this month, counting what is
@@ -1084,15 +1146,18 @@ public actor JevService {
             return try await existing.value
         }
 
-        guard let apiKey = keyProvider() else { throw JevError.noKey }
-
         // The ledger's location is captured here rather than read at the end: a `configure`
         // that lands mid-flight must not write this call's cost to a different file.
         let ledgerURL = self.ledgerURL
         let reservation = JevLedger.cost(inputTokens: Self.estimatedTokens(bytes: bytes))
         reservedUSD += reservation
-        let work = Task<ControlAPI.DecideResponse, any Error> { [request, apiKey, feature] in
-            try await self.send(request, apiKey: apiKey, feature: feature)
+        // The key is read inside the work rather than before it, for two reasons. The read
+        // may wait on a consent dialog, and the caller's deadline has to cover that wait
+        // too — a feature that said "four seconds" must not sit behind a dialog for four
+        // minutes. And an identical ask arriving meanwhile finds this one in flight and
+        // joins it, rather than raising a dialog of its own.
+        let work = Task<ControlAPI.DecideResponse, any Error> { [request, feature] in
+            try await self.sendWithKey(request, feature: feature)
         }
         inFlight[key] = work
 
@@ -1130,6 +1195,23 @@ public actor JevService {
         // billing it twice would be a lie the budget then acts on.
         record(feature: feature, response: response, to: ledgerURL)
         return response
+    }
+
+    /// The key, then the request — with the owner's switches read once more in between.
+    ///
+    /// The read may have waited minutes on a consent dialog, and the owner may have pinned
+    /// this ability away from Jev, or switched it off, while it did. `ask` checked them
+    /// before the wait; a change that landed during it must still stop the request, or
+    /// "never the cloud" would be a charge the moment somebody clicked Allow.
+    private func sendWithKey(
+        _ request: ControlAPI.DecideRequest, feature: JevFeature
+    ) async throws -> ControlAPI.DecideResponse {
+        guard let apiKey = await readKey() else { throw JevError.noKey }
+        let settings = settings()
+        let pin = settings.laneOverride(feature)
+        guard pin.allowsJev else { throw JevError.pinnedAwayFromJev(feature, pin) }
+        guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
+        return try await send(request, apiKey: apiKey, feature: feature)
     }
 
     /// Whether a request finished inside the caller's patience. True means settled — with an
@@ -1282,8 +1364,12 @@ public actor JevService {
 
     /// The model names this key can send. Used by the Settings "Test connection" button,
     /// which is the cheapest honest answer to "is my key right?" — it spends no tokens.
+    ///
+    /// The one read that goes ahead after a refused one: the person pressing the button is
+    /// the person who can answer the dialog this time.
     public func testConnection() async throws -> [String] {
-        guard let apiKey = keyProvider() else { throw JevError.noKey }
+        keyReadRefused = false
+        guard let apiKey = await readKey() else { throw JevError.noKey }
         return try await SystemOneClient(baseURL: baseURL, apiKey: apiKey, session: session)
             .models()
     }
