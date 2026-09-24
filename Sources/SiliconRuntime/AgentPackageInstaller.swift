@@ -48,6 +48,7 @@ enum AgentPackageInstallError: LocalizedError {
     case npmFailed(String, Int32, String)
     case npmTimedOut(String)
     case versionProbeTimedOut(String)
+    case versionProbeKilled(String, Int32)
     case missingBin(String)
 
     var errorDescription: String? {
@@ -69,6 +70,9 @@ enum AgentPackageInstallError: LocalizedError {
                 + "locked artifact.\(detail.isEmpty ? "" : "\n\(detail)")"
         case .npmTimedOut(let name):
             return "Installing the verified \(name) package timed out."
+        case .versionProbeKilled(let path, let signal):
+            return "\(path) was stopped by signal \(signal) before it reported its version. "
+                + "Try again."
         case .versionProbeTimedOut(let path):
             return "\(path) did not report its version in time. On a busy Mac, or the first "
                 + "time macOS sees a new Node.js, that can happen once — try again."
@@ -581,8 +585,10 @@ enum AgentPackageInstaller {
     }
 
     /// `<executable> --version`, bounded by `deadline`, in `directory`, with only
-    /// `environment`. Throws `CancellationError` when cancelled and `versionProbeTimedOut`
-    /// when it had to be killed: neither is an answer, and a caller must not read one into it.
+    /// `environment`. Throws `CancellationError` when cancelled, `versionProbeTimedOut` when it
+    /// had to be killed and `versionProbeKilled` when something else's signal ended it — a
+    /// `killall node`, memory pressure, a code-signing kill of a Node just replaced. None of
+    /// those is an answer, and a caller must not read one into it.
     private static func probeVersion(
         _ executable: URL, in directory: URL, environment: [String: String],
         deadline: TimeInterval, isCancelled: () -> Bool
@@ -625,6 +631,11 @@ enum AgentPackageInstaller {
         try? FileManager.default.removeItem(at: log)
         if isCancelled() { throw CancellationError() }
         if timedOut { throw AgentPackageInstallError.versionProbeTimedOut(executable.path) }
+        if process.terminationReason == .uncaughtSignal {
+            throw AgentPackageInstallError.versionProbeKilled(
+                executable.path, process.terminationStatus
+            )
+        }
         return (output, process.terminationStatus)
     }
 

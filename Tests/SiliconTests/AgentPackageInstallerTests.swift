@@ -776,6 +776,7 @@ struct AgentPackageTreeProbeTests {
         let destinationRoot: URL
         let node: URL
         let slowNode: URL
+        let killedNode: URL
         let probing: URL
         let package = AgentPackage(
             id: "fixture", name: "fixture-agent", version: "1.0.0",
@@ -836,6 +837,7 @@ struct AgentPackageTreeProbeTests {
                 : > "\(probing.path)"
                 exec /bin/sleep 60
                 """)
+            killedNode = try tools("killed", nodeScript: "#!/bin/sh\nkill -9 $$")
         }
 
         func install(node: URL) async throws -> InstalledAgentPackage {
@@ -865,6 +867,23 @@ struct AgentPackageTreeProbeTests {
         let again = try await stage.install(node: stage.node)
         #expect(again.reused, "the next start installed from scratch")
         #expect(again.directory == first.directory)
+    }
+
+    /// Killed by a signal — `killall node`, memory pressure, a code-signing kill — a probe has
+    /// not answered either.
+    @Test func aNodeProbeKilledBySignalKeepsTheVerifiedTree() async throws {
+        let stage = try Stage()
+        defer { try? FileManager.default.removeItem(at: stage.root) }
+        let first = try await stage.install(node: stage.node)
+
+        await #expect(throws: AgentPackageInstallError.self) {
+            try await stage.install(node: stage.killedNode)
+        }
+        #expect(FileManager.default.fileExists(atPath: first.bin.path),
+                "a probe killed by a signal deleted the verified tree")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: stage.destinationRoot.path)
+        #expect(entries.filter { $0.hasPrefix("fixture-") } == [first.directory.lastPathComponent],
+                "a tree was made for a Node version nobody read")
     }
 
     @Test func aNodeProbeThatTimesOutKeepsTheVerifiedTree() async throws {
