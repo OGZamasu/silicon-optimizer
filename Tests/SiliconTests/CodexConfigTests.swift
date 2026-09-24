@@ -83,9 +83,9 @@ struct CodexConfigTests {
 
     /// Proof by a real TOML parser rather than by string matching: whatever the peer called
     /// its model, the document still has exactly the tables this app wrote, and the model
-    /// id reads back byte for byte.
+    /// id reads back byte for byte. Every name is judged, so a regression names them all.
     @Test(.enabled(if: TOMLOracle.python != nil, "needs a python3 with tomllib (3.11+)"))
-    func aPeersModelNameCannotAddATableToTheConfig() throws {
+    func aPeersModelNameCannotAddATableToTheConfig() {
         for name in Self.adversarialModelNames {
             let id = GatewayAPI.modelID(peerSlug: "rig", model: name)
             let document = CodexRuntime.configuration(
@@ -93,17 +93,22 @@ struct CodexConfigTests {
                 mcpServerPath: "/Applications/Silicon Optimizer.app/Contents/Resources/bin/silicon-mcp",
                 trustedProjectPath: "/opt/work/code"
             )
-            let parsed = try TOMLOracle.parse(document)
+            let parsed: [String: Any]
+            do {
+                parsed = try TOMLOracle.parse(document)
+            } catch {
+                Issue.record("\(name.debugDescription) made the document unreadable: \(error)")
+                continue
+            }
             #expect(Set(parsed.keys) == [
                 "model", "model_provider", "model_providers", "mcp_servers", "projects",
             ], "\(name.debugDescription) changed the document's shape")
             #expect(parsed["model"] as? String == id)
             #expect(parsed["model_provider"] as? String == "silicon")
-            let servers = try #require(parsed["mcp_servers"] as? [String: Any])
-            #expect(Array(servers.keys) == ["silicon-optimizer"],
-                    "\(name.debugDescription) added an MCP server")
-            let providers = try #require(parsed["model_providers"] as? [String: Any])
-            #expect(Array(providers.keys) == ["silicon"])
+            #expect((parsed["mcp_servers"] as? [String: Any]).map { Array($0.keys) }
+                    == ["silicon-optimizer"], "\(name.debugDescription) added an MCP server")
+            #expect((parsed["model_providers"] as? [String: Any]).map { Array($0.keys) }
+                    == ["silicon"])
         }
     }
 
