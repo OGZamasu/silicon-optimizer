@@ -29,6 +29,21 @@ public actor DecisionRouter {
     /// What the last decision did, for the Decisions panel's per-ability line.
     private var lastAnswers: [JevFeature: DecisionRecord] = [:]
 
+    /// How an ability's request is reshaped for a lane that reads a Laya checkpoint.
+    ///
+    /// Laya reads 512 tokens of state and 192 of question, and cuts the rest away without a
+    /// word; Jev and the loaded model read the whole request. So the two Laya lanes — this
+    /// Mac's and a node's, which run the same checkpoints — get a form made to fit, and
+    /// everything else gets the request as the feature wrote it. The forms are the
+    /// features' business, so the app supplies them; with none, every lane gets the request
+    /// unchanged and the sidecar refuses what would be cut.
+    public typealias LayaForm = @Sendable (
+        JevFeature, JSONContent, [String: ControlAPI.SystemOneQuestion]
+    ) -> (state: JSONContent, questions: [String: ControlAPI.SystemOneQuestion])
+    private var layaForm: LayaForm?
+
+    public func useLayaForm(_ form: @escaping LayaForm) { layaForm = form }
+
     public struct DecisionRecord: Sendable, Equatable {
         public var lane: DecisionLaneID
         /// The peer, when a node answered.
@@ -262,6 +277,20 @@ public actor DecisionRouter {
             )
         }
         guard let lane = lanes[id] else { throw DecisionLaneError.nothingAvailable(feature) }
+        var state = state, questions = questions
+        if id == .laya || id == .node, let layaForm {
+            let fitted = layaForm(feature, state, questions)
+            // A form with nothing left to ask is a refusal of this request, like any other
+            // that is too long for the checkpoint — not a lane that has failed.
+            guard !fitted.questions.isEmpty else {
+                throw DecisionLaneError.questionTooLong(
+                    question: questions.keys.sorted().first ?? "-",
+                    tokens: questions.values.map { LayaBudget.prefix($0).tokens }.max() ?? 0,
+                    limit: LayaBudget.headTokens, checkpoint: "Laya"
+                )
+            }
+            (state, questions) = (fitted.state, fitted.questions)
+        }
         let request = ControlAPI.DecideRequest(
             state: state, questions: questions, model: nil, provider: id.wireName
         )
