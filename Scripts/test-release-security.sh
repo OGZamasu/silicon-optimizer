@@ -57,9 +57,9 @@ if "$ROOT/Scripts/verify-vendor-runtime.sh" "$VENDOR" "$MANIFEST" >/dev/null 2>&
     exit 1
 fi
 
-grep -Fq 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' "$ROOT/.github/workflows/ci.yml"
-if grep -Eq 'actions/checkout@v[0-9]+' "$ROOT/.github/workflows/ci.yml"; then
-    echo "mutable checkout action reference found" >&2; exit 1
+# No hosted CI: every check runs on a Mac from this repository's own scripts (CONTRIBUTING.md).
+if [[ -n "$(find "$ROOT/.github/workflows" -type f 2>/dev/null)" ]]; then
+    echo "a GitHub Actions workflow was found; checks here run locally" >&2; exit 1
 fi
 if grep -E '(^|[[:space:]])npx[[:space:]]+wrangler' "$ROOT/Scripts/release.sh" "$ROOT/web/package.json"; then
     echo "npx Wrangler fallback found" >&2; exit 1
