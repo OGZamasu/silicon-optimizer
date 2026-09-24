@@ -74,12 +74,16 @@ struct MacPathRedaction: Sendable {
     ///
     /// A path here is one that starts at a folder a Mac's disk actually has at its top —
     /// `/Volumes`, `/Users`, `/private` and the rest — so `/v1/jobs` in a sentence about a
-    /// node's API is left as it was. It starts at a slash that begins a word — the start of
-    /// the text, or after a space, a quote, a bracket, `=` or a comma — so the path inside
-    /// a URL, which follows a host name, is not one either, nor are `~/…` and `Movies/…`
-    /// that a label above has already made safe. Folder names may hold spaces; a segment
-    /// ending in one is where the next path begins. Quotes, brackets, commas and colons end
-    /// a path, because that is what a log puts around one.
+    /// node's API is left as it was. Its slash may follow anything but a letter, a digit,
+    /// `.`, `~`, `-` or `_`: so `file:///Volumes/…`, `PATH=/a:/Volumes/…`, `error:/Volumes/…`
+    /// and a path in curly quotes or backticks are all found, while the path inside a URL,
+    /// which follows a host name or a port, is not, and nor are `~/…` and `Movies/…` that a
+    /// label above has already made safe.
+    ///
+    /// Folder names may hold spaces. Quotes, brackets, commas and colons end a path, because
+    /// that is what a log puts around one; so does a file name followed by a space, because
+    /// what comes next is the sentence — `…/model.gguf needs 12 GB/s` is not a folder called
+    /// `model.gguf needs 12 GB`.
     static func namesOnly(_ text: String) -> String {
         guard text.contains("/"), let expression = absolutePath else { return text }
         let whole = text as NSString
@@ -98,12 +102,18 @@ struct MacPathRedaction: Sendable {
         return out + whole.substring(from: cursor)
     }
 
+    /// What ends a path: the quotes, brackets and separators a log or a sentence puts
+    /// around one, straight and curly.
+    private static let stops = #"'"(),:\[\]{}<>`“”‘’«»"#
+
     private static let absolutePath = try? NSRegularExpression(
-        pattern: #"(?<![^\s'"(\[{<=,])"#  // a slash that begins a word,
+        pattern: #"(?<![\w.~-])"#  // a slash that no name runs into,
             + "/(?i:" + topLevelFolders.joined(separator: "|") + ")"  // a folder at the top,
-            + #"(?=[/\s'"(),:\[\]{}<>]|$)"#  // the whole of its name,
-            + #"(?:/[^/\n'"(),:\[\]{}<>]*[^/\s'"(),:\[\]{}<>](?=/))*"#  // the ones below it,
-            + #"(?:/[^/\n'"(),:\[\]{}<>]*)?"#  // and the name they end in
+            + #"(?=[/\s\#(stops)]|$)"#  // the whole of its name,
+            // the folders below it, none of them a file name with the sentence after it,
+            + #"(?:/(?![^/\n]*\.[A-Za-z][A-Za-z0-9]{0,4}\s)"#
+            + #"[^/\n\#(stops)]*[^/\s\#(stops)](?=/))*"#
+            + #"(?:/[^/\n\#(stops)]*)?"#  // and the name they end in
     )
 
     /// What a Mac has at the top of its disk. Matched without regard to case, as the disk

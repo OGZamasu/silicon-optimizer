@@ -172,6 +172,26 @@ struct MacPathRedactionTests {
         #expect(redaction.scrub("--output=/opt/homebrew/var/mesh.glb failed")
             == "--output=mesh.glb failed")
         #expect(redaction.scrub("/usr/bin/python3: can't open file") == "python3: can't open file")
+        // However the path is put: a file URL, a search path's later entries, straight
+        // after a colon, in curly quotes, in backticks, in guillemets.
+        #expect(redaction.scrub(
+            "NSURL=file:///Volumes/External/trellis2/out/mesh.glb, NSUnderlyingError"
+        ) == "NSURL=file://mesh.glb, NSUnderlyingError")
+        #expect(redaction.scrub("PYTHONPATH=/opt/lib:/Volumes/External/trellis2/src")
+            == "PYTHONPATH=lib:src")
+        #expect(redaction.scrub("error:/Volumes/External/models/ckpt.bin")
+            == "error:ckpt.bin")
+        #expect(redaction.scrub("Couldn’t open “/Volumes/External/Local Models/x.png”.")
+            == "Couldn’t open “x.png”.")
+        #expect(redaction.scrub("run `/Volumes/External/trellis2/run.sh` again")
+            == "run `run.sh` again")
+        #expect(redaction.scrub("« /Volumes/External/a/b.png »") == "« b.png »")
+        // A file name with the sentence after it is where the path ends, so a slash later
+        // in the sentence is not taken for one of its folders.
+        #expect(redaction.scrub("/Volumes/External/Local Models/m.gguf needs 12 GB/s here")
+            == "m.gguf needs 12 GB/s here")
+        #expect(redaction.scrub("/private/tmp/x.png and/or /Volumes/External/y.png")
+            == "x.png and/or y.png")
         // Whatever the labels already made safe stays as they left it.
         #expect(redaction.scrub("/Volumes/External/Silicon Videos/a.mp4, /Users/you/b/c.png")
             == "Silicon Videos/a.mp4, ~/b/c.png")
@@ -182,6 +202,8 @@ struct MacPathRedactionTests {
             "POST /v1/jobs answered 500.",
             "Could not reach http://100.64.0.9:8000/v1/jobs/Users/x.",
             "and/or 16/9", "/Volumesque/a/b", "./run.sh failed",
+            // A Windows node's paths, native and through WSL, are not this Mac's.
+            "C:\\Users\\bob\\x.gguf", "/mnt/c/Users/bob/x.gguf",
         ] {
             #expect(redaction.scrub(untouched) == untouched, "\(untouched)")
         }
