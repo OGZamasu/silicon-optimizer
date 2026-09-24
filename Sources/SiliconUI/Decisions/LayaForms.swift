@@ -14,10 +14,10 @@ import SiliconRuntime
 /// supports the judgment is shortened. A state that repeats what the questions' options
 /// already say — every candidate's traits, every tool's description — loses the repeat;
 /// free text around the subject is cut to its head and tail; the subject itself never is.
-/// A tool call about to run, a reply being checked and a prompt whose safety is being read
-/// go whole or not at all, because an answer about part of one can wave through the part
-/// that was cut. Whatever still does not fit is refused by the sidecar, and the router asks
-/// the next lane.
+/// A tool call about to run — with the request, the goal and the results it is judged
+/// against — a reply being checked and a prompt whose safety is being read go whole or not
+/// at all, because an answer about part of one can wave through the part that was cut.
+/// Whatever still does not fit is refused by the sidecar, and the router asks the next lane.
 ///
 /// Jev and the loaded model are not affected: they get every request as the feature wrote it.
 enum LayaForms {
@@ -93,14 +93,12 @@ enum LayaForms {
             )
             return (.object(fields), [])
         case .guardrails:
-            // The newest result is the one a call is most likely to follow from.
-            if let results = fields["recent_tool_results"]?.arrayValue, let last = results.last {
-                fields["recent_tool_results"] = .array([last])
-            }
-            return (.object(fields), [
-                "tool_call", "working_directory", "paths_outside_working_directory",
-                "known_paid_endpoints_named",
-            ])
+            // Nothing here is only supporting text. The call is judged against the request
+            // and the goal — a cut can take "…but don't push" out of either — and against
+            // the recent results, where an injected instruction is exactly what one question
+            // looks for, in whichever result carried it. So the state goes whole: if it does
+            // not fit, the sidecar refuses and the person is asked, as before any of this.
+            return (.object(fields), Set(fields.keys))
         case .verification:
             // A reply cut to its head and tail reads as cut off and as not answering — two of
             // the failures being checked for — and a flagged reply is re-run, perhaps paid.
