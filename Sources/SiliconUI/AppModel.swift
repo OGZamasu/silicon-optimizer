@@ -194,6 +194,8 @@ public final class AppModel {
     public internal(set) var piCurrentModel: String?
     var piRuntime: PiRuntime?
     var piEventTask: Task<Void, Never>?
+    /// Which start of Pi a runtime state belongs to; see `applyPiRuntimeState`.
+    var piLifecycleGeneration = 0
     var piStreamingItem: PiItem?
     var piThinkingItem: PiItem?
 
