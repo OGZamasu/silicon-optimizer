@@ -624,6 +624,13 @@ public actor LayaSidecar {
                     limit: (object["room"] as? NSNumber)?.intValue ?? 0,
                     checkpoint: configuration.checkpoint.displayName
                 )
+            case "question_too_long":
+                throw DecisionLaneError.questionTooLong(
+                    question: object["question"] as? String ?? "?",
+                    tokens: (object["tokens"] as? NSNumber)?.intValue ?? 0,
+                    limit: (object["room"] as? NSNumber)?.intValue ?? 0,
+                    checkpoint: configuration.checkpoint.displayName
+                )
             default: throw LayaSidecarError.failed(detail)
             }
         }

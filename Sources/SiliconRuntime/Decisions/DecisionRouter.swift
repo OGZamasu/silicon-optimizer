@@ -242,8 +242,10 @@ public actor DecisionRouter {
     /// Whether a lane's error is about the request it was given, not about the lane.
     static func isRefusalOfThisRequest(_ error: any Error) -> Bool {
         guard let error = error as? DecisionLaneError else { return false }
-        if case .stateTooLong = error { return true }
-        return false
+        switch error {
+        case .stateTooLong, .questionTooLong: return true
+        default: return false
+        }
     }
 
     private func run(

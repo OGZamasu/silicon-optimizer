@@ -975,12 +975,16 @@ struct LayaInstallTests {
 // MARK: - The real driver script, over a stand-in library
 
 /// `laya_sidecar.py` itself — the script the app ships, not `FakeSidecar` — over a stand-in
-/// `laya_mlx` that loads nothing: a tokenizer that counts words, a 32-token context, and a
-/// `system_one` that writes down every state it is handed. Enough to prove what the script
-/// does *before* the library sees a state; nothing here needs MLX, weights or a network.
+/// `laya_mlx` that loads nothing: a tokenizer that counts words, a 96-token context with 48 of
+/// question, and a `system_one` that writes down every state it is handed. Its `common`
+/// module builds a question the way laya-mlx 0.1.0's does — each option held to 48 tokens,
+/// the whole question to `head_max_len`, the question's own text cut first — which is enough
+/// to prove what the script does *before* the library sees a request; nothing here needs MLX,
+/// weights or a network.
 ///
-/// The stand-in's `build_prefix` is a word count too, so "Is this true?" leaves
-/// 32 − (1 + 3 + 4) − 1 = 23 tokens of room for the state.
+/// "Is this true?" with no criteria is "noul question: Is this true?" (5 words) and the two
+/// default options (8 and 6 with their mask tokens), so it leaves 96 − 22 − 1 = 73 tokens of
+/// room for the state.
 struct StubLayaLibrary {
     let directory: URL
 
@@ -1001,11 +1005,16 @@ struct StubLayaLibrary {
                 return {"input_ids": [4] * len(text.split())}
 
         class _Agent:
-            cfg = {"max_len": 32, "head_max_len": 12}
+            cfg = {"max_len": 96, "head_max_len": 48}
             tok = _Tokenizer()
             @staticmethod
             def _to_internal(q):
-                return {"t": q["type"], "ins": q["instructions"], "crit": q.get("criteria")}
+                ins = q["instructions"]
+                crit = q.get("criteria")
+                if q["type"] == "choice" and isinstance(crit, list):
+                    crit = dict.fromkeys(crit)
+                return {"t": q["type"], "ins": ins if isinstance(ins, str) else json.dumps(ins),
+                        "crit": crit}
             def system_one(self, state, questions):
                 with open(os.path.join(_HERE, "asked.jsonl"), "a") as f:
                     f.write(json.dumps(list(state) if isinstance(state, dict) else state) + "\\n")
@@ -1017,13 +1026,39 @@ struct StubLayaLibrary {
         """.write(to: package.appendingPathComponent("__init__.py"), atomically: true, encoding: .utf8)
         try """
         import json
+
         def serialize_state(state):
             return state if isinstance(state, str) else json.dumps(state)
+
+        def _text(value):
+            return value if isinstance(value, str) else json.dumps(value)
+
+        def render_options(q):
+            crit = q.get("crit")
+            if q["t"] == "choice":
+                return [k if v in (None, "") else k + ": " + _text(v) for k, v in crit.items()]
+            if q["t"] == "score":
+                return ["level %d: %s" % (i, _text(c)) for i, c in enumerate(crit)]
+            crit = crit or {}
+            no, yes = crit.get("false"), crit.get("true")
+            return ["false: " + (_text(no) if no not in (None, "") else "no, the statement does not hold"),
+                    "true: " + (_text(yes) if yes not in (None, "") else "yes, the statement holds")]
+
         def build_prefix(tok, q, head_max_len=192, option_order=None):
-            head = tok(q["ins"])["input_ids"][:head_max_len]
-            ids = [tok.cls_token_id] + head + [tok.sep_token_id]
-            ids += [tok.mask_token_id, tok.mask_token_id, tok.sep_token_id]
-            return ids, [len(head) + 2, len(head) + 3]
+            head = tok("%s question: %s" % (q["t"], q["ins"]))["input_ids"]
+            options = [[tok.mask_token_id] + tok(" " + o)["input_ids"][:48] for o in render_options(q)]
+            budget = head_max_len - sum(len(o) for o in options)
+            if budget < 16:
+                each = max(4, (head_max_len - 16) // max(1, len(options)))
+                options = [o[:each] for o in options]
+                budget = head_max_len - sum(len(o) for o in options)
+            ids = [tok.cls_token_id] + head[:max(8, budget)] + [tok.sep_token_id]
+            markers = []
+            for o in options:
+                markers.append(len(ids))
+                ids.extend(o)
+            ids.append(tok.sep_token_id)
+            return ids, markers
         """.write(to: package.appendingPathComponent("common.py"), atomically: true, encoding: .utf8)
     }
 
@@ -1067,9 +1102,9 @@ struct LayaDriverScriptTests {
         )
         try await sidecar.start()
 
-        let long = Array(repeating: "word", count: 40).joined(separator: " ")
+        let long = Array(repeating: "word", count: 100).joined(separator: " ")
         await #expect(throws: DecisionLaneError.stateTooLong(
-            tokens: 40, limit: 23, checkpoint: LayaCheckpoint.english.displayName
+            tokens: 100, limit: 73, checkpoint: LayaCheckpoint.english.displayName
         )) {
             _ = try await sidecar.decide(state: long, questions: question)
         }
@@ -1078,9 +1113,37 @@ struct LayaDriverScriptTests {
         // A refusal about one request, not a fault: the process stays, and the next state
         // that fits is answered.
         #expect(await sidecar.isRunning)
-        let fits = Array(repeating: "word", count: 23).joined(separator: " ")
+        let fits = Array(repeating: "word", count: 73).joined(separator: " ")
         let answered = try await sidecar.decide(state: fits, questions: question)
         #expect(answered.answers["q"]?.noul == 0.5)
+        #expect(library.asked.count == 1)
+        await sidecar.stop()
+    }
+
+    /// The question gets the same silent treatment one step earlier: laya-mlx holds each
+    /// option to 48 tokens and the whole question to its head budget, and answers about what
+    /// is left. The script measures the question first and refuses one the library would cut.
+    @Test func aQuestionTheLibraryWouldCutIsRefused() async throws {
+        let library = try StubLayaLibrary()
+        defer { library.clean() }
+        let sidecar = LayaSidecar(
+            configuration: library.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+
+        let long = Array(repeating: "word", count: 60).joined(separator: " ")
+        // "noul question: Is this true?" is 5; the default false option 8; the true one 62.
+        await #expect(throws: DecisionLaneError.questionTooLong(
+            question: "q", tokens: 75, limit: 48, checkpoint: LayaCheckpoint.english.displayName
+        )) {
+            _ = try await sidecar.decide(state: "a state", questions: [
+                "q": ["type": "noul", "instructions": "Is this true?", "criteria": ["true": long]],
+            ])
+        }
+        #expect(library.asked.isEmpty, "the library was handed a question it would have cut")
+
+        #expect(await sidecar.isRunning)
+        _ = try await sidecar.decide(state: "a state", questions: question)
         #expect(library.asked.count == 1)
         await sidecar.stop()
     }
