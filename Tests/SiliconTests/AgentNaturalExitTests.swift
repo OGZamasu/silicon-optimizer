@@ -185,12 +185,14 @@ struct PiNaturalExitTests {
     }
 
     /// The crash whose output closes before the process is reaped — deterministic here, where
-    /// in the app it was a race lost about one time in ten.
+    /// in the app it was a race lost about one time in ten. Both pipes close first: the old
+    /// check waited for stderr to end, and a shell that kept stderr open until it exited would
+    /// have waited out the reap for it and hidden the race.
     @Test func aCrashNoticedBeforeTheReapIsStillReportedWithItsStatus() async throws {
         let runtime = PiRuntime()
         let states = States()
         let events = try await launch(
-            runtime, "echo 'it broke' >&2; exec 1>&-; sleep 0.5; exit 9", states: states
+            runtime, "echo 'it broke' >&2; exec 1>&- 2>&-; sleep 0.5; exit 9", states: states
         )
         for await _ in events {}
 
