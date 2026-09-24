@@ -79,7 +79,11 @@ struct PinnedToolInstallTests {
             try PinnedInstallTests.pins(PinnedInstall.lock(kind, directory: directory, python: python, in: Self.lockRoot))
         }
         for python in PinnedInstall.mfluxPythons {
-            #expect(try lock("mflux", PinnedInstall.mlxEnvironmentLocks, python)["mflux"] == "0.18.1")
+            let mflux = try lock("mflux", PinnedInstall.mlxEnvironmentLocks, python)
+            // 0.20.0 is the first with Qwen-Image 2.1 (`mflux-generate-qwen-2.1`), and it
+            // needs MLX 0.32.
+            #expect(mflux["mflux"] == "0.20.0")
+            #expect(mflux["mlx"]?.hasPrefix("0.32.") == true, "\(python): \(mflux["mlx"] ?? "no mlx")")
         }
         for python in PinnedInstall.voicePythons {
             let voice = try lock("voice", PinnedInstall.mlxEnvironmentLocks, python)

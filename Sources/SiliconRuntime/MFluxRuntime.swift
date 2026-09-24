@@ -295,7 +295,11 @@ public struct MFluxArguments: Sendable {
     /// `mflux-generate` is rejected outright, so the binary is part of the model's identity
     /// rather than a detail of invocation.
     public var executableName: String {
-        switch model.catalogID {
+        Self.executableName(for: model.catalogID ?? "")
+    }
+
+    public static func executableName(for catalogID: String) -> String {
+        switch catalogID {
         case "flux2-klein-4b", "flux2-klein-9b": "mflux-generate-flux2"
         case "qwen-image": "mflux-generate-qwen"
         case "z-image-turbo": "mflux-generate-z-image-turbo"
@@ -370,7 +374,12 @@ public struct MFluxArguments: Sendable {
         case "flux1-krea-dev": "krea-dev"
         case "flux2-klein-4b": "flux2-klein-4b"
         case "flux2-klein-9b": "flux2-klein-9b"
-        case "qwen-image": "qwen"
+        // The repository, not an alias. `mflux-generate-qwen` never reads `--model` as a model
+        // choice: a built-in name leaves it on its default, and only anything else becomes the
+        // weights path. Its default was Qwen/Qwen-Image through mflux 0.18.1 and is
+        // Qwen/Qwen-Image-2512 from 0.20.0 (`qwen` became that one's alias), so the old `qwen`
+        // would quietly fetch and render a different 57 GB model than the one installed.
+        case "qwen-image": "Qwen/Qwen-Image"
         case "z-image-turbo": "z-image-turbo"
         case "z-image": "z-image"
         case "ernie-image-turbo": "ernie-image-turbo"

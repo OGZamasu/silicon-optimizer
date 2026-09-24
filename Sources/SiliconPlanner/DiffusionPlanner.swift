@@ -16,10 +16,12 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
     /// Run the runtime in its low-memory mode.
     ///
     /// Named for what mflux actually offers — `--low-ram` — rather than for tiled VAE decoding,
-    /// which this used to promise and mflux 0.18.1 has no flag for. Measured peak on
-    /// FLUX.2-klein-4B is byte-identical with and without it (10.52 GB either way, issue #3), so
-    /// the planner charges it nothing. What it does buy is freeing the transformer *between*
-    /// images, which matters for a batch and not for one.
+    /// which this used to promise and mflux 0.18.1 had no flag for. Measured peak on
+    /// FLUX.2-klein-4B is byte-identical with and without it (10.52 GB either way, issue #3, on
+    /// 0.18.1), so the planner charges it nothing. What it does buy is freeing the transformer
+    /// *between* images, which matters for a batch and not for one. mflux 0.20.0 adds a separate
+    /// `--vae-tiling` flag; the app does not pass it, because nobody has measured what it does to
+    /// the decode peak, and a lever the planner cannot price is not one it should offer.
     public var lowRAM: Bool
     /// Blocks kept resident when streaming the denoiser from disk. Nil means all of them.
     public var residentBlocks: Int?
@@ -34,9 +36,11 @@ public struct ImageConfiguration: Sendable, Codable, Hashable {
     ///
     /// Saving one is only useful if it can be read again, and that is not universal: mflux 0.18.1
     /// forwards `--base-model` in the FLUX.1 and FIBO entry points but not in the FLUX.2 or
-    /// Z-Image ones, so a locally saved FLUX.2 model fails with "Cannot infer base_model". Until
-    /// that is fixed upstream the load spike is unavoidable there, and advising otherwise would
-    /// send someone to an error message.
+    /// Z-Image ones, so a locally saved FLUX.2 model fails with "Cannot infer base_model".
+    /// 0.20.0 forwards it, but the app still runs every image model from its Hub weights and has
+    /// no way to point a render at a saved copy, so the families that could not are left saying
+    /// so until that path exists and has been tried — advising otherwise would send someone to
+    /// a copy nothing reads.
     public var canReuseQuantizedSave: Bool
     /// Images generated in one run. Batching amortises the encode but multiplies the latents.
     public var batchSize: Int
@@ -423,9 +427,10 @@ public struct DiffusionPlanner: Sendable {
         }
 
         // There used to be a "decode the image in tiles" suggestion here. It is gone because
-        // mflux 0.18.1 has no tiled-decode flag — the app was passing `--low-ram` and calling it
-        // tiling, and `--low-ram` was measured to change the peak by nothing at all. Lowering
-        // the resolution is the only lever that acts on the decode, and it is already below.
+        // mflux 0.18.1 had no tiled-decode flag — the app was passing `--low-ram` and calling it
+        // tiling, and `--low-ram` was measured to change the peak by nothing at all. 0.20.0 has
+        // `--vae-tiling`, unmeasured here and so not offered. Lowering the resolution is the
+        // only lever known to act on the decode, and it is already below.
 
         // Resolution is the strongest lever, because the decode scales with area and the decode
         // is what peaks.

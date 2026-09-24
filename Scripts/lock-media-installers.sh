@@ -191,7 +191,7 @@ fi
 if want silicon-mlx; then
 mkdir -p "$OUT/silicon-mlx"
 cp "$INPUTS/silicon-mlx-tested.txt" "$WORK/silicon-mlx-tested.txt"
-echo "mflux==0.18.1" > "$WORK/mflux.in"
+echo "mflux==0.20.0" > "$WORK/mflux.in"
 cat > "$WORK/voice.in" <<EOF
 mlx-audio==0.5.0
 mlx-speech==0.5.2
@@ -206,7 +206,7 @@ EOF
 echo "setuptools" > "$WORK/voice-build.in"
 for python in 3.12 3.13 3.14; do
     compile "$OUT/silicon-mlx/mflux-py$python.txt" "$python" \
-        "MFLUX" "" "" "mflux==0.18.1 within Scripts/lock-inputs/silicon-mlx-tested.txt" \
+        "MFLUX" "" "" "mflux==0.20.0 within Scripts/lock-inputs/silicon-mlx-tested.txt" \
         -- mflux.in -c silicon-mlx-tested.txt
     [[ "$python" == 3.12 ]] && continue
     pins "$OUT/silicon-mlx/mflux-py$python.txt" > "$WORK/mflux-constraints.txt"

@@ -18,9 +18,11 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
     public var isGated: Bool
     /// Whether a locally saved quantized copy can be loaded back for this family.
     ///
-    /// False for FLUX.2 and Z-Image: `mflux-save` writes them happily, but the matching generate
-    /// entry point drops `--base-model` on the floor, so reading one back fails. Checked against
-    /// mflux 0.18.1.
+    /// False for FLUX.2 and Z-Image: `mflux-save` writes them happily, but in mflux 0.18.1 the
+    /// matching generate entry point dropped `--base-model` on the floor, so reading one back
+    /// failed. 0.20.0 forwards it, but nothing in this app renders from a saved copy yet — every
+    /// entry runs from its Hub weights — so the flags stay as they were until that path exists
+    /// and has been tried.
     public var supportsQuantizedReuse: Bool
 
     /// Exactly the files the runtime fetches, and nothing else.
@@ -334,9 +336,10 @@ public enum DiffusionCatalog {
         repository: "Qwen/Qwen-Image",
         quantizations: [.mlx4, .mlx6, .mlx8],
         rating: 4,
-        // mflux-save writes a quantized copy, but the entry point's own --base-model handling
-        // has the same "dropped on the floor" bug documented against FLUX.2 and Z-Image below —
-        // unconfirmed for this family specifically, so treated the same until proven otherwise.
+        // mflux-save writes a quantized copy, but through 0.18.1 the entry point's own
+        // --base-model handling had the same "dropped on the floor" bug documented against
+        // FLUX.2 and Z-Image below — unconfirmed for this family specifically, so treated the
+        // same until proven otherwise. (0.20.0's qwen entry point still reads no --base-model.)
         supportsQuantizedReuse: false,
         downloadPatterns: DiffusionEntry.qwenImagePatterns,
         componentDirectories: ["transformer", "text_encoder", "vae"]
@@ -374,7 +377,8 @@ public enum DiffusionCatalog {
         quantizations: [.mlx4, .mlx6, .mlx8],
         rating: 4,
         // Confirmed against mflux 0.18.1: mflux-save writes a quantized copy happily, but
-        // mflux-generate-z-image(-turbo) drops --base-model on the floor reading one back.
+        // mflux-generate-z-image(-turbo) dropped --base-model on the floor reading one back.
+        // 0.20.0 infers the family instead; see `supportsQuantizedReuse` for why this stays.
         supportsQuantizedReuse: false,
         downloadPatterns: DiffusionEntry.zImagePatterns,
         componentDirectories: ["transformer", "text_encoder", "vae"]
