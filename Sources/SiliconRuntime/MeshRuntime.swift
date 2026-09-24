@@ -137,8 +137,17 @@ public struct MeshInstallation: Sendable {
 
 public enum MeshLocator {
 
+    /// Where TRELLIS.2 caches its weights: the Hugging Face hub cache it downloads into.
+    public static var defaultHubCache: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub")
+    }
+
     /// TRELLIS.2: needs the repo, its venv, and notes whether the 13 GB weights are cached.
-    public static func trellis(base: URL) -> MeshInstallation {
+    ///
+    /// - Parameter hubCache: The hub cache to look for the weights in. The default, except in
+    ///   a test, which must not look in the owner's.
+    public static func trellis(base: URL, hubCache: URL = defaultHubCache) -> MeshInstallation {
         let repo = base.appendingPathComponent("trellis-mac")
         let python = repo.appendingPathComponent(".venv/bin/python")
         guard FileManager.default.fileExists(atPath: python.path) else {
@@ -149,8 +158,7 @@ public enum MeshLocator {
                     + "point the trellis2 folder at where it's installed."
             )
         }
-        let weights = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub/models--microsoft--TRELLIS.2-4B")
+        let weights = hubCache.appendingPathComponent("models--microsoft--TRELLIS.2-4B")
         let weightsPresent = (try? FileManager.default.contentsOfDirectory(
             at: weights.appendingPathComponent("snapshots"), includingPropertiesForKeys: nil
         ))?.isEmpty == false

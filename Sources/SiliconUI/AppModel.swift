@@ -1048,6 +1048,9 @@ public final class AppModel {
     private var meshTask: Task<Void, Never>?
     private var activeMeshRuntime: (any MeshRuntime)?
     private var meshWasCancelled = false
+    /// Where the TRELLIS.2 installation check looks for its weights. A test points it at a
+    /// folder of its own rather than the owner's Hugging Face cache.
+    @ObservationIgnored var trellisHubCache: URL = MeshLocator.defaultHubCache
     /// Stands in for `makeMeshRuntime(for:)` when set. Tests use it to run the mesh queue on a
     /// runtime that renders nothing.
     @ObservationIgnored var meshRuntimeFactory: (@MainActor (MeshEntry) -> (any MeshRuntime)?)?
@@ -1068,7 +1071,7 @@ public final class AppModel {
         let base = settings.resolvedTrellisBaseDirectory
         switch entry.backend {
         case .trellis:
-            return MeshLocator.trellis(base: base)
+            return MeshLocator.trellis(base: base, hubCache: trellisHubCache)
         case .hunyuan:
             return MeshLocator.hunyuan(
                 base: base, weightsSlot: Self.hunyuanWeightsSlot(for: entry.id)

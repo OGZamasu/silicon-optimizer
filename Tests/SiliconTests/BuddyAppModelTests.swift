@@ -548,8 +548,9 @@ enum BuddyTestStore {
     /// `AppModel(settings:)` alone opens the owner's own video queue, and the `/events`
     /// watcher reads that queue and publishes every finished file in it into the shared
     /// media table — which it then saves, to the owner's `media.json`. So this one has an
-    /// empty queue, output folders and a media table of its own, all under a temporary
-    /// folder nothing else uses, and the conversation store redirected as every suite's is.
+    /// empty queue, output folders, a media table and a Hugging Face cache of its own, all
+    /// under a temporary folder nothing else uses, and the conversation store redirected as
+    /// every suite's is.
     @MainActor
     static func model(settings: Settings = .init()) -> AppModel {
         redirect()
@@ -564,6 +565,7 @@ enum BuddyTestStore {
             settings: settings
         )
         model.eventMediaRegistry = MediaRegistry(url: nil)
+        model.trellisHubCache = folder.appendingPathComponent("hub")
         return model
     }
 }

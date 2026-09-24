@@ -168,8 +168,10 @@ struct ControlRenderQueueTests {
             kind: .mlx, executable: folder.appendingPathComponent("absent/mflux-generate"),
             version: nil, hasExpertStreaming: false, source: .userPath
         )
-        // Nothing a render here finishes with is published into the owner's media table.
+        // Nothing a render here finishes with is published into the owner's media table, and
+        // the TRELLIS.2 check looks for weights here rather than in the owner's cache.
         model.eventMediaRegistry = MediaRegistry(url: nil)
+        model.trellisHubCache = folder.appendingPathComponent("hub")
         let renders = HeldRenders()
         model.makeImageRuntime = { _ in HeldImageRuntime(renders) }
         model.meshRuntimeFactory = { _ in HeldMeshRuntime(renders) }
