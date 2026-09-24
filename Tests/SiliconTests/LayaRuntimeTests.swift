@@ -858,6 +858,18 @@ struct LayaInstallTests {
                 == .environment)
     }
 
+    /// python.org's installer with its links declined leaves the interpreter only in its
+    /// framework. The list used to stop at Homebrew and /usr/local, so such a Mac was told
+    /// no Python was there — the face camera's bug, in Laya's own copy of the list.
+    @Test func aPythonOrgFrameworkOnlyInstallIsFound() {
+        let framework = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+        let found = LayaRuntime.locatePython(
+            isExecutable: { $0 == framework || $0 == "/usr/bin/python3" },
+            version: { $0.path == framework ? (3, 12) : (3, 9) }
+        )
+        #expect(found?.path == framework)
+    }
+
     @Test func aTooOldInterpreterIsNotUsedToBuildTheEnvironment() {
         // macOS ships 3.9 and laya-mlx needs 3.11: the candidate list is searched newest
         // first and anything older is skipped rather than used and failed later.

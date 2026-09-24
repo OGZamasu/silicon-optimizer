@@ -363,6 +363,10 @@ public actor LayaRuntime {
     /// last and usually fails the version check — it is there for a future macOS rather
     /// than as a real candidate today. The bare `python3`s are only taken when their version
     /// is one the dependency locks cover.
+    ///
+    /// python.org's installer puts each version in its framework and, unless the owner
+    /// declines, links it from `/usr/local/bin`; the framework paths are here for a Mac where
+    /// the links were declined, which the list used to miss.
     public static let pythonCandidates = [
         "/opt/homebrew/bin/python3.14",
         "/opt/homebrew/bin/python3.13",
@@ -373,17 +377,21 @@ public actor LayaRuntime {
         "/usr/local/bin/python3.13",
         "/usr/local/bin/python3.12",
         "/usr/local/bin/python3.11",
+    ] + LayaPackage.lockedPythons.reversed().map {
+        "/Library/Frameworks/Python.framework/Versions/\($0)/bin/python\($0)"
+    } + [
         "/usr/bin/python3",
     ]
 
     /// The first interpreter that is both executable and a version the locks cover.
     public static func locatePython(
         candidates: [String] = pythonCandidates,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) },
         version: (URL) -> (Int, Int)? = { probeVersion(of: $0) }
     ) -> URL? {
         for path in candidates {
             let url = URL(fileURLWithPath: path)
-            guard FileManager.default.isExecutableFile(atPath: path),
+            guard isExecutable(path),
                   let (major, minor) = version(url)
             else { continue }
             if LayaPackage.lockedPythons.contains("\(major).\(minor)") {
