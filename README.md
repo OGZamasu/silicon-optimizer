@@ -325,7 +325,9 @@ the control token being refused on the tailnet is the same rule from the other s
 control** or **Chat only** — then shows a six-digit code and a QR encoding
 `siliconbuddy://pair?host=…&port=…&code=…`. The code works once and expires after five
 minutes. The phone posts it to `POST /buddy/pair` — the one unauthenticated route — and gets
-back a 32-byte token of its own. Five attempts a minute per address, ten wrong guesses from
+back a 32-byte token of its own. Only the tailnet listener takes a code: posted to loopback,
+where the token it would mint is refused, it is turned away unspent, with the address and port
+that will take it. Five attempts a minute per address, ten wrong guesses from
 anywhere at all burns the code, and ten failures from one address shut it out for a quarter of
 an hour: that is what makes six digits enough.
 

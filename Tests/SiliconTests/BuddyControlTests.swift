@@ -66,13 +66,115 @@ struct BuddyControlTests {
             let paired = try await fixture.pair()
             #expect(try await fixture.phone.status("GET", "/status", token: paired.token) == 200)
             #expect(try await fixture.local.status("GET", "/status", token: paired.token) == 401)
-            // And pairing itself is refused there, so a token cannot be minted that way.
-            await fixture.registry.invite(host: "127.0.0.1", port: fixture.local.port)
-            let refused = try await fixture.local.status(
-                "POST", "/buddy/pair", token: nil,
-                body: #"{"code":"000000","deviceName":"x","platform":"y"}"#
+            // And pairing itself is refused there, so a token cannot be minted that way —
+            // with the code that is actually open, so the refusal is the listener's and not
+            // a wrong guess's, and the code is still there afterwards.
+            let invitation = await fixture.registry.invite(
+                host: "127.0.0.1", port: fixture.phone.port
             )
-            #expect(refused == 403 || refused == 404)
+            let (refused, body) = try await fixture.local.call(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(invitation.code)","deviceName":"x","platform":"y"}"#
+            )
+            #expect(refused == 403)
+            let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: body)
+            #expect(envelope.error == ControlServer.pairingBelongsOnTheTailnet(
+                await fixture.server.tailnetEndpoint
+            ))
+            #expect(await fixture.registry.openInvitation()?.code == invitation.code)
+            #expect(await fixture.registry.devices().count == 1)
+        }
+    }
+
+    /// A valid code posted to the loopback listener used to be spent there: the invitation
+    /// burned, a device was written down, and the token handed back was one loopback refuses
+    /// on sight — a phone holding a credential for nowhere, and an owner holding a code that
+    /// no longer worked. It is refused before the registry sees it, so the same code still
+    /// pairs on the listener that honours what it mints.
+    @Test func aValidCodeOnTheLoopbackListenerIsRefusedAndStillPairsOnTheTailnet() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint()
+            let body = #"{"code":"\#(minted.code)","deviceName":"Phone","platform":"android"}"#
+            let endpoint = await fixture.server.tailnetEndpoint
+
+            // More often than the limiter allows in a minute, and from the address the far
+            // listener sees in this fixture too: a refusal here must cost nothing out there.
+            for _ in 0...BuddyRegistry.attemptsPerMinute {
+                let (status, answer) = try await fixture.local.call(
+                    "POST", "/buddy/pair", token: nil, body: body
+                )
+                #expect(status == 403)
+                let envelope = try JSONDecoder().decode(
+                    ControlAPI.ErrorResponse.self, from: answer
+                )
+                #expect(envelope.error == ControlServer.pairingBelongsOnTheTailnet(endpoint))
+                // Actionable: it names the listener that will take the code.
+                #expect(envelope.error.contains("port \(fixture.phone.port)"))
+            }
+            // Pairing is exempt from the scope gate, so this Mac's own token reaches the route
+            // too — and is refused just the same.
+            #expect(try await fixture.local.status(
+                "POST", "/buddy/pair", token: fixture.local.token, body: body
+            ) == 403)
+            #expect(await fixture.registry.devices().isEmpty)
+            #expect(await fixture.registry.openInvitation()?.code == minted.code)
+
+            // The same code, where it belongs.
+            let device = try await fixture.spend(minted, name: "Phone")
+            #expect(device.port == fixture.phone.port)
+            #expect(await fixture.registry.devices().map(\.name) == ["Phone"])
+            #expect(try await fixture.phone.status("GET", "/status", token: device.token) == 200)
+            #expect(try await fixture.local.status("GET", "/status", token: device.token) == 401)
+        }
+    }
+
+    /// With no tailnet listener to send the caller to, the refusal says what minting a code
+    /// says, and still leaves the code alone for when the listener is back.
+    @Test func aLoopbackPairingWithTheTailnetListenerDownSaysSoAndSpendsNothing() async throws {
+        try await withServer { fixture in
+            let invitation = await fixture.registry.invite(
+                host: "127.0.0.1", port: fixture.phone.port
+            )
+            try await fixture.server.setTailnetAccess(address: nil)
+            #expect(await fixture.server.tailnetEndpoint == nil)
+
+            let (status, answer) = try await fixture.local.call(
+                "POST", "/buddy/pair", token: nil,
+                body: #"{"code":"\#(invitation.code)","deviceName":"Phone","platform":"ios"}"#
+            )
+            #expect(status == 403)
+            let envelope = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: answer)
+            #expect(envelope.error == ControlServer.pairingBelongsOnTheTailnet(nil))
+            #expect(envelope.error.hasSuffix(ControlServer.buddyListenerDown))
+            #expect(await fixture.registry.openInvitation()?.code == invitation.code)
+            #expect(await fixture.registry.devices().isEmpty)
+        }
+    }
+
+    /// The port a paired device is told is the tailnet listener's. One closed while the
+    /// request was still arriving has none to give, and loopback's — which the route used to
+    /// fall back to — is one the device could never use, so the code is kept, not spent.
+    @Test func aCodeStillArrivingWhenTheTailnetListenerClosesIsKept() async throws {
+        try await withServer { fixture in
+            let minted = try await fixture.mint()
+            let body = #"{"code":"\#(minted.code)","deviceName":"Phone","platform":"android"}"#
+            let raw = try await RawConnection.connect(port: fixture.phone.port)
+            defer { raw.close() }
+            // All but the last byte of the body, so the route cannot run before the
+            // listener has gone.
+            try await raw.send(
+                "POST /buddy/pair HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    + "Content-Type: application/json\r\n"
+                    + "Content-Length: \(body.utf8.count)\r\n\r\n" + body.dropLast()
+            )
+            try await fixture.server.setTailnetAccess(address: nil)
+            #expect(await fixture.server.tailnetEndpoint == nil)
+            try await raw.send(String(body.suffix(1)))
+
+            let reply = try await raw.readSome()
+            #expect(reply.hasPrefix("HTTP/1.1 409"))
+            #expect(await fixture.registry.openInvitation()?.code == minted.code)
+            #expect(await fixture.registry.devices().isEmpty)
         }
     }
 
@@ -93,8 +195,12 @@ struct BuddyControlTests {
 
     @Test func aWrongCodeIsRefusedAndThenThrottled() async throws {
         try await withServer { fixture in
-            await fixture.registry.invite(host: "127.0.0.1", port: fixture.phone.port)
-            let attempt = #"{"code":"000000","deviceName":"Phone","platform":"android"}"#
+            let invitation = await fixture.registry.invite(
+                host: "127.0.0.1", port: fixture.phone.port
+            )
+            // Wrong by construction rather than by a one-in-a-million chance.
+            let wrong = invitation.code == "000000" ? "111111" : "000000"
+            let attempt = #"{"code":"\#(wrong)","deviceName":"Phone","platform":"android"}"#
 
             for _ in 0..<BuddyRegistry.attemptsPerMinute {
                 let refused = try await fixture.phone.status(
@@ -652,15 +758,17 @@ struct BuddyControlTests {
     /// the body has to be small before anything else is true about it.
     @Test func anUnauthenticatedTailnetBodyIsCappedFarBelowADevices() async throws {
         try await withServer { fixture in
-            await fixture.registry.invite(host: "127.0.0.1", port: fixture.phone.port)
+            let invitation = await fixture.registry.invite(
+                host: "127.0.0.1", port: fixture.phone.port
+            )
             let padding = String(repeating: "a", count: BuddyLimits.unauthenticatedBodyBytes)
             let refused = try await fixture.phone.status(
                 "POST", "/buddy/pair", token: nil,
-                body: #"{"code":"000000","deviceName":"\#(padding)","platform":"android"}"#
+                body: #"{"code":"\#(invitation.code)","deviceName":"\#(padding)","platform":"android"}"#
             )
             #expect(refused == 413)
             // The code survives, because nothing ever looked at it.
-            #expect(await fixture.registry.openInvitation() != nil)
+            #expect(await fixture.registry.openInvitation()?.code == invitation.code)
 
             // A paired device's ceiling is much higher, and the same body gets through it.
             let paired = try await fixture.pair()
