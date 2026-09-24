@@ -41,32 +41,66 @@ struct NodeModelSwitchTests {
         #expect(node.switchableModels == ["qwen3.8-27b"])
     }
 
-    /// Through the real request: every spelling a menu or a gateway id can hand over goes
-    /// out as the id, and the node's rule turns each into a file it has.
-    @Test func theStartRequestCarriesTheModelIdNeverTheFileName() async throws {
+    /// Through the real request: every spelling a menu, a gateway id or the context menu
+    /// can hand over goes out as the id, with the exact listed file beside it as
+    /// `model_file` — which every node reads before it munges `model`. The hand-placed
+    /// file with dots and dashes in its name is the one the munge alone could never find.
+    @Test func theStartRequestCarriesTheModelIdAndTheListedFile() async throws {
         let server = try CapturingServer(status: 409) { _ in #"{"detail":"queue busy"}"# }
         defer { server.stop() }
         let app = AppModel(settings: .init())
+        var node = Self.twoModelNode
+        node.availableModels.append("llama-3.1-8b.ninfer")
         let peer = AppModel.PeerStatus(
-            name: "Rig", baseURL: "http://127.0.0.1:\(server.port)", reachable: true,
-            llm: Self.twoModelNode
+            name: "Rig", baseURL: "http://127.0.0.1:\(server.port)", reachable: true, llm: node
         )
 
-        let asked = ["gemma4_31b.ninfer", "qwen3_8_27b.ninfer", "gemma4_31b", "qwen3.8-27b"]
-        for model in asked {
-            await app.setPeerLLM(peer, running: true, model: model)
+        let asked: [(asked: String, id: String, file: String)] = [
+            ("gemma4_31b.ninfer", "gemma4_31b", "gemma4_31b.ninfer"),
+            ("qwen3_8_27b.ninfer", "qwen3.8-27b", "qwen3_8_27b.ninfer"),
+            ("gemma4_31b", "gemma4_31b", "gemma4_31b.ninfer"),
+            ("qwen3.8-27b", "qwen3.8-27b", "qwen3_8_27b.ninfer"),
+            ("llama-3.1-8b.ninfer", "llama-3.1-8b", "llama-3.1-8b.ninfer"),
+            ("llama-3.1-8b", "llama-3.1-8b", "llama-3.1-8b.ninfer"),
+        ]
+        for entry in asked {
+            await app.setPeerLLM(peer, running: true, model: entry.asked)
         }
+        // The context menu's restart sends the loaded model again, with a size.
+        await app.setPeerLLM(peer, running: true, model: node.model, contextLength: 32_768)
 
         let sent = try server.requests.map { request in
             #expect(request.path == "/v1/llm/start")
-            let body = try #require(
+            return try #require(
                 try JSONSerialization.jsonObject(with: request.body) as? [String: Any]
             )
-            return try #require(body["model"] as? String)
         }
-        #expect(sent == ["gemma4_31b", "qwen3.8-27b", "gemma4_31b", "qwen3.8-27b"])
-        for model in sent {
-            #expect(Self.twoModelNode.availableModels.contains(Self.fileTheNodeLooksFor(model)))
+        #expect(sent.count == asked.count + 1)
+        for (body, entry) in zip(sent, asked + [("qwen3.8-27b", "qwen3.8-27b", "qwen3_8_27b.ninfer")]) {
+            #expect(body["model"] as? String == entry.id, "\(entry.asked)")
+            #expect(body["model_file"] as? String == entry.file, "\(entry.asked)")
+            #expect(node.availableModels.contains(body["model_file"] as? String ?? ""))
         }
+        #expect(sent.last?["context_length"] as? Int == 32_768)
+        // Every id is still one an older node's munge alone resolves, where it can.
+        for body in sent.prefix(4) {
+            let id = try #require(body["model"] as? String)
+            #expect(node.availableModels.contains(Self.fileTheNodeLooksFor(id)))
+        }
+    }
+
+    /// A file that differs from the served id only in case: the munge names a file that
+    /// is not there on a case-sensitive models folder, the listed name is.
+    @Test func theListedFileKeepsItsOwnCase() {
+        let node = AppModel.PeerLLM(
+            installed: true, running: true, healthy: true, model: "qwen3.8-27b",
+            availableModels: ["Qwen3_8_27B.ninfer"]
+        )
+        #expect(node.listedFile(for: "qwen3.8-27b") == "Qwen3_8_27B.ninfer")
+        // A node with no list is asked by id alone, as before.
+        let unlisted = AppModel.PeerLLM(
+            installed: true, running: true, healthy: true, model: "qwen3.8-27b"
+        )
+        #expect(unlisted.listedFile(for: "qwen3.8-27b") == nil)
     }
 }

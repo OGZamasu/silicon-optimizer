@@ -1165,13 +1165,14 @@ public final class AppModel {
         /// The model id a node's `POST /v1/llm/start` expects, for a model this Mac may
         /// hold under either spelling.
         ///
-        /// The node turns the `model` it is sent into a file name — dots and dashes to
-        /// underscores, `.ninfer` appended — so "qwen3.8-27b" finds qwen3_8_27b.ninfer,
-        /// and a file name sent as-is looks for qwen3_8_27b_ninfer.ninfer. It looks only
-        /// after stopping the model it was serving, so a wrong spelling here takes the
-        /// node's chat down for every member of the swarm. The loaded model goes by the
-        /// id the node serves it under; any other file by its name without the extension,
-        /// which is the id the node gives a file it starts.
+        /// Without a `model_file` beside it, the node turns the `model` it is sent into a
+        /// file name — dots and dashes to underscores, `.ninfer` appended — so
+        /// "qwen3.8-27b" finds qwen3_8_27b.ninfer, and a file name sent as-is looks for
+        /// qwen3_8_27b_ninfer.ninfer. It looks only after stopping the model it was
+        /// serving, so a wrong spelling here takes the node's chat down for every member
+        /// of the swarm. The loaded model goes by the id the node serves it under; any
+        /// other file by its name without the extension, which is the id the node gives a
+        /// file it starts.
         public func nodeModelID(for name: String) -> String {
             Self.nodeModelID(for: name, serving: model)
         }
@@ -1183,6 +1184,33 @@ public final class AppModel {
                 return String(name.dropLast(suffix.count))
             }
             return name
+        }
+
+        /// The listed file a choice stands for, sent beside the id as `model_file`.
+        ///
+        /// Every node reads `model_file` — an exact name in its models folder — before it
+        /// munges `model`, so the file is found whatever the munge would have made of the
+        /// id: a hand-placed `llama-3.1-8b.ninfer`, whose dots and dashes the munge turns
+        /// into underscores; a file differing from the served id only in case, on a
+        /// case-sensitive models folder. Nil when nothing listed is this model — the id
+        /// alone then — so a node without a list is asked exactly as before.
+        public func listedFile(for name: String) -> String? {
+            if availableModels.contains(name) { return name }
+            let id = nodeModelID(for: name)
+            let munged = id.replacingOccurrences(of: ".", with: "_")
+                .replacingOccurrences(of: "-", with: "_")
+            // The file this id names on its own, then the one the node's rule reaches,
+            // then either in another case, and only then a looser match on letters and
+            // digits — which can be two files, so it comes last.
+            for exact in ["\(id).ninfer", "\(munged).ninfer"] where availableModels.contains(exact) {
+                return exact
+            }
+            for spelling in ["\(id).ninfer", "\(munged).ninfer"] {
+                if let file = availableModels.first(where: {
+                    $0.caseInsensitiveCompare(spelling) == .orderedSame
+                }) { return file }
+            }
+            return availableModels.first { GatewayAPI.modelNamesMatch($0, id) }
         }
     }
 
@@ -1437,9 +1465,11 @@ public final class AppModel {
         if model != nil || contextLength != nil {
             var payload: [String: Any] = [:]
             // By id, whatever spelling the caller had: menus list the node's files, and a
-            // gateway id can end in one.
+            // gateway id can end in one. And the exact file beside it, which the node
+            // reads first, so its munge of the id is never what finds the file.
             if let model {
                 payload["model"] = PeerLLM.nodeModelID(for: model, serving: peer.llm?.model)
+                if let file = peer.llm?.listedFile(for: model) { payload["model_file"] = file }
             }
             // Honored once the node ships hub #127; older nodes ignore the field and
             // start at their own profile — the card shows whatever they actually chose.
