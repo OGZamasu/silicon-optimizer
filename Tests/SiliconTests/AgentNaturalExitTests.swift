@@ -3,7 +3,7 @@ import Testing
 @testable import SiliconRuntime
 @testable import SiliconUI
 
-@Suite("Agent natural exits", .serialized)
+@Suite("Agent natural exits", .serialized, .redirectedConversationStore)
 struct AgentNaturalExitTests {
     private final class StateCapture: @unchecked Sendable {
         private let lock = NSLock()
