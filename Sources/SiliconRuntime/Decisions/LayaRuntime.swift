@@ -152,8 +152,43 @@ public actor LayaRuntime {
     /// Set while an install is running, so the panel can say so and a second one is refused.
     public private(set) var isInstalling = false
 
-    public init(locks: URL = PinnedInstall.defaultLockRoot()) {
+    /// Whether someone is starting, swapping or stopping the sidecar, and who is waiting to.
+    ///
+    /// Each of those crosses suspension points — a cold load is half a minute — and this actor
+    /// is reentrant across every one of them. Two decisions arriving while nothing was loaded
+    /// both found no sidecar, both started one, and the second assignment dropped the first:
+    /// about a gigabyte of weights in a process nothing would stop until the app quit. So they
+    /// take turns, in arrival order, exactly as `LayaSidecar` does for its pipe, and the
+    /// second caller finds the first one's sidecar up and uses it.
+    private var turnHolder = false
+    private var turnQueue: [CheckedContinuation<Void, Never>] = []
+
+    /// How long a loaded checkpoint may sit unused: `idleUnloadSeconds`, except in a test.
+    private let idleUnloadAfter: TimeInterval
+    private var idleSweep: Task<Void, Never>?
+
+    public init(
+        locks: URL = PinnedInstall.defaultLockRoot(),
+        idleUnloadAfter: TimeInterval = LayaRuntime.idleUnloadSeconds
+    ) {
         self.locks = locks
+        self.idleUnloadAfter = idleUnloadAfter
+    }
+
+    private func acquireTurn() async {
+        if !turnHolder {
+            turnHolder = true
+            return
+        }
+        await withCheckedContinuation { turnQueue.append($0) }
+    }
+
+    private func releaseTurn() {
+        guard !turnQueue.isEmpty else {
+            turnHolder = false
+            return
+        }
+        turnQueue.removeFirst().resume()
     }
 
     public func configure(
@@ -640,11 +675,13 @@ public actor LayaRuntime {
     /// The sidecar for this checkpoint, started if it is not up and swapped if the owner
     /// has changed checkpoints since.
     public func sidecar(for checkpoint: LayaCheckpoint) async throws -> LayaSidecar {
+        await acquireTurn()
+        defer { releaseTurn() }
         if let sidecar, activeCheckpoint == checkpoint, await sidecar.isRunning {
             lastUsed = Date()
             return sidecar
         }
-        if sidecar != nil { await unload() }
+        if sidecar != nil { await stopSidecar() }
 
         guard let library = await libraryProvider() else {
             throw LayaSidecarError.pythonMissing("no model library is configured")
@@ -666,12 +703,22 @@ public actor LayaRuntime {
         lastReady = ready
         lastPeakMemoryBytes = ready.peakMemoryBytes
         lastUsed = Date()
+        scheduleIdleUnload()
         return fresh
     }
 
     /// Releases the model. Called by the idle sweep, before an install, and when the owner
     /// switches checkpoints.
     public func unload() async {
+        await acquireTurn()
+        defer { releaseTurn() }
+        await stopSidecar()
+    }
+
+    /// `unload()` for a caller that already holds the turn.
+    private func stopSidecar() async {
+        idleSweep?.cancel()
+        idleSweep = nil
         if let sidecar { await sidecar.stop() }
         sidecar = nil
         activeCheckpoint = nil
@@ -701,13 +748,40 @@ public actor LayaRuntime {
     /// weights in the morning.
     public static let idleUnloadSeconds: TimeInterval = 20 * 60
 
-    /// Unloads if nothing has used it for `idleUnloadSeconds`. Returns whether it did.
+    /// Unloads if nothing has used it for the idle interval — `idleUnloadSeconds`, outside a
+    /// test. Returns whether it did.
     @discardableResult
     public func unloadIfIdle(now: Date = Date()) async -> Bool {
+        await acquireTurn()
+        defer { releaseTurn() }
         guard sidecar != nil,
-              now.timeIntervalSince(lastUsed) >= Self.idleUnloadSeconds
+              now.timeIntervalSince(lastUsed) >= idleUnloadAfter
         else { return false }
-        await unload()
+        await stopSidecar()
         return true
+    }
+
+    /// Puts `unloadIfIdle` on a clock, from the moment a sidecar comes up.
+    ///
+    /// Nothing else ever called it, so the rule above was never applied: a checkpoint loaded
+    /// once held its gigabyte until the app quit. This sleeps until the sidecar would become
+    /// idle, looks again — every decision moves `lastUsed` — and ends once nothing is loaded.
+    private func scheduleIdleUnload() {
+        idleSweep?.cancel()
+        idleSweep = Task { [weak self] in
+            while !Task.isCancelled, let wait = await self?.secondsUntilIdle() {
+                if wait > 0 {
+                    try? await Task.sleep(for: .seconds(wait))
+                } else {
+                    await self?.unloadIfIdle()
+                }
+            }
+        }
+    }
+
+    /// Seconds until the loaded sidecar counts as idle, or nil when nothing is loaded.
+    private func secondsUntilIdle() -> TimeInterval? {
+        guard sidecar != nil else { return nil }
+        return idleUnloadAfter - Date().timeIntervalSince(lastUsed)
     }
 }

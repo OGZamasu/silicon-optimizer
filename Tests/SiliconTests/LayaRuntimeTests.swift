@@ -23,7 +23,9 @@ struct FakeSidecar {
     ///   finds no reader — what a sidecar that has just died looks like to the pipe, held
     ///   still long enough to hit every time; `closesOutput` takes one request, closes
     ///   stdout and exits 9 half a second later — a death whose pipe closes before the
-    ///   process is reaped, the order that used to be mistaken for a timeout.
+    ///   process is reaped, the order that used to be mistaken for a timeout; `slowStart`
+    ///   answers like `ok` but takes half a second to say it is ready, the way a real load
+    ///   takes long enough for a second decision to arrive in the middle of it.
     init(_ behaviour: String = "ok") throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("laya-fake-\(UUID().uuidString)", isDirectory: true)
@@ -56,6 +58,8 @@ struct FakeSidecar {
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "starts.log"), "a") as f:
             f.write("1\\n")
         behaviour = \(behaviour.debugDescription)
+        if behaviour == "slowStart":
+            time.sleep(0.5)
         if behaviour == "notInstalled":
             print(json.dumps({"id": hello.get("id"), "ok": False,
                               "kind": "not_installed", "error": "No module named laya_mlx"}),
@@ -468,7 +472,9 @@ struct LayaStoppedReadingRoutingTests {
     /// A model library laid out the way `LayaRuntime` checks for an install, with the fake
     /// standing in for the driver script: the interpreter a symlink to the system one (a
     /// copy is killed at launch), an empty `laya_mlx` package and an empty weights file.
-    static func installedRuntime(for fake: FakeSidecar) async throws -> LayaRuntime {
+    static func installedRuntime(
+        for fake: FakeSidecar, idleUnloadAfter: TimeInterval = LayaRuntime.idleUnloadSeconds
+    ) async throws -> LayaRuntime {
         let manager = FileManager.default
         let library = fake.directory
         let environment = LayaRuntime.environmentDirectory(library: library)
@@ -490,10 +496,85 @@ struct LayaStoppedReadingRoutingTests {
         #expect(manager.createFile(
             atPath: snapshot.appendingPathComponent("model.safetensors").path, contents: Data()
         ))
-        let runtime = LayaRuntime()
+        let runtime = LayaRuntime(idleUnloadAfter: idleUnloadAfter)
         await runtime.configure(library: { library }, script: { fake.script })
         #expect(await runtime.installation(checkpoint: .english).isInstalled)
         return runtime
+    }
+}
+
+// MARK: - One sidecar, and not forever
+
+/// The runtime's two promises about memory: one resident checkpoint however many decisions
+/// arrive at once, and none at all once it has gone unused for long enough.
+@Suite("The Laya runtime's one sidecar")
+struct LayaRuntimeResidencyTests {
+
+    private func starts(_ fake: FakeSidecar) -> Int {
+        let log = fake.directory.appendingPathComponent("starts.log")
+        return ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
+            .split(separator: "\n").count
+    }
+
+    /// Two abilities asking while nothing is loaded — the ordinary case after launch or an
+    /// idle unload. Both used to find no sidecar and start one each; the second replaced the
+    /// first in the runtime, and the first went on holding its gigabyte, unreachable, until
+    /// the app quit.
+    @Test func twoColdDecisionsAtOnceShareOneSidecar() async throws {
+        let fake = try FakeSidecar("slowStart")
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+        let lane = LayaLane(runtime: runtime, checkpoint: { .english })
+
+        async let first = lane.decide(.fixture("first"))
+        async let second = lane.decide(.fixture("second"))
+        let (one, two) = try await (first, second)
+
+        #expect(one.answers["first"] != nil)
+        #expect(two.answers["second"] != nil)
+        #expect(starts(fake) == 1, "one process for both decisions, not one each")
+        await runtime.unload()
+    }
+
+    /// The idle rule applied by itself. `unloadIfIdle` existed, and nothing called it.
+    @Test func aCheckpointNobodyUsesIsReleasedWithoutAnyoneAsking() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(
+            for: fake, idleUnloadAfter: 0.3
+        )
+        let sidecar = try await runtime.sidecar(for: .english)
+        #expect(await runtime.isLoaded)
+
+        // Generous, because the suite shares the machine: slow is fine, never is the bug.
+        for _ in 0..<400 {
+            if await runtime.isLoaded == false { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(await runtime.isLoaded == false, "still resident after going idle")
+        #expect(await sidecar.isRunning == false, "the process went with it")
+    }
+
+    /// And measured from the last use, not from the load, against this runtime's own
+    /// interval — the one the sweep is scheduled by. Asked with explicit clocks, so a
+    /// machine that stalls cannot make it pass or fail.
+    @Test func idlenessIsMeasuredFromTheLastUse() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(
+            for: fake, idleUnloadAfter: 600
+        )
+        let lane = LayaLane(runtime: runtime, checkpoint: { .english })
+        _ = try await lane.decide(.fixture())
+        let loaded = Date()
+        try await Task.sleep(for: .seconds(1))
+        _ = try await lane.decide(.fixture())
+
+        // Past the interval counted from the load, inside it counted from the second use.
+        #expect(await runtime.unloadIfIdle(now: loaded.addingTimeInterval(600.5)) == false)
+        #expect(await runtime.unloadIfIdle(now: Date().addingTimeInterval(601)))
+        #expect(await runtime.isLoaded == false)
+        #expect(starts(fake) == 1)
     }
 }
 
