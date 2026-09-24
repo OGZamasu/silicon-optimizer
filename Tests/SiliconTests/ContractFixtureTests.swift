@@ -321,4 +321,45 @@ struct ContractFixtureTests {
         _ = try await lane.decide(.fixture())
         #expect(server.requests.map(\.path) == [endpoint])
     }
+
+    /// A mesh job the node cancelled — its owner's Cancel Queue, a cancel from the node's own
+    /// page — is over. The LATO.2 lane read the status it did not know as "still running" and
+    /// polled the finished job for thirty minutes before calling it a timeout.
+    @Test func aMeshJobTheNodeCancelledEndsInsteadOfPollingOn() async throws {
+        let body = try fixtureText("job-cancelled")
+        let jobID = try #require(try fixture("job-cancelled")["job_id"] as? String)
+        let server = try CapturingServer { request, _ in
+            request.path == "/v1/image-to-mesh"
+                ? .init(body: #"{"job_id":"\#(jobID)"}"#) : .init(body: body)
+        }
+        defer { server.stop() }
+        let request = try Lato2CredentialTests.request()
+        defer { try? FileManager.default.removeItem(at: request.image.deletingLastPathComponent()) }
+        let runtime = Lato2Runtime(baseURL: URL(string: "http://127.0.0.1:\(server.port)")!)
+
+        let ending = await withTaskGroup(of: String?.self) { group in
+            group.addTask {
+                do {
+                    for try await _ in try await runtime.generate(request) {}
+                    return "finished"
+                } catch MeshRuntimeError.cancelledOnNode(let detail) {
+                    return detail ?? "cancelled, with no sentence"
+                } catch {
+                    return "\(error)"
+                }
+            }
+            // Far longer than one poll takes, far shorter than the 30-minute deadline.
+            group.addTask {
+                try? await Task.sleep(for: .seconds(20))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            await runtime.cancel()
+            return first
+        }
+        let detail = try #require(ending, "still polling a cancelled job after 20 s")
+        #expect(detail == "Cancelled while running.")
+        #expect(server.requests.filter { $0.path == "/v1/jobs/\(jobID)" }.count == 1)
+    }
 }

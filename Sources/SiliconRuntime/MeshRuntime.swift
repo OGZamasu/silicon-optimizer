@@ -81,6 +81,9 @@ public enum MeshRuntimeError: Error, LocalizedError {
     case noMeshProduced
     case remoteUnreachable(String)
     case cancelled
+    /// The node running the job cancelled it, in its own words when it gave any. Not this
+    /// Mac's Stop, which is `cancelled`.
+    case cancelledOnNode(String?)
 
     public var errorDescription: String? {
         switch self {
@@ -98,6 +101,8 @@ public enum MeshRuntimeError: Error, LocalizedError {
             detail
         case .cancelled:
             "Generation cancelled."
+        case .cancelledOnNode(let detail):
+            "The node cancelled this job" + (detail.map { ": \($0)" } ?? ".")
         }
     }
 }

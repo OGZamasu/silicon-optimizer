@@ -392,6 +392,8 @@ public actor Lato2Runtime: MeshRuntime {
                         break poll
                     case .failed(let message):
                         throw MeshRuntimeError.generationFailed(message)
+                    case .cancelled(let detail):
+                        throw MeshRuntimeError.cancelledOnNode(detail)
                     case .running:
                         try await Task.sleep(for: .seconds(3))
                     }
@@ -536,6 +538,9 @@ public actor Lato2Runtime: MeshRuntime {
         case running
         case done
         case failed(String)
+        /// Stopped on the node — its owner's Cancel Queue, or a cancel from its own page. As
+        /// final as a failure, but not one: the node freed the card and publishes nothing.
+        case cancelled(String?)
     }
 
     struct JobSnapshot {
@@ -608,6 +613,12 @@ public actor Lato2Runtime: MeshRuntime {
             let message = (json["error"] as? String).map { String($0.prefix(512)) }
                 ?? "The LATO.2 job failed."
             return JobSnapshot(state: .failed(message), progress: progress, files: [])
+        // Its own terminal state since the node could cancel a job. Unknown here, it fell to
+        // `default` and a cancelled job was polled as running until the 30-minute deadline.
+        case "cancelled", "canceled":
+            let detail = ((json["cancel"] as? [String: Any])?["detail"] as? String
+                ?? json["error"] as? String).map { String($0.prefix(512)) }
+            return JobSnapshot(state: .cancelled(detail), progress: nil, files: [])
         default:
             return JobSnapshot(
                 state: .running, progress: progress ?? reported.fraction,
