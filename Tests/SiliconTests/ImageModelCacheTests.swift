@@ -38,19 +38,53 @@ struct ImageModelCacheTests {
     @Test func theDownloaderIsPointedAtTheCacheMFluxReads() throws {
         let engineCache = try library().appendingPathComponent("Engine Cache", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: engineCache.deletingLastPathComponent()) }
+        let hub = HuggingFaceHub.directory(home: engineCache)
         let installer = DiffusionInstaller(
-            executable: URL(fileURLWithPath: "/usr/bin/true"), hubCache: engineCache
+            executable: URL(fileURLWithPath: "/usr/bin/true"), home: engineCache, hub: hub
         )
         let downloader = installer.processEnvironment(base: [
             "HF_HUB_CACHE": "/somewhere/else/hub",
         ])
         let renderer = MFluxRuntime.childEnvironment(huggingFaceToken: nil, hubCache: engineCache)
         #expect(downloader["HF_HOME"] == renderer["HF_HOME"])
-        #expect(downloader["HF_HUB_CACHE"] == engineCache.appendingPathComponent("hub").path,
+        #expect(downloader["HF_HUB_CACHE"] == hub.path,
                 "an inherited hub cache would send the download elsewhere")
+        #expect(renderer["HF_HUB_CACHE"] == hub.path,
+                "an inherited hub cache would have MFLUX read somewhere else")
+        #expect(hub.path == engineCache.appendingPathComponent("hub").path)
         #expect(DiffusionInstaller.cacheDirectory(
-            for: DiffusionCatalog.flux2Klein4B.repository, hubCache: engineCache
-        ).path.hasPrefix(engineCache.appendingPathComponent("hub").path + "/"))
+            for: DiffusionCatalog.flux2Klein4B.repository, hub: hub
+        ).path.hasPrefix(hub.path + "/"))
+    }
+
+    /// With no library the child keeps the app's own `HF_HOME`, but the download is still told
+    /// the hub it will be checked in.
+    @Test func withoutALibraryTheDownloadStillGoesWhereItIsChecked() throws {
+        let hub = try library().appendingPathComponent("hub", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: hub.deletingLastPathComponent()) }
+        let installer = DiffusionInstaller(
+            executable: URL(fileURLWithPath: "/usr/bin/true"), home: nil, hub: hub
+        )
+        let environment = installer.processEnvironment(base: ["HF_HOME": "/inherited"])
+        #expect(environment["HF_HOME"] == "/inherited")
+        #expect(environment["HF_HUB_CACHE"] == hub.path)
+    }
+
+    /// Tests build `AppModel(settings: .init())`, with no library. Such a model must not resolve
+    /// the real `~/.cache/huggingface` — a link into a real model library on some Macs — for
+    /// anything, least of all a removal: it gets a scratch hub of its own.
+    @Test func aModelWithInjectedSettingsNeverResolvesTheRealCache() throws {
+        let model = AppModel(settings: .init())
+        defer { try? FileManager.default.removeItem(at: model.fallbackHuggingFaceHub) }
+        let scratch = FileManager.default.temporaryDirectory.standardizedFileURL.path + "/"
+        #expect(model.imageModelHub.standardizedFileURL.path.hasPrefix(scratch))
+        #expect(model.imageModelHub != HuggingFaceHub.directory(home: nil))
+
+        let entry = throwawayEntry()
+        let repository = try placeWeights(for: entry, hub: model.imageModelHub)
+        #expect(model.isImageModelInstalled(entry))
+        model.uninstallImageModel(entry)
+        #expect(!FileManager.default.fileExists(atPath: repository.path))
     }
 
     /// A catalog entry under a repository name nobody has, so that removing it — even through
@@ -81,7 +115,7 @@ struct ImageModelCacheTests {
 
         #expect(model.isImageModelInstalled(entry), "weights in the engine cache read as missing")
         #expect(model.installedImageModelSize(entry) == DiffusionInstaller.installedSize(
-            entry.repository, hubCache: settings.resolvedEngineCacheDirectory
+            entry.repository, hub: hub
         ))
         model.uninstallImageModel(entry)
         #expect(!FileManager.default.fileExists(atPath: repository.path),

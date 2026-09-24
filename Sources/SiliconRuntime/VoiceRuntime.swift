@@ -571,17 +571,7 @@ public actor VoiceRuntime {
     nonisolated static func hubDirectory(
         hubCache: URL?, environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
-        if let hubCache { return hubCache.appendingPathComponent("hub", isDirectory: true) }
-        if let hub = environment["HF_HUB_CACHE"], !hub.isEmpty {
-            return URL(fileURLWithPath: hub, isDirectory: true)
-        }
-        if let home = environment["HF_HOME"], !home.isEmpty {
-            return URL(fileURLWithPath: home, isDirectory: true).appendingPathComponent("hub")
-        }
-        let cache = environment["XDG_CACHE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
-            .map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache")
-        return cache.appendingPathComponent("huggingface/hub", isDirectory: true)
+        HuggingFaceHub.directory(home: hubCache, environment: environment)
     }
 
     func pinnedModel(_ repository: String) throws -> PinnedInstall.HubModel {

@@ -261,6 +261,10 @@ public final class AppModel {
     /// Whether the credential comes from the user's Keychain, as in the running app, or arrived
     /// with injected settings, as in tests and previews, which must never reach for it.
     private let readsCredentialsFromKeychain: Bool
+    /// Where Hugging Face's own rules put the hub cache for a child that inherits this app's
+    /// environment — MFLUX, when no library is set. A scratch directory under injected
+    /// settings; see `init`.
+    @ObservationIgnored var fallbackHuggingFaceHub: URL
 
     /// The Keychain read in flight, so work that needs the token can wait for it rather than
     /// run without one.
@@ -466,14 +470,20 @@ public final class AppModel {
 
     public func isImageModelInstalled(_ entry: DiffusionEntry) -> Bool {
         _ = imageLibraryVersion
-        return DiffusionInstaller.isInstalled(entry, hubCache: settings.resolvedEngineCacheDirectory)
+        return DiffusionInstaller.isInstalled(entry, hub: imageModelHub)
     }
 
     public func installedImageModelSize(_ entry: DiffusionEntry) -> Bytes {
         _ = imageLibraryVersion
-        return DiffusionInstaller.installedSize(
-            entry.repository, hubCache: settings.resolvedEngineCacheDirectory
-        )
+        return DiffusionInstaller.installedSize(entry.repository, hub: imageModelHub)
+    }
+
+    /// The hub cache image models are downloaded into, found in and removed from: the one
+    /// MFLUX reads. `hub` in the library's engine cache when a library is set — MFLUX is run
+    /// with `HF_HOME` there — and otherwise `fallbackHuggingFaceHub`.
+    var imageModelHub: URL {
+        settings.resolvedEngineCacheDirectory.map { HuggingFaceHub.directory(home: $0) }
+            ?? fallbackHuggingFaceHub
     }
 
     /// Downloads into the cache MFLUX is run against (`MFluxRuntime`'s `hubCache`), so the
@@ -483,7 +493,8 @@ public final class AppModel {
               let hf = DiffusionInstaller.locate(besideMFlux: mflux) else { return nil }
         let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
         return DiffusionInstaller(
-            executable: hf, token: token, hubCache: settings.resolvedEngineCacheDirectory
+            executable: hf, token: token, home: settings.resolvedEngineCacheDirectory,
+            hub: imageModelHub
         )
     }
 
@@ -528,9 +539,7 @@ public final class AppModel {
     }
 
     public func uninstallImageModel(_ entry: DiffusionEntry) {
-        let directory = DiffusionInstaller.cacheDirectory(
-            for: entry.repository, hubCache: settings.resolvedEngineCacheDirectory
-        )
+        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository, hub: imageModelHub)
         try? FileManager.default.removeItem(at: directory)
         imageLibraryVersion += 1
     }
@@ -2809,6 +2818,13 @@ public final class AppModel {
         // ordinary application loads the document here and fetches the credential once it is
         // running: see `loadHuggingFaceToken()`.
         self.readsCredentialsFromKeychain = settings == nil
+        // The same line again for the Hugging Face cache: a model built with injected settings
+        // gets a scratch hub, so no test can resolve `~/.cache/huggingface` — on some Macs a
+        // link into a real model library — and remove an image model from it.
+        self.fallbackHuggingFaceHub = settings == nil
+            ? HuggingFaceHub.directory(home: nil)
+            : FileManager.default.temporaryDirectory
+                .appendingPathComponent("silicon-test-hub-\(UUID().uuidString)", isDirectory: true)
         self.settings = settings ?? Settings.load()
         self.videoRuntime = videoRuntime
         self.cloudAudioRuntime = cloudAudioRuntime

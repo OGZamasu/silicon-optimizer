@@ -436,7 +436,8 @@ struct DiffusionInstallerTests {
     /// Hugging Face's cache flattens `org/name` into `models--org--name`.
     @Test func mapsRepositoriesOntoTheHubCacheLayout() {
         let directory = DiffusionInstaller.cacheDirectory(
-            for: "black-forest-labs/FLUX.2-klein-4B"
+            for: "black-forest-labs/FLUX.2-klein-4B",
+            hub: FileManager.default.temporaryDirectory.appendingPathComponent("hub")
         )
         #expect(directory.lastPathComponent == "models--black-forest-labs--FLUX.2-klein-4B")
     }
@@ -454,7 +455,8 @@ struct DiffusionInstallerTests {
     @Test func huggingFaceCredentialIsEnvironmentOnlyAndRedacted() {
         let secret = "hf_test_secret_that_must_not_reach_argv"
         let diffusion = DiffusionInstaller(
-            executable: URL(fileURLWithPath: "/usr/bin/true"), token: secret
+            executable: URL(fileURLWithPath: "/usr/bin/true"), token: secret, home: nil,
+            hub: FileManager.default.temporaryDirectory.appendingPathComponent("hub")
         )
         let diffusionArguments = diffusion.downloadArguments(DiffusionCatalog.flux2Klein4B)
         #expect(!diffusionArguments.contains(secret))

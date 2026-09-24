@@ -93,6 +93,10 @@ public actor MFluxRuntime: ImageRuntime {
         }
         if let hubCache {
             environment["HF_HOME"] = hubCache.path
+            // Set too, as the image installer does: an `HF_HUB_CACHE` inherited from the app's
+            // own environment outranks `HF_HOME`, and would have MFLUX read somewhere other than
+            // where the weights were downloaded.
+            environment["HF_HUB_CACHE"] = HuggingFaceHub.directory(home: hubCache).path
         }
         return environment
     }

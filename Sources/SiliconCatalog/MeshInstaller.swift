@@ -57,7 +57,10 @@ public struct MeshInstaller: Sendable {
     public static func downloadedSize(of download: Download) -> Bytes {
         switch download.destination {
         case .hubCache:
-            return DiffusionInstaller.installedSize(download.repository)
+            // TRELLIS.2 inherits the app's environment, so Hugging Face's own rules place it.
+            return DiffusionInstaller.installedSize(
+                download.repository, hub: HuggingFaceHub.directory(home: nil)
+            )
         case .localDirectory(let directory):
             let entries = (try? FileManager.default.contentsOfDirectory(
                 at: directory, includingPropertiesForKeys: [.fileSizeKey]
