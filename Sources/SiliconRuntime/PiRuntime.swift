@@ -39,6 +39,11 @@ public actor PiRuntime {
     private var startupGeneration = 0
     private var stdinHandle: FileHandle?
     private var eventContinuation: AsyncStream<String>.Continuation?
+    /// Where this run's state goes, kept so a write that finds Pi gone can say so too.
+    private var reportState: (@Sendable (State) -> Void)?
+    /// The last of Pi's stderr, for the message when it goes. Noise otherwise.
+    private var stderrTail: [String] = []
+    private var stderrOpen = false
 
     public init() {}
 
@@ -159,18 +164,6 @@ public actor PiRuntime {
         if generation == startupGeneration { installationTask = nil }
         guard generation == startupGeneration else { return nil }
 
-        let process = Process()
-        process.executableURL = node
-        process.arguments = [
-            installed.bin.path,
-            "--mode", "rpc",
-            // Trust our own workspace for this run without writing the user's
-            // trust store.
-            "-a",
-            "--session-dir", workspace.appendingPathComponent("sessions").path,
-        ]
-        process.currentDirectoryURL = workspace
-
         // Pi is installed from a package registry at first use. Give it only the ambient
         // process state it needs, rather than forwarding every credential that happened to
         // be present in the app's launch environment.
@@ -190,6 +183,32 @@ public actor PiRuntime {
         if let mcpServerPath {
             environment["SILICON_MCP_PATH"] = mcpServerPath
         }
+
+        return await launch(
+            executable: node,
+            arguments: [
+                installed.bin.path,
+                "--mode", "rpc",
+                // Trust our own workspace for this run without writing the user's
+                // trust store.
+                "-a",
+                "--session-dir", workspace.appendingPathComponent("sessions").path,
+            ],
+            environment: environment, directory: workspace, onState: onState
+        )
+    }
+
+    /// Spawns Pi — or, in a test, anything that speaks JSONL on stdio — for the run `start`
+    /// has just checked is current, and watches it until it goes.
+    func launch(
+        executable: URL, arguments: [String], environment: [String: String],
+        directory: URL, onState: @escaping @Sendable (State) -> Void
+    ) async -> AsyncStream<String>? {
+        let generation = startupGeneration
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
         process.environment = environment
 
         let stdin = Pipe.childInput()
@@ -211,16 +230,14 @@ public actor PiRuntime {
         ChildProcessRegistry.register(pid: process.processIdentifier)
         self.process = process
         self.stdinHandle = stdin.fileHandleForWriting
+        self.reportState = onState
+        self.stderrTail = []
+        self.stderrOpen = true
 
-        // Stderr is noise unless startup fails; keep a short tail for diagnosis.
         let stderrLines = CodexRuntime.lines(from: stderr.fileHandleForReading)
-        let stderrTask = Task {
-            var tail: [String] = []
-            for await line in stderrLines {
-                tail.append(line)
-                if tail.count > 20 { tail.removeFirst(tail.count - 20) }
-            }
-            return tail
+        Task {
+            for await line in stderrLines { self.noteStderr(line, generation: generation) }
+            if generation == self.startupGeneration { self.stderrOpen = false }
         }
 
         let stdoutLines = CodexRuntime.lines(from: stdout.fileHandleForReading)
@@ -234,16 +251,8 @@ public actor PiRuntime {
                     guard !clean.isEmpty else { continue }
                     continuation.yield(clean)
                 }
-                let tail = await stderrTask.value
-                if generation == self.startupGeneration,
-                   monitored.isRunning == false, monitored.terminationStatus != 0 {
-                    let detail = tail.suffix(3).joined(separator: "\n")
-                    onState(.failed(message:
-                        "Pi exited (\(monitored.terminationStatus))."
-                        + (detail.isEmpty ? "" : "\n\(detail)")))
-                }
+                await self.outputEnded(monitored, generation: generation, onState: onState)
                 continuation.finish()
-                self.cleanupExitedProcess(monitored, generation: generation)
             }
         }
 
@@ -257,7 +266,16 @@ public actor PiRuntime {
         guard let stdinHandle else { return }
         var data = Data(line.utf8)
         data.append(Data("\n".utf8))
-        try? stdinHandle.write(contentsOf: data)
+        do {
+            try stdinHandle.write(contentsOf: data)
+        } catch {
+            // Nothing is reading: Pi has gone, or is going. The message is lost either way;
+            // what must not happen is the engine going on looking ready while every message
+            // after this one is lost the same way. The end of its output follows with the
+            // exit status.
+            self.stdinHandle = nil
+            reportState?(.failed(message: "Pi stopped reading, so that message did not reach it."))
+        }
     }
 
     public func stop() async {
@@ -272,6 +290,7 @@ public actor PiRuntime {
         eventContinuation?.finish()
         eventContinuation = nil
         stdinHandle = nil
+        reportState = nil
         let stoppedProcess = process
         process = nil
         if let stoppedProcess {
@@ -289,9 +308,48 @@ public actor PiRuntime {
         return generation
     }
 
-    private func cleanupExitedProcess(_ ended: Process, generation: Int) {
+    private func noteStderr(_ line: String, generation: Int) {
+        guard generation == startupGeneration else { return }
+        stderrTail.append(line)
+        if stderrTail.count > 20 { stderrTail.removeFirst(stderrTail.count - 20) }
+    }
+
+    /// Pi's output has closed: Pi is going away, however it goes, and nothing sent to it
+    /// from here on will be read.
+    ///
+    /// Only one ending used to count — a non-zero status that Foundation had already reaped
+    /// by the moment the output closed. A clean exit, or a crash whose pipe closed a moment
+    /// before the reap, left the engine `ready` with a handle to a pipe nobody reads, and
+    /// every message after that was written into it and lost without a word while a phone
+    /// was told each one had been accepted.
+    private func outputEnded(
+        _ ended: Process, generation: Int, onState: @Sendable (State) -> Void
+    ) async {
+        // The output closes a moment before the process is reaped, and the status needs the
+        // reap. A deliberate stop in the meantime owns the ending instead.
+        for _ in 0..<250 where ended.isRunning {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        // Its last words are on stderr and may still be in the pipe. A moment for them, and
+        // no more: something Pi started can hold stderr open long after Pi has gone.
+        for _ in 0..<25 where stderrOpen && generation == startupGeneration {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
         guard generation == startupGeneration, process === ended else { return }
-        ChildProcessRegistry.unregister(pid: ended.processIdentifier)
+        stdinHandle = nil
+        reportState = nil
         process = nil
+        let how: String
+        if ended.isRunning {
+            // Alive without its output is no use to anyone, and nothing else would stop it.
+            ended.terminate()
+            how = "Pi stopped answering."
+        } else {
+            ChildProcessRegistry.unregister(pid: ended.processIdentifier)
+            how = ended.terminationStatus == 0
+                ? "Pi exited." : "Pi exited (\(ended.terminationStatus))."
+        }
+        let detail = stderrTail.suffix(3).joined(separator: "\n")
+        onState(.failed(message: how + (detail.isEmpty ? "" : "\n\(detail)")))
     }
 }
