@@ -18,8 +18,12 @@ does exactly those two things itself, and uses mflux's own classes for everythin
    through mflux's scheduler extension point (a BaseScheduler registered by name), with
    guidance 1.0 and no negative prompt, so there is no second, unconditional pass.
 
-The prompt is encoded first and the text encoder released before the transformer is
-materialised, so the two largest components are never resident together. That is also why the
+It runs in stages that never overlap: the prompt is encoded and the text encoder released
+before the transformer is materialised (one block at a time), and the transformer is released
+before the VAE decodes, so no two of the three large components are ever resident together.
+The encoder itself — 15 GB in bf16, which mflux never quantizes — is read a layer at a time as
+the prompt passes through it, each layer released once its output is evaluated, so encoding
+holds the embedding table and one layer rather than all 36. That is also why the
 base model, with no adapter, runs through here rather than `mflux-generate-qwen-2.1`: that
 entry point drops its reference to the text encoder before the first step, but the prompt
 embeddings are still unevaluated then, so the encoder's 15 GB of weights stay referenced until
@@ -251,10 +255,15 @@ def stage(text):
 class PhaseMemory:
     """The peak of each phase on its own, as `silicon-memory: <phase> <GB>` lines, so a real
     run says which phase set the peak — the figure the app's planner is checked against.
-    Registered with mflux as a loop callback, which is how denoising is told from decoding."""
+    Registered with mflux as a loop callback, which is how denoising is told from decoding.
 
-    def __init__(self, mx):
+    It also lets the transformer go once the loop is done: one image is all this process
+    renders, and the decode that follows needs only the VAE — mflux's own low-RAM mode does
+    the same for a single seed."""
+
+    def __init__(self, mx, model=None):
         self.mx = mx
+        self.model = model
         self.overall = 0
 
     def close(self, phase):
@@ -267,7 +276,15 @@ class PhaseMemory:
         self.close("start")
 
     def call_after_loop(self, seed, prompt, latents, config):
+        self.mx.eval(latents)
         self.close("denoise")
+        if self.model is not None:
+            import gc
+
+            self.model.transformer = None
+            gc.collect()
+            self.mx.clear_cache()
+            eval_leaves(self.model.vae, self.mx)
 
 
 # MARK: - The run
@@ -363,6 +380,53 @@ def load_model(model_path, adapter_path, expected_scale, quantize):
     return model, merged, rank, scale
 
 
+def eval_leaves(module, mx):
+    """Materialises a module's parameters one array at a time.
+
+    The weights are lazy: reading one from disk runs on the CPU, and the GPU work that uses it
+    waits for that read inside its command buffer. Evaluating everything in one go puts
+    gigabytes of reads in front of GPU work that is already committed, and on a busy Mac with
+    the weights on an external disk that wait outlasts Metal's command-buffer watchdog
+    ("Caused GPU Timeout Error"). One array at a time, each wait is one array's read.
+    """
+    from mlx.utils import tree_flatten
+
+    for _, value in tree_flatten(module.parameters()):
+        mx.eval(value)
+
+
+class StreamedLayer:
+    """One text-encoder layer, run once and let go: its output is evaluated before the next
+    layer is read, and the layer — its weights still lazy until this call — is dropped after.
+    The same module and the same call as the encoder's own loop; only when memory is held
+    changes."""
+
+    def __init__(self, layers, index, mx):
+        self.layers = layers
+        self.index = index
+        self.mx = mx
+
+    def __call__(self, hidden_states, attention_mask, position_embeddings):
+        layer = self.layers[self.index]
+        if layer is None:
+            raise RuntimeError("a streamed text-encoder layer can run once")
+        eval_leaves(layer, self.mx)
+        hidden_states, cache = layer(hidden_states, attention_mask, position_embeddings)
+        self.mx.eval(hidden_states)
+        self.layers[self.index] = None
+        del layer
+        self.mx.clear_cache()
+        return hidden_states, cache
+
+
+def stream_text_encoder(text_encoder, mx):
+    """Makes a single pass through `text_encoder` read and release one layer at a time."""
+    layers = list(text_encoder.layers)
+    text_encoder.layers = [StreamedLayer(layers, index, mx) for index in range(len(layers))]
+    eval_leaves(text_encoder.embed_tokens, mx)
+    eval_leaves(text_encoder.norm, mx)
+
+
 def fixed_sigma_scheduler(sigmas):
     """A BaseScheduler class sampling on exactly `sigmas`, then 0 — the Euler step mflux's
     LinearScheduler takes, minus its schedule and its resolution-dependent shift."""
@@ -431,6 +495,7 @@ def main(argv=None):
         # Encode first, then let the text encoder go, before the transformer is read: mflux's
         # own loop evicts it too, but only after the transformer has joined it in memory.
         stage("Encoding the prompt")
+        stream_text_encoder(model.text_encoder, mx)
         embeds, mask = Qwen21PromptEncoder.encode_prompt(
             prompt=arguments.prompt,
             prompt_cache=model.prompt_cache,
@@ -447,8 +512,8 @@ def main(argv=None):
         # quantized, then released, rather than the whole transformer at once.
         stage("Preparing the transformer")
         for block in model.transformer.transformer_blocks:
-            mx.eval(block.parameters())
-        mx.eval(model.transformer.parameters())
+            eval_leaves(block, mx)
+        eval_leaves(model.transformer, mx)
         gc.collect()
         mx.clear_cache()
         memory.close("prepare")
@@ -462,6 +527,7 @@ def main(argv=None):
         if sigmas is not None:
             name = f"silicon_fixed_sigmas_{arguments.steps}"
             register_contrib(fixed_sigma_scheduler(sigmas), name)
+        memory.model = model
         model.callbacks.register(memory)
         stage(f"Denoising in {arguments.steps} steps")
         image = model.generate_image(
