@@ -1705,8 +1705,15 @@ public final class AppModel {
 
     /// Runs one process to completion off the main actor; returns nil on success or a
     /// human-sized failure message.
-    private nonisolated static func runProcess(
-        step: RepairStep, onLine: @Sendable @escaping (String) -> Void
+    ///
+    /// Done means the output has ended as well as the process. The two are noticed on
+    /// different queues, and answering on the exit alone could run ahead of the last read —
+    /// dropping the final line, which for a failing step is the one that says why, and
+    /// sometimes leaving an empty message. The wait for the end of the output is bounded:
+    /// something a step starts can hold the pipe open long after the step has finished.
+    nonisolated static func runProcess(
+        step: RepairStep, outputGrace: TimeInterval = 2,
+        onLine: @Sendable @escaping (String) -> Void
     ) async -> String? {
         await withCheckedContinuation { continuation in
             let process = Process()
@@ -1719,9 +1726,14 @@ public final class AppModel {
             process.standardInput = FileHandle.nullDevice
 
             let tail = TailBox()
+            let outputEnded = DispatchSemaphore(value: 0)
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
-                guard !data.isEmpty else { return }
+                guard !data.isEmpty else {
+                    handle.readabilityHandler = nil
+                    outputEnded.signal()
+                    return
+                }
                 for line in String(decoding: data, as: UTF8.self)
                     .split(separator: "\n", omittingEmptySubsequences: true)
                 {
@@ -1732,11 +1744,15 @@ public final class AppModel {
                 }
             }
             process.terminationHandler = { finished in
-                pipe.fileHandleForReading.readabilityHandler = nil
-                if finished.terminationStatus == 0 {
-                    continuation.resume(returning: nil)
-                } else {
-                    continuation.resume(returning: tail.lastLines(4).joined(separator: "\n"))
+                // Off Foundation's queue: the wait below may be a couple of seconds.
+                DispatchQueue.global(qos: .utility).async {
+                    _ = outputEnded.wait(timeout: .now() + outputGrace)
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    if finished.terminationStatus == 0 {
+                        continuation.resume(returning: nil)
+                    } else {
+                        continuation.resume(returning: tail.lastLines(4).joined(separator: "\n"))
+                    }
                 }
             }
             do {
