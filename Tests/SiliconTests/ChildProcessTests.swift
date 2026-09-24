@@ -336,13 +336,29 @@ struct ServerProcessRegistrationTests {
 @Suite("A child's input pipe")
 struct ChildInputPipeTests {
 
+    /// Whether writing eventually fails, now that the reader has gone.
+    ///
+    /// Not necessarily the first write. While any other test is inside `Process.run()`, the
+    /// child it is spawning holds a copy of every descriptor this process has open — the
+    /// kernel copies the whole table, close-on-exec or not, and closes the copies at that
+    /// child's exec — so for a millisecond or so the reader this test closed can still exist.
+    /// What these tests pin is that the write *fails* rather than raising SIGPIPE, and a retry
+    /// does not weaken that: without the flag, the first write that failed would end the run.
+    private func writeFails(_ write: () -> Bool) -> Bool {
+        for _ in 0..<200 {
+            if !write() { return true }
+            usleep(10_000)
+        }
+        return false
+    }
+
     @Test func aWriteWithNoReaderIsAnErrorNotASignal() throws {
         let pipe = Pipe.childInput()
         #expect(fcntl(pipe.fileHandleForWriting.fileDescriptor, F_GETNOSIGPIPE) == 1)
         try pipe.fileHandleForReading.close()
-        #expect(throws: (any Error).self) {
-            try pipe.fileHandleForWriting.write(contentsOf: Data("a question\n".utf8))
-        }
+        #expect(writeFails {
+            (try? pipe.fileHandleForWriting.write(contentsOf: Data("a question\n".utf8))) != nil
+        })
     }
 
     /// The app's own diagnostics go to a stderr it did not open — `SILICON_JEV_DEBUG` writes
@@ -356,7 +372,7 @@ struct ChildInputPipeTests {
         // here rather than taking the whole test run down with the next line.
         try #require(fcntl(handle.fileDescriptor, F_GETNOSIGPIPE) == 1)
         try pipe.fileHandleForReading.close()
-        #expect(handle.writeUnlessNobodyIsReading(Data("[jev] 2 questions\n".utf8)) == false)
+        #expect(writeFails { handle.writeUnlessNobodyIsReading(Data("[jev] 2 questions\n".utf8)) })
     }
 
     /// And the same with a real child that went away, the way a sidecar does.
@@ -369,8 +385,8 @@ struct ChildInputPipeTests {
         process.standardError = FileHandle.nullDevice
         try process.run()
         process.waitUntilExit()
-        #expect(throws: (any Error).self) {
-            try pipe.fileHandleForWriting.write(contentsOf: Data("a question\n".utf8))
-        }
+        #expect(writeFails {
+            (try? pipe.fileHandleForWriting.write(contentsOf: Data("a question\n".utf8))) != nil
+        })
     }
 }
