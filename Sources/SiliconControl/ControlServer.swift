@@ -675,16 +675,25 @@ public actor ControlServer {
         /// more hosts still have most of the listener.
         static let perTailnetSource = 16
 
+        private let listenerLimit: Int
+        private let sourceLimit: Int
         private var byOrigin: [Origin: Int] = [:]
         private var bySource: [String: Int] = [:]
+
+        /// The control server's numbers by default. The swarm's pairing listener, which
+        /// is smaller and entirely unauthenticated, asks for its own.
+        init(perListener: Int = Self.perListener, perTailnetSource: Int = Self.perTailnetSource) {
+            listenerLimit = perListener
+            sourceLimit = perTailnetSource
+        }
 
         var total: Int { byOrigin.values.reduce(0, +) }
 
         /// Takes a slot for `source` on `origin`'s listener, or answers false.
         mutating func admit(from origin: Origin, source: String) -> Bool {
-            guard byOrigin[origin, default: 0] < Self.perListener else { return false }
+            guard byOrigin[origin, default: 0] < listenerLimit else { return false }
             if origin == .tailnet {
-                guard bySource[source, default: 0] < Self.perTailnetSource else { return false }
+                guard bySource[source, default: 0] < sourceLimit else { return false }
                 bySource[source, default: 0] += 1
             }
             byOrigin[origin, default: 0] += 1
