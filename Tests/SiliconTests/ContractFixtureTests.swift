@@ -93,7 +93,7 @@ struct ContractFixtureTests {
         #expect(within(status.gpuUtil, of: 0.05))
         #expect(status.queueDepth == 0)
         #expect(status.gpuConsumer == "llm")
-        #expect(status.readyCapabilities == ["image-to-mesh", "llm-qwen3.8-27b"])
+        #expect(status.readyCapabilities == ["image-to-mesh", "llm-qwen3.8-27b", "text-to-video"])
 
         let mesh = try #require(status.capabilities.first)
         #expect(mesh.kind == "mesh")

@@ -25,8 +25,53 @@
       "ready": true,
       "settings": {},
       "typical_seconds": null
+    },
+    {
+      "description": "Generates a short video clip from a prompt or a start image.",
+      "detail": "Wan 2.2 TI2V-5B via diffusers, CPU-offloaded.",
+      "enabled": true,
+      "id": "text-to-video",
+      "kind": "video",
+      "name": "Text \u2192 video clip (Wan 2.2 TI2V-5B)",
+      "peak_vram_gb": null,
+      "ready": true,
+      "settings": {},
+      "supported_job_actions": [
+        "cancel"
+      ],
+      "supported_resolutions": [
+        "480p",
+        "720p",
+        "1080p"
+      ],
+      "typical_seconds": null
     }
   ],
+  "decisions": {
+    "available": true,
+    "endpoint": "/v1/systemone",
+    "engine": "laya",
+    "error": null,
+    "latency_ms": null,
+    "limits": {
+      "max_body_bytes": 262144,
+      "max_options": 32,
+      "max_questions": 32,
+      "max_state_chars": 20000
+    },
+    "loaded": false,
+    "models": [
+      "laya",
+      "laya-multilingual",
+      "laya-typed-decisions"
+    ],
+    "question_types": [
+      "choice",
+      "score",
+      "noul"
+    ],
+    "vram_mib": null
+  },
   "llm": {
     "context_length": 32768,
     "max_concurrency": 4,
