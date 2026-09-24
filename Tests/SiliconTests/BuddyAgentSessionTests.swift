@@ -1516,7 +1516,9 @@ struct BuddyAgentSessionTests {
     /// An `AppModel` with a ledger of its own. The address it lives at may be one an
     /// earlier test's used, so what was remembered about that one is forgotten first.
     static func freshModel() -> AppModel {
-        let model = AppModel(settings: .init())
+        // Not `AppModel(settings:)`: that opens the owner's own video queue, which the
+        // `/events` watcher reads and publishes into the owner's media table.
+        let model = BuddyTestStore.model()
         BuddyAgentSessions.shared.forget(model)
         return model
     }
@@ -2104,6 +2106,11 @@ func withServer(
     let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
     let server = ControlServer(
         host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
+        // The server's own stores too: its media table and the upload and poster folders
+        // it sweeps, never the owner's.
+        media: MediaRegistry(url: nil),
+        uploadsRoot: directory.appendingPathComponent("uploads"),
+        postersRoot: directory.appendingPathComponent("posters"),
         // Never the real CLI: a test must not bind whatever tailnet this machine is on.
         discoverTailnetAddress: { nil }
     )

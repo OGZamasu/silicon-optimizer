@@ -23,10 +23,10 @@ struct BuddyAppModelTests {
     /// any test runs; this checks it actually took, because the cost of it not having is a
     /// stranger's chat history.
     private func isolatedModel() -> AppModel {
-        BuddyTestStore.redirect()
+        let model = BuddyTestStore.model()
         let redirected = ProcessInfo.processInfo.environment["SILICON_CONVERSATIONS_PATH"]
         #expect(redirected?.contains("silicon-test-conversations") == true)
-        return AppModel(settings: .init())
+        return model
     }
 
     // MARK: - Conversations
@@ -542,6 +542,30 @@ enum BuddyTestStore {
     }()
 
     static func redirect() { _ = redirected }
+
+    /// An `AppModel` that reads and writes nothing of the owner's.
+    ///
+    /// `AppModel(settings:)` alone opens the owner's own video queue, and the `/events`
+    /// watcher reads that queue and publishes every finished file in it into the shared
+    /// media table — which it then saves, to the owner's `media.json`. So this one has an
+    /// empty queue, output folders and a media table of its own, all under a temporary
+    /// folder nothing else uses, and the conversation store redirected as every suite's is.
+    @MainActor
+    static func model(settings: Settings = .init()) -> AppModel {
+        redirect()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-model-\(UUID())")
+        var settings = settings
+        settings.imageOutputDirectory = folder.appendingPathComponent("Images").path
+        settings.meshOutputDirectory = folder.appendingPathComponent("Meshes").path
+        settings.videoOutputDirectory = folder.appendingPathComponent("Videos").path
+        let model = AppModel(
+            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: settings
+        )
+        model.eventMediaRegistry = MediaRegistry(url: nil)
+        return model
+    }
 }
 
 /// Applied to every suite that builds an `AppModel`, because any of them can schedule the
@@ -572,13 +596,16 @@ struct BuddyLiveEventTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let model = AppModel(settings: .init())
+        let model = BuddyTestStore.model()
         let hub = BuddyEventHub()
         let handshakeURL = directory.appendingPathComponent("control.json")
         let server = ControlServer(
             host: model, handshakeURL: handshakeURL,
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
-            events: hub, discoverTailnetAddress: { nil }
+            events: hub, media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
+            discoverTailnetAddress: { nil }
         )
         try await server.start()
         defer { Task { await server.stop() } }

@@ -901,7 +901,7 @@ struct BuddyControlTests {
         let hub = BuddyEventHub()
         try await withServer(hub: hub) { fixture in
             let paired = try await fixture.pair()
-            let uploads = BuddyUploads.root
+            let uploads = fixture.uploads
             let reason = "Could not read \(uploads.path)/kettle.png "
                 + "(see \(NSHomeDirectory())/Library/Logs/ltx.log)"
             let posting = Task {
@@ -1018,6 +1018,8 @@ struct BuddyControlTests {
         let registry: BuddyRegistry
         let host: BuddyTestHost
         let session: URLSession
+        /// The server's upload folder, one of the media roots it names in sentences.
+        let uploads: URL
 
         func pair(
             name: String = "Galaxy S24 Ultra", platform: String = "android",
@@ -1170,11 +1172,17 @@ struct BuddyControlTests {
 
         let handshakeURL = directory.appendingPathComponent("control.json")
         let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
+        let uploads = directory.appendingPathComponent("uploads")
         let host = BuddyTestHost(
             tokens: tokens, pace: pace, failing: failing, verdict: verdict
         )
         let server = ControlServer(
             host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
+            // `GET /video/queue` sweeps the upload folder and prunes the media table, so both
+            // are this fixture's own rather than the owner's.
+            media: MediaRegistry(url: nil),
+            uploadsRoot: uploads,
+            postersRoot: directory.appendingPathComponent("posters"),
             eventWriteDeadline: writeDeadline,
             // Never the real CLI: a test must not bind whatever tailnet this machine is on.
             discoverTailnetAddress: { nil }
@@ -1199,7 +1207,7 @@ struct BuddyControlTests {
             server: server,
             local: TestClient(port: handshake.port, token: handshake.token, session: session),
             phone: TestClient(port: tailnetPort, token: handshake.token, session: session),
-            registry: registry, host: host, session: session
+            registry: registry, host: host, session: session, uploads: uploads
         ))
         await server.stop()
     }

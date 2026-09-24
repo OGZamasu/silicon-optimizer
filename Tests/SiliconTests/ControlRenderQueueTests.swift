@@ -160,6 +160,8 @@ struct ControlRenderQueueTests {
             kind: .mlx, executable: folder.appendingPathComponent("absent/mflux-generate"),
             version: nil, hasExpertStreaming: false, source: .userPath
         )
+        // Nothing a render here finishes with is published into the owner's media table.
+        model.eventMediaRegistry = MediaRegistry(url: nil)
         let renders = HeldRenders()
         model.makeImageRuntime = { _ in HeldImageRuntime(renders) }
         model.meshRuntimeFactory = { _ in HeldMeshRuntime(renders) }

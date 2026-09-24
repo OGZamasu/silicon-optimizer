@@ -663,6 +663,11 @@ struct TailnetExposureTests {
             server = ControlServer(
                 host: host, handshakeURL: handshakeURL, buddy: registry,
                 events: BuddyEventHub(),
+                // `GET /video/queue` sweeps the upload folder and prunes the media table:
+                // this fixture's own, never the owner's.
+                media: MediaRegistry(url: nil),
+                uploadsRoot: directory.appendingPathComponent("uploads"),
+                postersRoot: directory.appendingPathComponent("posters"),
                 // Never the real CLI unless a test says so explicitly: a test must not bind
                 // whatever tailnet this machine happens to be on by accident.
                 discoverTailnetAddress: { discovery.current },

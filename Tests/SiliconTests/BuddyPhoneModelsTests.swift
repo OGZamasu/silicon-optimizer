@@ -2328,7 +2328,7 @@ struct BuddyPhoneModelsTests {
         var settings = Settings()
         settings.huggingFaceToken = "placeholder-not-a-real-token"
         settings.modelLibraryDirectory = library.path
-        let app = AppModel(settings: settings)
+        let app = BuddyTestStore.model(settings: settings)
         let environment = PhoneModelSeams.Environment(
             huggingFace: huggingFace.baseURL,
             stateFile: directory.appendingPathComponent("phone-models.json"),

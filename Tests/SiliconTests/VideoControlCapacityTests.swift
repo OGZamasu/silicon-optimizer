@@ -9,7 +9,15 @@ struct VideoControlCapacityTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let handshakeURL = directory.appendingPathComponent("control.json")
         let host = WaitingVideoHost()
-        let server = ControlServer(host: host, handshakeURL: handshakeURL)
+        // The server's stores are this test's own: `GET /video/queue` sweeps the upload
+        // folder and prunes the media table, and the device registry is the owner's too.
+        let server = ControlServer(
+            host: host, handshakeURL: handshakeURL,
+            buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters")
+        )
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 16
         configuration.timeoutIntervalForResource = 15
@@ -52,7 +60,15 @@ struct VideoControlCapacityTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let handshakeURL = directory.appendingPathComponent("control.json")
         let host = WaitingVideoHost()
-        let server = ControlServer(host: host, handshakeURL: handshakeURL)
+        // The server's stores are this test's own: `GET /video/queue` sweeps the upload
+        // folder and prunes the media table, and the device registry is the owner's too.
+        let server = ControlServer(
+            host: host, handshakeURL: handshakeURL,
+            buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters")
+        )
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 100
         configuration.timeoutIntervalForRequest = 15

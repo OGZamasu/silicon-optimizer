@@ -332,11 +332,12 @@ extension AppModel {
     /// this milestone does not touch, and a watcher that samples cannot miss an update by
     /// forgetting to announce one.
     ///
-    /// - Parameter registry: The table finished files are published from. The shared one,
-    ///   except in a test that must not add entries to the owner's.
+    /// - Parameter registry: The table finished files are published from, when not the
+    ///   model's own `eventMediaRegistry`.
     func buddyEventSnapshot(
-        registry: MediaRegistry = .shared
+        registry: MediaRegistry? = nil
     ) async -> BuddyEventPump.Snapshot {
+        let registry = registry ?? eventMediaRegistry
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
         let roots = await controlMediaRoots()
@@ -654,7 +655,7 @@ public final class BuddyEventPump {
     ///   `AppModel.buddyEventSnapshot(registry:)`.
     func start(
         watching model: AppModel, hub: BuddyEventHub = .shared,
-        interval: Duration = .seconds(1), registry: MediaRegistry = .shared
+        interval: Duration = .seconds(1), registry: MediaRegistry? = nil
     ) {
         startRequests += 1
         let target = WatchTarget(model: model, hub: hub)
