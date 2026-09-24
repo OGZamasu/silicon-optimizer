@@ -499,19 +499,10 @@ struct ModelDetailSheet: View {
                 .max { $0.bitsPerWeight < $1.bitsPerWeight }
             if let lower { quantization = lower }
         case .enableExpertStreaming:
-            guard let moe = entry.shape.moe else { return }
+            // The pool the suggestion names, as the planner sized it.
+            guard entry.shape.moe != nil, let slots = remediation.expertSlots else { return }
             expertStreamingEnabled = true
-            // Size the pool from what the plan says is actually affordable.
-            let perSlot = MemoryPlanner.weightBytes(
-                MemoryPlanner.parametersPerExpertSlot(entry.shape), quantization
-            )
-            let plan = model.plan(
-                for: entry, quantization: quantization, configuration: currentConfiguration
-            )
-            let available = plan.budget - plan.nonExpertWeights - plan.kvCache
-                - plan.recurrentState - plan.computeBuffers
-            let affordable = perSlot.rawValue > 0 ? Int(available.rawValue / perSlot.rawValue) : 8
-            expertSlots = Double(max(8, min(moe.expertCount, affordable)))
+            expertSlots = Double(slots)
         case .switchRuntime, .closeApps:
             break
         }

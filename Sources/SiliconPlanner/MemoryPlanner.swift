@@ -41,6 +41,23 @@ public struct MemoryPlanner: Sendable {
         return max(shape.totalParameters / 20, shape.totalParameters - expertTotal)
     }
 
+    /// How many expert slots fit in what `plan` leaves over: its budget less everything that
+    /// is not a routed expert, in whole slots, and never every expert — a pool that holds them
+    /// all streams nothing. A plan with or without streaming answers the same, since neither
+    /// counts the pool among its fixed costs. None for a dense model, and none for the empty
+    /// plan the planner returns for a configuration it cannot price, whose fixed costs of
+    /// nothing would otherwise make the whole budget look free.
+    public static func affordableExpertSlots(
+        in plan: MemoryPlan, shape: ModelShape, quantization: Quantization
+    ) -> Int {
+        guard let moe = shape.moe, plan.computeBuffers > .zero else { return 0 }
+        let perSlot = weightBytes(parametersPerExpertSlot(shape), quantization)
+        let available = plan.budget - plan.nonExpertWeights - plan.kvCache
+            - plan.recurrentState - plan.computeBuffers
+        guard perSlot > .zero, available > .zero else { return 0 }
+        return min(moe.expertCount - 1, Int(available.rawValue / perSlot.rawValue))
+    }
+
     public static func weightBytes(_ parameters: Int64, _ quantization: Quantization) -> Bytes {
         guard parameters >= 0 else { return Bytes(Int64.max) }
         return boundedBytes(Double(parameters) * quantization.bitsPerWeight / 8.0)
@@ -376,9 +393,9 @@ public struct MemoryPlanner: Sendable {
             // Pick the largest pool that fits the budget, leaving the rest of the plan intact.
             let available = plan.budget - plan.nonExpertWeights - plan.kvCache
                 - plan.recurrentState - plan.computeBuffers
-            let affordable = perSlot.rawValue > 0
-                ? Int(available.rawValue / perSlot.rawValue) : 0
-            let slots = max(8, min(moe.expertCount - 1, affordable))
+            let slots = max(
+                8, Self.affordableExpertSlots(in: plan, shape: shape, quantization: quantization)
+            )
             // Ordered with the comparison last: `a < b, c > .zero` parses as a generic argument
             // list and fails to compile.
             if available > .zero, slots < moe.expertCount {
@@ -397,7 +414,8 @@ public struct MemoryPlanner: Sendable {
                     saving: saving,
                     cost: "Prompt processing drops sharply: the micro-batch must fall to "
                         + "\(maxUBatch) tokens. Generation slows modestly.",
-                    kind: .enableExpertStreaming
+                    kind: .enableExpertStreaming,
+                    expertSlots: slots
                 ))
             }
         }

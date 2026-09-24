@@ -47,14 +47,9 @@ public actor TrellisRuntime: MeshRuntime {
             arguments += ["--seed", String(seed)]
         }
 
-        var environment = [
-            "PYTHONUNBUFFERED": "1",
-            "PYTORCH_ENABLE_MPS_FALLBACK": "1",
-            "PYTHONPATH": base.appendingPathComponent("metal_overlay").path,
-        ]
-        if let torchLib = Self.torchLibraryDirectory(venv: repo.appendingPathComponent(".venv")) {
-            environment["DYLD_FALLBACK_LIBRARY_PATH"] = torchLib.path
-        }
+        let environment = Self.childEnvironment(
+            base: base, venv: repo.appendingPathComponent(".venv")
+        )
 
         state = .starting(stage: "Starting TRELLIS.2…")
         cancelled = false
@@ -63,7 +58,8 @@ public actor TrellisRuntime: MeshRuntime {
         let stages = MeshStageBox()
 
         try await process.start(
-            executable: python, arguments: arguments, currentDirectory: repo
+            executable: python, arguments: arguments, environment: environment,
+            currentDirectory: repo
         ) { line in
             Task {
                 if let event = await stages.interpretTrellis(line) {
@@ -126,6 +122,23 @@ public actor TrellisRuntime: MeshRuntime {
         cancelled = true
         state = .idle
         Task { await process.terminate() }
+    }
+
+    /// What generate.py runs with, over the app's own environment: unbuffered output, so its
+    /// stages arrive as they happen rather than all at the end; MPS fallback for the ops Metal
+    /// lacks; the Metal extension overlay on `PYTHONPATH`; and the venv's torch libraries
+    /// where the overlay's extensions look for them. It was built and never handed to the
+    /// process, so every render ran without the overlay, on the slow CPU bake.
+    static func childEnvironment(base: URL, venv: URL) -> [String: String] {
+        var environment = [
+            "PYTHONUNBUFFERED": "1",
+            "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+            "PYTHONPATH": base.appendingPathComponent("metal_overlay").path,
+        ]
+        if let torchLib = torchLibraryDirectory(venv: venv) {
+            environment["DYLD_FALLBACK_LIBRARY_PATH"] = torchLib.path
+        }
+        return environment
     }
 
     /// The venv's torch library directory, whatever Python minor version it holds.

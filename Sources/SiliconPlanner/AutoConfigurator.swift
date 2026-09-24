@@ -174,24 +174,25 @@ public struct AutoConfigurator: Sendable {
         guard perSlot > .zero else { return nil }
 
         for context in contextOptions(for: entry) {
-            // Size the pool from what is left after the fixed costs.
             var probe = LoadConfiguration(
                 contextLength: context, kvCachePrecision: .q8_0, flashAttention: true,
                 expertStreaming: ExpertStreamingConfiguration(slotCount: moe.expertCount),
                 threads: profile.performanceCores
             )
+            // Size the pool from what is left after the fixed costs, priced by a plan with no
+            // streaming at all. A zero-slot pool is not a configuration the planner prices: it
+            // answers with an empty plan, whose fixed costs of nothing sized the pool to the
+            // whole budget, every plan made with it failed, and the model was never offered.
             let fixed = planner.plan(
                 shape: shape, quantization: quantization,
                 configuration: LoadConfiguration(
-                    contextLength: context, kvCachePrecision: .q8_0, flashAttention: true,
-                    expertStreaming: ExpertStreamingConfiguration(slotCount: 0)
+                    contextLength: context, kvCachePrecision: .q8_0, flashAttention: true
                 ),
                 otherAppsInUse: otherAppsInUse
             )
-            let available = fixed.budget - fixed.resident
-            guard available > perSlot else { continue }
-
-            let slots = min(moe.expertCount - 1, Int(available.rawValue / perSlot.rawValue))
+            let slots = MemoryPlanner.affordableExpertSlots(
+                in: fixed, shape: shape, quantization: quantization
+            )
             guard slots >= 8 else { continue }
 
             probe.expertStreaming = ExpertStreamingConfiguration(slotCount: slots)

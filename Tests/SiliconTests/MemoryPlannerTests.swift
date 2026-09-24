@@ -58,6 +58,24 @@ struct ExpertSlotTests {
                 "slots=\(slots) predicted \(plan.resident.formatted), expected ~\(expectedGiB) GiB")
     }
 
+    /// The streaming suggestion carries the pool Apply sets, and it is the one its title names.
+    /// A plan that is tight but has room for every expert still gets one short of them all —
+    /// a pool holding every expert streams nothing. The model sheet worked the number out again
+    /// as `min(experts, affordable)`, so this very suggestion, "127 of 128", applied 128.
+    @Test func theStreamingSuggestionCarriesThePoolItNames() throws {
+        let plan = MemoryPlanner(profile: m3Max36).plan(
+            shape: qwen30BA3B, quantization: .q4_K_M,
+            configuration: LoadConfiguration(contextLength: 65_536)
+        )
+        let suggestion = try #require(plan.remediations.first { $0.kind == .enableExpertStreaming })
+        let slots = try #require(suggestion.expertSlots)
+        let experts = try #require(qwen30BA3B.moe).expertCount
+        #expect(slots == experts - 1)
+        #expect(suggestion.title.contains("(\(slots) of \(experts) resident)"))
+        #expect(plan.remediations.filter { $0.kind != .enableExpertStreaming }
+            .allSatisfy { $0.expertSlots == nil })
+    }
+
     @Test func streamingReducesResidentMemory() {
         let planner = MemoryPlanner(profile: m3Pro36)
         let base = LoadConfiguration(contextLength: 32_768)
@@ -269,6 +287,24 @@ struct AutoConfiguratorTests {
         if let smallPick, let largePick {
             #expect(largePick.entry.shape.totalParameters >= smallPick.entry.shape.totalParameters)
         }
+    }
+
+    /// Expert streaming is what lets a mixture-of-experts model bigger than the budget run at
+    /// all: gpt-oss-120b is 63 GB of weights, and a 64 GB Mac's budget is about 50. The pool
+    /// is sized from what the plan's fixed costs leave — which a zero-slot plan cannot say,
+    /// because the planner refuses to price one and hands back an empty plan instead.
+    @Test func aMoEModelTooBigToSitInMemoryIsOfferedWithStreaming() throws {
+        var profile = m3Max36
+        profile.totalMemory = .gib(64)
+        let entry = ModelCatalog.gptOSS120B
+        let pick = try #require(AutoConfigurator(profile: profile).best(for: entry))
+        let streaming = try #require(pick.configuration.expertStreaming)
+        let experts = try #require(entry.shape.moe).expertCount
+        #expect(streaming.slotCount >= 8 && streaming.slotCount < experts)
+        #expect(pick.plan.verdict.isUsable)
+        #expect(pick.plan.resident <= pick.plan.budget)
+        #expect(AutoConfigurator(profile: profile).rank().contains { $0.entry.id == entry.id },
+                "hidden from the catalogue")
     }
 
     @Test func eightGigabyteMachineGetsASmallModel() {
