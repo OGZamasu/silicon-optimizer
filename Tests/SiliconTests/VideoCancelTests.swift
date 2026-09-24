@@ -117,7 +117,7 @@ struct VideoCancelTests {
         defer { try? FileManager.default.removeItem(at: request.outputDirectory) }
         let (queue, item) = try acceptedQueue(request)
         let model = AppModel(videoQueue: queue, videoRuntime: runtime(), settings: .init())
-        // An older node (silicon-node today) advertises no job actions; the lane alone is not enough.
+        // An older node (silicon-node before it could cancel) advertises no job actions; the lane alone is not enough.
         #expect(!AppModel.canCancelVideo(item, among: [peer(actions: [])]))
         #expect(AppModel.canCancelVideo(item, among: [peer(actions: ["cancel"])]))
         let elsewhere = AppModel.PeerStatus(name: "fixture", baseURL: "http://other.test", reachable: true,
@@ -201,7 +201,7 @@ struct VideoCancelTests {
             (.dropConnection, .unknown),
             (.body(409, #"{"cancel":"unsupported","status":"running","detail":"Phosphene has already started this render."}"#), .unsupported),
             (.body(404, #"{"cancel":"unknown","status":"unknown","detail":"This node has no job with that ID."}"#), .unknown),
-            // silicon-node's existing job action answers without a `cancel` field.
+            // An older silicon-node's job action answers without a `cancel` field.
             (.body(200, #"{"ok":true}"#), .unknown),
         ]
         for (answer, expected) in answers {

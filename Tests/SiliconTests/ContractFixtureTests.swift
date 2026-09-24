@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import Testing
+import SiliconCatalog
+@testable import SiliconControl
 @testable import SiliconRuntime
 @testable import SiliconUI
 
@@ -27,9 +29,17 @@ struct ContractFixtureTests {
         .appendingPathComponent("contract")
 
     private func fixture(_ name: String) throws -> [String: Any] {
-        let url = Self.contractDirectory.appendingPathComponent("\(name).json")
-        let object = try JSONSerialization.jsonObject(with: try Data(contentsOf: url))
+        let object = try JSONSerialization.jsonObject(with: try Data(contentsOf: url(name)))
         return try #require(object as? [String: Any])
+    }
+
+    /// A fixture's exact bytes, for a stand-in node to answer with.
+    private func fixtureText(_ name: String) throws -> String {
+        try String(contentsOf: url(name), encoding: .utf8)
+    }
+
+    private func url(_ name: String) -> URL {
+        Self.contractDirectory.appendingPathComponent("\(name).json")
     }
 
     private func within(_ value: Double?, of expected: Double) -> Bool {
@@ -171,13 +181,144 @@ struct ContractFixtureTests {
         #expect(NodeJobProgress(from: json).fraction == nil)
     }
 
-    /// Three statuses cross the wire, and the node collapses "queued" into "running" —
-    /// so the Mac must never treat a missing `progress` as zero work done.
-    @Test func onlyThreeStatusesEverArrive() throws {
+    /// Four statuses cross the wire. The node collapses "queued" into "running", so the Mac
+    /// must never treat a missing `progress` as zero work done; and a cancelled job is its
+    /// own terminal state, never a failure.
+    @Test func fourStatusesArriveAndCancelledIsItsOwn() throws {
         var statuses: Set<String> = []
-        for name in ["job-queued", "job-running", "job-done", "job-failed"] {
-            statuses.insert(try #require(try fixture(name)["status"] as? String))
+        for name in try Self.documentedFixtures() where name.hasPrefix("job-") {
+            let status = try fixture(String(name.dropLast(".json".count)))["status"]
+            statuses.insert(try #require(status as? String, "\(name)"))
         }
-        #expect(statuses == ["running", "done", "failed"])
+        #expect(statuses == ["running", "done", "failed", "cancelled"])
+    }
+
+    // MARK: - Cancellation and the decision lane (silicon-node 638b10e)
+
+    /// The node's video lane says it can stop a job, and that advertisement is all the
+    /// queue's Cancel keys on: the clip's own node offering `cancel` for the clip's lane.
+    /// The fixture's lane is the generic `text-to-video`, which Wan 2.2 renders on.
+    @MainActor
+    @Test func theNodesVideoLaneOffersToCancelAClipItIsRendering() throws {
+        let base = URL(string: "http://100.64.0.9:8790")!
+        var status = AppModel.PeerStatus(
+            name: "silicon-node", baseURL: base.absoluteString, reachable: true
+        )
+        AppModel.parseNode(try fixture("node"), into: &status)
+
+        let video = try #require(status.capabilities.first { $0.kind == NodeVideoRuntime.capabilityKind })
+        #expect(video.id == VideoCatalog.genericCapabilityID)
+        #expect(video.supportedJobActions == ["cancel"])
+        // Only the lane that says so: the mesh and chat lanes offer nothing to stop.
+        #expect(status.capabilities.filter { !$0.supportedJobActions.isEmpty }.map(\.id)
+                == ["text-to-video"])
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("contract-cancel-offer-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let queue = VideoBatchQueue(storeURL: directory.appendingPathComponent("queue.json"))
+        let item = try queue.enqueueSingle(VideoRequest(
+            entryID: VideoCatalog.wan22.id, prompt: "A shot", outputDirectory: directory
+        ))
+        try queue.begin(item.id, nodeName: status.name, nodeURL: base)
+        try queue.accepted(item.id, job: VideoNodeJob(id: "job-4f2c1a9b7d3e5f608a12"))
+        let rendering = try #require(queue.items.first)
+        #expect(AppModel.canCancelVideo(rendering, among: [status]))
+    }
+
+    /// A cancelled job ends the video poller as cancelled — the GPU is free and nothing will
+    /// be published — never as a failure the queue might offer to render again. The node's
+    /// `cancel.detail` is the sentence the clip keeps.
+    @Test func aCancelledJobEndsTheVideoPollerAsCancelled() async throws {
+        let body = try fixtureText("job-cancelled")
+        let json = try fixture("job-cancelled")
+        let jobID = try #require(json["job_id"] as? String)
+        let server = try CapturingServer { _, _ in .init(body: body) }
+        defer { server.stop() }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("contract-cancelled-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let runtime = NodeVideoRuntime(pollInterval: .milliseconds(20))
+        do {
+            _ = try await runtime.generate(
+                VideoRequest(entryID: VideoCatalog.wan22.id, prompt: "A shot",
+                             outputDirectory: directory),
+                node: URL(string: "http://127.0.0.1:\(server.port)")!, token: nil,
+                resuming: VideoNodeJob(id: jobID), onProgress: { _ in }
+            )
+            Issue.record("A cancelled job has no clip to return")
+        } catch let cancelled as VideoNodeCancelled {
+            #expect(cancelled.detail == "Cancelled while running.")
+        }
+        #expect(server.requests.map(\.path) == ["/v1/jobs/\(jobID)"])
+        // Stopped, not stalled: nothing in it reads as a live percentage or a wait.
+        let progress = NodeJobProgress(from: json)
+        #expect(progress.fraction == nil && !progress.isQueued)
+    }
+
+    /// `POST /v1/jobs/{id}/cancel` answers in its `cancel` field, and "cancelled" is the one
+    /// answer that means the render is over for certain.
+    @Test func theCancelAnswerReadsAsConfirmed() async throws {
+        let body = try fixtureText("job-cancel")
+        let jobID = try #require(try fixture("job-cancel")["job_id"] as? String)
+        let server = try CapturingServer { _, _ in .init(body: body) }
+        defer { server.stop() }
+
+        let outcome = await NodeVideoRuntime().cancelJob(
+            VideoNodeJob(id: jobID), node: URL(string: "http://127.0.0.1:\(server.port)")!,
+            token: nil
+        )
+        #expect(outcome == .cancelled("The job is stopped and will not publish results."))
+        #expect(server.requests.map(\.path) == ["/v1/jobs/\(jobID)/cancel"])
+    }
+
+    /// The decision lane is the top-level `decisions` object, not a capability. Read as the
+    /// node sends it: available, cold (the first question pays the load), nothing measured.
+    @Test func readsTheDecisionLaneFromItsOwnObject() throws {
+        let json = try fixture("node")
+        var status = AppModel.PeerStatus(
+            name: "silicon-node", baseURL: "http://100.64.0.9:8790", reachable: true
+        )
+        AppModel.parseNode(json, into: &status)
+
+        let lane = try #require(status.decisions)
+        #expect(lane.available && !lane.loaded)
+        #expect(lane.models == ["laya", "laya-multilingual", "laya-typed-decisions"])
+        #expect(lane.perQuestionMS == nil)
+        #expect(lane.error == nil)
+        #expect(!status.capabilities.contains { $0.kind == NodeDecisionLane.capabilityKind })
+
+        let candidate = try #require(AppModel.decisionCandidate(for: status))
+        #expect(candidate.ready)
+        #expect(candidate.checkpoints == ["laya", "laya-multilingual", "laya-typed-decisions"])
+
+        // What this Mac would send has to be what the node says it accepts: every
+        // checkpoint by the name the node lane uses, every kind of question.
+        let decisions = try #require(json["decisions"] as? [String: Any])
+        for checkpoint in LayaCheckpoint.allCases {
+            #expect(lane.models.contains(NodeDecisionLane.nodeModelName(for: checkpoint)))
+        }
+        let accepted = Set(decisions["question_types"] as? [String] ?? [])
+        #expect(ControlAPI.SystemOneQuestion.kinds.isSubset(of: accepted))
+    }
+
+    /// The node lane posts a decision where the advertisement says to.
+    @Test func theNodeLanePostsWhereTheAdvertisementSays() async throws {
+        let decisions = try #require(try fixture("node")["decisions"] as? [String: Any])
+        let endpoint = try #require(decisions["endpoint"] as? String)
+        let server = try CapturingServer { _, _ in
+            .init(body: #"""
+                {"model":"laya","usage":{"input_tokens":1,"output_tokens":0},
+                 "answers":{"q":{"type":"noul","noul":0.5}}}
+                """#)
+        }
+        defer { server.stop() }
+        let lane = NodeDecisionLane(peer: {
+            .init(name: "silicon-node", baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+                  token: "fixture-swarm-token")
+        })
+        _ = try await lane.decide(.fixture())
+        #expect(server.requests.map(\.path) == [endpoint])
     }
 }
