@@ -38,7 +38,9 @@ struct ChildProcessRegistryTests {
             .appendingPathComponent("reexec-stub-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let stub = directory.appendingPathComponent("python3.13")
-        try "#!/bin/sh\n/bin/sleep 0.2\nexec /bin/sleep 60\n"
+        // A whole second before the exec, so a stalled machine cannot let it happen before
+        // the test has recorded the stub.
+        try "#!/bin/sh\n/bin/sleep 1\nexec /bin/sleep 60\n"
             .write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
         let process = Process()
