@@ -311,20 +311,17 @@ struct QwenImage21RunnerTests {
             seed: 7, output: output
         )
 
-        var stages: [String] = [], steps: [Int] = []
+        // Stage and step events are delivered as the lines arrive, on their own tasks, and on a
+        // loaded machine the last of them can land after the stream has finished; how those
+        // lines read is pinned by `theRunnersStagesAndMFLUXsBarAreBothRead`. Here: the result.
         var finished: ImageResult?
         for try await event in try await standIn.runtime().generate(asked, model: carrier(Self.pruna, quantization: .mlx4)) {
-            switch event {
-            case .stage(let text): stages.append(text)
-            case .step(let index, let total): #expect(total == 8); steps.append(index)
-            case .finished(let result): finished = result
-            }
+            if case .step(_, let total) = event { #expect(total == 8) }
+            if case .finished(let result) = event { finished = result }
         }
         let result = try #require(finished)
         #expect(result.image == output)
         #expect(result.peakMemory == Bytes(Int64(20.5e9)))
-        #expect(stages.contains("Encoding the prompt…"))
-        #expect(steps.last == 8)
 
         let argv = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: standIn.record)) as? [String])
         #expect(argv.first == standIn.runner.path)
