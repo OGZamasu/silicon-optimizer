@@ -180,6 +180,35 @@ struct AgentBridgeTests {
         #expect(try String(contentsOf: url, encoding: .utf8) == text)
     }
 
+    /// The command line in the user's own Codex config went through a quotes-and-backslashes
+    /// escaper: an install path with a newline in it wrote a file Codex cannot read, whose
+    /// next line was whatever followed the newline. Judged by a real TOML parser.
+    @Test(.enabled(if: TOMLOracle.python != nil, "needs a python3 with tomllib (3.11+)"))
+    func anInstallPathOfAnyShapeStaysOneCommand() throws {
+        let hostile = "/Applications/Odd \"Name\"\n[mcp_servers.evil]\ncommand = \"/bin/sh\"\r"
+            + "\u{0}\u{7F}\\tail/silicon-mcp"
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-\(UUID().uuidString)", isDirectory: true)
+        let env = AgentBridge.Environment(
+            home: root.appendingPathComponent("home", isDirectory: true),
+            applications: root.appendingPathComponent("Applications", isDirectory: true),
+            mcpPath: hostile
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: env.home, withIntermediateDirectories: true)
+
+        try AgentBridge.connectCodex(in: env)
+        let text = try String(contentsOf: AgentBridge.codexConfigURL(in: env), encoding: .utf8)
+        let parsed = try TOMLOracle.parse(text)
+        let servers = try #require(parsed["mcp_servers"] as? [String: Any])
+        #expect(Array(servers.keys) == [AgentBridge.serverName])
+        let ours = try #require(servers[AgentBridge.serverName] as? [String: Any])
+        #expect(ours["command"] as? String == hostile)
+        // And the app reads back what it wrote, so the button says connected.
+        #expect(AgentBridge.codexCommand(inTOML: text) == hostile)
+        #expect(AgentBridge.codexStatus(in: env) == .connected)
+    }
+
     @Test("a quoted section header counts as ours")
     func codexQuotedHeader() throws {
         let env = try makeEnvironment()

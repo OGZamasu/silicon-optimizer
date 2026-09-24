@@ -235,32 +235,10 @@ public actor CodexRuntime {
         return document
     }
 
-    /// The inside of a TOML basic string: everything the spec says must be escaped, is.
-    ///
-    /// Quotes and backslashes alone are not enough. The model id can end in a swarm peer's
-    /// own name for one of its models, and a raw newline in it would end the line — the
-    /// next line is then whatever table the peer wrote, `[mcp_servers.…]` with a `command`
-    /// Codex runs at thread start. Control characters other than the named ones go out as
-    /// `\uXXXX`, which is the only form TOML accepts for them.
+    /// The model id can end in a swarm peer's own name for one of its models, which is why
+    /// every string in this file goes through the full escaper, not only the paths.
     static func tomlEscaped(_ value: String) -> String {
-        var escaped = ""
-        escaped.reserveCapacity(value.utf8.count)
-        for scalar in value.unicodeScalars {
-            switch scalar {
-            case "\\": escaped += "\\\\"
-            case "\"": escaped += "\\\""
-            case "\u{08}": escaped += "\\b"
-            case "\t": escaped += "\\t"
-            case "\n": escaped += "\\n"
-            case "\u{0C}": escaped += "\\f"
-            case "\r": escaped += "\\r"
-            case _ where scalar.value < 0x20 || scalar.value == 0x7F:
-                escaped += String(format: "\\u%04X", scalar.value)
-            default:
-                escaped.unicodeScalars.append(scalar)
-            }
-        }
-        return escaped
+        TOMLString.escaped(value)
     }
 
     public static func ensureConfigured(
