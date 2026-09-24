@@ -19,6 +19,10 @@ actor HeldRenders {
     private(set) var mostAtOnce = 0
     /// The settings each 3D render was handed, in order.
     private(set) var meshConfigurations: [MeshConfiguration] = []
+    /// `PaidLanes.allowed` as each render saw it when it started, by prompt (or, for a
+    /// mesh, the subject image's name). Read on the render's own task, which is where a
+    /// paid call it made would read it.
+    private(set) var paidLanes: [String: Bool] = [:]
 
     var started: [String] { prompts }
 
@@ -45,6 +49,7 @@ actor HeldRenders {
     ) -> Int {
         outputs.append(output)
         prompts.append(prompt)
+        paidLanes[prompt] = PaidLanes.allowed
         open += 1
         mostAtOnce = max(mostAtOnce, open)
         stage?.yield(.stage("Loading the model…"))
@@ -370,6 +375,83 @@ struct ControlRenderQueueTests {
         )
         #expect(failed.status == "failed")
         #expect(failed.reason == "The service ran out of memory.")
+    }
+
+    // MARK: - The paid lanes
+
+    /// Each job runs with the paid lanes as its own caller had them. The task that runs a
+    /// job is started by the job that finished before it, and a task keeps its creator's
+    /// task-locals — so without this a swarm node's render shut the lanes for the owner's
+    /// next render, and the owner's opened them for the peer's.
+    @Test func aPeersRenderDoesNotShutThePaidLanesForTheOwnersNext() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+
+        let peer = Task {
+            try await PaidLanes.$allowed.withValue(false) {
+                try await f.model.generateImage(imageRequest("peer"))
+            }
+        }
+        try await waitUntil { await f.renders.started == ["peer"] }
+        f.model.imagePrompt = "owner"
+        f.model.generateImage()
+        try await f.renders.finish(0)
+        _ = try await answer(peer)
+        try await waitUntil { await f.renders.started.count == 2 }
+        try await f.renders.finish(1)
+        try await waitUntil { !f.model.isGeneratingImage }
+
+        #expect(await f.renders.paidLanes["peer"] == false)
+        #expect(await f.renders.paidLanes["owner"] == true)
+    }
+
+    @Test func theOwnersRenderDoesNotOpenThePaidLanesForAPeersNext() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+
+        f.model.imagePrompt = "owner"
+        f.model.generateImage()
+        try await waitUntil { await f.renders.started == ["owner"] }
+        let peer = Task {
+            try await PaidLanes.$allowed.withValue(false) {
+                try await f.model.generateImage(imageRequest("peer"))
+            }
+        }
+        try await waitUntil { f.model.imageQueue.count == 1 }
+        try await f.renders.finish(0)
+        try await waitUntil { await f.renders.started.count == 2 }
+        try await f.renders.finish(1)
+        _ = try await answer(peer)
+
+        #expect(await f.renders.paidLanes["owner"] == true)
+        #expect(await f.renders.paidLanes["peer"] == false)
+    }
+
+    @Test func aPeersMeshDoesNotShutThePaidLanesForTheOwnersNext() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        let ownersSubject = f.folder.appendingPathComponent("owner.png")
+        try Data("png".utf8).write(to: ownersSubject)
+
+        let peer = Task {
+            try await PaidLanes.$allowed.withValue(false) {
+                try await f.model.generateMesh(ControlAPI.MeshRequest(
+                    imagePath: f.subject.path, modelID: MeshCatalog.lato2.id
+                ))
+            }
+        }
+        try await waitUntil { await f.renders.started.count == 1 }
+        f.model.selectedMeshModel = MeshCatalog.lato2.id
+        f.model.meshInputImage = ownersSubject
+        f.model.generateMesh()
+        try await f.renders.finish(0)
+        _ = try await answer(peer)
+        try await waitUntil { await f.renders.started.count == 2 }
+        try await f.renders.finish(1)
+        try await waitUntil { !f.model.isGeneratingMesh }
+
+        #expect(await f.renders.paidLanes[f.subject.lastPathComponent] == false)
+        #expect(await f.renders.paidLanes["owner.png"] == true)
     }
 
     // MARK: - Meshes

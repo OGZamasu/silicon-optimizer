@@ -403,6 +403,14 @@ public final class AppModel {
         /// Who is waiting for the result: nobody for the composer's own jobs, whose outcome
         /// is on screen; a control-API call for the jobs it queued, which answers with it.
         var waiter: RenderWaiter<QueuedImage>?
+        /// Whether whoever asked for it may spend the owner's money: `PaidLanes.allowed` where
+        /// the job was made — false inside a swarm node's request, true for the owner.
+        ///
+        /// Carried on the job because the task that runs it is started by whichever job
+        /// finished before it, and a task keeps its creator's task-locals: without this, a
+        /// peer's render would shut the paid lanes for the owner's next one, and the owner's
+        /// would open them for the peer's.
+        var paidLanesAllowed = PaidLanes.allowed
     }
 
     /// Jobs waiting for the current generation to finish. Only one MFLUX process runs at a time —
@@ -720,7 +728,8 @@ public final class AppModel {
         let runtime = makeImageRuntime(self)
         activeImageRuntime = runtime
 
-        imageTask = Task { [weak self] in
+        // With the lanes as the job's caller had them, not as the job before it left them.
+        imageTask = PaidLanes.$allowed.withValue(job.paidLanesAllowed) { Task { [weak self] in
             // How the job ended, told to whoever is waiting on it once, on the way out —
             // whichever way out it is. A caller left holding a connection for a render
             // that is not coming is a phone that hangs.
@@ -822,7 +831,7 @@ public final class AppModel {
                 }
                 imageWasCancelled = false
             }
-        }
+        } }
     }
 
     /// The same job, rendered by a swarm node instead of this Mac (#136). The node
@@ -868,7 +877,7 @@ public final class AppModel {
             }
         }
 
-        imageTask = Task { [weak self] in
+        imageTask = PaidLanes.$allowed.withValue(job.paidLanesAllowed) { Task { [weak self] in
             // As on the local path: the caller, if any, is told once on the way out.
             var outcome: Result<QueuedImage, any Error> = .failure(ImageRuntimeError.noImageProduced)
             // Mirrors the local path's defer: clear the machinery and advance the
@@ -926,7 +935,7 @@ public final class AppModel {
                     )
                 }
             }
-        }
+        } }
     }
 
     /// Gated-model guidance that respects what is already done: telling someone to add a
@@ -1017,6 +1026,8 @@ public final class AppModel {
         public var modelName: String
         /// Same as `ImageJob.waiter`: set for a control-API call, nil for the composer.
         var waiter: RenderWaiter<MeshResult>?
+        /// Same as `ImageJob.paidLanesAllowed`.
+        var paidLanesAllowed = PaidLanes.allowed
     }
 
     public internal(set) var meshQueue: [MeshJob] = []
@@ -2079,7 +2090,8 @@ public final class AppModel {
         meshWasCancelled = false
         activeMeshRuntime = runtime
 
-        meshTask = Task { [weak self] in
+        // As for images: the job's own caller decides the paid lanes, not the job before it.
+        meshTask = PaidLanes.$allowed.withValue(job.paidLanesAllowed) { Task { [weak self] in
             // Told to the caller once, on the way out, as on the image paths.
             var outcome: Result<MeshResult, any Error> = .failure(MeshRuntimeError.noMeshProduced)
             defer {
@@ -2137,7 +2149,7 @@ public final class AppModel {
                 }
                 meshWasCancelled = false
             }
-        }
+        } }
     }
 
     // MARK: - Recent results on disk
