@@ -386,8 +386,8 @@ public struct Settings: Codable, Sendable, Equatable {
 
     /// Where generated meshes are written. Empty means the default below.
     public var meshOutputDirectory: String = ""
-    /// The trellis2 project folder holding trellis-mac and hunyuan3d-swift. Empty means the
-    /// T9 default the engines were set up at.
+    /// The trellis2 project folder holding trellis-mac and hunyuan3d-swift. Empty means
+    /// `defaultTrellisBaseDirectory`.
     public var trellisBaseDirectory: String = ""
     /// Base URL of the remote LATO.2 service, e.g. "http://192.168.1.20:8790". Empty means
     /// not configured.
@@ -473,7 +473,47 @@ public struct Settings: Codable, Sendable, Equatable {
         if !configured.isEmpty {
             return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
         }
-        return URL(fileURLWithPath: "/Volumes/T9/trellis2")
+        return Self.defaultTrellisBaseDirectory
+    }
+
+    /// Where the 3D engines are looked for when Settings names no folder: a `trellis2` folder
+    /// at the top of the home folder or of a local disk — the engines and their weights are
+    /// big, and often set up on an external one. Looked for once per launch; with none, the
+    /// home folder's, where the Mesh tab then says what is missing.
+    public static let defaultTrellisBaseDirectory = trellisBaseDirectory(
+        home: FileManager.default.homeDirectoryForCurrentUser, disks: localDiskRoots()
+    )
+
+    static func trellisBaseDirectory(home: URL, disks: [URL]) -> URL {
+        let candidates = ([home] + disks).map {
+            $0.appendingPathComponent("trellis2", isDirectory: true)
+        }
+        var isDirectory: ObjCBool = false
+        return candidates.first {
+            FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        } ?? candidates[0]
+    }
+
+    /// The local disks mounted under /Volumes, read from the mount table without waiting on
+    /// any of them, so a network share that has gone away cannot stall the lookup.
+    static func localDiskRoots() -> [URL] {
+        let capacity = getfsstat(nil, 0, MNT_NOWAIT)
+        guard capacity > 0 else { return [] }
+        var mounts: [statfs] = Array(repeating: .init(), count: Int(capacity))
+        let count = getfsstat(
+            &mounts, Int32(MemoryLayout<statfs>.stride * mounts.count), MNT_NOWAIT
+        )
+        guard count > 0 else { return [] }
+        return mounts.prefix(Int(count)).compactMap { mount -> URL? in
+            guard mount.f_flags & UInt32(MNT_LOCAL) != 0 else { return nil }
+            let path = withUnsafeBytes(of: mount.f_mntonname) { bytes in
+                String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            guard path.hasPrefix("/Volumes/") else { return nil }
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        .sorted { $0.path < $1.path }
     }
 
     /// Base name for one generation's files — same chronological-sort and suffix-width

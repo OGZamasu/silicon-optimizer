@@ -539,8 +539,8 @@ struct SettingsCompatibilityTests {
     /// The whole point: an unreadable value costs its own key and nothing else.
     @Test func oneUnreadableFieldCannotWipeEverythingElse() throws {
         let stored = """
-        {"modelLibraryDirectory":"/Volumes/T9/Local Models",
-         "meshOutputDirectory":"/Volumes/T9/Models",
+        {"modelLibraryDirectory":"/Volumes/External/Local Models",
+         "meshOutputDirectory":"/Volumes/External/Models",
          "huggingFaceToken":"hf_example",
          "personas":[{"id":"x","name":"Tester","portraitPath":"/tmp/t.png"}],
          "temperature":0.4,
@@ -548,8 +548,8 @@ struct SettingsCompatibilityTests {
         """
         let settings = try JSONDecoder().decode(Settings.self, from: Data(stored.utf8))
 
-        #expect(settings.modelLibraryDirectory == "/Volumes/T9/Local Models")
-        #expect(settings.meshOutputDirectory == "/Volumes/T9/Models")
+        #expect(settings.modelLibraryDirectory == "/Volumes/External/Local Models")
+        #expect(settings.meshOutputDirectory == "/Volumes/External/Models")
         #expect(settings.huggingFaceToken == "hf_example")
         #expect(settings.temperature == 0.4)
         #expect(settings.personas.count == 1)

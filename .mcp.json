@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "mac-ui": {
-      "command": "/Users/mbp/.silicon-ui-mcp/bin/python3",
+      "command": "${HOME}/.silicon-ui-mcp/bin/python3",
       "args": ["Scripts/mac-ui-mcp/server.py"],
       "env": {}
     }

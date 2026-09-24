@@ -9,7 +9,7 @@ import SiliconPlanner
 ///
 /// The invocation recipe is exact and verified: the Metal extension overlay is injected via
 /// `PYTHONPATH`, and because those extensions bake an rpath to a venv location that predates the
-/// project's move onto the T9 volume, `DYLD_FALLBACK_LIBRARY_PATH` points at the venv's real
+/// project's move onto an external disk, `DYLD_FALLBACK_LIBRARY_PATH` points at the venv's real
 /// torch libraries so the dlopen succeeds. Without the overlay the render still works — it just
 /// falls back to a much slower CPU bake.
 public actor TrellisRuntime: MeshRuntime {

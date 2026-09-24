@@ -9,7 +9,8 @@ import UniformTypeIdentifiers
 @Suite("Mesh sharing")
 struct MeshShareTests {
 
-    private static let shoe = URL(fileURLWithPath: "/Volumes/T9/trellis2/test_shoe.glb")
+    private static let shoe = Settings.defaultTrellisBaseDirectory
+        .appendingPathComponent("test_shoe.glb")
 
     @Test func spinsAFullTurnIntoALoopingGIF() async throws {
         guard FileManager.default.fileExists(atPath: Self.shoe.path) else { return }
