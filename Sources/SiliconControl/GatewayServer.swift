@@ -335,6 +335,12 @@ public actor GatewayServer {
             try? await HTTPResponse.error(400, "The request names no model.").write(to: connection)
             return
         }
+        // Before anything is loaded, routed or streamed: see `carriesOnlyInlineImages`.
+        guard GatewayAPI.carriesOnlyInlineImages(body: request.body) else {
+            try? await HTTPResponse.error(400, ControlAPI.ChatImages.notInline)
+                .write(to: connection)
+            return
+        }
         let wantsStream = GatewayAPI.wantsStream(body: request.body)
         let waitBudget = GatewayAPI.waitBudget(fromHeader: request.headers["x-silicon-wait"])
         let (preview, promptChars) = GatewayAPI.promptPreview(inBody: request.body)

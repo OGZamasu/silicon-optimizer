@@ -582,6 +582,32 @@ public enum GatewayAPI {
         return json["stream"] as? Bool ?? false
     }
 
+    /// Whether every image a chat-completions request carries is a picture sent inline.
+    ///
+    /// The gateway hands the messages to the backend as they came, and the llama-server this
+    /// app bundles — like a node's — downloads an `image_url` that is an address. The chat
+    /// routes on the control server take only `data:` pictures (`ControlAPI.ChatImages`),
+    /// and so does this one: a harness attaching a screenshot sends it inline, and nothing
+    /// that reaches a model through this Mac makes the Mac fetch an address. A body that is
+    /// not JSON carries no images; the backend will say what is wrong with it.
+    public static func carriesOnlyInlineImages(body: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let messages = json["messages"] as? [[String: Any]]
+        else { return true }
+        for message in messages {
+            guard let parts = message["content"] as? [[String: Any]] else { continue }
+            for part in parts {
+                // `{"url": …}` is the schema; a bare string is what some clients send.
+                let image = (part["image_url"] as? [String: Any])?["url"] ?? part["image_url"]
+                guard let image else { continue }
+                guard let url = image as? String, ControlAPI.ChatImages.isInline(url) else {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
     // MARK: - Media serving
 
     /// File types the chat surfaces may embed. Anything else is refused — the media
