@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import SiliconCatalog
+import SiliconCore
 import Testing
 @testable import SiliconControl
 @testable import SiliconRuntime
@@ -185,11 +187,109 @@ struct BuddyAppModelTests {
         #expect(BuddyEventPump.changes(from: first, to: moved).map(\.name)
             == ["status", "download"])
 
-        // A finished download stops being mentioned rather than being announced as gone;
-        // the phone's own list is what forgets it.
+        // A download that has gone from the reading is announced once more, as over — a
+        // phone holds on to it until a frame says so — and is not mentioned after that.
         var without = moved
         without.downloads = [:]
-        #expect(BuddyEventPump.changes(from: moved, to: without).isEmpty)
+        #expect(BuddyEventPump.changes(from: moved, to: without).map(\.name) == ["download"])
+        #expect(BuddyEventPump.changes(from: without, to: without).isEmpty)
+    }
+
+    /// What leaves the reading is news as well. A phone keeps every transfer and render it
+    /// was told about until a frame says it is over, so one that simply stopped being
+    /// mentioned stayed "happening now" on it for ever. Each gets exactly one closing frame
+    /// — a download as it ended, a render taken out of the queue as cancelled — and one
+    /// whose last frame already said it was over gets none.
+    @Test func whatLeavesTheReadingIsAnnouncedAsOverOnce() {
+        let idle = ControlAPI.Status(
+            state: "idle", loadedModelID: nil, loadedModelName: nil, contextLength: nil,
+            expertStreaming: false, lastGenerationTokensPerSecond: nil
+        )
+        let fetching = ControlAPI.DownloadEvent(
+            id: "qwen3-coder@Q4_K_M", name: "Qwen3-Coder", fraction: 0.4,
+            bytesReceived: 400, bytesExpected: 1000, bytesPerSecond: 50
+        )
+        let broken = ControlAPI.DownloadEvent(
+            id: "flux2-klein-4b", name: "FLUX.2 klein", fraction: 0.1, bytesReceived: 10,
+            bytesExpected: 100, bytesPerSecond: 0, error: "The network went away."
+        )
+        let waiting = ControlAPI.JobEvent(
+            id: "clip-1", kind: "video", status: "pending", title: "Opening shot"
+        )
+        let rendering = ControlAPI.JobEvent(
+            id: "clip-2", kind: "video", status: "rendering", title: "The tram",
+            fraction: 0.5, stage: "video-denoise 15/30"
+        )
+        let done = ControlAPI.JobEvent(
+            id: "clip-3", kind: "video", status: "completed", title: "The river",
+            mediaID: "bWVkaWEtY2xpcC1leGFt"
+        )
+        let before = BuddyEventPump.Snapshot(
+            status: idle,
+            downloads: [fetching.id: fetching, broken.id: broken],
+            jobs: [waiting.id: waiting, rendering.id: rendering, done.id: done]
+        )
+        let after = BuddyEventPump.Snapshot(status: idle, downloads: [:], jobs: [:])
+
+        func downloads(_ events: [BuddyEvent]) -> [ControlAPI.DownloadEvent] {
+            events.compactMap { if case .download(let download) = $0 { download } else { nil } }
+        }
+        func jobs(_ events: [BuddyEvent]) -> [ControlAPI.JobEvent] {
+            events.compactMap { if case .job(let job) = $0 { job } else { nil } }
+        }
+
+        let stopped = BuddyEventPump.changes(from: before, to: after)
+        #expect(downloads(stopped).map(\.id) == [fetching.id])
+        #expect(downloads(stopped).first?.error == BuddyEventPump.downloadStopped)
+        #expect(downloads(stopped).first?.bytesPerSecond == 0)
+        #expect(jobs(stopped).map(\.id) == [waiting.id, rendering.id])
+        for job in jobs(stopped) {
+            #expect(job.status == "cancelled")
+            #expect(job.reason == BuddyEventPump.removedFromQueue)
+            #expect(job.fraction == nil && job.stage == nil && job.mediaID == nil)
+        }
+
+        // A transfer that arrived says so, the way a phone model's does: all of it, nothing
+        // wrong.
+        let arrived = downloads(
+            BuddyEventPump.changes(from: before, to: after, settling: BuddyEventPump.arrived)
+        )
+        #expect(arrived.first?.fraction == 1)
+        #expect(arrived.first?.bytesReceived == 1000)
+        #expect(arrived.first?.error == nil)
+
+        #expect(BuddyEventPump.changes(from: after, to: after).isEmpty)
+    }
+
+    /// How a download that left the transfer list ended is read off what is installed now:
+    /// the model it was fetching is here, or it is not.
+    @Test func aDownloadThatLeftIsSettledByWhatIsInstalledNow() throws {
+        BuddyTestStore.redirect()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-settle-\(UUID())")
+        let model = AppModel(
+            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            settings: .init()
+        )
+        model.installedModels = [InstalledModel(
+            id: "qwen3-coder@Q4_K_M", name: "Qwen3-Coder", catalogID: "qwen3-coder",
+            quantization: .q4_K_M, format: .gguf,
+            primaryFile: folder.appendingPathComponent("qwen3-coder.gguf"), allFiles: [],
+            projectorFile: nil, sizeOnDisk: .zero, installedAt: Date(), shape: nil,
+            capabilities: []
+        )]
+        func last(_ id: String) -> ControlAPI.DownloadEvent {
+            .init(
+                id: id, name: id, fraction: 0.97, bytesReceived: 970, bytesExpected: 1000,
+                bytesPerSecond: 80
+            )
+        }
+
+        let arrived = model.settledDownload(last("qwen3-coder@Q4_K_M"))
+        #expect(arrived.fraction == 1 && arrived.error == nil)
+        let stopped = model.settledDownload(last("qwen3-coder@Q8_0"))
+        #expect(stopped.error == BuddyEventPump.downloadStopped)
+        #expect(stopped.fraction == 0.97)
     }
 
     // MARK: - The Settings section

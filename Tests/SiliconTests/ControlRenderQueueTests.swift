@@ -305,6 +305,68 @@ struct ControlRenderQueueTests {
         try await waitUntil { !f.model.isGeneratingImage }
     }
 
+    // MARK: - What /events says when one ends
+
+    /// The Images and 3D queues are one frame each on `/events`, for the job running now.
+    /// When it ends the frame stays and says how — with the file to fetch when it made one —
+    /// rather than simply no longer being sent, which left a phone showing it running.
+    @Test func aFinishedImageIsAnnouncedAsCompletedWithItsFile() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        // In memory: a test must not add entries to the owner's own media table.
+        let registry = MediaRegistry(url: nil)
+
+        let call = Task { try await f.model.generateImage(imageRequest("a harbour")) }
+        try await waitUntil { await f.renders.started.count == 1 }
+        let running = await f.model.buddyEventSnapshot(registry: registry)
+        #expect(running.jobs["image"]?.status == "running")
+
+        try await f.renders.finish(0)
+        _ = try await answer(call)
+        try await waitUntil { !f.model.isGeneratingImage }
+        let finished = await f.model.buddyEventSnapshot(registry: registry)
+        let frame = try #require(finished.jobs["image"])
+        #expect(frame.status == "completed")
+        #expect(frame.mediaID != nil)
+        #expect(frame.mediaID == (await registry.id(forPath: (await f.renders.output(0)).path)))
+
+        // Which the watcher sends as one `job` frame: finished, not removed.
+        let sent = BuddyEventPump.changes(from: running, to: finished).compactMap { event in
+            if case .job(let job) = event { job } else { nil }
+        }
+        #expect(sent.map(\.status) == ["completed"])
+    }
+
+    @Test func aStoppedOrFailedRenderIsAnnouncedAsSuch() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        let registry = MediaRegistry(url: nil)
+
+        f.model.imagePrompt = "a lighthouse"
+        f.model.generateImage()
+        try await waitUntil { await f.renders.started.count == 1 }
+        f.model.cancelImage()
+        try await waitUntil { !f.model.isGeneratingImage }
+        let stopped = try #require(
+            await f.model.buddyEventSnapshot(registry: registry).jobs["image"]
+        )
+        #expect(stopped.status == "cancelled")
+        #expect(stopped.reason == QueuedRenderError.stoppedOnMac.localizedDescription)
+        #expect(stopped.mediaID == nil)
+
+        f.model.selectedMeshModel = MeshCatalog.lato2.id
+        f.model.meshInputImage = f.subject
+        f.model.generateMesh()
+        try await waitUntil { await f.renders.started.count == 2 }
+        await f.renders.fail(1, MeshRuntimeError.generationFailed("The service ran out of memory."))
+        try await waitUntil { !f.model.isGeneratingMesh }
+        let failed = try #require(
+            await f.model.buddyEventSnapshot(registry: registry).jobs["mesh"]
+        )
+        #expect(failed.status == "failed")
+        #expect(failed.reason == "The service ran out of memory.")
+    }
+
     // MARK: - Meshes
 
     @Test func aControlMeshWaitsBehindTheComposersAndNeverRunsBesideIt() async throws {

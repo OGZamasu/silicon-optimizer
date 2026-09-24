@@ -409,6 +409,8 @@ public final class AppModel {
     /// concurrent runs would fight over the same memory budget the plan is checked against.
     public internal(set) var imageQueue: [ImageJob] = []
     public internal(set) var currentImageJob: ImageJob?
+    /// How the last image job ended, for `/events`. See `RenderEnding`.
+    @ObservationIgnored var lastImageEnding: RenderEnding?
     /// Switching model adopts that model's step count.
     ///
     /// These are not interchangeable numbers: schnell is distilled to finish in 4 steps and klein
@@ -725,6 +727,9 @@ public final class AppModel {
             var outcome: Result<QueuedImage, any Error> = .failure(ImageRuntimeError.noImageProduced)
             defer {
                 job.waiter?.finish(outcome)
+                self?.lastImageEnding = RenderEnding(
+                    title: job.modelName, outcome: outcome.map { $0.images.first?.image }
+                )
                 Task { @MainActor in
                     guard let self else { return }
                     self.imageTask = nil
@@ -830,6 +835,9 @@ public final class AppModel {
             let reason = "\(node.name)'s address didn't parse."
             imageState = .failed(message: reason)
             job.waiter?.finish(.failure(ImageRuntimeError.generationFailed(reason)))
+            lastImageEnding = RenderEnding(
+                title: job.modelName, outcome: .failure(ImageRuntimeError.generationFailed(reason))
+            )
             currentImageJob = nil
             advanceImageQueue()
             return
@@ -868,6 +876,9 @@ public final class AppModel {
             // stay visible.
             defer {
                 job.waiter?.finish(outcome)
+                self?.lastImageEnding = RenderEnding(
+                    title: job.modelName, outcome: outcome.map { $0.images.first?.image }
+                )
                 Task { @MainActor in
                     guard let self else { return }
                     self.imageTask = nil
@@ -1010,6 +1021,8 @@ public final class AppModel {
 
     public internal(set) var meshQueue: [MeshJob] = []
     public internal(set) var currentMeshJob: MeshJob?
+    /// How the last mesh job ended, for `/events`. See `RenderEnding`.
+    @ObservationIgnored var lastMeshEnding: RenderEnding?
 
     /// Defaults to Hunyuan mini: it is installed, fast, and greets a first try with a result
     /// in under a minute rather than a 13 GB download.
@@ -2047,6 +2060,9 @@ public final class AppModel {
             currentMeshJob = nil
             meshState = .failed(message: reason)
             job.waiter?.finish(.failure(MeshRuntimeError.notInstalled(reason)))
+            lastMeshEnding = RenderEnding(
+                title: job.modelName, outcome: .failure(MeshRuntimeError.notInstalled(reason))
+            )
             // The next job still gets its turn: a caller queued behind this one is holding a
             // connection, and nothing else would start it until somebody queued another.
             advanceMeshQueue()
@@ -2068,6 +2084,9 @@ public final class AppModel {
             var outcome: Result<MeshResult, any Error> = .failure(MeshRuntimeError.noMeshProduced)
             defer {
                 job.waiter?.finish(outcome)
+                self?.lastMeshEnding = RenderEnding(
+                    title: job.modelName, outcome: outcome.map(\.primaryFile)
+                )
                 Task { @MainActor in
                     guard let self else { return }
                     self.meshTask = nil

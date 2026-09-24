@@ -331,7 +331,12 @@ extension AppModel {
     /// posted from the places state changes: those places are in `AppModel.swift`, which
     /// this milestone does not touch, and a watcher that samples cannot miss an update by
     /// forgetting to announce one.
-    func buddyEventSnapshot() async -> BuddyEventPump.Snapshot {
+    ///
+    /// - Parameter registry: The table finished files are published from. The shared one,
+    ///   except in a test that must not add entries to the owner's.
+    func buddyEventSnapshot(
+        registry: MediaRegistry = .shared
+    ) async -> BuddyEventPump.Snapshot {
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
         let roots = await controlMediaRoots()
@@ -342,7 +347,7 @@ extension AppModel {
             // handing out — one fetch, not a second poll to find out what to fetch.
             var mediaID: String?
             if let file = item.file {
-                mediaID = await MediaRegistry.shared.register(path: file, within: roots)
+                mediaID = await registry.register(path: file, within: roots)
             }
             jobs[item.id] = Self.jobEvent(
                 for: item, active: active,
@@ -357,6 +362,14 @@ extension AppModel {
                 fraction: imageProgress.map { $0.total > 0 ? Double($0.step) / Double($0.total) : nil } ?? nil,
                 stage: imageState.stageLine
             )
+        } else if let ending = lastImageEnding {
+            var mediaID: String?
+            if let file = ending.file {
+                mediaID = await registry.register(path: file.path, within: roots)
+            }
+            jobs["image"] = Self.jobEvent(
+                id: "image", kind: "image", ending: ending, mediaID: mediaID
+            )
         }
         if let mesh = currentMeshJob {
             jobs["mesh"] = ControlAPI.JobEvent(
@@ -364,8 +377,16 @@ extension AppModel {
                 fraction: meshProgress,
                 stage: meshState.stageLine
             )
+        } else if let ending = lastMeshEnding {
+            var mediaID: String?
+            if let file = ending.file {
+                mediaID = await registry.register(path: file.path, within: roots)
+            }
+            jobs["mesh"] = Self.jobEvent(
+                id: "mesh", kind: "mesh", ending: ending, mediaID: mediaID
+            )
         }
-        await MediaRegistry.shared.persist()
+        await registry.persist()
 
         var downloads: [String: ControlAPI.DownloadEvent] = [:]
         for transfer in activeTransfers {
@@ -406,6 +427,36 @@ extension AppModel {
                 : item.status == VideoQueueStatus.cancelled.rawValue ? item.cancelDetail : nil,
             mediaID: mediaID
         )
+    }
+
+    /// The last frame of an image or mesh job that has left its queue: the same three
+    /// endings a clip has, and the file to fetch when there is one.
+    nonisolated static func jobEvent(
+        id: String, kind: String, ending: RenderEnding, mediaID: String?
+    ) -> ControlAPI.JobEvent {
+        ControlAPI.JobEvent(
+            id: id, kind: kind, status: ending.status.rawValue, title: ending.title,
+            reason: ending.reason, mediaID: ending.status == .completed ? mediaID : nil
+        )
+    }
+
+    /// A download that has left the transfer list, as its last frame: arrived when what it
+    /// was fetching is installed now, stopped when it is not. Both end with nothing moving,
+    /// so a phone's "Happening now" lets go of it either way.
+    func settledDownload(_ last: ControlAPI.DownloadEvent) -> ControlAPI.DownloadEvent {
+        hasInstalled(downloadID: last.id)
+            ? BuddyEventPump.arrived(last) : BuddyEventPump.stopped(last)
+    }
+
+    /// Whether the thing a transfer with this id was fetching is on this Mac now. The ids
+    /// are the ones `activeTransfers` hands out: `<entry>@<quantization>` for a language
+    /// model, which is also its library id, and the catalog entry's own id for an image or
+    /// 3D model.
+    func hasInstalled(downloadID id: String) -> Bool {
+        if installedModels.contains(where: { $0.id == id }) { return true }
+        if let entry = DiffusionCatalog.entry(id: id) { return isImageModelInstalled(entry) }
+        if let entry = MeshCatalog.entry(id: id) { return meshInstallation(for: entry).isInstalled }
+        return false
     }
 
     // MARK: - Shapes
@@ -511,6 +562,39 @@ enum VerdictRelay {
     }
 }
 
+// MARK: - How a render ended
+
+/// How the last job in the Images or 3D queue ended, kept for `/events`.
+///
+/// Those queues are reported as one frame each, `image` and `mesh`, for the job running now.
+/// When it finishes there is no job running, and a frame that simply stopped being sent left
+/// a phone showing the render as running for ever — and with no file to fetch. So the frame
+/// stays, saying how the render ended in the video queue's words, until the next one starts.
+struct RenderEnding: Sendable, Equatable {
+    var status: VideoQueueStatus
+    var title: String
+    var reason: String?
+    /// What it made, when it made something.
+    var file: URL?
+
+    /// From a job's outcome: done with its file, stopped or taken out of the queue at the
+    /// Mac, or failed with the renderer's own sentence.
+    init(title: String, outcome: Result<URL?, any Error>) {
+        self.title = title
+        switch outcome {
+        case .success(let file):
+            status = .completed
+            self.file = file
+        case .failure(let error as QueuedRenderError):
+            status = .cancelled
+            reason = error.localizedDescription
+        case .failure(let error):
+            status = .failed
+            reason = error.localizedDescription
+        }
+    }
+}
+
 // MARK: - Watching the Mac for subscribers
 
 /// Samples the app's state while at least one `/events` stream is open, and posts what
@@ -598,7 +682,11 @@ public final class BuddyEventPump {
                         return
                     }
                     let current = await model.buddyEventSnapshot()
-                    for event in Self.changes(from: previous, to: current) { await hub.post(event) }
+                    for event in Self.changes(
+                        from: previous, to: current, settling: model.settledDownload
+                    ) {
+                        await hub.post(event)
+                    }
                     previous = current
                     guard (try? await Task.sleep(for: interval)) != nil else { break }
                 }
@@ -630,7 +718,16 @@ public final class BuddyEventPump {
 
     /// The first reading is entirely news — a phone that has just connected knows nothing,
     /// so it gets the current state rather than waiting for something to move.
-    static func changes(from previous: Snapshot?, to current: Snapshot) -> [BuddyEvent] {
+    ///
+    /// Something that leaves the reading is news too. A phone holds on to every download
+    /// and render it has been told about until a frame says it is over, so one that simply
+    /// stops being mentioned stays "happening now" on the phone for ever. A download is
+    /// announced once more as `settle` says it ended; a render taken out of a queue, as
+    /// cancelled. Anything whose last frame already said it was over is left alone.
+    static func changes(
+        from previous: Snapshot?, to current: Snapshot,
+        settling settle: (ControlAPI.DownloadEvent) -> ControlAPI.DownloadEvent = BuddyEventPump.stopped
+    ) -> [BuddyEvent] {
         var events: [BuddyEvent] = []
         if previous.map({ !matches($0.status, current.status) }) ?? true {
             events.append(.status(current.status))
@@ -639,11 +736,72 @@ public final class BuddyEventPump {
         where previous?.downloads[id] != download {
             events.append(.download(download))
         }
+        for (id, last) in (previous?.downloads ?? [:]).sorted(by: { $0.key < $1.key })
+        where current.downloads[id] == nil && !isOver(last) {
+            events.append(.download(settle(last)))
+        }
         for (id, job) in current.jobs.sorted(by: { $0.key < $1.key })
         where previous?.jobs[id] != job {
             events.append(.job(job))
         }
+        for (id, last) in (previous?.jobs ?? [:]).sorted(by: { $0.key < $1.key })
+        where current.jobs[id] == nil && !isOver(last) {
+            events.append(.job(removed(last)))
+        }
         return events
+    }
+
+    /// The words a job's status is over in — the video queue's, which the image and mesh
+    /// frames share.
+    nonisolated static let finishedStatuses: Set<String> = [
+        VideoQueueStatus.completed.rawValue, VideoQueueStatus.failed.rawValue,
+        VideoQueueStatus.cancelled.rawValue,
+    ]
+
+    nonisolated static func isOver(_ job: ControlAPI.JobEvent) -> Bool {
+        finishedStatuses.contains(job.status)
+    }
+
+    /// Done is `fraction: 1`; failed or stopped carries an `error`. The same two endings
+    /// `PhoneModelService` gives the downloads it runs for a phone.
+    nonisolated static func isOver(_ download: ControlAPI.DownloadEvent) -> Bool {
+        download.fraction >= 1 || download.error != nil
+    }
+
+    /// Why a job went from a reading without saying it was over: somebody at the Mac took
+    /// it out of the queue, and it will not run now.
+    nonisolated static let removedFromQueue = "Removed from the queue on the Mac before it finished."
+
+    /// Why a download went from a reading without arriving.
+    nonisolated static let downloadStopped = "Stopped on the Mac before it finished."
+
+    nonisolated static func removed(_ job: ControlAPI.JobEvent) -> ControlAPI.JobEvent {
+        ControlAPI.JobEvent(
+            id: job.id, kind: job.kind, status: VideoQueueStatus.cancelled.rawValue,
+            title: job.title, reason: removedFromQueue
+        )
+    }
+
+    nonisolated static func arrived(
+        _ download: ControlAPI.DownloadEvent
+    ) -> ControlAPI.DownloadEvent {
+        var done = download
+        done.fraction = 1
+        done.bytesReceived = max(download.bytesReceived, download.bytesExpected)
+        done.bytesPerSecond = 0
+        done.error = nil
+        done.stage = nil
+        return done
+    }
+
+    nonisolated static func stopped(
+        _ download: ControlAPI.DownloadEvent
+    ) -> ControlAPI.DownloadEvent {
+        var stopped = download
+        stopped.bytesPerSecond = 0
+        stopped.error = downloadStopped
+        stopped.stage = nil
+        return stopped
     }
 
     /// `ControlAPI.Status` is part of a frozen wire contract and deliberately not
