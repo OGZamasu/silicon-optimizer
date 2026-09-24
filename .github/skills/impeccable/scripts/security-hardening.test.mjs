@@ -1408,6 +1408,44 @@ test('an approved accept stays an accept whatever page URL it carries', (t) => {
   assert.doesNotMatch(source, /Original/);
 });
 
+test('a locked accept is rerun with the poll script\'s own arguments, never the page\'s', (t) => {
+  const root = tempDir(t);
+  writeAcceptFixture(root);
+  const marker = path.join(root, 'command-ran');
+  const paramValues = { size: `--discard' $(touch ${marker}) '`, steps: 'snug' };
+  const event = { type: 'accept', id: 'bbccddee', variantId: '1', pageUrl: '--discard', paramValues,
+    _acceptResult: { handled: false, mode: 'error', error: 'source_locked' }, _completionAck: { ok: true } };
+  const told = instructionsForEvent(event, { scriptsPath: 'SCRIPTS' });
+  const words = told.match(/`node SCRIPTS\/live-accept\.mjs (.*?)` \(idempotent\)/)?.[1];
+  assert.ok(words, told);
+  const shell = spawnSync('/bin/sh', ['-c', `printf '%s\\n' ${words}`], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(shell.status, 0, shell.stderr);
+  const args = shell.stdout.split('\n').slice(0, -1);
+  assert.deepEqual(args, buildAcceptScriptArgs(event));
+  assert.equal(args.includes('--discard'), false);
+
+  const accepted = spawnSync(process.execPath, [liveAccept, ...args], { cwd: root, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
+  const source = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  assert.match(source, /<h1>V1<\/h1>/);
+  const line = source.split('\n').find((text) => text.includes('impeccable-param-values'));
+  assert.deepEqual(JSON.parse(line.match(/impeccable-param-values bbccddee: (.*) -->$/)[1]), paramValues);
+  assert.equal(fs.existsSync(marker), false, 'the shell never ran a page-supplied command');
+});
+
+test('live.md never shows page text as a helper argument of its own', () => {
+  // Backslash-continued command lines read as one.
+  const doc = fs.readFileSync(path.join(scriptsDir, '..', 'reference', 'live.md'), 'utf8').replace(/\\\n\s*/g, ' ');
+  assert.doesNotMatch(doc, /--page-url/);
+  const separateWord = /--(element-id|classes|tag|text|query|file|param-values)\s+[^\s`]/;
+  const commands = [...doc.matchAll(/live-(?:wrap|insert|accept)\.mjs[^`\n]*/g)].map(([command]) => command);
+  assert.ok(commands.some((command) => command.includes('--text=')), 'the wrap and insert commands are found');
+  for (const command of commands) assert.doesNotMatch(command, separateWord, command);
+  const mapping = doc.split('\n').find((line) => line.startsWith('Flag mapping'));
+  assert.ok(mapping);
+  assert.doesNotMatch(mapping, separateWord);
+});
+
 test('page element strings reach the generate scaffold as values, never as helper flags', async (t) => {
   const root = fs.realpathSync(tempDir(t));
   const other = fs.realpathSync(tempDir(t));

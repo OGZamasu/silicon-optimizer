@@ -15,6 +15,7 @@
  * hand-maintained doc can.
  */
 
+import { buildAcceptScriptArgs } from './accept-args.mjs';
 import { VISUAL_ACTIONS } from './vocabulary.mjs';
 
 // Element fields come from the inspected page's DOM, so a command the agent
@@ -23,6 +24,11 @@ import { VISUAL_ACTIONS } from './vocabulary.mjs';
 // such as '--target=/elsewhere' would be read as that flag, not as a value.
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+// A word the shell passes through unchanged stays bare; anything else is quoted.
+function shellWord(value) {
+  return /^[A-Za-z0-9_./:=-]+$/.test(value) ? value : shellQuote(value);
 }
 
 // Mount failures, and preflight errors that echo the element's locators, are
@@ -143,7 +149,10 @@ function acceptInstructions(event, scriptsPath) {
   }
   if (result.mode === 'error') {
     if (result.error === 'source_locked') {
-      return `${prefix}The source file is briefly locked by a publisher. Re-run the exact same live-accept.mjs command (idempotent); do NOT hand-edit the file, and do not poll past this.`;
+      // The exact command, so the agent never rebuilds it from the event and
+      // puts page text such as pageUrl on it.
+      const args = buildAcceptScriptArgs(event).map(shellWord).join(' ');
+      return `${prefix}The source file is briefly locked by a publisher. Re-run exactly \`node ${scriptsPath}/live-accept.mjs ${args}\` (idempotent) until it goes through; do NOT hand-edit the file, and do not poll past this.`;
     }
     if (result.error === 'accept_receipt_conflict') {
       return `${prefix}This session already resolved as ${result.priorOperation || 'a prior operation'}; do not edit anything. Run node ${scriptsPath}/live-status.mjs and tell the user what the session resolved to.`;
