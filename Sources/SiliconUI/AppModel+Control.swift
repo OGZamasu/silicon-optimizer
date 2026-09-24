@@ -1092,14 +1092,16 @@ extension AppModel {
     }
 
     public func planMesh(_ request: ControlAPI.MeshRequest) async throws -> ControlAPI.MeshPlan {
-        let (entry, configuration) = try resolveMesh(request)
-        return describe(meshPlan(for: entry, configuration: configuration), entry: entry)
+        let (entry, configuration, note) = try resolveMesh(request)
+        var plan = describe(meshPlan(for: entry, configuration: configuration), entry: entry)
+        if let note { plan.notes.insert(note, at: 0) }
+        return plan
     }
 
     public func generateMesh(
         _ request: ControlAPI.MeshRequest
     ) async throws -> ControlAPI.MeshResponse {
-        let (entry, configuration) = try resolveMesh(request)
+        let (entry, configuration, note) = try resolveMesh(request)
         // Optional on the wire since devices got `uploadID`/`mediaID`, which the control
         // server resolves into this field before the request reaches here. Nothing this
         // side can do with a request that still has none.
@@ -1135,13 +1137,15 @@ extension AppModel {
             objPath: result.obj?.path,
             elapsedSeconds: result.elapsed,
             model: entry.name,
-            warning: warning
+            warning: Self.merged(warning, note)
         )
     }
 
+    /// The model, the settings it will run with, and a note when a setting was changed on
+    /// the way — a texture larger than the model bakes, taken down to the largest it does.
     private func resolveMesh(
         _ request: ControlAPI.MeshRequest
-    ) throws -> (MeshEntry, MeshConfiguration) {
+    ) throws -> (MeshEntry, MeshConfiguration, note: String?) {
         let entry: MeshEntry
         if let id = request.modelID {
             guard let match = MeshCatalog.entry(id: id) else {
@@ -1156,13 +1160,18 @@ extension AppModel {
             } ?? MeshCatalog.hunyuanMini
         }
 
-        // Every knob is checked against what the backends take before anything is queued.
-        // They go to a Python script or a Swift CLI as arguments, and an octree of 100,000 or
-        // a million steps from a paired phone or a swarm peer is not a render — it is the GPU
-        // and the memory budget taken until somebody notices.
+        // Every knob the chosen model reads is checked against what its backend takes before
+        // anything is queued. They go to a Python script or a Swift CLI as arguments, and an
+        // octree of 100,000 or a million steps from a paired phone or a swarm peer is not a
+        // render — it is the GPU and the memory budget taken until somebody notices.
+        //
+        // A knob the model does not read is left alone, as the 3D tab leaves it: the phone
+        // apps send one set of settings whatever the model, and refusing Hunyuan a texture
+        // size it never looks at would turn a working render into a 400.
         var configuration = MeshConfiguration()
         configuration.steps = entry.defaultSteps
-        if let pipeline = request.pipelineType {
+        var note: String?
+        if entry.supportsPipelineType, let pipeline = request.pipelineType {
             guard Self.meshPipelines.contains(pipeline) else {
                 throw ControlHostError.badRequest(
                     "pipelineType must be one of " + Self.meshPipelines.joined(separator: ", ")
@@ -1171,13 +1180,23 @@ extension AppModel {
             }
             configuration.pipelineType = pipeline
         }
-        if let textureSize = request.textureSize {
-            guard Self.meshTextureSizes.contains(textureSize) else {
-                throw ControlHostError.badRequest("textureSize must be 512, 1024 or 2048.")
+        if entry.supportsTextureSize, let textureSize = request.textureSize {
+            let largest = Self.meshTextureSizes.max() ?? 2048
+            if textureSize > largest {
+                // The Android app offers 4096 for every model. Refusing it would break a
+                // client already in people's hands, and the largest the model bakes is the
+                // nearest thing to what was asked for.
+                configuration.textureSize = largest
+                note = "\(entry.name) bakes textures up to \(largest) px, so this one is "
+                    + "\(largest) px rather than \(textureSize)."
+            } else {
+                guard Self.meshTextureSizes.contains(textureSize) else {
+                    throw ControlHostError.badRequest("textureSize must be 512, 1024 or 2048.")
+                }
+                configuration.textureSize = textureSize
             }
-            configuration.textureSize = textureSize
         }
-        if let steps = request.steps {
+        if entry.supportsSteps, let steps = request.steps {
             guard Self.meshSteps.contains(steps) else {
                 throw ControlHostError.badRequest(
                     "3D steps must be between \(Self.meshSteps.lowerBound) and "
@@ -1186,13 +1205,14 @@ extension AppModel {
             }
             configuration.steps = steps
         }
-        if let quantize = request.quantize {
+        if entry.supportsQuantization, let quantize = request.quantize {
             guard Self.meshQuantizations.contains(quantize) else {
                 throw ControlHostError.badRequest("quantize must be 4 or 8, or left out for fp16.")
             }
             configuration.quantize = quantize
         }
-        if let octree = request.octree {
+        // The octree has no control in the 3D tab; only the Hunyuan decode reads it.
+        if entry.backend == .hunyuan, let octree = request.octree {
             guard Self.meshOctrees.contains(octree) else {
                 throw ControlHostError.badRequest(
                     "octree must be between \(Self.meshOctrees.lowerBound) and "
@@ -1205,7 +1225,7 @@ extension AppModel {
             configuration.vertexBudget = max(200, min(5000, budget))
         }
         configuration.seed = request.seed
-        return (entry, configuration)
+        return (entry, configuration, note)
     }
 
     /// What the 3D tab offers, which is what the backends were measured with. The steps

@@ -17,6 +17,8 @@ actor HeldRenders {
     private var settled: Set<Int> = []
     private var open = 0
     private(set) var mostAtOnce = 0
+    /// The settings each 3D render was handed, in order.
+    private(set) var meshConfigurations: [MeshConfiguration] = []
 
     var started: [String] { prompts }
 
@@ -30,6 +32,7 @@ actor HeldRenders {
     func begin(_ request: MeshRequest) -> (Int, AsyncThrowingStream<MeshEvent, any Error>) {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: MeshEvent.self)
         meshes.append(continuation)
+        meshConfigurations.append(request.configuration)
         images.append(AsyncThrowingStream.makeStream(of: ImageEvent.self).continuation)
         let output = request.outputDirectory.appendingPathComponent(request.baseName + ".glb")
         continuation.yield(.stage("Sampling"))
@@ -431,7 +434,8 @@ struct ControlRenderQueueTests {
             ControlAPI.MeshRequest(imagePath: subject, modelID: hunyuan, steps: 1_000_000),
             ControlAPI.MeshRequest(imagePath: subject, modelID: hunyuan, steps: 0),
             ControlAPI.MeshRequest(imagePath: subject, modelID: hunyuan, quantize: 3),
-            ControlAPI.MeshRequest(imagePath: subject, modelID: trellis, textureSize: 65_536),
+            ControlAPI.MeshRequest(imagePath: subject, modelID: trellis, textureSize: 700),
+            ControlAPI.MeshRequest(imagePath: subject, modelID: trellis, textureSize: 0),
             ControlAPI.MeshRequest(imagePath: subject, modelID: trellis, pipelineType: "--help"),
         ] {
             await #expect(throws: ControlHostError.self) { _ = try await f.model.planMesh(request) }
@@ -448,6 +452,65 @@ struct ControlRenderQueueTests {
         _ = try await f.model.planMesh(ControlAPI.MeshRequest(
             modelID: MeshCatalog.trellis2.id, pipelineType: "1024_cascade", textureSize: 2048
         ))
+    }
+
+    /// The phone apps send one set of 3D settings whatever the model — the Android app
+    /// offers a 4096 px texture for all of them. A setting the chosen model never reads is
+    /// left alone rather than refused, which is what the 3D tab does too; before the bounds
+    /// existed these rendered, and a client already in people's hands must keep rendering.
+    @Test func settingsAModelDoesNotReadAreLeftAlone() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+
+        for model in [MeshCatalog.hunyuanMini.id, MeshCatalog.lato2.id] {
+            _ = try await f.model.planMesh(ControlAPI.MeshRequest(
+                modelID: model, pipelineType: "--help", textureSize: 4096
+            ))
+        }
+        // Nor does the octree reach anything but the Hunyuan decode.
+        _ = try await f.model.planMesh(ControlAPI.MeshRequest(
+            modelID: MeshCatalog.lato2.id, steps: 1_000_000, quantize: 3, octree: 100_000
+        ))
+
+        let call = Task {
+            try await f.model.generateMesh(ControlAPI.MeshRequest(
+                imagePath: f.subject.path, modelID: MeshCatalog.lato2.id, textureSize: 4096,
+                octree: 100_000
+            ))
+        }
+        try await waitUntil { await f.renders.started.count == 1 }
+        try await f.renders.finish(0)
+        _ = try await answer(call)
+        // Nothing the model does not read was passed on as the caller wrote it.
+        let handed = try #require(await f.renders.meshConfigurations.first)
+        #expect(handed.textureSize == MeshConfiguration().textureSize)
+        #expect(handed.octree == MeshConfiguration().octree)
+    }
+
+    /// A model that does bake textures is given the largest it bakes when asked for more —
+    /// taken down with a note, not refused.
+    @Test func aTextureLargerThanTheModelBakesIsTakenDownWithANote() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        // TRELLIS.2 counts as set up when its environment exists.
+        let python = f.folder.appendingPathComponent("engines/trellis-mac/.venv/bin/python")
+        try FileManager.default.createDirectory(
+            at: python.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: python)
+
+        let request = ControlAPI.MeshRequest(
+            imagePath: f.subject.path, modelID: MeshCatalog.trellis2.id, textureSize: 4096
+        )
+        let plan = try await f.model.planMesh(request)
+        #expect(plan.notes.first?.contains("2048 px") == true)
+
+        let call = Task { try await f.model.generateMesh(request) }
+        try await waitUntil { await f.renders.started.count == 1 }
+        try await f.renders.finish(0)
+        let reply = try await answer(call)
+        #expect(reply.warning?.contains("2048 px") == true)
+        #expect(await f.renders.meshConfigurations.first?.textureSize == 2048)
     }
 }
 
