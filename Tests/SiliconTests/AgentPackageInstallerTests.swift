@@ -2,16 +2,55 @@ import Foundation
 import Testing
 @testable import SiliconRuntime
 
-/// The fixtures here are built and installed with the Node and npm this Mac has, because the
-/// allowlist and integrity checks are npm's own. Where a test only needs `node --version` to
-/// answer, its `node` is a script that does just that: the Node discovery finds can be a
-/// version manager's shim, which given the fresh `HOME` the installer probes with first
-/// downloads a whole runtime — slow, not offline, and not the thing under test. The real
-/// Node's probes get a minute for the same reason.
+enum AgentPackageFixtureNode {
+    /// The Node the fixtures build and install with: a real `node` binary with npm 11.19 or
+    /// newer beside it, and never a version manager's shim. What discovery finds can be one —
+    /// vite-plus's is — and a shim run with the fresh `HOME` every fixture has first downloads
+    /// a whole runtime into it, about 210 MB a fixture. The runtimes version managers keep are
+    /// real binaries, so their folders are listed for candidates; nothing in them is written.
+    /// With no real Node that qualifies, the suite is skipped rather than going online.
+    static let node: URL? = {
+        let manager = FileManager.default
+        let home = manager.homeDirectoryForCurrentUser
+        var candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/opt/local/bin/node"]
+        candidates += (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map { "\($0)/node" }
+        for (versions, binary) in [
+            (".nvm/versions/node", "bin/node"),
+            (".local/share/fnm/node-versions", "installation/bin/node"),
+            (".volta/tools/image/node", "bin/node"),
+            (".vite-plus/js_runtime/node", "bin/node"),
+        ] {
+            let folder = home.appendingPathComponent(versions, isDirectory: true)
+            for version in (try? manager.contentsOfDirectory(atPath: folder.path)) ?? [] {
+                candidates.append(folder.appendingPathComponent(version).appendingPathComponent(binary).path)
+            }
+        }
+        return HarnessRuntime.pick(
+            from: candidates.filter(isNodeBinary), includingRejected: nil,
+            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
+        ).node
+    }()
+
+    /// Whether `path` is Node itself: resolving to a Mach-O file named `node`. A shim resolves
+    /// to its manager's binary (`vp`, `volta-shim`, `mise`) or is a script.
+    private static func isNodeBinary(_ path: String) -> Bool {
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        guard resolved.lastPathComponent == "node",
+              let handle = try? FileHandle(forReadingFrom: resolved)
+        else { return false }
+        defer { try? handle.close() }
+        guard let magic = try? handle.read(upToCount: 4), magic.count == 4 else { return false }
+        return [[0xcf, 0xfa, 0xed, 0xfe], [0xca, 0xfe, 0xba, 0xbe]].contains(Array(magic))
+    }
+}
+
+/// The fixtures here are built and installed with a real Node and npm on this Mac, because the
+/// allowlist and integrity checks are npm's own; every artifact is a local tarball, so nothing
+/// is fetched. Where a test only needs `node --version` to answer, its `node` is a script that
+/// does just that. The probes get a minute, for a Mac under load.
 @Suite("Verified agent packages", .serialized, .longVersionProbes,
-       .enabled(if: HarnessRuntime.locateNode(
-           minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
-       ).node != nil))
+       .enabled(if: AgentPackageFixtureNode.node != nil))
 struct AgentPackageInstallerTests {
     private struct Fixture {
         let root: URL
@@ -45,9 +84,7 @@ struct AgentPackageInstallerTests {
     private func fixture(
         checkInstallEnvironment: Bool = false, scriptMarker: URL? = nil
     ) throws -> Fixture {
-        let node = try #require(HarnessRuntime.locateNode(
-            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
-        ).node)
+        let node = try #require(AgentPackageFixtureNode.node)
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent(
             "silicon-agent-package-test-\(UUID().uuidString)", isDirectory: true
