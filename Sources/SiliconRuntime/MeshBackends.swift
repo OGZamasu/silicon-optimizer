@@ -543,14 +543,21 @@ public actor Lato2Runtime: MeshRuntime {
         }
         var request = authorized(URLRequest(url: statusURL), token: token)
         request.timeoutInterval = 30
-        let (data, _): (Data, URLResponse)
+        let (data, response): (Data, URLResponse)
         do {
-            (data, _) = try await RemoteHTTP.data(
+            (data, response) = try await RemoteHTTP.data(
                 for: request, policy: .peerHost(baseURL), credentialOrigin: baseURL
             )
         } catch {
             throw MeshRuntimeError.remoteUnreachable(
                 "Lost the LATO.2 service mid-job: \(error.localizedDescription)"
+            )
+        }
+        // A token revoked or rotated mid-job is final: the node's `{"detail": …}` has no
+        // `status`, and read as "still running" it was polled for the full 30 minutes.
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+            throw MeshRuntimeError.generationFailed(
+                "The LATO.2 service refused the job: \(refusal(data, hadToken: token != nil))"
             )
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {

@@ -91,6 +91,58 @@ struct Lato2CredentialTests {
         }
     }
 
+    /// A token revoked or rotated while the job runs ends the job, in the node's words. A
+    /// JSON refusal has no `status`, and was read as "still running" for 30 minutes; the
+    /// middleware's plain-text one failed as unreadable JSON.
+    @Test func aRefusalWhilePollingEndsTheJobWithTheNodesReason() async throws {
+        let refusals: [CapturingServer.Answer] = [
+            .init(status: 403, body: #"{"detail":"Your client token was revoked."}"#),
+            .init(status: 401, headers: ["Content-Type": "text/plain"],
+                  body: "That bearer token does not match this node's node token."),
+        ]
+        for refusal in refusals {
+            let server = try CapturingServer { request, _ in
+                request.path == "/v1/image-to-mesh" ? .init(body: #"{"job_id":"job-1"}"#) : refusal
+            }
+            defer { server.stop() }
+            let request = try Self.request()
+            defer {
+                try? FileManager.default.removeItem(at: request.image.deletingLastPathComponent())
+            }
+            let runtime = Lato2Runtime(
+                baseURL: URL(string: "http://127.0.0.1:\(server.port)")!, token: Self.token
+            )
+
+            let started = ContinuousClock.now
+            let message = await withTaskGroup(of: String?.self) { group in
+                group.addTask {
+                    do {
+                        for try await _ in try await runtime.generate(request) {}
+                        return "finished"
+                    } catch let MeshRuntimeError.generationFailed(message) {
+                        return message
+                    } catch {
+                        return "\(error)"
+                    }
+                }
+                // Far longer than a refusal takes, far shorter than the 30-minute deadline.
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(20))
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                await runtime.cancel()
+                return first
+            }
+
+            let reason = try #require(message, "still polling after 20 s of refusals")
+            #expect(reason.contains(refusal.status == 403 ? "was revoked" : "does not match"))
+            #expect(ContinuousClock.now - started < .seconds(10))
+            #expect(server.requests.filter { $0.path == "/v1/jobs/job-1" }.count == 1)
+        }
+    }
+
     /// The probe asks the question the lane depends on, not just whether the machine is up.
     @Test func theProbeTellsRefusedFromAnswering() async throws {
         let server = try Self.node()
