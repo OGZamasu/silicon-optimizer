@@ -263,8 +263,9 @@ struct PinnedToolInstallTests {
     }
 
     /// macOS's own 3.9 — the one every one of these used to be installed on — and anything
-    /// else the locks do not cover is refused before a command runs, both for a new
-    /// environment and one an older install left.
+    /// else the locks do not cover is refused before a command runs: as the base of a new
+    /// environment, and over one an older install left when there is no covered Python to
+    /// make it again with.
     @Test func aPythonTheLocksDoNotCoverIsRefused() throws {
         let root = try PinnedInstallTests.scratch("python-refused")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -286,7 +287,7 @@ struct PinnedToolInstallTests {
             let old = root.appendingPathComponent("\(tool)-old")
             try PinnedInstallTests.fakeEnvironment(at: old, version: "3.9.6")
             #expect(throws: PinnedInstall.PlanError.self, "\(tool) over a 3.9 environment") {
-                try plan(Self.homebrew314, old)
+                try plan(URL(fileURLWithPath: "/usr/bin/python3"), old)
             }
             // …and one it does cover decides by its own version, whatever the base is.
             let covered = root.appendingPathComponent("\(tool)-covered")
@@ -298,6 +299,94 @@ struct PinnedToolInstallTests {
         }
         let error = PinnedInstall.PlanError.unsupportedPython(tool: "The voice tools", found: "3.12", supported: PinnedInstall.voicePythons)
         #expect(error.localizedDescription.contains("3.13 or 3.14") && error.localizedDescription.contains("python@3.14"))
+    }
+
+    /// An environment an older install made with a Python no lock covers is the app's own, and
+    /// is made again with a covered interpreter, rather than refused on every install with
+    /// advice — install a newer Python — that nothing would then use. Everything the plan
+    /// keeps inside it comes back: LuxTTS's checkouts are fetched from `git init` up.
+    @Test func anEnvironmentTheLocksDoNotCoverIsMadeAgain() throws {
+        let root = try PinnedInstallTests.scratch("python-remade")
+        defer { try? FileManager.default.removeItem(at: root) }
+        typealias Plan = (URL?, URL) throws -> [PinnedInstall.Command]
+        let plans: [(String, Plan)] = [
+            ("MFLUX", { try MFluxRuntime.installPlan(basePython: $0, locks: Self.lockRoot, environment: $1) }),
+            ("voice", { try VoiceRuntime.toolsInstallPlan(basePython: $0, locks: Self.lockRoot, environment: $1) }),
+            ("LuxTTS", { try VoiceRuntime.luxTTSInstallPlan(basePython: $0, git: Self.git, locks: Self.lockRoot, environment: $1) }),
+            ("tracker", { try TrackerRuntime.installPlan(basePython: $0, locks: Self.lockRoot, environment: $1) }),
+        ]
+        for (tool, plan) in plans {
+            for old in ["3.9.6", "3.15.0"] {
+                let environment = root.appendingPathComponent("\(tool)-\(old)")
+                try PinnedInstallTests.fakeEnvironment(at: environment, version: old)
+                for checkout in ["luxtts", "linacodec"] {
+                    try FileManager.default.createDirectory(
+                        at: environment.appendingPathComponent("\(checkout)/.git"),
+                        withIntermediateDirectories: true
+                    )
+                }
+                let commands = try plan(Self.homebrew314, environment)
+                #expect(commands.first?.executable == Self.homebrew314, "\(tool) over \(old)")
+                #expect(commands.first?.arguments == ["-m", "venv", "--clear", environment.path],
+                        "\(tool) over \(old)")
+                #expect(!Self.installs(commands).isEmpty)
+                #expect(Self.installs(commands).allSatisfy {
+                    $0.arguments.last!.hasSuffix("py3.14.txt") || $0.arguments.contains("--no-index")
+                }, "\(tool) over \(old) installed another Python's lock")
+                if tool == "LuxTTS" {
+                    for checkout in ["luxtts", "linacodec"] {
+                        let path = environment.appendingPathComponent(checkout).path
+                        let initialise = commands.firstIndex { $0.arguments == ["init", "--quiet", path] }
+                        let fetch = commands.firstIndex { $0.arguments.starts(with: ["-C", path, "fetch"]) }
+                        #expect(initialise != nil && fetch != nil && initialise! < fetch!,
+                                "\(checkout) is cleared with the environment and must be made again")
+                    }
+                }
+            }
+        }
+    }
+
+    /// MFLUX and the voice tools share one environment. Making it again for one clears the
+    /// other out of it, so the other goes back in — MFLUX's locks cover every Python the voice
+    /// tools' do, and the voice tools go back only when theirs cover the new one.
+    @Test func remakingTheSharedEnvironmentPutsBackWhatWasInIt() throws {
+        let root = try PinnedInstallTests.scratch("shared-remade")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func locks(_ plan: [PinnedInstall.Command]) -> [String] {
+            Self.installs(plan).map { URL(fileURLWithPath: $0.arguments.last!).lastPathComponent }
+        }
+
+        // MFLUX installed on 3.12, then the voice tools, whose floor is 3.13.
+        let mflux312 = root.appendingPathComponent("mflux-3.12")
+        try PinnedInstallTests.fakeEnvironment(at: mflux312, version: "3.12.9")
+        FileManager.default.createFile(
+            atPath: mflux312.appendingPathComponent("bin/mflux-generate").path, contents: Data(),
+            attributes: [.posixPermissions: 0o755]
+        )
+        let voice = try VoiceRuntime.toolsInstallPlan(
+            basePython: Self.homebrew314, locks: Self.lockRoot, environment: mflux312
+        )
+        #expect(voice.first?.arguments == ["-m", "venv", "--clear", mflux312.path])
+        #expect(locks(voice) == ["mflux-py3.14.txt", "build-py3.14.txt", "voice-py3.14.txt"])
+
+        // The voice tools on macOS's 3.9, from before the locks, then MFLUX.
+        let voice39 = root.appendingPathComponent("voice-3.9")
+        try PinnedInstallTests.fakeEnvironment(at: voice39, version: "3.9.6")
+        try FileManager.default.createDirectory(
+            at: voice39.appendingPathComponent("lib/python3.9/site-packages/mlx_audio"),
+            withIntermediateDirectories: true
+        )
+        let mflux = try MFluxRuntime.installPlan(
+            basePython: Self.homebrew314, locks: Self.lockRoot, environment: voice39
+        )
+        #expect(mflux.first?.arguments == ["-m", "venv", "--clear", voice39.path])
+        #expect(locks(mflux) == ["mflux-py3.14.txt", "build-py3.14.txt", "voice-py3.14.txt"])
+        // …and made with 3.12, which the voice locks do not cover, only MFLUX goes in.
+        let on312 = try MFluxRuntime.installPlan(
+            basePython: URL(fileURLWithPath: "/opt/homebrew/bin/python3.12"),
+            locks: Self.lockRoot, environment: voice39
+        )
+        #expect(locks(on312) == ["mflux-py3.12.txt"])
     }
 
     @Test func theNewestCoveredInterpreterIsTheBase() {

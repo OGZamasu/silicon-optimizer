@@ -43,22 +43,38 @@ public actor MFluxRuntime: ImageRuntime {
 
     /// The install, as commands: the shared environment (made with the newest Python the
     /// locks cover, so the voice tools fit in it later) and MFLUX's hash-locked packages,
-    /// wheels only. An environment someone already made is kept, and decides the lock.
+    /// wheels only. An environment someone already made is kept, and decides the lock — unless
+    /// no lock covers it, and then it is made again, and the voice tools that were in it go
+    /// back in too when their locks cover the new Python.
     public nonisolated static func installPlan(
         basePython: URL?, locks: URL = PinnedInstall.defaultLockRoot(),
         environment: URL = VoiceRuntime.environment
     ) throws -> [PinnedInstall.Command] {
+        let voiceToolsCleared = PinnedInstall.needsRemaking(
+            environment, supported: PinnedInstall.mfluxPythons
+        ) && VoiceRuntime.hasVoiceTools(in: environment)
         let (python, version, commands) = try PinnedInstall.environment(
             environment, tool: "MFLUX", supported: PinnedInstall.mfluxPythons,
             basePython: basePython
         )
-        return commands + [PinnedInstall.pipInstall(
+        var plan = commands + [packageInstall(python: python, version: version, locks: locks)]
+        if voiceToolsCleared, PinnedInstall.voicePythons.contains(version) {
+            plan += VoiceRuntime.toolsInstall(python: python, version: version, locks: locks)
+        }
+        return plan
+    }
+
+    /// MFLUX's hash-locked packages, wheels only, into the shared environment at `python`.
+    nonisolated static func packageInstall(
+        python: URL, version: String, locks: URL
+    ) -> PinnedInstall.Command {
+        PinnedInstall.pipInstall(
             python: python,
             lock: PinnedInstall.lock(
                 "mflux", directory: PinnedInstall.mlxEnvironmentLocks, python: version, in: locks
             ),
             label: "Installing MFLUX", onlyBinary: true
-        )]
+        )
     }
 
     /// Environment for the mflux child process.

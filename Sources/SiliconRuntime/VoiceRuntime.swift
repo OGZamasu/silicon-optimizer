@@ -166,16 +166,35 @@ public actor VoiceRuntime {
     /// source-only dependency of num2words) builds with the locked setuptools instead of one
     /// an isolated build would download, then the hash-locked set — which includes the spaCy
     /// model by its release URL and digest.
+    ///
+    /// An environment no voice lock covers — MFLUX's on 3.12, say — is made again, and MFLUX,
+    /// if it was in it, goes back in first: its locks cover every Python the voice tools' do.
     public nonisolated static func toolsInstallPlan(
         basePython: URL?, locks: URL = PinnedInstall.defaultLockRoot(),
         environment: URL = VoiceRuntime.environment
     ) throws -> [PinnedInstall.Command] {
+        let mfluxCleared = PinnedInstall.needsRemaking(
+            environment, supported: PinnedInstall.voicePythons
+        ) && FileManager.default.isExecutableFile(
+            atPath: environment.appendingPathComponent("bin/mflux-generate").path
+        )
         let (python, version, commands) = try PinnedInstall.environment(
             environment, tool: "The voice tools", supported: PinnedInstall.voicePythons,
             basePython: basePython
         )
+        var plan = commands
+        if mfluxCleared {
+            plan.append(MFluxRuntime.packageInstall(python: python, version: version, locks: locks))
+        }
+        return plan + toolsInstall(python: python, version: version, locks: locks)
+    }
+
+    /// The voice tools' build tools, then their hash-locked set, into the shared environment.
+    nonisolated static func toolsInstall(
+        python: URL, version: String, locks: URL
+    ) -> [PinnedInstall.Command] {
         let directory = PinnedInstall.mlxEnvironmentLocks
-        return commands + [
+        return [
             PinnedInstall.pipInstall(
                 python: python,
                 lock: PinnedInstall.lock("build", directory: directory, python: version, in: locks),
@@ -269,7 +288,9 @@ public actor VoiceRuntime {
         }
     }
 
-    private nonisolated static var hasMLXAudio: Bool {
+    private nonisolated static var hasMLXAudio: Bool { hasMLXAudio(in: environment) }
+
+    private nonisolated static func hasMLXAudio(in environment: URL) -> Bool {
         let lib = environment.appendingPathComponent("lib")
         guard let versions = try? FileManager.default.contentsOfDirectory(atPath: lib.path)
         else { return false }
@@ -278,6 +299,13 @@ public actor VoiceRuntime {
                 atPath: lib.appendingPathComponent("\(version)/site-packages/mlx_audio").path
             )
         }
+    }
+
+    /// Whether the voice tools were ever installed into `environment`.
+    nonisolated static func hasVoiceTools(in environment: URL) -> Bool {
+        hasMLXAudio(in: environment) || FileManager.default.isExecutableFile(
+            atPath: environment.appendingPathComponent("bin/mlx-speech").path
+        )
     }
 
     // MARK: - Speaking
