@@ -43,8 +43,8 @@ enum DecisionLanesBootstrap {
         await router.register(OneTokenLane(decider: { [weak model] in
             await MainActor.run { model?.oneTokenDecider }
         }))
-        await router.useLayaForm { feature, state, questions in
-            LayaForms.form(feature, state: state, questions: questions)
+        await router.useLayaForm { feature, state, questions, keeping in
+            LayaForms.form(feature, state: state, questions: questions, keeping: keeping)
         }
     }
 

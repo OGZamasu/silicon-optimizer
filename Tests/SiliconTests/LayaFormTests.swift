@@ -252,6 +252,34 @@ struct LayaFormTests {
         }
     }
 
+    /// With nine models on this Mac, taking the shortlist from the top filled the choice with
+    /// them, and Laya could never send a request to the swarm or a provider — not even the
+    /// hard ones the swarm is there for. It takes a model from each place in turn, and always
+    /// the owner's default, which the policy falls back on.
+    @Test func routingAsksAboutEveryPlaceAndTheDefault() throws {
+        let candidates = routingCandidates(locals: 9, nodes: 4, clouds: 2)
+        let request = RoutingRequest(
+            message: harnessTurn, turns: 3, imagesAttached: false,
+            systemMentionsCodeOrTools: true, messageWords: 70
+        )
+        // The default is the last of this Mac's models in list order: the one a cut from the
+        // top of this Mac's share would drop first.
+        let pinned = try #require(candidates.last { $0.placement.isLocal })
+        let form = LayaForms.form(
+            .routing, state: RoutingQuestions.state(request: request, candidates: candidates),
+            questions: RoutingQuestions.questions(for: candidates), keeping: [pinned.label]
+        )
+        let offered = Set(try #require(form.questions["best_model"]?.criteria?.objectValue).keys)
+        #expect(offered.count < candidates.count, "the checkpoint cannot name all fifteen")
+        let places = Set(candidates.filter { offered.contains($0.label) }.map(\.placement.rank))
+        #expect(places == [0, 1, 2], "this Mac, the swarm and a provider are all asked about")
+        #expect(offered.contains(pinned.label), "the owner's default is always an option")
+        // The list in the state names exactly the options asked about.
+        let listed = form.state.objectValue?["candidates"]?.arrayValue?.compactMap(\.stringValue)
+        #expect(Set(listed ?? []) == offered)
+        #expect(LayaBudget.fits(state: form.state, questions: form.questions))
+    }
+
     // MARK: Media routing
 
     @Test func mediaRoutingFitsAndKeepsThePromptWhole() {
@@ -506,7 +534,7 @@ struct LayaFormRoutingTests {
         let laya = Capturing(.laya), oneToken = Capturing(.oneToken)
         await router.register(laya)
         await router.register(oneToken)
-        await router.useLayaForm { _, _, questions in
+        await router.useLayaForm { _, _, questions, _ in
             (.string("the form"), questions)
         }
         let questions = ControlAPI.DecideRequest.fixture().questions
@@ -520,6 +548,24 @@ struct LayaFormRoutingTests {
 
     /// A form with nothing left to ask is a refusal of this request, and the next lane
     /// answers — the Laya lane stays ready for the next one.
+    /// What a feature asks to keep reaches the form, and only the form.
+    @Test func whatAFeatureKeepsReachesTheForm() async throws {
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(key: nil)
+        let router = DecisionRouter(service: harness.service)
+        let laya = Capturing(.laya)
+        await router.register(laya)
+        await router.useLayaForm { _, _, questions, keeping in
+            (.string(keeping.sorted().joined(separator: ",")), questions)
+        }
+        _ = try await router.decide(
+            .routing, state: .string("s"), questions: ControlAPI.DecideRequest.fixture().questions,
+            keeping: ["the default"]
+        )
+        #expect(await laya.asked.map(\.state) == [.string("the default")])
+    }
+
     @Test func aFormWithNothingLeftToAskFallsThrough() async throws {
         let harness = JevHarness()
         defer { harness.clean() }
@@ -528,7 +574,7 @@ struct LayaFormRoutingTests {
         let laya = Capturing(.laya), oneToken = Capturing(.oneToken)
         await router.register(laya)
         await router.register(oneToken)
-        await router.useLayaForm { _, state, _ in (state, [:]) }
+        await router.useLayaForm { _, state, _, _ in (state, [:]) }
         let questions = ControlAPI.DecideRequest.fixture().questions
 
         let answer = try await router.decide(.routing, state: .string("s"), questions: questions)

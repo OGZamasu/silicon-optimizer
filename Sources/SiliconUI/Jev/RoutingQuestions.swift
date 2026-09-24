@@ -891,15 +891,21 @@ public enum RoutingQuestions: JevQuestionSet {
     /// Routing without its choice over the models would be seven judgments and no decision.
     ///
     /// `using` is the seam a test points at a loopback server instead of TypeSafe.
+    ///
+    /// `defaultModel` is kept in the choice when a lane has to ask about fewer options than
+    /// there are — a Laya checkpoint can name about eight — because a question that cannot
+    /// answer "the one you chose" is worse than a shorter one.
     public static func ask(
         request: RoutingRequest, candidates: [RoutingCandidate],
-        using service: JevService = .shared
+        defaultModel: String? = nil, using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await DecisionRouter.router(for: service).decide(
+        let pinned = candidates.first { $0.id == defaultModel }.map { Set([$0.label]) } ?? []
+        return try await DecisionRouter.router(for: service).decide(
             feature,
             state: state(request: request, candidates: candidates),
             questions: questions(for: candidates),
-            cacheKey: cacheKey(request: request, candidates: candidates)
+            cacheKey: cacheKey(request: request, candidates: candidates),
+            keeping: pinned
         )
     }
 }

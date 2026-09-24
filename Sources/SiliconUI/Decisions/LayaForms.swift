@@ -25,7 +25,8 @@ enum LayaForms {
     typealias Questions = [String: ControlAPI.SystemOneQuestion]
 
     static func form(
-        _ feature: JevFeature, state: JSONContent, questions: Questions
+        _ feature: JevFeature, state: JSONContent, questions: Questions,
+        keeping: Set<String> = []
     ) -> (state: JSONContent, questions: Questions) {
         switch feature {
         case .decideTool:
@@ -37,7 +38,9 @@ enum LayaForms {
             // held to the checkpoint's budget, the same as every ability's.
             return (state, LayaBudget.compact(questions))
         default:
-            let questions = LayaBudget.compact(ranked(feature, state: state, questions: questions))
+            let questions = LayaBudget.compact(
+                ranked(feature, state: state, questions: questions, keeping: keeping)
+            )
             let (structure, subject) = trimmed(feature, state: state, questions: questions)
             return (
                 LayaBudget.shortened(structure, toFit: questions, protecting: subject),
@@ -46,11 +49,18 @@ enum LayaForms {
         }
     }
 
-    /// Where the choice is over a ranked list — routing's shortlist, this Mac first; the
-    /// recommendation's, best first — the checkpoint is asked about as much of the head of
-    /// it as it can name, rather than the question being dropped for the tail.
+    /// Where the choice is over a list the checkpoint cannot name in full, which part of it
+    /// is asked about rather than the question being dropped for the tail.
+    ///
+    /// `keeping` goes in first — the owner's default model, which a routing question must be
+    /// able to answer with. Then a recommendation takes its list in rank order, best first.
+    /// Routing's list is ordered by where a model runs — this Mac, the swarm, providers — so
+    /// taking it from the top would fill the budget with this Mac's models on any Mac with
+    /// about eight, and Laya could never send a request to the swarm or a provider however
+    /// hard it was. So it is taken a model from each place in turn, each place in list order.
     static func ranked(
-        _ feature: JevFeature, state: JSONContent, questions: Questions
+        _ feature: JevFeature, state: JSONContent, questions: Questions,
+        keeping: Set<String> = []
     ) -> Questions {
         let (choice, list, key): (String, String, String)
         switch feature {
@@ -59,11 +69,39 @@ enum LayaForms {
         default: return questions
         }
         guard let question = questions[choice],
-              let order = labels(state.objectValue?[list], key: key)?.arrayValue
+              let items = state.objectValue?[list]?.arrayValue
         else { return questions }
+        let names = items.compactMap { $0.objectValue?[key]?.stringValue }
+        var order = names
+        if feature == .routing {
+            var places: [String] = []
+            var byPlace: [String: [String]] = [:]
+            for item in items {
+                guard let name = item.objectValue?[key]?.stringValue else { continue }
+                let place = self.place(item.objectValue?["runs_on"]?.stringValue)
+                if byPlace[place] == nil { places.append(place) }
+                byPlace[place, default: []].append(name)
+            }
+            order = []
+            for turn in 0..<(byPlace.values.map(\.count).max() ?? 0) {
+                for place in places where turn < byPlace[place]!.count {
+                    order.append(byPlace[place]![turn])
+                }
+            }
+        }
+        order = names.filter(keeping.contains) + order.filter { !keeping.contains($0) }
         var narrowed = questions
-        narrowed[choice] = LayaBudget.keepingFirst(question, in: order.compactMap(\.stringValue))
+        narrowed[choice] = LayaBudget.keepingFirst(question, in: order)
         return narrowed
+    }
+
+    /// This Mac, the swarm, or a provider, from a routing candidate's `runs_on`.
+    private static func place(_ runsOn: String?) -> String {
+        switch runsOn {
+        case RoutingCandidate.Placement.thisMac.describedAs: "this Mac"
+        case RoutingCandidate.Placement.node("").describedAs: "swarm"
+        default: "provider"
+        }
     }
 
     /// The state with what repeats the questions taken out, and the keys that are the

@@ -37,8 +37,12 @@ public actor DecisionRouter {
     /// everything else gets the request as the feature wrote it. The forms are the
     /// features' business, so the app supplies them; with none, every lane gets the request
     /// unchanged and the sidecar refuses what would be cut.
+    ///
+    /// `keeping` names options a form must not leave out of a choice it narrows — the
+    /// owner's default model, say. It means nothing to the other lanes, which are asked
+    /// about every option.
     public typealias LayaForm = @Sendable (
-        JevFeature, JSONContent, [String: ControlAPI.SystemOneQuestion]
+        JevFeature, JSONContent, [String: ControlAPI.SystemOneQuestion], Set<String>
     ) -> (state: JSONContent, questions: [String: ControlAPI.SystemOneQuestion])
     private var layaForm: LayaForm?
 
@@ -188,7 +192,8 @@ public actor DecisionRouter {
         state: JSONContent,
         questions: [String: ControlAPI.SystemOneQuestion],
         cacheKey: String? = nil,
-        deadline: TimeInterval? = nil
+        deadline: TimeInterval? = nil,
+        keeping: Set<String> = []
     ) async throws -> ControlAPI.DecideResponse {
         let override = await service.settings().laneOverride(feature)
         let available = await availability(for: feature)
@@ -229,7 +234,7 @@ public actor DecisionRouter {
             do {
                 let response = try await run(
                     id, feature: feature, state: state, questions: questions,
-                    cacheKey: cacheKey, deadline: deadline
+                    cacheKey: cacheKey, deadline: deadline, keeping: keeping
                 )
                 note(feature: feature, response: response, lane: id, questions: questions.count)
                 return response
@@ -266,7 +271,7 @@ public actor DecisionRouter {
     private func run(
         _ id: DecisionLaneID, feature: JevFeature, state: JSONContent,
         questions: [String: ControlAPI.SystemOneQuestion],
-        cacheKey: String?, deadline: TimeInterval?
+        cacheKey: String?, deadline: TimeInterval?, keeping: Set<String> = []
     ) async throws -> ControlAPI.DecideResponse {
         if id == .jev {
             // Through the service, always: this is the only path to a paid call in the
@@ -279,7 +284,7 @@ public actor DecisionRouter {
         guard let lane = lanes[id] else { throw DecisionLaneError.nothingAvailable(feature) }
         var state = state, questions = questions
         if id == .laya || id == .node, let layaForm {
-            let fitted = layaForm(feature, state, questions)
+            let fitted = layaForm(feature, state, questions, keeping)
             // A form with nothing left to ask is a refusal of this request, like any other
             // that is too long for the checkpoint — not a lane that has failed.
             guard !fitted.questions.isEmpty else {
