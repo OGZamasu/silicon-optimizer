@@ -597,15 +597,7 @@ enum Tools {
             return describeRecommendation(try await client.get(path) as ControlAPI.CatalogModel)
 
         case "list_models":
-            var path = "/catalog?onlyRunnable="
-                + String(arguments["only_runnable"]?.boolValue ?? true)
-            if let category = arguments["category"]?.stringValue,
-               let escaped = category.addingPercentEncoding(
-                   withAllowedCharacters: .urlQueryAllowed
-               ) {
-                path += "&category=\(escaped)"
-            }
-            let models: [ControlAPI.CatalogModel] = try await client.get(path)
+            let models: [ControlAPI.CatalogModel] = try await client.get(catalogPath(arguments))
             return describeCatalog(models)
 
         case "list_installed_models":
@@ -1400,6 +1392,22 @@ enum Tools {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// `GET /catalog` for `list_models`. The category is a value, so it is escaped as one:
+    /// "Small & Fast" is a real category, and escaped for a whole query string it arrived
+    /// as `category=Small ` plus a parameter named ` Fast` — the filter silently dropped
+    /// and the whole catalog returned.
+    static func catalogPath(_ arguments: [String: JSONValue]) -> String {
+        var path = "/catalog?onlyRunnable="
+            + String(arguments["only_runnable"]?.boolValue ?? true)
+        if let category = arguments["category"]?.stringValue,
+           let escaped = category.addingPercentEncoding(
+               withAllowedCharacters: queryValueCharacters
+           ) {
+            path += "&category=\(escaped)"
+        }
+        return path
     }
 
     /// Everything a query-string value may carry unescaped.

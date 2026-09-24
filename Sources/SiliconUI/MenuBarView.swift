@@ -302,9 +302,9 @@ struct MenuBarView: View {
                         .monospacedDigit()
                         .foregroundStyle(.tertiary)
                 }
-                if let llm = peer.llm, switchableModels(llm).count > 1 {
+                if let llm = peer.llm, llm.switchableModels.count > 1 {
                     Menu("Switch model") {
-                        ForEach(switchableModels(llm), id: \.self) { candidate in
+                        ForEach(llm.switchableModels, id: \.self) { candidate in
                             Button {
                                 Task {
                                     await model.setPeerLLM(peer, running: true, model: candidate)
@@ -322,16 +322,6 @@ struct MenuBarView: View {
                 }
             }
         }
-    }
-
-    /// What the peer could serve: the advertised list when the node offers one, else just
-    /// what is loaded — a one-model node gets a status line, not a one-item menu.
-    private func switchableModels(_ llm: AppModel.PeerLLM) -> [String] {
-        var models = llm.availableModels
-        if let loaded = llm.model, !models.contains(loaded) {
-            models.insert(loaded, at: 0)
-        }
-        return models
     }
 
     private func swarmDetail(_ peer: AppModel.PeerStatus) -> String? {

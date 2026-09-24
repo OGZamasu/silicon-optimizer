@@ -264,21 +264,70 @@ public actor Lato2Runtime: MeshRuntime {
     private static let maximumJobBytes: Int64 = 768 * 1_024 * 1_024
     public private(set) var state: RuntimeState = .idle
     private let baseURL: URL
+    /// The bearer this Mac holds for the machine at `baseURL` — the same credential every
+    /// other node lane sends. The service is a node route now, and a node refuses every
+    /// off-box `/v1/` request that carries none.
+    private let token: String?
     private var cancelled = false
 
-    public init(baseURL: URL) {
+    public init(baseURL: URL, token: String? = nil) {
         self.baseURL = baseURL
+        self.token = token
     }
 
-    /// True when the service answers its health endpoint.
-    public static func probe(baseURL: URL) async -> Bool {
-        var request = URLRequest(url: baseURL.appendingPathComponent("health"))
-        request.timeoutInterval = 4
+    /// What the probe found. `/health` is open on a node, so answering it proves the
+    /// machine is up and nothing about whether it will take a job from this Mac.
+    public enum Reachability: Sendable, Equatable {
+        case answering
+        /// Up, and refusing this Mac's credential (or the lack of one), in its own words.
+        case refused(String)
+        case unreachable
+    }
+
+    /// Asks `/health` whether the service is up, then asks an authenticated route whether
+    /// it would take a job — the question the lane actually depends on.
+    public static func probe(baseURL: URL, token: String?) async -> Reachability {
+        var health = URLRequest(url: baseURL.appendingPathComponent("health"))
+        health.timeoutInterval = 4
         guard let (_, response) = try? await RemoteHTTP.data(
-                for: request, policy: .peerHost(baseURL), credentialOrigin: baseURL
+                for: health, policy: .peerHost(baseURL), credentialOrigin: baseURL
               ),
-              let http = response as? HTTPURLResponse else { return false }
-        return (200..<300).contains(http.statusCode)
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode)
+        else { return .unreachable }
+
+        // Any answer but a refusal will do: a standalone LATO.2 service without this
+        // route says 404, which is not a "no".
+        var capabilities = authorized(
+            URLRequest(url: baseURL.appendingPathComponent("v1/capabilities")), token: token
+        )
+        capabilities.timeoutInterval = 4
+        guard let (body, answer) = try? await RemoteHTTP.data(
+                for: capabilities, policy: .peerHost(baseURL), credentialOrigin: baseURL
+              ),
+              let http = answer as? HTTPURLResponse
+        else { return .unreachable }
+        guard http.statusCode == 401 || http.statusCode == 403 else { return .answering }
+        return .refused(refusal(body, hadToken: token != nil))
+    }
+
+    private static func authorized(_ request: URLRequest, token: String?) -> URLRequest {
+        var request = request
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        return request
+    }
+
+    /// The node's own sentence, and — when this Mac had nothing to send — where the
+    /// credential comes from, because "requires a bearer token" names no place to get one.
+    private static func refusal(_ body: Data, hadToken: Bool) -> String {
+        var message = String(decoding: body.prefix(300), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !hadToken {
+            message += (message.isEmpty ? "" : " ")
+                + "No credential was sent: this Mac only sends one to a machine in its "
+                + "swarm, so use the address the swarm has for that machine."
+        }
+        return message
     }
 
     public func generate(_ request: MeshRequest) async throws
@@ -288,6 +337,7 @@ public actor Lato2Runtime: MeshRuntime {
         state = .starting(stage: "Contacting the LATO.2 service…")
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: MeshEvent.self)
         let baseURL = self.baseURL
+        let token = self.token
         let started = Date()
 
         let worker = Task {
@@ -297,7 +347,7 @@ public actor Lato2Runtime: MeshRuntime {
                     image: request.image,
                     vertexBudget: request.configuration.vertexBudget,
                     seed: request.configuration.seed,
-                    baseURL: baseURL
+                    baseURL: baseURL, token: token
                 )
                 continuation.yield(.stage("Rendering on the LATO.2 machine…"))
 
@@ -310,7 +360,9 @@ public actor Lato2Runtime: MeshRuntime {
                             "The LATO.2 job did not finish within 30 minutes."
                         )
                     }
-                    let job = try await Self.jobStatus(jobID: jobID, baseURL: baseURL)
+                    let job = try await Self.jobStatus(
+                        jobID: jobID, baseURL: baseURL, token: token
+                    )
                     if let progress = job.progress {
                         continuation.yield(.progress(progress))
                     }
@@ -349,6 +401,7 @@ public actor Lato2Runtime: MeshRuntime {
                         from: remote,
                         policy: .peerHost(baseURL),
                         credentialOrigin: baseURL,
+                        bearerToken: token,
                         to: local,
                         maximumBytes: Self.maximumArtifactBytes,
                         budget: budget,
@@ -392,7 +445,7 @@ public actor Lato2Runtime: MeshRuntime {
     // MARK: Wire helpers
 
     private static func submit(
-        image: URL, vertexBudget: Int, seed: Int?, baseURL: URL
+        image: URL, vertexBudget: Int, seed: Int?, baseURL: URL, token: String?
     ) async throws -> String {
         let imageData: Data
         do {
@@ -422,7 +475,9 @@ public actor Lato2Runtime: MeshRuntime {
         body.append(imageData)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
-        var request = URLRequest(url: baseURL.appendingPathComponent("v1/image-to-mesh"))
+        var request = authorized(
+            URLRequest(url: baseURL.appendingPathComponent("v1/image-to-mesh")), token: token
+        )
         request.httpMethod = "POST"
         request.setValue(
             "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type"
@@ -443,7 +498,10 @@ public actor Lato2Runtime: MeshRuntime {
         }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode)
         else {
-            let bodyText = String(decoding: data.prefix(300), as: UTF8.self)
+            let status = (response as? HTTPURLResponse)?.statusCode
+            let bodyText = status == 401 || status == 403
+                ? refusal(data, hadToken: token != nil)
+                : String(decoding: data.prefix(300), as: UTF8.self)
             throw MeshRuntimeError.generationFailed(
                 "The LATO.2 service refused the job: \(bodyText)"
             )
@@ -475,22 +533,31 @@ public actor Lato2Runtime: MeshRuntime {
         var reported: NodeJobProgress?
     }
 
-    private static func jobStatus(jobID: String, baseURL: URL) async throws -> JobSnapshot {
+    private static func jobStatus(
+        jobID: String, baseURL: URL, token: String?
+    ) async throws -> JobSnapshot {
         guard let statusURL = RemotePathIdentifier.appending(
             jobID, to: baseURL.appendingPathComponent("v1/jobs")
         ) else {
             throw MeshRuntimeError.generationFailed("The LATO.2 job id is invalid.")
         }
-        var request = URLRequest(url: statusURL)
+        var request = authorized(URLRequest(url: statusURL), token: token)
         request.timeoutInterval = 30
-        let (data, _): (Data, URLResponse)
+        let (data, response): (Data, URLResponse)
         do {
-            (data, _) = try await RemoteHTTP.data(
+            (data, response) = try await RemoteHTTP.data(
                 for: request, policy: .peerHost(baseURL), credentialOrigin: baseURL
             )
         } catch {
             throw MeshRuntimeError.remoteUnreachable(
                 "Lost the LATO.2 service mid-job: \(error.localizedDescription)"
+            )
+        }
+        // A token revoked or rotated mid-job is final: the node's `{"detail": …}` has no
+        // `status`, and read as "still running" it was polled for the full 30 minutes.
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+            throw MeshRuntimeError.generationFailed(
+                "The LATO.2 service refused the job: \(refusal(data, hadToken: token != nil))"
             )
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {

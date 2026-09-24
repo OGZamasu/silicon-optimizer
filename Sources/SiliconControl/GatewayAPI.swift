@@ -28,6 +28,33 @@ public enum GatewayAPI {
         "node/\(peerSlug)/\(model)"
     }
 
+    /// The longest model name a peer may put into a gateway id. Real names — HF repo ids,
+    /// GGUF file names, a node's served id — are a fraction of this.
+    public static let maximumPeerModelNameBytes = 200
+
+    /// Whether a model name a swarm peer reported may become a gateway id at all.
+    ///
+    /// The name is the peer's text, not this app's, and a gateway id does not stay in the
+    /// gateway: it is the default written into Codex's config.toml, a harness's saved
+    /// choice, and what a phone is offered — picked automatically when it is the first
+    /// serving model. Every file it lands in escapes it, and this is the second wall: one
+    /// line, bounded, no quote, no backslash, nothing invisible. Every real model name
+    /// fits; nothing that could end a string in one of those files does.
+    public static func isAcceptablePeerModelName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= maximumPeerModelNameBytes,
+              name.trimmingCharacters(in: .whitespaces) == name
+        else { return false }
+        return name.unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator,
+                 .surrogate, .privateUse, .unassigned:
+                return false
+            default:
+                return scalar != "\"" && scalar != "\\"
+            }
+        }
+    }
+
     public static func modelID(cloudProvider: String, model: String) -> String {
         "cloud/\(cloudProvider)/\(model)"
     }
