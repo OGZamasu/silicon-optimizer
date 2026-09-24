@@ -158,12 +158,14 @@ extension AppModel {
     /// pinned revision*, for exactly the same reason: "aac6fef/laya-mlx" at one commit is
     /// not a promise about the next, and floors measured against one must not be applied to
     /// the other.
-    func calibrationModel(for lane: DecisionLaneID) async -> CalibrationQuestions.LoadedModel? {
+    func calibrationModel(
+        for lane: DecisionLaneID, using service: JevService = .shared
+    ) async -> CalibrationQuestions.LoadedModel? {
         switch lane {
         case .oneToken:
             return calibrationModel
         case .laya:
-            let checkpoint = await JevService.shared.settings().layaCheckpoint
+            let checkpoint = await service.settings().layaCheckpoint
             return .init(
                 id: "\(checkpoint.repository)@\(checkpoint.revision)",
                 sizeBytes: checkpoint.downloadBytes, installedAt: nil
@@ -185,14 +187,35 @@ extension AppModel {
         await calibration(for: .oneToken)
     }
 
+    /// `GET /jev/calibration?lane=…` — one lane's last run.
+    ///
+    /// Answered here rather than left to `ControlHost`'s default, which knows only the
+    /// one-token lane: that default is for hosts with no lanes of their own, and standing in
+    /// for this Mac's it turned every `?lane=laya` and `?lane=node` into a 404.
+    public func decisionCalibration(lane: String?) async -> ControlAPI.JevCalibration? {
+        await decisionCalibration(lane: lane, using: .shared)
+    }
+
+    func decisionCalibration(
+        lane: String?, using service: JevService
+    ) async -> ControlAPI.JevCalibration? {
+        // No lane, or `local`, is the one-token lane — the route as it always answered.
+        // Jev is the reference a calibration measures against, never a lane with one.
+        guard let id = lane.map({ DecisionLaneID.named($0) }) ?? .oneToken, id != .jev
+        else { return nil }
+        return await calibration(for: id, using: service)
+    }
+
     /// One lane's last calibration, with the context only this Mac can fill in.
-    public func calibration(for lane: DecisionLaneID) async -> ControlAPI.JevCalibration? {
+    public func calibration(
+        for lane: DecisionLaneID, using service: JevService = .shared
+    ) async -> ControlAPI.JevCalibration? {
         await JevBootstrap.ready()
-        let url = await JevService.shared.calibrationURL(for: lane)
+        let url = await service.calibrationURL(for: lane)
         guard var result = await LocalCalibrationStore.shared.result(at: url)
         else { return nil }
-        let model = await calibrationModel(for: lane)
-        let settings = await JevService.shared.settings().cascadeFloors
+        let model = await calibrationModel(for: lane, using: service)
+        let settings = await service.settings().cascadeFloors
         let applies = result.measured(
             modelID: model?.id, sizeBytes: model?.sizeBytes, installedAt: model?.installedAt
         )
