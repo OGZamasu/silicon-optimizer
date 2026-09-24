@@ -40,19 +40,24 @@ public struct LayaLane: DecisionLane {
         try request.validate()
         let checkpoint = await checkpoint()
         let started = Date()
+        var used: LayaSidecar?
         do {
-            return try await ask(request, checkpoint: checkpoint, started: started)
+            let sidecar = try await runtime.sidecar(for: checkpoint)
+            used = sidecar
+            return try await ask(request, sidecar: sidecar, checkpoint: checkpoint, started: started)
         } catch let error as LayaSidecarError where error.deservesRestart {
-            // One restart, then the truth.
-            await runtime.unload()
-            return try await ask(request, checkpoint: checkpoint, started: started)
+            // One restart, then the truth — of the sidecar that failed, and only if the
+            // runtime still holds it: another decision's retry may already have replaced it.
+            if let used { await runtime.unload(ifStill: used) }
+            let sidecar = try await runtime.sidecar(for: checkpoint)
+            return try await ask(request, sidecar: sidecar, checkpoint: checkpoint, started: started)
         }
     }
 
     private func ask(
-        _ request: ControlAPI.DecideRequest, checkpoint: LayaCheckpoint, started: Date
+        _ request: ControlAPI.DecideRequest, sidecar: LayaSidecar,
+        checkpoint: LayaCheckpoint, started: Date
     ) async throws -> ControlAPI.DecideResponse {
-        let sidecar = try await runtime.sidecar(for: checkpoint)
         let response = try await sidecar.decide(
             state: LayaWire.state(request.state),
             questions: LayaWire.questions(request.questions)

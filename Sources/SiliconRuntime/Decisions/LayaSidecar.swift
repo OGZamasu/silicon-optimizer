@@ -342,6 +342,8 @@ public actor LayaSidecar {
     /// Set while a stop is deliberate, so a clean exit on the way out is not reported as a
     /// death to whoever is still waiting.
     private var stopping = false
+    /// Set once the runtime has let this sidecar go. See `retire()`.
+    private var retired = false
 
     /// Whether a write-then-read round trip is in flight, and who is queued for the next
     /// one.
@@ -392,6 +394,11 @@ public actor LayaSidecar {
     /// is the slow call and everything after it is milliseconds.
     @discardableResult
     public func start() async throws -> Ready {
+        // Restartable, so the lane's one retry goes back through the runtime — which hands
+        // out whichever sidecar it holds now — rather than this one reloading itself.
+        guard !retired else {
+            throw LayaSidecarError.died(status: nil, detail: "it was replaced")
+        }
         if let loaded, isRunning { return loaded }
         await stop()
 
@@ -462,6 +469,19 @@ public actor LayaSidecar {
             await stop()
             throw error
         }
+    }
+
+    /// Stops it for good: the runtime has let it go.
+    ///
+    /// A lane keeps the sidecar it was handed for the length of a request, and `decide`
+    /// starts the process when it is not up. So a sidecar the runtime had already unloaded —
+    /// a checkpoint switch, Laya switched off, an install, another lane's retry after a
+    /// death — used to come back to life under a lane still holding it: a gigabyte in a
+    /// process the runtime no longer referenced, never idle-unloaded, alive until quit. A
+    /// retired sidecar refuses instead, with an error the lane retries through the runtime.
+    public func retire() async {
+        retired = true
+        await stop()
     }
 
     /// Asks it to exit, waits briefly, then insists.

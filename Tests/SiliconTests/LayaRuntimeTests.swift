@@ -576,6 +576,84 @@ struct LayaRuntimeResidencyTests {
         #expect(await runtime.isLoaded == false)
         #expect(starts(fake) == 1)
     }
+
+    /// A lane keeps the sidecar it was handed for the whole request. An unload landing in
+    /// between — a checkpoint switch, Laya switched off, an install — used to leave that
+    /// sidecar free to start a process of its own when the request reached it: a gigabyte
+    /// the runtime no longer referenced, never idle-unloaded, alive until quit.
+    @Test func aSidecarHeldAcrossAnUnloadDoesNotStartAProcessOfItsOwn() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+        let held = try await runtime.sidecar(for: .english)
+        await runtime.unload()
+
+        do {
+            _ = try await held.decide(
+                state: "x", questions: ["q": ["type": "noul", "instructions": "Is this true?"]]
+            )
+            Issue.record("a sidecar the runtime had let go answered, from a process of its own")
+        } catch let error as LayaSidecarError {
+            // The one kind of failure the lane retries — through the runtime.
+            #expect(error.deservesRestart)
+        }
+        #expect(await held.isRunning == false)
+        #expect(await runtime.isLoaded == false)
+        #expect(starts(fake) == 1, "nothing started behind the runtime's back")
+    }
+
+    /// No owner action at all: two decisions share a sidecar that dies on its first request,
+    /// and each lane takes its one retry. The first retry replaced the dead sidecar through
+    /// the runtime; the second decision, queued on the dead one, restarted it itself — and
+    /// its retry's unconditional unload could stop the healthy replacement the first was
+    /// using. Both decisions still succeeded, so nothing looked wrong: the only sign was a
+    /// second Laya process in Activity Monitor, in 11 of 12 runs.
+    @Test func concurrentRetriesAfterADeathLeaveOneProcess() async throws {
+        for _ in 0..<6 {
+            let fake = try FakeSidecar("slowStart")
+            defer { fake.clean() }
+            // Every start logs its pid, and the first process dies on its first request.
+            let source = FakeSidecar.source("slowStart")
+                .replacingOccurrences(
+                    of: "f.write(\"1\\n\")", with: "f.write(str(os.getpid()) + \"\\n\")"
+                )
+                .replacingOccurrences(
+                    of: "if behaviour == \"dieOnRequest\":",
+                    with: """
+                    marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "died-once")
+                    if not os.path.exists(marker):
+                        open(marker, "w").close()
+                        sys.stdin.readline()
+                        sys.exit(9)
+                    if behaviour == "dieOnRequest":
+                    """
+                )
+            try source.write(to: fake.script, atomically: true, encoding: .utf8)
+            let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+            let lane = LayaLane(runtime: runtime, checkpoint: { .english })
+
+            async let first = lane.decide(.fixture("first"))
+            async let second = lane.decide(.fixture("second"))
+            let (one, two) = try await (first, second)
+            #expect(one.answers["first"] != nil && two.answers["second"] != nil)
+
+            let pids = ((try? String(
+                contentsOf: fake.directory.appendingPathComponent("starts.log"), encoding: .utf8
+            )) ?? "").split(separator: "\n").compactMap { Int32($0) }
+            #expect(pids.count >= 2, "the fake did not die and restart")
+            // A retired process is asked to exit and may take a moment; one that nothing
+            // stops never goes.
+            var alive = pids.filter { kill($0, 0) == 0 }
+            for _ in 0..<150 where alive.count > 1 {
+                try await Task.sleep(for: .milliseconds(20))
+                alive = pids.filter { kill($0, 0) == 0 }
+            }
+            #expect(alive.count == 1, "\(alive.count) Laya processes for one runtime")
+            #expect(await runtime.isLoaded)
+            await runtime.unload()
+            for pid in pids { kill(pid, SIGKILL) }
+        }
+    }
 }
 
 private final class JevRequestCounter: @unchecked Sendable {

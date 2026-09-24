@@ -715,11 +715,24 @@ public actor LayaRuntime {
         await stopSidecar()
     }
 
+    /// Releases the model only if it is still the one that failed.
+    ///
+    /// A lane's one retry after a death: by the time it asks, another lane's retry may have
+    /// replaced the dead sidecar with a healthy one, and an unconditional unload would stop
+    /// that one out from under whoever is using it.
+    public func unload(ifStill failed: LayaSidecar) async {
+        await acquireTurn()
+        defer { releaseTurn() }
+        guard sidecar === failed else { return }
+        await stopSidecar()
+    }
+
     /// `unload()` for a caller that already holds the turn.
     private func stopSidecar() async {
         idleSweep?.cancel()
         idleSweep = nil
-        if let sidecar { await sidecar.stop() }
+        // Retired, not merely stopped: a lane may still hold it, and must not restart it.
+        if let sidecar { await sidecar.retire() }
         sidecar = nil
         activeCheckpoint = nil
         lastReady = nil
