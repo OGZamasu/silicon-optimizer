@@ -477,7 +477,12 @@ final class CapturingServer: @unchecked Sendable {
                 self.lock.unlock()
                 let canned = self.answer(record, served)
                 let body = Data(canned.body.utf8)
-                var responseHead = "HTTP/1.1 \(canned.status) X\r\nContent-Type: application/json\r\n"
+                // JSON unless the answer names its own type — a file route is not JSON.
+                let namesItsType = canned.headers.keys.contains {
+                    $0.caseInsensitiveCompare("Content-Type") == .orderedSame
+                }
+                var responseHead = "HTTP/1.1 \(canned.status) X\r\n"
+                    + (namesItsType ? "" : "Content-Type: application/json\r\n")
                     + "Content-Length: \(body.count)\r\nConnection: close\r\n"
                 for (name, value) in canned.headers.sorted(by: { $0.key < $1.key }) {
                     responseHead += "\(name): \(value)\r\n"

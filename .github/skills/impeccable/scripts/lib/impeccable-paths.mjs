@@ -183,6 +183,49 @@ function withMigrationLock(privateRoot, action) {
   }
 }
 
+/**
+ * Move a legacy Live entry into private state without following it. The app
+ * root and the private directory (under the home folder) are often on
+ * different volumes — a project on an external disk — where rename(2) fails
+ * with EXDEV and Live could never start. There the entry is copied, still
+ * without following symlinks, into a staging name beside its destination,
+ * renamed into place, and only then removed from the app root, so a failed
+ * copy leaves the original where it was and nothing half-copied behind.
+ */
+export function moveNoFollow(source, destination) {
+  try {
+    fs.renameSync(source, destination);
+    return;
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error;
+  }
+  const staging = path.join(path.dirname(destination), `.${randomUUID()}.moving`);
+  try {
+    copyNoFollow(source, staging);
+    if (existsNoFollow(destination)) throw new Error(`Private Live record already exists; refusing overwrite: ${source} -> ${destination}`);
+    fs.renameSync(staging, destination);
+  } catch (error) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+  if (fs.lstatSync(source).isDirectory()) fs.rmSync(source, { recursive: true });
+  else fs.unlinkSync(source);
+}
+
+function copyNoFollow(source, target) {
+  const stat = fs.lstatSync(source);
+  if (stat.isSymbolicLink()) {
+    fs.symlinkSync(fs.readlinkSync(source), target);
+  } else if (stat.isFile()) {
+    fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+  } else if (stat.isDirectory()) {
+    fs.mkdirSync(target, { mode: 0o700 });
+    for (const name of fs.readdirSync(source)) copyNoFollow(path.join(source, name), path.join(target, name));
+  } else {
+    throw new Error(`Legacy Live entry is not a file, directory, or symlink: ${source}`);
+  }
+}
+
 function assertLegacyPathComponents(root, target) {
   const relative = path.relative(root, target);
   if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
@@ -260,7 +303,7 @@ function migrateLegacyLivePrivateArtifactsUnlocked(root, privateRoot) {
       if (spec.kind === 'quarantine') {
         fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
         assertPrivateDirectory(path.dirname(destination));
-        fs.renameSync(source, destination);
+        moveNoFollow(source, destination);
         fs.chmodSync(destination, 0o700);
         moved.push({ source, destination });
         continue;
@@ -276,7 +319,7 @@ function migrateLegacyLivePrivateArtifactsUnlocked(root, privateRoot) {
           assertPrivateDirectory(quarantine);
           target = path.join(quarantine, `legacy-record-duplicate-${randomUUID()}-${path.basename(source)}`);
         }
-        fs.renameSync(source, target);
+        moveNoFollow(source, target);
         fs.chmodSync(target, 0o600);
         moved.push({ source, destination: target });
         continue;
@@ -296,7 +339,7 @@ function migrateLegacyLivePrivateArtifactsUnlocked(root, privateRoot) {
           fs.mkdirSync(quarantine, { recursive: true, mode: 0o700 });
           assertPrivateDirectory(quarantine);
           const unknownPath = path.join(quarantine, `legacy-unknown-${randomUUID()}`);
-          fs.renameSync(fromFile, unknownPath);
+          moveNoFollow(fromFile, unknownPath);
           if (sourceEntry.isFile()) fs.chmodSync(unknownPath, 0o600);
           else if (sourceEntry.isDirectory()) fs.chmodSync(unknownPath, 0o700);
           moved.push({ source: fromFile, destination: unknownPath });
@@ -308,12 +351,12 @@ function migrateLegacyLivePrivateArtifactsUnlocked(root, privateRoot) {
           fs.mkdirSync(quarantine, { recursive: true, mode: 0o700 });
           assertPrivateDirectory(quarantine);
           const duplicatePath = path.join(quarantine, `legacy-session-duplicate-${randomUUID()}-${name}`);
-          fs.renameSync(fromFile, duplicatePath);
+          moveNoFollow(fromFile, duplicatePath);
           fs.chmodSync(duplicatePath, 0o600);
           moved.push({ source: fromFile, destination: duplicatePath });
           continue;
         }
-        fs.renameSync(fromFile, toFile);
+        moveNoFollow(fromFile, toFile);
         fs.chmodSync(toFile, 0o600);
         moved.push({ source: fromFile, destination: toFile });
       }

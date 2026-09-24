@@ -120,11 +120,16 @@ struct WireChatRequest: Encodable {
 
     init(_ request: ChatRequest) {
         self.messages = request.messages.map { message in
-            if message.images.isEmpty {
+            // Only pictures carried inline ever reach the runtime, which would download an
+            // `http(s)` one. The control server refuses those at the door; this is for the
+            // ones already in a conversation from before it did, which are sent again with
+            // every later turn.
+            let images = message.images.filter(ControlAPI.ChatImages.isInline)
+            if images.isEmpty {
                 return WireMessage(role: message.role.rawValue, content: .text(message.content))
             }
             var parts: [WireMessage.Part] = [.text(message.content)]
-            parts.append(contentsOf: message.images.map(WireMessage.Part.image))
+            parts.append(contentsOf: images.map(WireMessage.Part.image))
             return WireMessage(role: message.role.rawValue, content: .parts(parts))
         }
         self.temperature = request.temperature

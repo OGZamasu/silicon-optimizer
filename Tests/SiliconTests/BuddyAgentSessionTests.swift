@@ -2106,8 +2106,6 @@ func withServer(
     let registry = BuddyRegistry(url: directory.appendingPathComponent("buddy.json"))
     let server = ControlServer(
         host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
-        // The server's own stores too: its media table and the upload and poster folders
-        // it sweeps, never the owner's.
         media: MediaRegistry(url: nil),
         uploadsRoot: directory.appendingPathComponent("uploads"),
         postersRoot: directory.appendingPathComponent("posters"),

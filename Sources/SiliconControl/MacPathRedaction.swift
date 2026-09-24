@@ -55,11 +55,73 @@ struct MacPathRedaction: Sendable {
         return (path as NSString).lastPathComponent
     }
 
-    /// `text`, with every folder above replaced where it appears as a whole path.
+    /// `text`, with every folder above replaced where it appears as a whole path, and every
+    /// other absolute path reduced to the name at its end.
+    ///
+    /// The folders above are the ones worth a readable label. They are not the only ones a
+    /// sentence quotes: a mesh or image tool that fails hands back the tail of its own log,
+    /// and a Python traceback names every file on the way down — the external drive, the
+    /// folder the tool was installed in, how the owner's disk is laid out. So whatever path
+    /// is left once the labels are in is cut to its last component, the way a runtime's log
+    /// is (`LoadFailure.withoutPaths`, which this module cannot reach).
     func scrub(_ text: String) -> String {
         guard text.contains("/") else { return text }
-        return folders.reduce(text) { Self.replace($1.path, with: $1.label, in: $0) }
+        let labelled = folders.reduce(text) { Self.replace($1.path, with: $1.label, in: $0) }
+        return Self.namesOnly(labelled)
     }
+
+    /// Every path on this Mac's disk in `text`, cut to its last component.
+    ///
+    /// A path here is one that starts at a folder a Mac's disk actually has at its top —
+    /// `/Volumes`, `/Users`, `/private` and the rest — so `/v1/jobs` in a sentence about a
+    /// node's API is left as it was. Its slash may follow anything but a letter, a digit,
+    /// `.`, `~`, `-` or `_`: so `file:///Volumes/…`, `PATH=/a:/Volumes/…`, `error:/Volumes/…`
+    /// and a path in curly quotes or backticks are all found, while the path inside a URL,
+    /// which follows a host name or a port, is not, and nor are `~/…` and `Movies/…` that a
+    /// label above has already made safe.
+    ///
+    /// Folder names may hold spaces. Quotes, brackets, commas and colons end a path, because
+    /// that is what a log puts around one; so does a file name followed by a space, because
+    /// what comes next is the sentence — `…/model.gguf needs 12 GB/s` is not a folder called
+    /// `model.gguf needs 12 GB`.
+    static func namesOnly(_ text: String) -> String {
+        guard text.contains("/"), let expression = absolutePath else { return text }
+        let whole = text as NSString
+        var out = ""
+        var cursor = 0
+        for match in expression.matches(
+            in: text, range: NSRange(location: 0, length: whole.length)
+        ) {
+            out += whole.substring(
+                with: NSRange(location: cursor, length: match.range.location - cursor)
+            )
+            let path = whole.substring(with: match.range)
+            out += path.split(separator: "/").last.map(String.init) ?? path
+            cursor = match.range.location + match.range.length
+        }
+        return out + whole.substring(from: cursor)
+    }
+
+    /// What ends a path: the quotes, brackets and separators a log or a sentence puts
+    /// around one, straight and curly.
+    private static let stops = #"'"(),:\[\]{}<>`“”‘’«»"#
+
+    private static let absolutePath = try? NSRegularExpression(
+        pattern: #"(?<![\w.~-])"#  // a slash that no name runs into,
+            + "/(?i:" + topLevelFolders.joined(separator: "|") + ")"  // a folder at the top,
+            + #"(?=[/\s\#(stops)]|$)"#  // the whole of its name,
+            // the folders below it, none of them a file name with the sentence after it,
+            + #"(?:/(?![^/\n]*\.[A-Za-z][A-Za-z0-9]{0,4}\s)"#
+            + #"[^/\n\#(stops)]*[^/\s\#(stops)](?=/))*"#
+            + #"(?:/[^/\n\#(stops)]*)?"#  // and the name they end in
+    )
+
+    /// What a Mac has at the top of its disk. Matched without regard to case, as the disk
+    /// itself is.
+    private static let topLevelFolders = [
+        "Applications", "Library", "System", "Users", "Volumes", "private", "var", "tmp",
+        "etc", "opt", "usr", "bin", "sbin", "cores", "dev", "home", "nix",
+    ]
 
     /// Whole-path matches only: `/Users/you` is not replaced inside `/Users/youngest`, and
     /// `/var/folders/…` is not replaced inside `/private/var/folders/…`.

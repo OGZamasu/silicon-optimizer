@@ -386,8 +386,8 @@ public struct Settings: Codable, Sendable, Equatable {
 
     /// Where generated meshes are written. Empty means the default below.
     public var meshOutputDirectory: String = ""
-    /// The trellis2 project folder holding trellis-mac and hunyuan3d-swift. Empty means the
-    /// T9 default the engines were set up at.
+    /// The trellis2 project folder holding trellis-mac and hunyuan3d-swift. Empty until set
+    /// here or found on this Mac — see `AppModel.trellisBaseDirectory`.
     public var trellisBaseDirectory: String = ""
     /// Base URL of the remote LATO.2 service, e.g. "http://192.168.1.20:8790". Empty means
     /// not configured.
@@ -468,12 +468,79 @@ public struct Settings: Codable, Sendable, Equatable {
             ?? FileManager.default.temporaryDirectory
     }
 
-    public var resolvedTrellisBaseDirectory: URL {
+    /// The folder set in `trellisBaseDirectory`, or nil while none is.
+    public var configuredTrellisBaseDirectory: URL? {
         let configured = trellisBaseDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !configured.isEmpty {
-            return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        guard !configured.isEmpty else { return nil }
+        return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+    }
+
+    /// The engines found on this Mac as it is right now, without touching Settings.
+    public static func discoverTrellisBaseDirectory() -> URL? {
+        trellisBaseDirectory(
+            home: FileManager.default.homeDirectoryForCurrentUser, disks: localDiskRoots()
+        )
+    }
+
+    /// A `trellis2` folder with an engine in it — `trellis-mac` or `hunyuan3d-swift` — at the
+    /// top of `home` or of one of `disks`. The home folder's comes first. Among disks, only one
+    /// that is alone in having one: choosing between two would be a guess, and the choice is
+    /// written into Settings and kept.
+    static func trellisBaseDirectory(home: URL, disks: [URL]) -> URL? {
+        func engines(under root: URL) -> URL? {
+            let base = root.appendingPathComponent("trellis2", isDirectory: true)
+            let holdsEngine = ["trellis-mac", "hunyuan3d-swift"].contains { engine in
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(
+                    atPath: base.appendingPathComponent(engine).path, isDirectory: &isDirectory
+                ) && isDirectory.boolValue
+            }
+            return holdsEngine ? base : nil
         }
-        return URL(fileURLWithPath: "/Volumes/T9/trellis2")
+        if let found = engines(under: home) { return found }
+        let found = disks.compactMap(engines(under:))
+        return found.count == 1 ? found[0] : nil
+    }
+
+    /// The disks engines may be set up on, read from the mount table without waiting on any
+    /// of them, so a network share that has gone away cannot stall the lookup.
+    static func localDiskRoots() -> [URL] {
+        let capacity = getfsstat(nil, 0, MNT_NOWAIT)
+        guard capacity > 0 else { return [] }
+        var table: [statfs] = Array(repeating: .init(), count: Int(capacity))
+        let count = getfsstat(
+            &table, Int32(MemoryLayout<statfs>.stride * table.count), MNT_NOWAIT
+        )
+        guard count > 0 else { return [] }
+        let mounts = table.prefix(Int(count)).map { mount in
+            Mount(
+                path: withUnsafeBytes(of: mount.f_mntonname) { bytes in
+                    String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+                },
+                flags: mount.f_flags
+            )
+        }
+        return diskRoots(in: mounts)
+    }
+
+    struct Mount: Equatable {
+        var path: String
+        var flags: UInt32
+    }
+
+    /// Local disks under /Volumes that could hold a working engine tree. Not a read-only mount
+    /// (the engines write their venv and build there), not a quarantined one (a downloaded
+    /// disk image, whose programs the app would otherwise run), and not one hidden from the
+    /// Finder (system and backup volumes).
+    static func diskRoots(in mounts: [Mount]) -> [URL] {
+        let unusable = UInt32(MNT_RDONLY | MNT_QUARANTINE | MNT_DONTBROWSE)
+        return mounts
+            .filter {
+                $0.flags & UInt32(MNT_LOCAL) != 0 && $0.flags & unusable == 0
+                    && $0.path.hasPrefix("/Volumes/")
+            }
+            .map { URL(fileURLWithPath: $0.path, isDirectory: true) }
+            .sorted { $0.path < $1.path }
     }
 
     /// Base name for one generation's files — same chronological-sort and suffix-width

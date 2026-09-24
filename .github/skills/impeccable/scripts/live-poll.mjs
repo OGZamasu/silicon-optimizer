@@ -17,6 +17,9 @@ import { completionAckForAcceptResult, completionTypeForAcceptResult } from './l
 import { liveHelperBase, readLiveServerInfo } from './lib/impeccable-paths.mjs';
 import { enterLiveRoot } from './live/roots.mjs';
 import { instructionsForEvent } from './live/instructions.mjs';
+import { buildAcceptScriptArgs } from './live/accept-args.mjs';
+
+export { buildAcceptScriptArgs };
 
 // Absolute path to a sibling script in this skill's scripts dir, so runtime
 // error hints print a directly-runnable command instead of a placeholder.
@@ -244,19 +247,6 @@ export async function completeAcceptHandling(event, base, token) {
     event._completionAck = completionAckForAcceptResult(event.id, completionType, event._acceptResult);
   }
   return event;
-}
-
-export function buildAcceptScriptArgs(event) {
-  const scriptArgs = event.type === 'discard'
-    ? ['--id', String(event.id), '--discard']
-    : ['--id', String(event.id), '--variant', String(event.variantId)];
-  // No page-supplied free text rides here: live-accept matches flags anywhere
-  // in argv, so a pageUrl of "--discard" would turn an approved Accept into a
-  // discard. live-accept no longer reads --page-url anyway.
-  if (event.type === 'accept' && event.paramValues && Object.keys(event.paramValues).length > 0) {
-    scriptArgs.push('--param-values', JSON.stringify(event.paramValues));
-  }
-  return scriptArgs;
 }
 
 export function writeCarbonizeBanner(event) {

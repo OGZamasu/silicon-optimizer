@@ -83,6 +83,9 @@ struct AppVersionTests {
             handshakeURL: handshakeURL,
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
             events: BuddyEventHub(),
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
             // Never the real CLI: a test must not bind whatever tailnet this machine is on.
             discoverTailnetAddress: { nil },
             appVersion: Self.fixture

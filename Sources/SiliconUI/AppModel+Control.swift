@@ -474,21 +474,67 @@ extension AppModel: ControlHost {
     ///
     /// Naming a lane makes it a hard requirement instead, and skips the cascade in both
     /// directions: `local` never pays, `typesafe` never asks the model here.
+    ///
+    /// Above both sits the owner's pin for the decide tool in Settings → Decisions — see
+    /// `decide(_:hasLoadedModel:oneToken:floors:service:router:)`, which is where the
+    /// lanes are chosen and which a test can drive.
     public func decide(_ request: ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse {
         try request.validate()
-        let provider = (request.provider ?? "auto").lowercased()
         var localEndpoint: URL?
         if case .ready(let endpoint) = runtimeState { localEndpoint = endpoint }
 
-        func oneToken(
-            _ asked: ControlAPI.DecideRequest = request
-        ) async throws -> ControlAPI.DecideResponse {
-            guard let endpoint = localEndpoint, let loaded = loadedModel else {
-                throw ControlHostError.noModelLoaded
-            }
-            noteActivity()
-            let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
-            return try await whileGenerating { try await decider.decide(asked) }
+        return try await Self.decide(
+            request,
+            hasLoadedModel: localEndpoint != nil,
+            oneToken: { asked in
+                guard let endpoint = localEndpoint, let loaded = self.loadedModel else {
+                    throw ControlHostError.noModelLoaded
+                }
+                self.noteActivity()
+                let decider = LocalDecider(endpoint: endpoint, modelName: loaded.name)
+                return try await self.whileGenerating { try await decider.decide(asked) }
+            },
+            // The floors belonging to the lane that is about to answer the free pass, not
+            // to "the local lane" as if there were only one of them.
+            floors: { lane in await self.cascadeFloors(for: lane) }
+        )
+    }
+
+    /// The lanes behind `decide`, with the app's own pieces handed in: whether a model is
+    /// loaded here, how to ask it, and the floors for a lane.
+    ///
+    /// The owner's pin for the decide tool is read first and governs every provider, because
+    /// it is the owner's word and `provider` is a caller's — a phone's, an MCP client's:
+    ///
+    /// - **Off**: nothing answers, whichever lane was named.
+    /// - **Always local**: never Jev. `typesafe` is refused, and `auto` answers from the
+    ///   free lanes alone — no escalation, and no Jev when nothing local is ready.
+    /// - **Always Jev**: only Jev. `auto` goes straight to it with no free first pass, and a
+    ///   named local lane is refused.
+    /// - **Automatic**: what `decide` has always done.
+    ///
+    /// `JevService` refuses a pinned ability on its own as well, so this is not what keeps
+    /// the money safe. It is what makes the answer the one the owner chose and the refusal
+    /// say why, rather than a local lane answering an ability switched off, or "add a
+    /// TypeSafe API key" to an owner who pinned it away from TypeSafe on purpose.
+    static func decide(
+        _ request: ControlAPI.DecideRequest,
+        hasLoadedModel: Bool,
+        oneToken: @escaping (ControlAPI.DecideRequest) async throws -> ControlAPI.DecideResponse,
+        floors: (DecisionLaneID) async -> ControlAPI.JevCalibration.Floors,
+        service: JevService = .shared,
+        router: DecisionRouter = .shared
+    ) async throws -> ControlAPI.DecideResponse {
+        let provider = (request.provider ?? "auto").lowercased()
+        guard ["auto", "local", "laya", "node", "typesafe"].contains(provider) else {
+            throw ControlHostError.badRequest(
+                "Unknown provider \"\(request.provider ?? "")\". "
+                + "Use auto, local, laya, node or typesafe."
+            )
+        }
+        let pin = await service.settings().laneOverride(.decideTool)
+        if let refusal = decidePinRefusal(pin, provider: provider) {
+            throw ControlHostError.badRequest(refusal)
         }
 
         /// The free half of the cascade, and of `provider: "local"`.
@@ -505,11 +551,11 @@ extension AppModel: ControlHost {
         func local(
             _ asked: ControlAPI.DecideRequest = request
         ) async throws -> ControlAPI.DecideResponse {
-            guard let lane = await DecisionRouter.shared.localLane(for: .decideTool),
+            guard let lane = await router.localLane(for: .decideTool),
                   lane != .oneToken
             else { return try await oneToken(asked) }
             do {
-                return try await DecisionRouter.shared.ask(
+                return try await router.ask(
                     lane: lane, feature: .decideTool,
                     state: asked.state, questions: asked.questions
                 )
@@ -517,7 +563,7 @@ extension AppModel: ControlHost {
                 // A lane that was ready a moment ago and is not now — a sidecar that died,
                 // a node that went to sleep. The loaded model is still here, and an answer
                 // from it beats a failed decision.
-                guard localEndpoint != nil else { throw error }
+                guard hasLoadedModel else { throw error }
                 return try await oneToken(asked)
             }
         }
@@ -525,7 +571,7 @@ extension AppModel: ControlHost {
             // Waited on rather than assumed: a request arriving in the first milliseconds of
             // launch must not be told there is no key on a Mac that has one.
             await JevBootstrap.ready()
-            return try await Self.decideViaTypeSafe(request)
+            return try await decideViaTypeSafe(request, using: service)
         }
 
         switch provider {
@@ -539,18 +585,25 @@ extension AppModel: ControlHost {
                     ControlAPI.DecisionLaneVocabulary.unknownLane(provider)
                 )
             }
-            return try await DecisionRouter.shared.ask(
+            return try await router.ask(
                 lane: lane, feature: .decideTool,
                 state: request.state, questions: request.questions
             )
-        case "auto":
+        default:
+            // `auto`. Pinned to Jev, the calibrated lane answers alone: a free first pass
+            // would be the uncalibrated answer the pin exists to keep out.
+            if pin == .alwaysJev { return try await typeSafe() }
             // With nothing free to cascade *from*, `auto` is a single lane and the policy
             // picks it: Jev when the owner has turned it on and keyed it, otherwise Laya,
             // otherwise a node. Only when none of those exists is there nothing to say.
-            let free = await DecisionRouter.shared.localLane(for: .decideTool)
-            guard localEndpoint != nil || free != nil else {
+            let free = await router.localLane(for: .decideTool)
+            guard hasLoadedModel || free != nil else {
+                // Pinned local, Jev is not a fallback — not even to be told it cannot answer.
+                guard pin == .automatic else {
+                    throw ControlHostError.badRequest(Self.decideLocalPinHasNoLane)
+                }
                 await JevBootstrap.ready()
-                if await JevService.shared.isAvailable(.decideTool) { return try await typeSafe() }
+                if await service.isAvailable(.decideTool) { return try await typeSafe() }
                 // A swarm node is never offered Jev (see `PaidLanes`), so the owner's key
                 // is not what it is missing.
                 guard PaidLanes.allowed else {
@@ -564,29 +617,44 @@ extension AppModel: ControlHost {
                     + "model, or add a TypeSafe API key and turn on the decide tool."
                 )
             }
-            // The floors belonging to the lane that is about to answer the free pass,
-            // not to "the local lane" as if there were only one of them.
-            let floors = await cascadeFloors(for: free ?? .oneToken)
             return try await DecisionCascade.run(
                 request,
-                floors: floors,
+                floors: await floors(free ?? .oneToken),
                 // Asked only once the local answers are in and at least one of them was
-                // uncertain, so a confident run never reads the settings file — and the
-                // Keychain is not touched until a request is actually about to be sent.
+                // uncertain, so the Keychain is not touched until a request is actually
+                // about to be sent. Pinned local, the answer is no before anything is read.
                 jevAvailable: {
+                    guard pin == .automatic else { return false }
                     await JevBootstrap.ready()
-                    return await Self.cascadeMayEscalate()
+                    return await Self.cascadeMayEscalate(service)
                 },
                 local: { try await local($0) },
-                jev: { try await Self.escalate($0) }
-            )
-        default:
-            throw ControlHostError.badRequest(
-                "Unknown provider \"\(request.provider ?? "")\". "
-                + "Use auto, local, laya, node or typesafe."
+                jev: { try await Self.escalate($0, using: service) }
             )
         }
     }
+
+    /// Why the owner's pin for the decide tool refuses a provider, or nil when it allows it.
+    static func decidePinRefusal(_ pin: DecisionLaneOverride, provider: String) -> String? {
+        switch (pin, provider) {
+        case (.off, _):
+            return "The decide tool is switched off in Settings → Decisions, so nothing "
+                + "answers it."
+        case (.alwaysLocal, "typesafe"):
+            return "The decide tool is set to Always local in Settings → Decisions, so it "
+                + "never asks Jev. Use auto, local, laya or node."
+        case (.alwaysJev, "local"), (.alwaysJev, "laya"), (.alwaysJev, "node"):
+            return "The decide tool is set to Always Jev in Settings → Decisions, so a local "
+                + "lane does not answer it. Use auto or typesafe."
+        default:
+            return nil
+        }
+    }
+
+    static let decideLocalPinHasNoLane =
+        "The decide tool is set to Always local in Settings → Decisions, and nothing local "
+        + "can answer right now: install Laya in Settings → Decisions or load a model. "
+        + "Nothing was sent to Jev."
 
     /// Whether `auto` may pay Jev for an answer this machine was unsure of.
     ///

@@ -853,6 +853,12 @@ where there is something to cascade from — the free lane answers everything an
 answers it was unsure of are put to Jev — except that the free lane is now Laya when Laya is
 installed.
 
+The decide tool's own pin governs `/decide` whichever `provider` a caller names: **Off**
+answers nothing, **Always local** refuses `typesafe` and never escalates, and **Always Jev**
+skips the free pass and refuses a named local lane. The pin is also checked again at the one
+door every paid call goes through, so an ability pinned **Always local** or **Off** —
+guardrails, verification and calibration included — cannot reach TypeSafe by any path.
+
 ### Thresholds are per lane
 
 A confidence number means whatever the thing that produced it means by it. Laya's 0.7 on a
@@ -1212,7 +1218,9 @@ it did before. With it on, calls are screened and you decide. With **Auto-approv
 rates safe** on as well, the safe ones run and the refused ones are declined without asking,
 and anything Jev wants reviewed still waits for you. A screening that could not happen at all
 — no key, budget spent, TypeSafe unreachable — always falls back to you and never to a
-silent yes.
+silent yes. When a free lane screened the call instead — Laya, with the guardrail pinned
+**Always local** in Settings → Decisions or Jev unable to answer — its verdict is on the card
+under its own name, and you still decide.
 
 ### Media routing
 
@@ -1445,6 +1453,8 @@ feature that quietly started doing that the first time a local answer looked thi
 making that decision for you. So a cloud target is only ever used when you name one in
 Settings, where the row says what is sent and to whom; and `POST /jev`, which can change it,
 takes this Mac's own control token, so a paired phone can see the setting but not make it.
+With verification pinned **Always local** in Settings → Decisions not even a named cloud model
+is used: a flagged answer is re-run on a machine of your own, or only annotated.
 
 The re-run goes through this Mac's own loopback gateway, so it starts a sleeping node, holds
 the cloud key and lands in the activity ledger like any other request — and it is capped at

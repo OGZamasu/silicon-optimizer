@@ -483,9 +483,9 @@ struct InstallRequestTests {
 
         let external = try JSONDecoder().decode(
             ControlAPI.LoadRequest.self,
-            from: Data(#"{"modelID":"bonsai-2-27b","directory":"/Volumes/T9/Local Models"}"#.utf8)
+            from: Data(#"{"modelID":"bonsai-2-27b","directory":"/Volumes/External/Local Models"}"#.utf8)
         )
-        #expect(external.directory == "/Volumes/T9/Local Models")
+        #expect(external.directory == "/Volumes/External/Local Models")
 
         let encoded = try JSONEncoder().encode(ControlAPI.LoadRequest(modelID: "x"))
         #expect(!String(decoding: encoded, as: UTF8.self).contains("directory"))

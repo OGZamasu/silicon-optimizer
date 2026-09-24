@@ -1659,7 +1659,8 @@ struct BuddyMediaEdgeTests {
 
     // MARK: - S3: the raised ceiling belongs to a caller, not to a path
 
-    /// Pointing 24 MiB at `/uploads` with a token nobody issued buys the ordinary 4 MiB.
+    /// Pointing 24 MiB at `/uploads` with a token nobody issued buys nothing: it is told 401
+    /// before the body is read, as any body over what no bearer may send is.
     @Test func onlyAnIdentifiedFullDeviceGetsTheRaisedCeiling() async throws {
         try await BuddyMediaFixture.withServer { fixture in
             let full = try await fixture.pair(name: "Studio phone")
@@ -1667,13 +1668,13 @@ struct BuddyMediaEdgeTests {
             let big = BuddyMediaRoutesTests.jpegBytes(count: 8 * 1_048_576)
             #expect(big.count > BuddyLimits.requestBodyBytes)
 
-            // A bearer that is not a device at all: refused on length, before the body.
+            // A bearer that is not a device at all: refused before the body, as nobody.
             let (guessed, why) = try await fixture.phone.call(
                 "POST", "/uploads", token: "guessed", data: big, contentType: "image/jpeg"
             )
-            #expect(guessed == 413)
+            #expect(guessed == 401)
             let sentence = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: why)
-            #expect(sentence.error.contains("\(BuddyLimits.requestBodyBytes)"))
+            #expect(sentence.error == "Invalid or missing control token.")
 
             // A chat-only device may not use this route at all, so it does not get its
             // ceiling either — refused on length rather than reaching the 403.
@@ -1681,14 +1682,15 @@ struct BuddyMediaEdgeTests {
                 "POST", "/uploads", token: chat.token, data: big, contentType: "image/jpeg"
             ) == 413)
 
-            // A revoked device is a bearer nobody issued, from the next request onward.
+            // A revoked device is a bearer nobody issued, from the next request onward — and
+            // is told so, which is what sends a phone back to pairing.
             #expect(try await fixture.phone.status(
                 "POST", "/uploads", token: full.token, data: big, contentType: "image/jpeg"
             ) == 200)
             _ = await fixture.devices.revoke(deviceID: full.deviceID)
             #expect(try await fixture.phone.status(
                 "POST", "/uploads", token: full.token, data: big, contentType: "image/jpeg"
-            ) == 413)
+            ) == 401)
         }
     }
 
@@ -2105,16 +2107,19 @@ struct BuddyMediaEdgeTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let registry = MediaRegistry(url: nil)
+        // A small ceiling, so the test is not ten thousand files long. The real one is
+        // pinned against the queue below.
+        let ceiling = 200
+        let registry = MediaRegistry(url: nil, maximumEntries: ceiling)
         var first: String?
         // One past the ceiling, oldest first.
-        for index in 0...MediaRegistry.maximumEntries {
+        for index in 0...ceiling {
             let file = directory.appendingPathComponent("clip-\(index).mp4")
             try Data("x".utf8).write(to: file)
             let id = await registry.register(path: file.path, within: [directory.path])
             if index == 0 { first = id }
         }
-        #expect(await registry.count == MediaRegistry.maximumEntries)
+        #expect(await registry.count == ceiling)
         // The oldest link is the one that went, and re-polling mints it again.
         let oldest = try #require(first)
         #expect(await registry.entry(id: oldest, within: [directory.path]) == nil)
@@ -2123,6 +2128,53 @@ struct BuddyMediaEdgeTests {
         )
         #expect(again != nil)
         #expect(again != oldest)
+    }
+
+    /// The queue view publishes every clip's id and its poster's on every poll. Once the
+    /// table was full, each new render pushed out an id the queue was still showing, the
+    /// next poll minted that file a new one, and a link a phone had cached answered 404 —
+    /// one more of them with every render, and a rewrite of the table with every poll.
+    @Test func anIdTheQueueStillShowsSurvivesATableThatIsFull() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-media-churn-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let roots = [directory.path]
+        let registry = MediaRegistry(url: nil, maximumEntries: 100)
+
+        // Thirty finished clips: sixty ids, the way `MediaDecoration` publishes a queue.
+        func poll() async -> [String?] {
+            var ids: [String?] = []
+            for index in 0..<30 {
+                let clip = directory.appendingPathComponent("clip-\(index).mp4").path
+                let poster = directory.appendingPathComponent("posters/clip-\(index).jpg").path
+                ids.append(await registry.register(path: clip, within: roots))
+                ids.append(await registry.register(path: poster, within: roots, kind: .poster))
+            }
+            return ids
+        }
+        let published = await poll()
+        #expect(!published.contains(nil))
+
+        // Renders keep arriving between polls, well past the ceiling.
+        for round in 0..<6 {
+            for index in 0..<20 {
+                let render = directory.appendingPathComponent("render-\(round)-\(index).png")
+                #expect(await registry.register(path: render.path, within: roots) != nil)
+            }
+            #expect(await poll() == published, "round \(round)")
+        }
+        #expect(await registry.count == 100)
+        // What went was renders nobody has asked for since, oldest first.
+        let firstRender = directory.appendingPathComponent("render-0-0.png").path
+        #expect(await registry.id(forPath: firstRender) == nil)
+        let lastRender = directory.appendingPathComponent("render-5-19.png").path
+        #expect(await registry.id(forPath: lastRender) != nil)
+    }
+
+    @MainActor @Test func theTableHoldsAFullQueueWithRoomForEverythingElse() {
+        // A result and a poster for each of the queue's items, and then some.
+        #expect(MediaRegistry.maximumEntries >= 2 * VideoBatchQueue.maximumHistory + 2000)
     }
 }
 

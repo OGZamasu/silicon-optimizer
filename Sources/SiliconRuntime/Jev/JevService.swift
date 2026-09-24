@@ -59,6 +59,16 @@ public enum JevFeature: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// Whether this ability runs only once the owner has switched it on — Jev's master
+    /// switch and its own — whichever lane would then answer it.
+    ///
+    /// Guardrails and verification hold an agent's tool calls and grade chat answers. Both
+    /// are off by default and promise that off means off, so a local lane being installed
+    /// must not start either on a Mac that never switched it on. The other abilities are
+    /// advice their feature can take or leave, and a free local lane answers them whether
+    /// or not their Jev switch is on.
+    public var runsOnlyWhenSwitchedOn: Bool { self == .guardrails || self == .verification }
+
     /// Whether the app actually calls Jev for this yet. The rest are shown in Settings as
     /// the roadmap — off, captioned "coming" — so the owner can see where this is going
     /// rather than meeting eight new toggles at once later.
@@ -139,8 +149,15 @@ public protocol JevQuestionSet {
 }
 
 extension JevQuestionSet {
-    /// Asks this set's questions through the one door, so the feature toggle, the budget,
-    /// the cache and the ledger all apply without the caller remembering them.
+    /// Asks this set's questions through the router, so the lane the owner chose for this
+    /// ability is the one that answers — and, when that lane is Jev, through the one door,
+    /// so the feature toggle, the budget, the cache and the ledger all apply without the
+    /// caller remembering them.
+    ///
+    /// Through the router rather than straight at `JevService`, like the features that
+    /// build their own questions: a set asked directly would be answered by Jev whatever
+    /// the Decisions panel says, which billed "Always local" guardrails and verification
+    /// to TypeSafe and left the local lane the panel named for them unasked.
     ///
     /// - Parameter service: the app leaves this alone. A feature's own tests pass a
     ///   `JevService` pointed at a loopback server, so a question set can be exercised
@@ -148,7 +165,14 @@ extension JevQuestionSet {
     public static func ask(
         state: JSONContent, cacheKey: String? = nil, using service: JevService = .shared
     ) async throws -> ControlAPI.DecideResponse {
-        try await service.ask(
+        try await ask(state: state, cacheKey: cacheKey, via: .router(for: service))
+    }
+
+    /// The same, through a given router — a test's, with lanes registered on it.
+    public static func ask(
+        state: JSONContent, cacheKey: String? = nil, via router: DecisionRouter
+    ) async throws -> ControlAPI.DecideResponse {
+        try await router.decide(
             feature, state: state, questions: questions, cacheKey: cacheKey
         )
     }
@@ -318,6 +342,9 @@ public struct JevSettings: Codable, Sendable, Equatable {
     )
 
     public func isOn(_ feature: JevFeature) -> Bool { features[feature] ?? false }
+
+    /// The master switch and this feature's own, both on.
+    public func isTurnedOn(_ feature: JevFeature) -> Bool { enabled && isOn(feature) }
 
     /// What the owner has said about this feature's lane. Absent means automatic.
     public func laneOverride(_ feature: JevFeature) -> DecisionLaneOverride {
@@ -707,6 +734,9 @@ public enum JevError: Error, LocalizedError, Equatable {
     /// The request being answered came from a swarm node, which may not spend the owner's
     /// Jev budget. Nothing was sent. See `PaidLanes`.
     case notForPeers
+    /// The owner pinned this ability away from Jev in Settings → Decisions — `Always local`
+    /// or `Off`. Nothing was sent.
+    case pinnedAwayFromJev(JevFeature, DecisionLaneOverride)
 
     public var errorDescription: String? {
         switch self {
@@ -731,6 +761,12 @@ public enum JevError: Error, LocalizedError, Equatable {
             )
         case .notForPeers:
             "Jev answers for this Mac's owner, not for swarm nodes, so nothing was sent to it."
+        case .pinnedAwayFromJev(let feature, .off):
+            "\(feature.displayName) is switched off in Settings → Decisions, so nothing was "
+            + "sent to Jev."
+        case .pinnedAwayFromJev(let feature, let override):
+            "\(feature.displayName) is set to \(override.displayName) in Settings → Decisions, "
+            + "so nothing was sent to Jev."
         }
     }
 }
@@ -791,6 +827,21 @@ public actor JevService {
 
     private var keyProvider: @Sendable () -> String? = { nil }
     private var keyIsSetProvider: (@Sendable () -> Bool)?
+    /// The key read under way, which every ask that needs the key while it is pending
+    /// waits on rather than starting a read of its own. See `readKey()`.
+    private var keyRead: Task<String?, Never>?
+    /// Bumped by `configure`, so a read that outlives the configuration it started under
+    /// cannot mark the new one refused.
+    private var keyGeneration = 0
+    /// Whether the last read found a key listed and could not have it — the consent dialog
+    /// answered Deny, or the item's access control refused this build. While this holds the
+    /// key reads as absent: asking again would put the same dialog up on every decision and
+    /// be refused the same way each time. `keyDidChange()`, a new `configure`, and the
+    /// Settings "Test connection" button each clear it.
+    private var keyReadRefused = false
+    /// How many asks have joined a read already under way. For tests, which otherwise
+    /// cannot tell an ask waiting on the shared read from one that has not reached it yet.
+    private(set) var joinedKeyReads = 0
     private var baseURL = SystemOneClient.typeSafeBaseURL
     private var session: URLSession?
     private var sleeper: @Sendable (TimeInterval) async -> Void = { seconds in
@@ -869,6 +920,18 @@ public actor JevService {
         ledgerWriteError = nil
         cache.removeAll()
         lastRetryDelays = []
+        keyRead = nil
+        keyGeneration += 1
+        keyReadRefused = false
+    }
+
+    /// The stored key changed — saved, replaced or removed — so a read that was refused
+    /// before is worth trying again.
+    public func keyDidChange() {
+        keyReadRefused = false
+        // A read that started under the old key and comes back empty says nothing about
+        // the new one, so it must not mark the new one refused.
+        keyGeneration += 1
     }
 
     // MARK: Settings
@@ -923,18 +986,65 @@ public actor JevService {
         )
     }
 
-    /// Whether this feature would answer right now. Five conditions, all cheap: no network,
-    /// and no Keychain prompt. The first is who is asking — never a swarm node's request.
+    /// Whether this feature would answer right now. Six conditions, all cheap: no network,
+    /// and no Keychain prompt. The first is who is asking — never a swarm node's request —
+    /// and the second is the owner's pin for this ability in Settings → Decisions.
     public func isAvailable(_ feature: JevFeature) -> Bool {
         guard PaidLanes.allowed else { return false }
         let settings = settings()
+        guard settings.laneOverride(feature).allowsJev else { return false }
         guard settings.enabled, settings.isOn(feature), hasKey() else { return false }
         return (remainingBudgetUSD(settings) ?? .infinity) > 0
     }
 
     private func hasKey() -> Bool {
+        if keyReadRefused { return false }
+        // A read under way means a key is listed — and asking the Keychain again from this
+        // actor while that read's consent dialog is up is the one thing that must not
+        // happen: even an attributes-only query may queue behind the dialog, and then the
+        // whole actor waits on it again.
+        if keyRead != nil { return true }
         if let keyIsSetProvider { return keyIsSetProvider() }
         return keyProvider() != nil
+    }
+
+    /// The Keychain's own queue for this service. Serial, so a read waits behind a consent
+    /// dialog that is already up rather than stacking a second one on top of it; one per
+    /// service, so a test's dialog cannot hold up another test's reads.
+    private let keychainQueue = DispatchQueue(label: "dev.siliconoptimizer.jev.key")
+
+    /// Reads the key without holding this actor while it does.
+    ///
+    /// Reading the secret can put a consent dialog on screen — after every rebuild, the
+    /// first read of the launch does — and `SecItemCopyMatching` blocks its thread until
+    /// somebody answers it. Done on this actor, that froze every other caller behind the
+    /// dialog: the gateway's pruning on every chat completion, `/v1/models`, `/decide`,
+    /// verification, even drawing Settings. So the read runs on a queue of its own, this
+    /// actor stays free while it waits, and asks that need the key meanwhile share the
+    /// one read rather than each raising a dialog of their own.
+    private func readKey() async -> String? {
+        if let keyRead {
+            joinedKeyReads += 1
+            return await keyRead.value
+        }
+        let provider = keyProvider
+        let generation = keyGeneration
+        let queue = keychainQueue
+        let read = Task<String?, Never> {
+            await withCheckedContinuation { continuation in
+                queue.async { continuation.resume(returning: provider()) }
+            }
+        }
+        keyRead = read
+        let key = await read.value
+        if keyRead == read { keyRead = nil }
+        // Listed, but not handed over: the person said no, or this build may not read it.
+        // Remembered, so the next decision does not raise the same dialog to be refused
+        // the same way.
+        if key == nil, generation == keyGeneration, keyIsSetProvider?() == true {
+            keyReadRefused = true
+        }
+        return key
     }
 
     /// Nil means no cap was set. Otherwise what is left of it this month, counting what is
@@ -961,8 +1071,9 @@ public actor JevService {
 
     /// One request to Jev, governed.
     ///
-    /// Everything that can refuse does so before a socket is opened: the feature's switch,
-    /// the budget, the size of the state, the shape of the questions, the presence of a key.
+    /// Everything that can refuse does so before a socket is opened: the ability's pin in
+    /// Settings → Decisions, the feature's switch, the budget, the size of the state, the
+    /// shape of the questions, the presence of a key.
     /// What is left is a single request — Jev reads the state once and answers every
     /// question against it in parallel, so a feature should ask all of its questions here
     /// rather than calling repeatedly.
@@ -994,6 +1105,12 @@ public actor JevService {
         // the owner's paid lane, and not from what that lane answered the owner either.
         guard PaidLanes.allowed else { throw JevError.notForPeers }
         let settings = settings()
+        // Then the owner's pin, and here rather than only in the router: this is the one
+        // door every paid call goes through, so an ability set to "Always local" or "Off"
+        // cannot reach TypeSafe from any path — a question set, `/decide`, a calibration,
+        // the bench — whether or not that path remembered to consult the router first.
+        let pin = settings.laneOverride(feature)
+        guard pin.allowsJev else { throw JevError.pinnedAwayFromJev(feature, pin) }
         guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
 
         let request = ControlAPI.DecideRequest(
@@ -1039,15 +1156,18 @@ public actor JevService {
             return try await existing.value
         }
 
-        guard let apiKey = keyProvider() else { throw JevError.noKey }
-
         // The ledger's location is captured here rather than read at the end: a `configure`
         // that lands mid-flight must not write this call's cost to a different file.
         let ledgerURL = self.ledgerURL
         let reservation = JevLedger.cost(inputTokens: Self.estimatedTokens(bytes: bytes))
         reservedUSD += reservation
-        let work = Task<ControlAPI.DecideResponse, any Error> { [request, apiKey, feature] in
-            try await self.send(request, apiKey: apiKey, feature: feature)
+        // The key is read inside the work rather than before it, for two reasons. The read
+        // may wait on a consent dialog, and the caller's deadline has to cover that wait
+        // too — a feature that said "four seconds" must not sit behind a dialog for four
+        // minutes. And an identical ask arriving meanwhile finds this one in flight and
+        // joins it, rather than raising a dialog of its own.
+        let work = Task<ControlAPI.DecideResponse, any Error> { [request, feature] in
+            try await self.sendWithKey(request, feature: feature)
         }
         inFlight[key] = work
 
@@ -1085,6 +1205,23 @@ public actor JevService {
         // billing it twice would be a lie the budget then acts on.
         record(feature: feature, response: response, to: ledgerURL)
         return response
+    }
+
+    /// The key, then the request — with the owner's switches read once more in between.
+    ///
+    /// The read may have waited minutes on a consent dialog, and the owner may have pinned
+    /// this ability away from Jev, or switched it off, while it did. `ask` checked them
+    /// before the wait; a change that landed during it must still stop the request, or
+    /// "never the cloud" would be a charge the moment somebody clicked Allow.
+    private func sendWithKey(
+        _ request: ControlAPI.DecideRequest, feature: JevFeature
+    ) async throws -> ControlAPI.DecideResponse {
+        guard let apiKey = await readKey() else { throw JevError.noKey }
+        let settings = settings()
+        let pin = settings.laneOverride(feature)
+        guard pin.allowsJev else { throw JevError.pinnedAwayFromJev(feature, pin) }
+        guard settings.enabled, settings.isOn(feature) else { throw JevError.disabled(feature) }
+        return try await send(request, apiKey: apiKey, feature: feature)
     }
 
     /// Whether a request finished inside the caller's patience. True means settled — with an
@@ -1237,8 +1374,12 @@ public actor JevService {
 
     /// The model names this key can send. Used by the Settings "Test connection" button,
     /// which is the cheapest honest answer to "is my key right?" — it spends no tokens.
+    ///
+    /// The one read that goes ahead after a refused one: the person pressing the button is
+    /// the person who can answer the dialog this time.
     public func testConnection() async throws -> [String] {
-        guard let apiKey = keyProvider() else { throw JevError.noKey }
+        keyReadRefused = false
+        guard let apiKey = await readKey() else { throw JevError.noKey }
         return try await SystemOneClient(baseURL: baseURL, apiKey: apiKey, session: session)
             .models()
     }

@@ -413,6 +413,9 @@ struct LoadRouteTests {
             host: host, handshakeURL: handshakeURL,
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
             events: BuddyEventHub(),
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
             loadPatience: patience,
             loadClock: { clock?.now ?? Date() },
             discoverTailnetAddress: { nil }

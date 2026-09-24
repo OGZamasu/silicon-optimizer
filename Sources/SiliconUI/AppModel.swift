@@ -78,6 +78,16 @@ public final class AppModel {
     /// the selector's.
     @ObservationIgnored
     var makeRuntime: (@MainActor (RuntimeSelector.Selection) -> any InferenceRuntime)?
+    /// Where `trellisBaseDirectory` looks for the 3D engines: this Mac's home folder and
+    /// disks in the app, a temporary tree under a test.
+    @ObservationIgnored
+    var trellisSearchRoots: @MainActor () -> (home: URL, disks: [URL]) = {
+        (FileManager.default.homeDirectoryForCurrentUser, Settings.localDiskRoots())
+    }
+    /// How long a search that found nothing stands before the next one, so a Mac without the
+    /// engines is not searched on every redraw of the 3D tab.
+    @ObservationIgnored var trellisSearchInterval: Duration = .seconds(15)
+    @ObservationIgnored private var trellisSearchMiss: (at: ContinuousClock.Instant, fallback: URL)?
 
     /// User-supplied llama.cpp flags from Advanced mode, applied to the next load.
     public private(set) var extraArguments: [String] = []
@@ -213,6 +223,9 @@ public final class AppModel {
     internal(set) var swarmMembers: [SwarmMember] = []
     internal(set) var swarmMembersLoaded = false
     var codexRuntime: CodexRuntime?
+    /// Which start or stop the Codex callbacks belong to. Bumped by each one, so a stop
+    /// that finishes late cannot mark a newer session idle.
+    var codexLifecycleGeneration = 0
     /// The rendered conversation: agent prose, commands, file changes, tool calls.
     public internal(set) var codexItems: [CodexChatItem] = []
     /// Approvals Codex is waiting on, oldest first.
@@ -1065,6 +1078,37 @@ public final class AppModel {
 
     public func refreshMeshInstallations() { meshLibraryVersion += 1 }
 
+    /// Where the 3D engines are: the folder Settings names, or — while it names none — a
+    /// `trellis2` folder with an engine in it at the top of the home folder or of a local disk
+    /// (`Settings.trellisBaseDirectory(home:disks:)`). Looked for when 3D needs it, not once at
+    /// launch, so a disk plugged in later is found; what is found is written into Settings,
+    /// where it shows and stays put. With none found, the home folder's `trellis2`, where the
+    /// 3D tab then says what is missing.
+    public var trellisBaseDirectory: URL {
+        if let configured = settings.configuredTrellisBaseDirectory { return configured }
+        if let miss = trellisSearchMiss, ContinuousClock.now - miss.at < trellisSearchInterval {
+            return miss.fallback
+        }
+        let roots = trellisSearchRoots()
+        guard let found = Settings.trellisBaseDirectory(home: roots.home, disks: roots.disks)
+        else {
+            let fallback = roots.home.appendingPathComponent("trellis2", isDirectory: true)
+            trellisSearchMiss = (.now, fallback)
+            return fallback
+        }
+        trellisSearchMiss = nil
+        // Written after the view update that asked, never during it.
+        Task { @MainActor [weak self] in
+            guard let self, self.settings.configuredTrellisBaseDirectory == nil else { return }
+            self.settings.trellisBaseDirectory = found.path
+            // Only the app's own settings document is written back. A model handed its
+            // settings — a test, a preview — keeps the choice in memory and away from the
+            // Keychain that `save()` also writes.
+            if self.readsCredentialsFromKeychain { self.settings.save() }
+        }
+        return found
+    }
+
     static func hunyuanWeightsSlot(for entryID: String) -> String {
         entryID == MeshCatalog.hunyuanTurbo.id ? "shape-large" : "shape-small"
     }
@@ -1072,7 +1116,7 @@ public final class AppModel {
     /// Whether a backend can run right now, and why not when it cannot.
     public func meshInstallation(for entry: MeshEntry) -> MeshInstallation {
         _ = meshLibraryVersion
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return MeshLocator.trellis(base: base, hubCache: trellisHubCache)
@@ -1127,7 +1171,7 @@ public final class AppModel {
 
     /// The one-click fix when a backend's `missing` is `.weights`.
     public func meshWeightsDownload(for entry: MeshEntry) -> MeshInstaller.Download? {
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return MeshInstaller.Download(
@@ -1255,8 +1299,75 @@ public final class AppModel {
         /// that offer more than one started advertising it with #133.
         public var engine: String?
         /// Models the peer could serve instead. Empty until nodes ship a list endpoint;
-        /// the loaded model then stands alone in the switcher.
+        /// the loaded model then stands alone in the switcher. Nodes list *files* here
+        /// ("qwen3_8_27b.ninfer"); `switchableModels` is the same list by model id.
         public var availableModels: [String] = []
+
+        /// What the peer could switch to, by the ids its start route takes: the loaded
+        /// model first, then every listed file that is not that model. A one-model node
+        /// lists its file and serves its id — one model, not a menu of two.
+        public var switchableModels: [String] {
+            var ids: [String] = []
+            if let model { ids.append(model) }
+            for file in availableModels {
+                let id = nodeModelID(for: file)
+                if !ids.contains(where: { GatewayAPI.modelNamesMatch($0, id) }) {
+                    ids.append(id)
+                }
+            }
+            return ids
+        }
+
+        /// The model id a node's `POST /v1/llm/start` expects, for a model this Mac may
+        /// hold under either spelling.
+        ///
+        /// Without a `model_file` beside it, the node turns the `model` it is sent into a
+        /// file name — dots and dashes to underscores, `.ninfer` appended — so
+        /// "qwen3.8-27b" finds qwen3_8_27b.ninfer, and a file name sent as-is looks for
+        /// qwen3_8_27b_ninfer.ninfer. It looks only after stopping the model it was
+        /// serving, so a wrong spelling here takes the node's chat down for every member
+        /// of the swarm. The loaded model goes by the id the node serves it under; any
+        /// other file by its name without the extension, which is the id the node gives a
+        /// file it starts.
+        public func nodeModelID(for name: String) -> String {
+            Self.nodeModelID(for: name, serving: model)
+        }
+
+        static func nodeModelID(for name: String, serving model: String?) -> String {
+            if let model, GatewayAPI.modelNamesMatch(model, name) { return model }
+            let suffix = ".ninfer"
+            if name.lowercased().hasSuffix(suffix), name.count > suffix.count {
+                return String(name.dropLast(suffix.count))
+            }
+            return name
+        }
+
+        /// The listed file a choice stands for, sent beside the id as `model_file`.
+        ///
+        /// Every node reads `model_file` — an exact name in its models folder — before it
+        /// munges `model`, so the file is found whatever the munge would have made of the
+        /// id: a hand-placed `llama-3.1-8b.ninfer`, whose dots and dashes the munge turns
+        /// into underscores; a file differing from the served id only in case, on a
+        /// case-sensitive models folder. Nil when nothing listed is this model — the id
+        /// alone then — so a node without a list is asked exactly as before.
+        public func listedFile(for name: String) -> String? {
+            if availableModels.contains(name) { return name }
+            let id = nodeModelID(for: name)
+            let munged = id.replacingOccurrences(of: ".", with: "_")
+                .replacingOccurrences(of: "-", with: "_")
+            // The file this id names on its own, then the one the node's rule reaches,
+            // then either in another case, and only then a looser match on letters and
+            // digits — which can be two files, so it comes last.
+            for exact in ["\(id).ninfer", "\(munged).ninfer"] where availableModels.contains(exact) {
+                return exact
+            }
+            for spelling in ["\(id).ninfer", "\(munged).ninfer"] {
+                if let file = availableModels.first(where: {
+                    $0.caseInsensitiveCompare(spelling) == .orderedSame
+                }) { return file }
+            }
+            return availableModels.first { GatewayAPI.modelNamesMatch($0, id) }
+        }
     }
 
     public struct PeerStatus: Identifiable, Sendable {
@@ -1284,13 +1395,16 @@ public final class AppModel {
         public var gpuConsumer: String?
         public var runningJob: PeerJob?
         public var pendingJobs: [PeerJob] = []
+        /// The node's decision lane, from the top-level `decisions` object in its
+        /// `/v1/node`. Nil when the node does not report one.
+        public var decisions: PeerDecisionLane?
 
         public var readyCapabilities: [String] {
             capabilities.filter(\.ready).map(\.id)
         }
     }
 
-    public private(set) var swarmPeers: [PeerStatus] = []
+    public internal(set) var swarmPeers: [PeerStatus] = []
     public private(set) var isRefreshingSwarm = false
     private var swarmPollTask: Task<Void, Never>?
     /// When the swarm was last polled, so a stale view can be seen for what it is
@@ -1509,7 +1623,13 @@ public final class AppModel {
         }
         if model != nil || contextLength != nil {
             var payload: [String: Any] = [:]
-            if let model { payload["model"] = model }
+            // By id, whatever spelling the caller had: menus list the node's files, and a
+            // gateway id can end in one. And the exact file beside it, which the node
+            // reads first, so its munge of the id is never what finds the file.
+            if let model {
+                payload["model"] = PeerLLM.nodeModelID(for: model, serving: peer.llm?.model)
+                if let file = peer.llm?.listedFile(for: model) { payload["model_file"] = file }
+            }
             // Honored once the node ships hub #127; older nodes ignore the field and
             // start at their own profile — the card shows whatever they actually chose.
             if let contextLength { payload["context_length"] = contextLength }
@@ -1697,6 +1817,7 @@ public final class AppModel {
                 .compactMap { Self.parseJob($0, running: false) }
         }
         status.gpuConsumer = (json["metrics"] as? [String: Any])?["gpu_consumer"] as? String
+        status.decisions = (json["decisions"] as? [String: Any]).map(Self.parseDecisions)
     }
 
     private nonisolated static func parseJob(
@@ -1882,7 +2003,7 @@ public final class AppModel {
     /// The one-time hy3d build, run for the user — xcodebuild because command-line SwiftPM
     /// never compiles mlx-swift's Metal shaders.
     public func buildHy3DEngine() {
-        let package = settings.resolvedTrellisBaseDirectory
+        let package = trellisBaseDirectory
             .appendingPathComponent("hunyuan3d-swift")
         runRepair(id: "hy3d-build", steps: [
             RepairStep(
@@ -2002,7 +2123,7 @@ public final class AppModel {
 
     func makeMeshRuntime(for entry: MeshEntry) -> (any MeshRuntime)? {
         if let meshRuntimeFactory { return meshRuntimeFactory(entry) }
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return TrellisRuntime(base: base)
@@ -2017,10 +2138,27 @@ public final class AppModel {
             let configured = settings.lato2ServiceURL
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard let url = URL(string: configured) else { return nil }
-            return Lato2Runtime(baseURL: url)
+            return Lato2Runtime(
+                baseURL: url, token: Self.lato2Credential(for: url, in: swarmConfig)
+            )
         case .unsupported:
             return nil
         }
+    }
+
+    /// The bearer the LATO.2 lane presents: whatever this Mac holds for the swarm peer at
+    /// that address — its own per-client token, else the shared one — exactly as the video,
+    /// image and chat lanes send it. The service URL is typed separately from the swarm, so
+    /// it is matched to a peer by origin; one that matches no peer gets nothing, because
+    /// the registry is also the list of places a swarm credential may go.
+    nonisolated static func lato2Credential(for url: URL, in config: SwarmConfig?) -> String? {
+        guard let config,
+              let peer = config.peers.first(where: { peer in
+                  URL(string: peer.baseURL.trimmingCharacters(in: .whitespaces))
+                      .map { RemoteURLPolicy.sameOrigin($0, url) } ?? false
+              })
+        else { return nil }
+        return config.bearer(forPeer: peer.name)
     }
 
     /// Queues the composer's current image. Same warn-don't-refuse policy as images.
@@ -4229,6 +4367,9 @@ public final class AppModel {
     }
 
     private var generationTask: Task<Void, Never>?
+    /// Which `send` holds `generationTask`. A stopped answer winds down a moment after Stop,
+    /// when the next answer may already hold the handle, so each clears only its own.
+    @ObservationIgnored private var currentGeneration: UUID?
 
     public var isGenerating: Bool { generationTask != nil }
 
@@ -4245,7 +4386,16 @@ public final class AppModel {
             )
             return
         }
-        guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
+        send(text, images: images, to: runtime)
+    }
+
+    /// `send` once a model is known to be loaded: apart so the tests can answer from a runtime
+    /// of their own.
+    func send(_ text: String, images: [String], to runtime: any InferenceRuntime) {
+        // One answer at a time. A second — Return pressed again mid-answer — took the first's
+        // handle, so Stop could no longer stop it and both wrote into the same thread.
+        guard generationTask == nil,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
         else { return }
         noteActivity()
 
@@ -4272,12 +4422,14 @@ public final class AppModel {
         // posting into the conversation this is answering would carry a half-written reply
         // as context. See `AppModel+Buddy`.
         let answering = conversations[index].id
+        let generation = UUID()
+        currentGeneration = generation
         BuddyGenerations.shared.begin(answering)
         generationTask = Task { [weak self] in
             defer {
                 Task { @MainActor in
-                    self?.generationTask = nil
                     BuddyGenerations.shared.end(answering)
+                    if self?.currentGeneration == generation { self?.generationTask = nil }
                 }
             }
             do {
@@ -4286,9 +4438,9 @@ public final class AppModel {
                     guard let self else { return }
                     switch event {
                     case .token(let token):
-                        self.append(token, toMessage: replyID, reasoning: false)
+                        self.append(token, to: replyID, in: answering, reasoning: false)
                     case .reasoningToken(let token):
-                        self.append(token, toMessage: replyID, reasoning: true)
+                        self.append(token, to: replyID, in: answering, reasoning: true)
                     case .finished(let metrics):
                         self.lastGeneration = metrics
                     }
@@ -4299,24 +4451,9 @@ public final class AppModel {
                 guard let self else { return }
                 self.append(
                     "\n\n_Generation failed: \(error.localizedDescription)_",
-                    toMessage: replyID, reasoning: false
+                    to: replyID, in: answering, reasoning: false
                 )
             }
-        }
-    }
-
-    private func append(_ token: String, toMessage id: UUID, reasoning: Bool) {
-        guard let conversationIndex = conversations.firstIndex(
-            where: { $0.id == selectedConversationID }
-        ), let messageIndex = conversations[conversationIndex].messages.firstIndex(
-            where: { $0.id == id }
-        ) else { return }
-
-        if reasoning {
-            conversations[conversationIndex].messages[messageIndex].reasoning =
-                (conversations[conversationIndex].messages[messageIndex].reasoning ?? "") + token
-        } else {
-            conversations[conversationIndex].messages[messageIndex].content += token
         }
     }
 
@@ -4326,7 +4463,8 @@ public final class AppModel {
     }
 
     public func regenerate() {
-        guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
+        guard generationTask == nil,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
               let lastUser = conversations[index].messages.last(where: { $0.role == .user })
         else { return }
 

@@ -1333,6 +1333,9 @@ struct MediaRoutingAppTests {
         settings.videoOutputDirectory = folder.appendingPathComponent("Videos").path
         settings.imageOutputDirectory = folder.appendingPathComponent("Images").path
         settings.meshOutputDirectory = folder.appendingPathComponent("Meshes").path
+        // And its own 3D engine folder: with none named, the check searches the home folder
+        // and every local disk.
+        settings.trellisBaseDirectory = folder.appendingPathComponent("engines").path
         return AppModel(
             videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
             settings: settings

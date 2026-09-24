@@ -51,6 +51,8 @@ struct TypeSafeKeyRow: View {
         // Replacing an existing key is not: they may have turned it off on purpose.
         let turningOn = hadNoKey && wantsAKey && !failed
         Task {
+            // A read refused under the old key says nothing about this one.
+            await JevService.shared.keyDidChange()
             if turningOn {
                 switchedOn = (try? await JevService.shared.update { $0.enabled = true }) != nil
             } else if !stored {

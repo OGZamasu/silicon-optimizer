@@ -636,6 +636,11 @@ enum BuddyTestStore {
         settings.imageOutputDirectory = folder.appendingPathComponent("Images").path
         settings.meshOutputDirectory = folder.appendingPathComponent("Meshes").path
         settings.videoOutputDirectory = folder.appendingPathComponent("Videos").path
+        // With none named, the 3D check looks for engines across the home folder and every
+        // local disk. A test names its own, unless it set one up itself.
+        if settings.trellisBaseDirectory.isEmpty {
+            settings.trellisBaseDirectory = folder.appendingPathComponent("engines").path
+        }
         let model = AppModel(
             videoQueue: videoQueue
                 ?? VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),

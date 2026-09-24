@@ -88,7 +88,7 @@ Speed matters; the user is watching the selected element. Reuse preflight metada
 
 ```bash
 node .github/skills/impeccable/scripts/live-insert.mjs --id EVENT_ID --count EVENT_COUNT --position after \
-  --element-id 'ANCHOR_ID' --classes 'class1,class2' --tag 'section' --text 'ANCHOR_TEXT'
+  --element-id='ANCHOR_ID' --classes='class1,class2' --tag='section' --text='ANCHOR_TEXT'
 ```
 
 `--position` ← `event.insert.position`; anchor flags map exactly like wrap's. The scaffold has **no** `data-impeccable-variant="original"`; variants are net-new HTML+CSS at `insertLine`. The scaffold carries `sourceWritten: false` with `wrapperBlock` and `replaceEndLine < replaceStartLine` (an insertion): splice variants into `wrapperBlock` at the marker and insert at `replaceStartLine` in ONE edit, exactly as the wrap section describes. Decide the visitor mode from the surface and load [craft-floor.md](craft-floor.md) before writing net-new markup. Svelte/SvelteKit also use this source-preview path: author Svelte-valid variant markup inside the wrapper, then let normal HMR display it. Accept/discard removes the wrapper; the anchor is untouched.
@@ -108,10 +108,10 @@ When `event.scaffold` is present, the helper already found the source and comput
 **`event.scaffold` carries `sourceWritten: false`.** The helper did NOT write the wrapper; it hands you `scaffold.wrapperBlock` plus the picked element's source range (`replaceStartLine`, `replaceEndLine`, 1-indexed). Write the wrapper **and** all variants in ONE edit: splice your variants into `wrapperBlock` at the "Variants: insert below this line" marker, then replace lines `[replaceStartLine, replaceEndLine]` with the result. A separate scaffold write reloads the framework before your variant write lands and strands the browser at 0/N. (`replaceEndLine < replaceStartLine` means insert mode: insert, remove nothing.)
 
 ```bash
-node .github/skills/impeccable/scripts/live-wrap.mjs --id EVENT_ID --count EVENT_COUNT --element-id 'ELEMENT_ID' --classes 'class1,class2' --tag 'div' --text 'TEXT_SNIPPET'
+node .github/skills/impeccable/scripts/live-wrap.mjs --id EVENT_ID --count EVENT_COUNT --element-id='ELEMENT_ID' --classes='class1,class2' --tag='div' --text='TEXT_SNIPPET'
 ```
 
-Flag mapping (keep separate, never collapse into `--query`; these values come from the page, so pass each as a single-quoted shell word with any `'` written as `'\''`): `--element-id` ← `event.element.id`; `--classes` ← classes joined with commas; `--tag` ← tagName; `--text` ← first ~80 chars of textContent, **every call**: it disambiguates repeated sibling components, without it wrap lands on the first match. If `event.pageUrl` implies the file, pass `--file PATH`. If `--text` still matches several candidates, wrap exits `{ error: "element_ambiguous", candidates, fallback: "agent-driven" }`: pick the right range from page context and write the wrapper manually per the fallback flow.
+Flag mapping (keep separate, never collapse into `--query`; these values come from the page, so pass each glued to its flag with `=` and single-quoted, with any `'` written as `'\''`; a separate word that looks like `--file=…` or `--target=…` would be read as that flag): `--element-id` ← `event.element.id`; `--classes` ← classes joined with commas; `--tag` ← tagName; `--text` ← first ~80 chars of textContent, **every call**: it disambiguates repeated sibling components, without it wrap lands on the first match. If `event.pageUrl` implies the file, pass `--file=PATH`. If `--text` still matches several candidates, wrap exits `{ error: "element_ambiguous", candidates, fallback: "agent-driven" }`: pick the right range from page context and write the wrapper manually per the fallback flow.
 
 Success output: `{ file, insertLine, commentSyntax, styleMode, styleTag, cssSelectorPrefixExamples, cssAuthoring }` (plus the `sourceWritten: false` fields above on source-preview targets). Run directly with no preflight scaffold, it writes the wrapper itself and you splice variants at `insertLine`. `styleMode` controls how preview CSS must be authored. Treat it as a detected capability mode, not a framework guess: `scoped` means `@scope ([data-impeccable-variant="N"])` rules; `astro-global-prefixed` means explicit `[data-impeccable-variant="N"]` prefixes with the exact returned `styleTag`. Use `cssAuthoring` as the source of truth for the current file (styleTag, selector strategy, requirements, forbidden patterns); apply no framework-specific exception unless it says to.
 
@@ -253,12 +253,12 @@ When wrap returns `fallback: "agent-driven"`, you pick the source file yourself;
 
 Event: `{id, variantId, _acceptResult, _completionAck}`. The poll script already ran `live-accept.mjs` deterministically and acknowledged delivery; the browser DOM is already updated.
 
-- The accept event includes `pageUrl`; the poll script must forward it to `live-accept.mjs --page-url PAGE_URL` so accept-time cleanup only scrubs staged copy edits for the current page.
+- No page text rides on the `live-accept.mjs` command: the poll script runs it with `--id EVENT_ID --variant VARIANT_ID` (or `--id EVENT_ID --discard`), plus `--param-values='<paramValues as JSON>'` when the page sent values. Never add `pageUrl` or any other page text to it; a page URL of `--discard` would turn an Accept into a discard.
 - `_completionAck.ok !== true`: do not poll yet. Run `live-status.mjs` / `live-resume.mjs`, finish cleanup manually if needed, then `live-complete.mjs --id EVENT_ID`.
 - `handled: true, carbonize: false`: nothing to do; poll again.
 - `handled: true, carbonize: true`: required cleanup below; `_acceptResult.todo`, `_completionAck.requiresComplete`, and the stderr banner all point at it.
 - `handled: false, mode: "fallback"`: the session lived in a generated file; you already wrote true source in fallback Step 3; clean the temporary wrapper and poll.
-- `handled: false, mode: "error"`: **do not hand-edit the file.** `source_locked`: rerun the same `live-accept.mjs` command (idempotent) until the publisher releases. `accept_receipt_conflict`: the session already resolved as `priorOperation`; run `live-status.mjs` and tell the user. Anything else: report briefly, run `live-status.mjs` first.
+- `handled: false, mode: "error"`: **do not hand-edit the file.** `source_locked`: rerun the exact `live-accept.mjs` command `_instructions` gives (idempotent) until the publisher releases. `accept_receipt_conflict`: the session already resolved as `priorOperation`; run `live-status.mjs` and tell the user. Anything else: report briefly, run `live-status.mjs` first.
 - `handled: false` without `mode`: manual cleanup: read file, find markers, edit.
 
 ### Required after accept (carbonize)

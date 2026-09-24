@@ -858,6 +858,11 @@ export function inertCommentJson(value) {
 }
 
 function argVal(args, flag) {
+  // Same grammar as live-wrap/live-insert: page values arrive as --flag=value.
+  const prefix = flag + '=';
+  for (const arg of args) {
+    if (arg.startsWith(prefix)) return arg.slice(prefix.length);
+  }
   const idx = args.indexOf(flag);
   return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : null;
 }

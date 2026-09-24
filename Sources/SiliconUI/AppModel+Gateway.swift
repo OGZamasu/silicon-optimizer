@@ -156,8 +156,12 @@ extension AppModel: GatewayHost {
             where !names.contains(where: { GatewayAPI.modelNamesMatch($0, candidate) }) {
                 names.append(candidate)
             }
+            // A name no model has is left out, not tidied up: a rewritten one would route
+            // to nothing, and the original is the shape of a string meant to end early in
+            // whichever file a gateway id is saved to.
             for name in names
-            where !hidden.contains(GatewayAPI.modelID(peerSlug: slug, model: name)) {
+            where GatewayAPI.isAcceptablePeerModelName(name)
+                && !hidden.contains(GatewayAPI.modelID(peerSlug: slug, model: name)) {
                 let serving = llm.running && llm.model == name
                 models.append(GatewayAPI.Model(
                     id: GatewayAPI.modelID(peerSlug: slug, model: name),

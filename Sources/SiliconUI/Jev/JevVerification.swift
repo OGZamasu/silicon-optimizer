@@ -333,6 +333,42 @@ struct JevVerifier: Sendable {
         }
     }
 
+    /// The app's judging half: the owner's switch, the lane their pin allows, and the
+    /// seven questions put to that lane.
+    ///
+    /// The switch is asked before the lanes. A local lane answers whatever ability it is
+    /// asked about, so with a model loaded the lanes alone would have that same model grade
+    /// every chat answer it had just written — on a Mac where verification is off, which is
+    /// every Mac by default.
+    ///
+    /// Through the router rather than straight at `JevService`: the router is what honours
+    /// "Always local" and "Off", and a question put to Jev directly billed an ability the
+    /// owner had pinned away from the cloud.
+    ///
+    /// - Parameters:
+    ///   - service: the app's, or a test's pointed at a loopback double.
+    ///   - router: the lanes that may answer — the app's, or a test's with lanes of its own.
+    static func judging(
+        service: JevService, router: DecisionRouter,
+        escalationTarget: @escaping @Sendable (String?) async -> String?,
+        escalate: @escaping @Sendable (
+            String, [ControlAPI.ChatRequest.Message], Int
+        ) async throws -> String
+    ) -> JevVerifier {
+        JevVerifier(
+            isAvailable: {
+                // Waited on rather than assumed: a request in the first milliseconds of
+                // launch must not read as "no key" on a Mac that has one.
+                await JevBootstrap.ready()
+                guard await service.settings().isTurnedOn(.verification) else { return false }
+                return await router.canAnswer(.verification)
+            },
+            ask: { state in try await VerificationQuestions.ask(state: state, via: router) },
+            escalationTarget: escalationTarget,
+            escalate: escalate
+        )
+    }
+
     static let noTargetNote =
         "No escalation model is set and no swarm node is serving one, so this was not "
         + "re-run. Pick a model in Settings → TypeSafe (Jev) if you want flagged answers "
@@ -409,14 +445,8 @@ extension AppModel {
             baseURL: URL(string: "http://127.0.0.1:\(gatewayPort())")!,
             token: gatewayToken
         )
-        return JevVerifier(
-            isAvailable: {
-                // Waited on rather than assumed: a request in the first milliseconds of
-                // launch must not read as "no key" on a Mac that has one.
-                await JevBootstrap.ready()
-                return await DecisionRouter.shared.canAnswer(.verification)
-            },
-            ask: { state in try await VerificationQuestions.ask(state: state) },
+        return .judging(
+            service: .shared, router: .shared,
             escalationTarget: { [weak self] answeredBy in
                 guard let self else { return nil }
                 return await self.verificationEscalationTarget(excluding: answeredBy)
@@ -478,15 +508,36 @@ extension AppModel {
     /// Settings, where the row says what is sent and to whom.
     func verificationEscalationTarget(excluding: String? = nil) async -> String? {
         await JevBootstrap.ready()
-        let chosen = await JevService.shared.settings().verificationEscalationModel
-        // `gatewayServableModels()`, not `gatewayModels()`: the latter offers the virtual
-        // `silicon/auto`, and "escalate to whatever routing picks" is not an escalation —
-        // it is a coin toss that may land on the model that just answered. Skipped
-        // entirely when the owner has already named one, so drawing a settings row cannot
-        // be what walks the library and the swarm.
-        let models = chosen?.isEmpty == false ? [] : await gatewayServableModels()
-        return Self.escalationTarget(
-            chosen: chosen, from: models, excluding: excluding, paidAllowed: PaidLanes.allowed
+        return await Self.verificationEscalationTarget(
+            settings: await JevService.shared.settings(), excluding: excluding,
+            peersAllowed: PaidLanes.allowed,
+            // `gatewayServableModels()`, not `gatewayModels()`: the latter offers the
+            // virtual `silicon/auto`, and "escalate to whatever routing picks" is not an
+            // escalation — it is a coin toss that may land on the model that just answered.
+            servable: { await self.gatewayServableModels() }
+        )
+    }
+
+    /// The same, with the settings and the model list handed in.
+    ///
+    /// A third rule on top of the two above: **Always local means no cloud re-run either.**
+    /// The pin's promise is "never the cloud", and an escalation sends the whole
+    /// conversation, images included, to whoever runs the model. So with verification
+    /// pinned Always local a flagged answer is re-run only on the owner's own serving node,
+    /// even when a cloud model is named in Settings — it is then annotated instead, which is
+    /// what an answer with nowhere allowed to go always gets.
+    static func verificationEscalationTarget(
+        settings: JevSettings, excluding: String?, peersAllowed: Bool,
+        servable: () async -> [GatewayAPI.Model]
+    ) async -> String? {
+        let chosen = settings.verificationEscalationModel
+        // Skipped entirely when the owner has already named one, so drawing a settings row
+        // cannot be what walks the library and the swarm.
+        let models = chosen?.isEmpty == false ? [] : await servable()
+        let paidAllowed = peersAllowed
+            && settings.laneOverride(.verification) != .alwaysLocal
+        return escalationTarget(
+            chosen: chosen, from: models, excluding: excluding, paidAllowed: paidAllowed
         )
     }
 }

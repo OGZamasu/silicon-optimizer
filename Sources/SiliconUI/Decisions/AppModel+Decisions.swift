@@ -96,11 +96,9 @@ extension AppModel {
 
     /// The peer that would answer a decision, or nil when none would.
     ///
-    /// Read off the swarm poll this app already runs. A node advertises a decision lane as
-    /// an ordinary capability in `/v1/node` — `kind: "decision"`, one entry per checkpoint
-    /// it has resident — so nothing on either side needed a new field: `PeerCapability`
-    /// already carries the id, the kind, whether it is ready, and how long it typically
-    /// takes, and this Mac has been parsing all four since the swarm existed.
+    /// Read off the swarm poll this app already runs: a node reports its decision lane in
+    /// `/v1/node` — see `decisionCandidate(for:)` for the two shapes that is accepted in —
+    /// so asking a node costs no request of its own before the question itself.
     ///
     /// The fastest ready one wins, and a peer that is unreachable is not a candidate at
     /// all: a decision must never wait on a machine that is asleep.
@@ -124,22 +122,93 @@ extension AppModel {
     /// Every peer advertising a decision lane, ready or not — so the panel can show a node
     /// that exists but is asleep rather than showing nothing at all.
     var decisionNodeCandidates: [ControlAPI.NodeLaneDetail.Candidate] {
-        swarmPeers.compactMap { peer in
-            let decisions = peer.capabilities.filter {
-                $0.kind == NodeDecisionLane.capabilityKind
-            }
-            guard !decisions.isEmpty else { return nil }
-            let ready = decisions.filter(\.ready)
+        swarmPeers.compactMap(Self.decisionCandidate(for:))
+            .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+    }
+
+    /// One peer's decision lane as the panel and the router see it, or nil when it offers
+    /// none.
+    ///
+    /// silicon-node reports its lane as a top-level `decisions` object in `/v1/node` —
+    /// `available`, the `models` it accepts, a running `latency_ms` per question kind — and
+    /// that is the shape read first. This Mac once looked only for a capability of kind
+    /// `decision`, which the node never sent, so the node lane was never found; that shape
+    /// is still accepted, for a node that advertises it that way.
+    ///
+    /// A node that reports the object but not `available` — the lane switched off, or the
+    /// package not installed — offers nothing, and is left out rather than listed as a
+    /// node that has a lane it cannot use.
+    nonisolated static func decisionCandidate(
+        for peer: PeerStatus
+    ) -> ControlAPI.NodeLaneDetail.Candidate? {
+        if let lane = peer.decisions {
+            guard lane.available else { return nil }
             return .init(
                 name: peer.name,
                 reachable: peer.reachable,
-                ready: peer.reachable && !ready.isEmpty,
-                checkpoints: ready.map(\.id).sorted(),
-                perQuestionMS: ready.compactMap(\.typicalSeconds).min().map { $0 * 1000 },
-                detail: decisions.compactMap(\.detail).first
+                ready: peer.reachable,
+                checkpoints: lane.models.sorted(),
+                perQuestionMS: lane.perQuestionMS,
+                detail: lane.error
             )
         }
-        .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+        let decisions = peer.capabilities.filter {
+            $0.kind == NodeDecisionLane.capabilityKind
+        }
+        guard !decisions.isEmpty else { return nil }
+        let ready = decisions.filter(\.ready)
+        return .init(
+            name: peer.name,
+            reachable: peer.reachable,
+            ready: peer.reachable && !ready.isEmpty,
+            checkpoints: ready.map(\.id).sorted(),
+            perQuestionMS: ready.compactMap(\.typicalSeconds).min().map { $0 * 1000 },
+            detail: decisions.compactMap(\.detail).first
+        )
+    }
+
+    /// A node's `decisions` object, read leniently like the rest of `/v1/node`: a field that
+    /// is missing or the wrong type reads as "not reported", never as a crash.
+    nonisolated static func parseDecisions(_ json: [String: Any]) -> PeerDecisionLane {
+        func number(_ value: Any?) -> Double? {
+            let result: Double? = switch value {
+            case let double as Double: double
+            case let int as Int: Double(int)
+            default: nil
+            }
+            guard let result, result.isFinite, result >= 0 else { return nil }
+            return result
+        }
+        let latency = json["latency_ms"] as? [String: Any] ?? [:]
+        // Keyed by the kind of a one-question request, which makes each a per-question
+        // figure; "batch" is a whole request of several and says nothing per question
+        // unless it is all there is.
+        let single = ["choice", "score", "noul"].compactMap { number(latency[$0]) }
+        return PeerDecisionLane(
+            available: json["available"] as? Bool ?? false,
+            loaded: json["loaded"] as? Bool ?? false,
+            models: json["models"] as? [String] ?? [],
+            perQuestionMS: single.min() ?? number(latency["batch"]),
+            error: json["error"] as? String
+        )
+    }
+}
+
+extension AppModel {
+    /// A node's decision lane as its `/v1/node` reports it.
+    public struct PeerDecisionLane: Sendable, Equatable {
+        /// Whether the node would answer a decision: the lane is switched on and its
+        /// package is installed. The checkpoints may still be cold — the node loads them
+        /// on the first question — which costs that question time, not an answer.
+        public var available: Bool
+        /// Whether the checkpoints are resident on the node's card right now.
+        public var loaded: Bool
+        /// The names the node accepts as a request's `model`: `laya`, `laya-multilingual`…
+        public var models: [String]
+        /// What one question has been costing there, in milliseconds.
+        public var perQuestionMS: Double?
+        /// The node's last load failure, when there was one.
+        public var error: String?
     }
 }
 
@@ -164,7 +233,9 @@ extension AppModel {
         var abilities: [ControlAPI.DecisionAbility] = []
         for feature in JevFeature.allCases {
             let entry = totals.features[feature.rawValue] ?? JevLedger.Entry()
-            let lane = await DecisionRouter.shared.lane(for: feature)
+            let lane = await Self.answeringLane(
+                for: feature, settings: settings, router: .shared
+            )
             let last = await DecisionRouter.shared.lastAnswer(for: feature)
             abilities.append(.init(
                 id: feature.rawValue,
@@ -325,8 +396,22 @@ extension AppModel {
         return "\(ready.name), with \(ready.checkpoints.joined(separator: ", "))."
     }
 
+    /// The lane the panel names for an ability: the router's choice, except that an ability
+    /// which runs only once switched on is answered by nobody while it is off, whatever lanes
+    /// are installed. Naming a lane for it then would be the panel claiming Laya screens
+    /// tool calls on a Mac where nothing screens them.
+    static func answeringLane(
+        for feature: JevFeature, settings: JevSettings, router: DecisionRouter
+    ) async -> DecisionLaneID? {
+        if feature.runsOnlyWhenSwitchedOn, !settings.isTurnedOn(feature) { return nil }
+        return await router.lane(for: feature)
+    }
+
     /// Why nothing would answer a feature. Written for a person reading a settings row.
     static func whyNothingAnswers(_ feature: JevFeature, settings: JevSettings) -> String {
+        if feature.runsOnlyWhenSwitchedOn, !settings.isTurnedOn(feature) {
+            return "Switched off in Settings → TypeSafe (Jev)."
+        }
         switch settings.laneOverride(feature) {
         case .off:
             return "Switched off for this ability."
@@ -544,6 +629,9 @@ extension AppModel {
         // — same refusals, same file, same numbers.
         if lane == .oneToken { return try await calibrateJev() }
 
+        if let refusal = await Self.calibrationPinRefusal(using: .shared) {
+            throw ControlHostError.badRequest(refusal)
+        }
         guard await JevService.shared.isAvailable(.calibration) else {
             throw ControlHostError.badRequest(
                 "Calibration asks Jev for the reference answers. Add a TypeSafe API key and "

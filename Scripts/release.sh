@@ -13,6 +13,25 @@
 
 set -euo pipefail
 
+# Both checks read the tool's whole output before searching it. Piped straight into
+# `grep -q`, the tool was killed by SIGPIPE when grep stopped reading at the match — and
+# `codesign -dv` writes its details line by line, Authority first — so under pipefail every
+# correctly signed build was rejected.
+identity_in_keychain() {
+    local identities
+    identities="$(security find-identity -v -p codesigning)" || return 1
+    grep -Fq "\"$1\"" <<<"$identities"
+}
+
+signed_with_identity() {
+    local details
+    details="$(codesign -dv --verbose=4 "$1" 2>&1)" || return 1
+    grep -Fxq "Authority=$2" <<<"$details"
+}
+
+# Sourced by Scripts/test-release-security.sh: define the checks above and do nothing else.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
 cd "$(dirname "$0")/.."
 
 VERSION="${1:-}"
@@ -39,7 +58,7 @@ fi
 for command in security codesign spctl xcrun ditto hdiutil npm gh git python3 shasum swift; do
     command -v "$command" >/dev/null || { echo "ERROR: required command not found: $command" >&2; exit 1; }
 done
-security find-identity -v -p codesigning | grep -Fq "\"${SIGN_IDENTITY}\"" || {
+identity_in_keychain "$SIGN_IDENTITY" || {
     echo "ERROR: requested Developer ID identity is not available in the keychain" >&2
     exit 1
 }
@@ -107,7 +126,7 @@ SILICON_SWIFT_SCRATCH_PATH="$RELEASE_TMP/swift-build" \
 
 echo "==> Verifying the Developer ID signature"
 codesign --verify --deep --strict --verbose=2 "$BUNDLE"
-codesign -dv --verbose=4 "$BUNDLE" 2>&1 | grep -Fq "Authority=${SIGN_IDENTITY}" || {
+signed_with_identity "$BUNDLE" "$SIGN_IDENTITY" || {
     echo "ERROR: built app is not signed with the requested Developer ID identity" >&2
     exit 1
 }

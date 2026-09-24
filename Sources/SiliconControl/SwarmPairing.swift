@@ -226,8 +226,21 @@ public actor PairingServer {
 
     private let hostName: String
     private var listener: NWListener?
-    private var activeConnections = 0
-    private static let maximumConnections = 16
+    /// Who holds which of the sixteen sockets. Every one of them is taken before anything
+    /// is known about the caller — nothing here is authenticated — so no single address may
+    /// hold more than four: otherwise one host on the tailnet, opening sixteen connections
+    /// and dribbling into each, could keep the joiner the owner is waiting for from ever
+    /// saying hello while the invite is open.
+    private var connections = ControlServer.ConnectionBudget(
+        perListener: PairingServer.maximumConnections,
+        perTailnetSource: PairingServer.maximumConnectionsPerAddress
+    )
+    static let maximumConnections = 16
+    static let maximumConnectionsPerAddress = 4
+    /// The most a request here may carry. A join is a device's name, and everything else is
+    /// a GET. The control server's general ceiling would let an unauthenticated caller hold
+    /// a slot for as long as sixteen megabytes take to arrive at a slow link's pace.
+    static let maximumBody = 4096
     private var slot: Slot?
     /// A denial must not occupy the only invitation slot while its requester is offline.
     /// Retain just enough to tell late pollers they were denied, until the record expires:
@@ -314,21 +327,23 @@ public actor PairingServer {
     // MARK: Serving
 
     private func accept(_ connection: NWConnection) {
-        guard activeConnections < Self.maximumConnections else {
+        let source = ControlServer.remoteAddress(of: connection)
+        guard connections.admit(from: .tailnet, source: source) else {
             connection.cancel()
             return
         }
-        activeConnections += 1
         connection.start(queue: .global(qos: .userInitiated))
-        Task { await serve(connection) }
+        Task { await serve(connection, source: source) }
     }
 
-    private func serve(_ connection: NWConnection) async {
+    private func serve(_ connection: NWConnection, source: String) async {
         defer {
             connection.cancel()
-            activeConnections -= 1
+            connections.release(from: .tailnet, source: source)
         }
-        guard let request = try? await HTTPRequest.read(from: connection) else { return }
+        guard let request = try? await HTTPRequest.read(
+            from: connection, maximumBody: { _, _, _ in Self.maximumBody }
+        ) else { return }
         let response = handle(request)
         try? await response.write(to: connection)
     }
