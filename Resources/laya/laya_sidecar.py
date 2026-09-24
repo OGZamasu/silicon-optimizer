@@ -98,6 +98,30 @@ class Sidecar:
             "version": getattr(laya_mlx, "__version__", None),
         }
 
+    def overflow(self, state, questions: dict):
+        """`(tokens, room)` when the state is longer than the encoder will read, else None.
+
+        laya-mlx cuts a long state to fit without a word: the tail goes — and with it
+        whatever happened to be serialised last — and the answer about what is left comes
+        back as confident as any other.  So the length is checked first, with the library's
+        own arithmetic from `PrefixCache.prepare`: the state's tokens against what each
+        question's prefix leaves of `max_len`, the tightest question deciding.  Counts only;
+        the state itself is never repeated.
+        """
+        from laya_mlx.common import build_prefix, serialize_state
+
+        agent = self.agent
+        tok = agent.tok
+        max_len = agent.cfg.get("max_len", 512)
+        head_len = agent.cfg.get("head_max_len", 192)
+        text = serialize_state(state).replace(tok.mask_token, " ")
+        tokens = len(tok(text, add_special_tokens=False)["input_ids"])
+        room = min(
+            max(0, max_len - len(build_prefix(tok, agent._to_internal(q), head_len)[0]) - 1)
+            for q in questions.values()
+        )
+        return (tokens, room) if tokens > room else None
+
     def decide(self, state, questions: dict) -> dict:
         """One request, however many questions, and how long it took.
 
@@ -195,6 +219,15 @@ def main() -> int:
             continue
 
         try:
+            too_long = sidecar.overflow(request.get("state"), questions)
+            if too_long:
+                tokens, room = too_long
+                _out({
+                    "id": request_id, "ok": False, "kind": "state_too_long",
+                    "error": f"The state is {tokens} tokens and the checkpoint reads {room}.",
+                    "tokens": tokens, "room": room,
+                })
+                continue
             answer = sidecar.decide(request.get("state"), questions)
         except Exception as error:
             # The type and the message, never the traceback and never the state. A

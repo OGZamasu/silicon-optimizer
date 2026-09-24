@@ -881,3 +881,141 @@ struct LayaInstallTests {
         )
     }
 }
+
+// MARK: - The real driver script, over a stand-in library
+
+/// `laya_sidecar.py` itself — the script the app ships, not `FakeSidecar` — over a stand-in
+/// `laya_mlx` that loads nothing: a tokenizer that counts words, a 32-token context, and a
+/// `system_one` that writes down every state it is handed. Enough to prove what the script
+/// does *before* the library sees a state; nothing here needs MLX, weights or a network.
+///
+/// The stand-in's `build_prefix` is a word count too, so "Is this true?" leaves
+/// 32 − (1 + 3 + 4) − 1 = 23 tokens of room for the state.
+struct StubLayaLibrary {
+    let directory: URL
+
+    init() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("laya-stub-\(UUID().uuidString)", isDirectory: true)
+        let package = directory.appendingPathComponent("laya_mlx", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try """
+        import json, os
+        __version__ = "stub"
+        _HERE = os.path.dirname(os.path.abspath(__file__))
+
+        class _Tokenizer:
+            mask_token = "[MASK]"
+            cls_token_id, sep_token_id, mask_token_id = 1, 2, 3
+            def __call__(self, text, add_special_tokens=False):
+                return {"input_ids": [4] * len(text.split())}
+
+        class _Agent:
+            cfg = {"max_len": 32, "head_max_len": 12}
+            tok = _Tokenizer()
+            @staticmethod
+            def _to_internal(q):
+                return {"t": q["type"], "ins": q["instructions"], "crit": q.get("criteria")}
+            def system_one(self, state, questions):
+                with open(os.path.join(_HERE, "asked.jsonl"), "a") as f:
+                    f.write(json.dumps(list(state) if isinstance(state, dict) else state) + "\\n")
+                return {"answers": {n: {"type": "noul", "noul": 0.5, "confidence": 0.9}
+                                    for n in questions}}
+
+        def load(model_id, **kwargs):
+            return _Agent()
+        """.write(to: package.appendingPathComponent("__init__.py"), atomically: true, encoding: .utf8)
+        try """
+        import json
+        def serialize_state(state):
+            return state if isinstance(state, str) else json.dumps(state)
+        def build_prefix(tok, q, head_max_len=192, option_order=None):
+            head = tok(q["ins"])["input_ids"][:head_max_len]
+            ids = [tok.cls_token_id] + head + [tok.sep_token_id]
+            ids += [tok.mask_token_id, tok.mask_token_id, tok.sep_token_id]
+            return ids, [len(head) + 2, len(head) + 3]
+        """.write(to: package.appendingPathComponent("common.py"), atomically: true, encoding: .utf8)
+    }
+
+    func clean() { try? FileManager.default.removeItem(at: directory) }
+
+    /// Every state `system_one` was handed, one JSON value per line: the key list for an
+    /// object, in the order it arrived.
+    var asked: [String] {
+        let log = directory.appendingPathComponent("laya_mlx/asked.jsonl")
+        return ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+    }
+
+    var configuration: LayaSidecar.Configuration {
+        let script = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/laya/laya_sidecar.py")
+        return .init(
+            python: URL(fileURLWithPath: "/usr/bin/python3"), script: script,
+            checkpoint: .english, environment: ["PYTHONPATH": directory.path],
+            requestTimeout: 10, startTimeout: 30
+        )
+    }
+}
+
+@Suite("The Laya driver script")
+struct LayaDriverScriptTests {
+
+    private var question: [String: Any] { ["q": ["type": "noul", "instructions": "Is this true?"]] }
+
+    /// laya-mlx cuts a state to fit its context and answers about what is left, with the
+    /// same confidence as ever. A routing state — the message and every candidate model —
+    /// runs to a thousand tokens and more against the English checkpoint's 512, and which
+    /// part fell off the end was the part serialised last. The script now measures first
+    /// and refuses, and the router goes on to a lane that can read the whole thing.
+    @Test func aStateLongerThanTheCheckpointReadsIsRefusedNotTruncated() async throws {
+        let library = try StubLayaLibrary()
+        defer { library.clean() }
+        let sidecar = LayaSidecar(
+            configuration: library.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+
+        let long = Array(repeating: "word", count: 40).joined(separator: " ")
+        await #expect(throws: DecisionLaneError.stateTooLong(
+            tokens: 40, limit: 23, checkpoint: LayaCheckpoint.english.displayName
+        )) {
+            _ = try await sidecar.decide(state: long, questions: question)
+        }
+        #expect(library.asked.isEmpty, "the library was handed a state it would have cut")
+
+        // A refusal about one request, not a fault: the process stays, and the next state
+        // that fits is answered.
+        #expect(await sidecar.isRunning)
+        let fits = Array(repeating: "word", count: 23).joined(separator: " ")
+        let answered = try await sidecar.decide(state: fits, questions: question)
+        #expect(answered.answers["q"]?.noul == 0.5)
+        #expect(library.asked.count == 1)
+        await sidecar.stop()
+    }
+
+    /// The same state must be the same input every time. Its keys used to go out in the
+    /// launch's dictionary order, so one state read differently from one launch to the
+    /// next — and what a long one lost was chance.
+    @Test func aStateGoesOutWithItsKeysInOneOrder() async throws {
+        let library = try StubLayaLibrary()
+        defer { library.clean() }
+        let sidecar = LayaSidecar(
+            configuration: library.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+        let keys = ["zeta", "eta", "alpha", "delta", "mu", "beta", "kappa", "gamma"]
+        let state = JSONContent.object(Dictionary(
+            uniqueKeysWithValues: keys.map { ($0, JSONContent.string("x")) }
+        ))
+
+        _ = try await sidecar.decide(state: LayaWire.state(state), questions: question)
+
+        let received = try JSONDecoder().decode(
+            [String].self, from: Data(try #require(library.asked.first).utf8)
+        )
+        #expect(received == keys.sorted())
+        await sidecar.stop()
+    }
+}

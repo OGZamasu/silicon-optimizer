@@ -525,8 +525,12 @@ public actor LayaSidecar {
         guard let input else {
             throw LayaSidecarError.died(status: nil, detail: "its input is closed")
         }
+        // Sorted, so a state is the same tokens every time it is asked. Unsorted, its keys
+        // came out in this launch's dictionary order: the same state read differently from
+        // one launch to the next, and which part of it came last — the part a long state
+        // loses — was chance.
         guard JSONSerialization.isValidJSONObject(object),
-              var data = try? JSONSerialization.data(withJSONObject: object)
+              var data = try? JSONSerialization.data(withJSONObject: object, options: .sortedKeys)
         else {
             throw LayaSidecarError.protocolBroken("the request would not encode as JSON")
         }
@@ -592,6 +596,14 @@ public actor LayaSidecar {
             switch object["kind"] as? String {
             case "not_installed": throw LayaSidecarError.notInstalled(detail)
             case "load_failed": throw LayaSidecarError.loadFailed(detail)
+            case "state_too_long":
+                // A refusal about this request, not a fault in the process: it stays up,
+                // and the router goes on to a lane that can read the whole state.
+                throw DecisionLaneError.stateTooLong(
+                    tokens: (object["tokens"] as? NSNumber)?.intValue ?? 0,
+                    limit: (object["room"] as? NSNumber)?.intValue ?? 0,
+                    checkpoint: configuration.checkpoint.displayName
+                )
             default: throw LayaSidecarError.failed(detail)
             }
         }

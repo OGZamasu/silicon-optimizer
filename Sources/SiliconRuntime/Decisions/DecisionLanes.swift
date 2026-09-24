@@ -237,8 +237,9 @@ public enum DecisionLaneError: Error, LocalizedError, Equatable {
     case wrongAnswerKind(question: String, expected: String, got: String)
     case missingAnswer(question: String)
     /// The state is longer than the checkpoint's encoder can see, so an answer would be
-    /// about a truncated version of it.
-    case stateTooLong(bytes: Int, limit: Int, checkpoint: String)
+    /// about a truncated version of it. Counted in the checkpoint's own tokens, by the
+    /// sidecar, against what the longest question leaves of the context.
+    case stateTooLong(tokens: Int, limit: Int, checkpoint: String)
 
     public var errorDescription: String? {
         switch self {
@@ -253,9 +254,9 @@ public enum DecisionLaneError: Error, LocalizedError, Equatable {
             "Laya answered \"\(question)\" with a \(got); a \(expected) was asked for."
         case .missingAnswer(let question):
             "Laya did not answer \"\(question)\"."
-        case .stateTooLong(let bytes, let limit, let checkpoint):
-            "That state is \(bytes / 1024) KB and \(checkpoint) reads about \(limit / 1024) KB "
-            + "of it. Filter it down, or choose a checkpoint with a longer context."
+        case .stateTooLong(let tokens, let limit, let checkpoint):
+            "That state is \(tokens) tokens and \(checkpoint) reads \(limit) of them. "
+            + "Filter it down, or choose a checkpoint with a longer context."
         }
     }
 }

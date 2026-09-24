@@ -75,8 +75,9 @@ public enum LayaCheckpoint: String, Codable, Sendable, CaseIterable, Hashable {
         }
     }
 
-    /// Tokens of state plus questions the encoder can see. Past it the state is truncated,
-    /// which is a wrong answer rather than an error — so the lane checks it up front.
+    /// Tokens of state plus questions the encoder can see. Past it laya-mlx truncates the
+    /// state, which is a wrong answer rather than an error — so the sidecar checks it up
+    /// front and refuses (`DecisionLaneError.stateTooLong`).
     public var contextTokens: Int {
         switch self {
         case .english: 512
