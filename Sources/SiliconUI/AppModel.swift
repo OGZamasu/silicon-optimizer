@@ -1625,6 +1625,9 @@ public final class AppModel {
         public var stage: String = "Starting…"
         public var error: String?
         var task: Task<Void, Never>?
+        /// Set by Stop. The job stays listed, saying so, until its process has exited, so the
+        /// Install button cannot come back and start a second copy beside the one still dying.
+        var stopping = false
         @ObservationIgnored var lastStageUpdate = Date.distantPast
 
         init(id: String) { self.id = id }
@@ -1672,41 +1675,63 @@ public final class AppModel {
         repairs[id] = job
 
         job.task = Task { [weak self] in
+            var completed = 0
             for step in steps {
-                await MainActor.run { job.stage = step.label }
-                let outcome = await Self.runProcess(step: step) { line in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        let job = self.repairs[id]
-                        guard let job, Date().timeIntervalSince(job.lastStageUpdate) > 0.25
-                        else { return }
-                        job.lastStageUpdate = Date()
-                        job.stage = "\(step.label) \(line)"
+                if Task.isCancelled { break }
+                await MainActor.run { if !job.stopping { job.stage = step.label } }
+                let process = RepairProcess()
+                let outcome = await withTaskCancellationHandler {
+                    await Self.runProcess(step: step, process: process) { line in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            let job = self.repairs[id]
+                            guard let job, !job.stopping,
+                                  Date().timeIntervalSince(job.lastStageUpdate) > 0.25
+                            else { return }
+                            job.lastStageUpdate = Date()
+                            job.stage = "\(step.label) \(line)"
+                        }
                     }
+                } onCancel: {
+                    process.stop()
                 }
-                if Task.isCancelled { return }
+                process.exited()
                 if let failure = outcome {
+                    // A step Stop killed fails too; that is the stop, not something to show.
+                    if Task.isCancelled { break }
                     await MainActor.run { job.error = failure }
                     return
                 }
+                completed += 1
             }
+            // Stopped or not, the step's process has exited by now, so the job can go and the
+            // Install button come back.
             await MainActor.run {
-                guard let self else { return }
+                guard let self, self.repairs[id] === job else { return }
                 self.repairs[id] = nil
-                onSuccess()
+                if completed == steps.count { onSuccess() }
             }
         }
     }
 
+    /// Stops a running repair, or clears a failed one so it can be tried again.
     public func cancelRepair(_ id: String) {
-        repairs[id]?.task?.cancel()
-        repairs[id] = nil
+        guard let job = repairs[id] else { return }
+        guard job.error == nil, let task = job.task else {
+            repairs[id] = nil
+            return
+        }
+        job.stopping = true
+        job.stage = "Stopping…"
+        task.cancel()
     }
 
     /// Runs one process to completion off the main actor; returns nil on success or a
-    /// human-sized failure message.
+    /// human-sized failure message. `process` learns the pid as it starts, which is how Stop
+    /// and quitting reach it.
     private nonisolated static func runProcess(
-        step: RepairStep, onLine: @Sendable @escaping (String) -> Void
+        step: RepairStep, process handle: RepairProcess = RepairProcess(),
+        onLine: @Sendable @escaping (String) -> Void
     ) async -> String? {
         await withCheckedContinuation { continuation in
             let process = Process()
@@ -1741,6 +1766,7 @@ public final class AppModel {
             }
             do {
                 try process.run()
+                handle.launched(process)
             } catch {
                 continuation.resume(returning: error.localizedDescription)
             }
@@ -2746,6 +2772,7 @@ public final class AppModel {
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in
             ChildProcessRegistry.terminateAll()
+            RepairProcess.stopAll()
         }
     }
 
