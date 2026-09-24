@@ -202,8 +202,11 @@ struct ImageView: View {
                 }
 
                 Toggle("Low-memory mode", isOn: $model.imageConfiguration.lowRAM)
-                    .help("Frees the transformer between images. Does not lower the peak of a "
-                          + "single image — measured identical with and without.")
+                    .help(currentEntry?.shape.lowMemoryDecodeTileMegapixels == nil
+                          ? "Frees the transformer between images. Does not lower the peak of a "
+                            + "single image — measured identical with and without."
+                          : "Decodes the image in 512×512 tiles, which lowers the peak of a "
+                            + "single image a long way for this model.")
 
                 mfluxUpdateBanner
                 installBanner

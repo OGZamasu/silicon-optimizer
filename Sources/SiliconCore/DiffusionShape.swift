@@ -65,6 +65,43 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
     /// rather than print both to two decimal places and let them look alike.
     public var peakIsCalibrated: Bool
 
+    /// What a text-encoder parameter costs when the runtime never quantizes it, whatever the
+    /// precision asked for: 2 for Qwen-Image 2.1's Qwen3-VL, which mflux keeps in bf16 because
+    /// quantizing it degrades the conditioning. Nil when it is quantized with the rest.
+    public var textEncoderBytesPerParameter: Double?
+
+    /// The same for the VAE: 4 where it is stored and run in fp32 (Qwen-Image 2.1's is), since
+    /// its convolutions are not something MLX quantizes. Nil when it follows the precision.
+    public var vaeBytesPerParameter: Double?
+
+    /// Parameters of a LoRA adapter merged into the transformer as it loads — read, merged and
+    /// released while the transformer is prepared. Zero for a plain model.
+    public var adapterParameters: Int64
+
+    /// Whether the runtime runs the three components one after another with nothing
+    /// overlapping: the prompt is encoded and the text encoder released before the
+    /// transformer is read, the transformer is read one block at a time, and it is released
+    /// before the VAE decodes. The app's Qwen-Image 2.1 runner does; MFLUX's own entry points
+    /// keep the transformer through the decode.
+    public var runsInStages: Bool
+
+    /// The most of the text encoder resident at once when the runtime reads it a layer at a
+    /// time — its embedding table and one layer — or nil when it is resident whole.
+    public var textEncoderStreamedParameters: Int64?
+
+    /// Working memory the VAE decode needs per megapixel, measured for this family's VAE.
+    /// Nil takes the planner's figure, which was measured on the FLUX VAE.
+    public var decodeBytesPerMegapixel: Double?
+
+    /// Working memory a denoising step needs per megapixel beyond the weights, measured for
+    /// this family's transformer. Nil takes the planner's per-token estimate.
+    public var denoiseBytesPerMegapixel: Double?
+
+    /// The area, in megapixels, of the tiles the runtime decodes in when low-memory mode is on,
+    /// or nil when low-memory mode does not tile this family's decode (FLUX.2's VAE opts out
+    /// of it, which is why the mode was measured to change nothing there).
+    public var lowMemoryDecodeTileMegapixels: Double?
+
     public var totalParameters: Int64 {
         transformerParameters + vaeParameters + textEncoderParameters
     }
@@ -82,7 +119,15 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         maxTextTokens: Int = 512,
         nativeResolution: Int = 1024,
         defaultSteps: Int = 20,
-        peakIsCalibrated: Bool = false
+        peakIsCalibrated: Bool = false,
+        textEncoderBytesPerParameter: Double? = nil,
+        vaeBytesPerParameter: Double? = nil,
+        adapterParameters: Int64 = 0,
+        runsInStages: Bool = false,
+        textEncoderStreamedParameters: Int64? = nil,
+        decodeBytesPerMegapixel: Double? = nil,
+        denoiseBytesPerMegapixel: Double? = nil,
+        lowMemoryDecodeTileMegapixels: Double? = nil
     ) {
         self.blockCount = blockCount
         self.hiddenSize = hiddenSize
@@ -97,6 +142,61 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         self.nativeResolution = nativeResolution
         self.defaultSteps = defaultSteps
         self.peakIsCalibrated = peakIsCalibrated
+        self.textEncoderBytesPerParameter = textEncoderBytesPerParameter
+        self.vaeBytesPerParameter = vaeBytesPerParameter
+        self.adapterParameters = adapterParameters
+        self.runsInStages = runsInStages
+        self.textEncoderStreamedParameters = textEncoderStreamedParameters
+        self.decodeBytesPerMegapixel = decodeBytesPerMegapixel
+        self.denoiseBytesPerMegapixel = denoiseBytesPerMegapixel
+        self.lowMemoryDecodeTileMegapixels = lowMemoryDecodeTileMegapixels
+    }
+
+    // Decoded field by field so a shape written before a field existed still reads: every
+    // field added after the first release has a default, and an absent one takes it.
+    private enum CodingKeys: String, CodingKey {
+        case blockCount, hiddenSize, headCount, transformerParameters, vaeParameters
+        case textEncoderParameters, vaeScaleFactor, latentChannels, patchSize, maxTextTokens
+        case nativeResolution, defaultSteps, peakIsCalibrated, textEncoderBytesPerParameter
+        case vaeBytesPerParameter, adapterParameters, runsInStages, decodeBytesPerMegapixel
+        case textEncoderStreamedParameters, lowMemoryDecodeTileMegapixels, denoiseBytesPerMegapixel
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            blockCount: try container.decode(Int.self, forKey: .blockCount),
+            hiddenSize: try container.decode(Int.self, forKey: .hiddenSize),
+            headCount: try container.decode(Int.self, forKey: .headCount),
+            transformerParameters: try container.decode(Int64.self, forKey: .transformerParameters),
+            vaeParameters: try container.decode(Int64.self, forKey: .vaeParameters),
+            textEncoderParameters: try container.decode(Int64.self, forKey: .textEncoderParameters),
+            vaeScaleFactor: try container.decode(Int.self, forKey: .vaeScaleFactor),
+            latentChannels: try container.decode(Int.self, forKey: .latentChannels),
+            patchSize: try container.decode(Int.self, forKey: .patchSize),
+            maxTextTokens: try container.decode(Int.self, forKey: .maxTextTokens),
+            nativeResolution: try container.decode(Int.self, forKey: .nativeResolution),
+            defaultSteps: try container.decode(Int.self, forKey: .defaultSteps),
+            peakIsCalibrated: try container.decodeIfPresent(Bool.self, forKey: .peakIsCalibrated) ?? false,
+            textEncoderBytesPerParameter: try container.decodeIfPresent(
+                Double.self, forKey: .textEncoderBytesPerParameter
+            ),
+            vaeBytesPerParameter: try container.decodeIfPresent(Double.self, forKey: .vaeBytesPerParameter),
+            adapterParameters: try container.decodeIfPresent(Int64.self, forKey: .adapterParameters) ?? 0,
+            runsInStages: try container.decodeIfPresent(Bool.self, forKey: .runsInStages) ?? false,
+            textEncoderStreamedParameters: try container.decodeIfPresent(
+                Int64.self, forKey: .textEncoderStreamedParameters
+            ),
+            decodeBytesPerMegapixel: try container.decodeIfPresent(
+                Double.self, forKey: .decodeBytesPerMegapixel
+            ),
+            denoiseBytesPerMegapixel: try container.decodeIfPresent(
+                Double.self, forKey: .denoiseBytesPerMegapixel
+            ),
+            lowMemoryDecodeTileMegapixels: try container.decodeIfPresent(
+                Double.self, forKey: .lowMemoryDecodeTileMegapixels
+            )
+        )
     }
 
     /// Parameters held in one transformer block, which is what a streaming slot costs.

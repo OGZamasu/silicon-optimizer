@@ -590,6 +590,23 @@ public enum DiffusionCatalog {
     /// of it) are distributed under: research and non-commercial use only.
     public static let qwenResearchLicence = "Qwen RESEARCH LICENSE AGREEMENT (research, non-commercial)"
 
+    /// What the runner holds of Qwen-Image 2.1's text encoder at once, reading it a layer at a
+    /// time: the 622M-parameter embedding table and one of its 36 layers (192.9M each).
+    public static let qwenImage21EncoderResidentParameters: Int64 = 622_329_856 + 192_946_654
+
+    /// What Qwen-Image 2.1's VAE decode needs above its weights, per megapixel: 5.42 GB for
+    /// a 512×512 decode, measured through mflux 0.20.0 on an M3 Max — about twice the FLUX
+    /// VAE's 9.8 GB, which is what makes an untiled 1024² decode (≈21.7 GB) the tallest stage.
+    public static let qwenImage21DecodeBytesPerMegapixel = 20.7e9
+
+    /// What a denoising step holds beyond the transformer's weights, per megapixel: 1.26 GB
+    /// over the 8-bit weights at 1024², measured with the 8-step adapter on an M3 Max.
+    public static let qwenImage21DenoiseBytesPerMegapixel = 1.25e9
+
+    /// The runner's low-memory mode decodes in mflux's own 512×512 tiles, which mflux allows
+    /// for this VAE (it does not opt out of implicit tiling, as FLUX.2's does).
+    public static let qwenImage21DecodeTileMegapixels = 512.0 * 512.0 / 1_000_000
+
     /// The Qwen-Image 2.1 commit both entries are fetched and run at.
     public static let qwenImage21Revision = "790c92633540aa0cb11d9abf19eb46d861714758"
 
@@ -600,6 +617,12 @@ public enum DiffusionCatalog {
     /// text-encoder files hold 8.77B, of which mflux loads only the 7.568B language model —
     /// the vision tower and the output head are never read — and always in bf16; the VAE is
     /// 338M parameters stored and run in fp32.
+    ///
+    /// Both entries run through the app's staged runner, and their memory is measured, not
+    /// extrapolated: through mflux 0.20.0 on a 36 GB M3 Max at 8-bit and 1024² with a tiled
+    /// decode, MLX peaked at 1.68 GB encoding, 8.04 GB reading the transformer (7.69 without
+    /// the adapter), 8.83 GB denoising and 6.98 GB decoding. The untiled decode is scaled from
+    /// a 512×512 measurement.
     public static let qwenImage21 = DiffusionEntry(
         id: "qwen-image-2.1",
         name: "Qwen-Image 2.1",
@@ -622,7 +645,15 @@ public enum DiffusionCatalog {
             patchSize: 1,
             maxTextTokens: 2048,
             nativeResolution: 1024,
-            defaultSteps: 40
+            defaultSteps: 40,
+            peakIsCalibrated: true,
+            textEncoderBytesPerParameter: 2,
+            vaeBytesPerParameter: 4,
+            runsInStages: true,
+            textEncoderStreamedParameters: qwenImage21EncoderResidentParameters,
+            decodeBytesPerMegapixel: qwenImage21DecodeBytesPerMegapixel,
+            denoiseBytesPerMegapixel: qwenImage21DenoiseBytesPerMegapixel,
+            lowMemoryDecodeTileMegapixels: qwenImage21DecodeTileMegapixels
         ),
         repository: "Qwen/Qwen-Image-2.1",
         quantizations: [.mlx4, .mlx6, .mlx8],
@@ -662,7 +693,18 @@ public enum DiffusionCatalog {
             patchSize: 1,
             maxTextTokens: 2048,
             nativeResolution: 1024,
-            defaultSteps: 8
+            defaultSteps: 8,
+            peakIsCalibrated: true,
+            textEncoderBytesPerParameter: 2,
+            vaeBytesPerParameter: 4,
+            // r 64 on 224 modules: 32 blocks × (4 × 4096-wide attention projections and
+            // 3 MLP projections between 4096 and 12288).
+            adapterParameters: 167_772_160,
+            runsInStages: true,
+            textEncoderStreamedParameters: qwenImage21EncoderResidentParameters,
+            decodeBytesPerMegapixel: qwenImage21DecodeBytesPerMegapixel,
+            denoiseBytesPerMegapixel: qwenImage21DenoiseBytesPerMegapixel,
+            lowMemoryDecodeTileMegapixels: qwenImage21DecodeTileMegapixels
         ),
         repository: "PrunaAI/Pruna-Qwen-Image-2.1",
         quantizations: [.mlx4, .mlx6, .mlx8],

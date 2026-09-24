@@ -453,6 +453,11 @@ public final class AppModel {
             guard selectedDiffusionModel != oldValue,
                   let entry = DiffusionCatalog.entry(id: selectedDiffusionModel) else { return }
             imageConfiguration.steps = entry.shape.defaultSteps
+            // Where low-memory mode tiles the decode, it is what decides whether a render fits,
+            // so the switch adopts the recommendation's choice rather than the last model's.
+            if entry.shape.lowMemoryDecodeTileMegapixels != nil {
+                imageConfiguration.lowRAM = recommendedImageConfiguration(for: entry).lowRAM
+            }
         }
     }
 
@@ -638,25 +643,36 @@ public final class AppModel {
     /// language recommendation, walking down resolution and precision until it fits.
     public func recommendedImageConfiguration(for entry: DiffusionEntry) -> ImageConfiguration {
         let planner = diffusionPlanner()
+        // An adapter trained at one size is recommended at that size: a smaller render that
+        // fits is not a better one when nobody knows what the adapter does there.
+        let sides = entry.adapter == nil ? [entry.shape.nativeResolution, 768, 512]
+            : [entry.shape.nativeResolution]
+        // Low-memory mode is tried too where it lowers the peak — a family whose runtime
+        // decodes in tiles in that mode — and changes nothing for the others.
+        let lowMemory = entry.shape.lowMemoryDecodeTileMegapixels == nil ? [false] : [false, true]
         for quantization in entry.quantizations.reversed() {
-            for side in [entry.shape.nativeResolution, 768, 512] {
-                let candidate = ImageConfiguration(
-                    width: side, height: side,
-                    steps: entry.shape.defaultSteps, quantization: quantization
-                )
-                if planner.plan(
-                    shape: entry.shape, configuration: candidate,
-                    otherAppsInUse: memoryUnavailableDuringImage
-                ).verdict == .comfortable {
-                    return candidate
+            for side in sides {
+                for lowRAM in lowMemory {
+                    let candidate = ImageConfiguration(
+                        width: side, height: side,
+                        steps: entry.shape.defaultSteps, quantization: quantization,
+                        lowRAM: lowRAM
+                    )
+                    if planner.plan(
+                        shape: entry.shape, configuration: candidate,
+                        otherAppsInUse: memoryUnavailableDuringImage
+                    ).verdict == .comfortable {
+                        return candidate
+                    }
                 }
             }
         }
         // Nothing fit outright; fall back to the cheapest thing that runs at all. Low-memory
         // mode is on here not because it lowers the peak — it does not — but because at this
         // point the machine is tight enough that freeing between images is worth having.
+        let side = entry.adapter == nil ? 512 : entry.shape.nativeResolution
         return ImageConfiguration(
-            width: 512, height: 512, steps: entry.shape.defaultSteps,
+            width: side, height: side, steps: entry.shape.defaultSteps,
             quantization: .mlx4, lowRAM: true
         )
     }

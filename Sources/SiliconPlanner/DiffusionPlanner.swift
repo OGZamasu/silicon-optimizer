@@ -200,6 +200,9 @@ public struct DiffusionPlanner: Sendable {
     public static func denoiseActivationBytes(
         _ shape: DiffusionShape, _ configuration: ImageConfiguration
     ) -> Bytes {
+        if let measured = shape.denoiseBytesPerMegapixel {
+            return Bytes(Int64(measured * configuration.megapixels * Double(configuration.batchSize)))
+        }
         let tokens = Double(shape.spatialTokens(
             width: configuration.width, height: configuration.height
         ))
@@ -226,9 +229,30 @@ public struct DiffusionPlanner: Sendable {
     public static func decodeActivationBytes(
         _ shape: DiffusionShape, _ configuration: ImageConfiguration
     ) -> Bytes {
-        Bytes(Int64(
-            decodeBytesPerMegapixel * configuration.megapixels * Double(configuration.batchSize)
+        // Decoded in tiles, only one tile's working memory is live at a time.
+        var megapixels = configuration.megapixels
+        if configuration.lowRAM, let tile = shape.lowMemoryDecodeTileMegapixels {
+            megapixels = min(megapixels, tile)
+        }
+        return Bytes(Int64(
+            (shape.decodeBytesPerMegapixel ?? decodeBytesPerMegapixel)
+                * megapixels * Double(configuration.batchSize)
         ))
+    }
+
+    /// The text encoders' resident size: at the requested precision, unless the runtime
+    /// never quantizes them.
+    public static func textEncoderBytes(_ shape: DiffusionShape, _ quantization: Quantization) -> Bytes {
+        shape.textEncoderBytesPerParameter.map {
+            Bytes(Int64(Double(shape.textEncoderParameters) * $0))
+        } ?? weightBytes(shape.textEncoderParameters, quantization)
+    }
+
+    /// The VAE's resident size, the same way.
+    public static func vaeBytes(_ shape: DiffusionShape, _ quantization: Quantization) -> Bytes {
+        shape.vaeBytesPerParameter.map {
+            Bytes(Int64(Double(shape.vaeParameters) * $0))
+        } ?? weightBytes(shape.vaeParameters, quantization)
     }
 
     // MARK: - Planning
@@ -238,10 +262,13 @@ public struct DiffusionPlanner: Sendable {
         configuration: ImageConfiguration,
         otherAppsInUse: Bytes = .zero
     ) -> DiffusionPlan {
+        if shape.runsInStages {
+            return stagedPlan(shape: shape, configuration: configuration, otherAppsInUse: otherAppsInUse)
+        }
         let quantization = configuration.quantization
 
-        let textEncoders = Self.weightBytes(shape.textEncoderParameters, quantization)
-        let vae = Self.weightBytes(shape.vaeParameters, quantization)
+        let textEncoders = Self.textEncoderBytes(shape, quantization)
+        let vae = Self.vaeBytes(shape, quantization)
         let latents = Self.latentBytes(shape, configuration)
 
         // Layer streaming: only the resident slice of the denoiser is in memory.
@@ -305,7 +332,7 @@ public struct DiffusionPlanner: Sendable {
         }
 
         // The stages, in the order they run.
-        var phases: [DiffusionPlan.Phase] = [
+        let phases: [DiffusionPlan.Phase] = [
             .init(
                 name: "Load",
                 detail: configuration.weightsArePrequantized
@@ -342,9 +369,105 @@ public struct DiffusionPlanner: Sendable {
             ),
         ]
 
+        return finished(
+            phases: phases, streamed: streamed, notes: notes, shape: shape,
+            configuration: configuration, otherAppsInUse: otherAppsInUse
+        )
+    }
+
+    /// A runtime that runs the components one after another (`DiffusionShape.runsInStages`):
+    /// the text encoder alone, then the transformer read block by block, then the VAE alone.
+    /// The peak is the tallest stage, and no stage holds two of the three large components.
+    ///
+    /// The transformer is charged at the precision it was quantized to, not at the two bytes a
+    /// parameter `residentBytesPerParameter` charges MFLUX's own entry points: those read it
+    /// all in the same evaluation that first runs it, while the staged runner reads, merges
+    /// and quantizes one block at a time and evaluates each before the next.
+    func stagedPlan(
+        shape: DiffusionShape, configuration: ImageConfiguration, otherAppsInUse: Bytes
+    ) -> DiffusionPlan {
+        let quantization = configuration.quantization
+        let textEncoders = Self.textEncoderBytes(shape, quantization)
+        // Read a layer at a time, the encoder holds only its embedding table and one layer.
+        let encoding = shape.textEncoderStreamedParameters.map {
+            Bytes(Int64(Double($0) * (shape.textEncoderBytesPerParameter
+                ?? quantization.bitsPerWeight / 8)))
+        } ?? textEncoders
+        let vae = Self.vaeBytes(shape, quantization)
+        let latents = Self.latentBytes(shape, configuration)
+        let transformer = Self.weightBytes(shape.transformerParameters, quantization)
+        // While the transformer is read: one block at full precision on its way to being
+        // quantized, with the adapter — if there is one — and the fp32 product it merges.
+        let adapter = Bytes(shape.adapterParameters * 2)
+        let block = Bytes(shape.parametersPerBlock * 2)
+        let merging = shape.adapterParameters > 0 ? block * 2 + adapter : .zero
+
+        var notes = [
+            "Runs in stages: the text encoder is released before the transformer is read, "
+                + "and the transformer before the VAE decodes, so the peak is the tallest "
+                + "stage rather than the sum of them.",
+        ]
+        if let perParameter = shape.textEncoderBytesPerParameter,
+           perParameter * 8 > quantization.bitsPerWeight {
+            notes.append(
+                shape.textEncoderStreamedParameters == nil
+                    ? "The text encoder is never quantized — \(textEncoders.formatted) whatever "
+                        + "precision is chosen — so a lower precision cannot shrink the encode stage."
+                    : "The text encoder is never quantized (\(textEncoders.formatted)), so it is "
+                        + "read a layer at a time as the prompt passes through it, holding "
+                        + "\(encoding.formatted) at most."
+            )
+        }
+        if !shape.peakIsCalibrated {
+            notes.append(
+                "This estimate is extrapolated. The memory model was fitted to measured "
+                + "FLUX.2 klein runs; nothing in this model's family has been measured against "
+                + "it, so treat the figure as an order of magnitude rather than a number."
+            )
+        }
+
+        let phases: [DiffusionPlan.Phase] = [
+            .init(
+                name: "Encode",
+                detail: shape.textEncoderStreamedParameters == nil
+                    ? "The text encoder turns the prompt into conditioning, then is released"
+                    : "The text encoder turns the prompt into conditioning, a layer at a time",
+                resident: encoding + latents
+            ),
+            .init(
+                name: "Load",
+                detail: shape.adapterParameters > 0
+                    ? "Reads the transformer a block at a time, merging the adapter and quantizing"
+                    : "Reads the transformer a block at a time, quantizing as it goes",
+                resident: transformer + block + merging
+            ),
+            .init(
+                name: "Denoise",
+                detail: "\(configuration.steps) steps through the transformer",
+                resident: transformer + latents + Self.denoiseActivationBytes(shape, configuration)
+            ),
+            .init(
+                name: "Decode",
+                detail: configuration.lowRAM && shape.lowMemoryDecodeTileMegapixels != nil
+                    ? "The transformer is released and the VAE reconstructs the image in tiles"
+                    : "The transformer is released and the VAE reconstructs the image",
+                resident: vae + latents + Self.decodeActivationBytes(shape, configuration)
+            ),
+        ]
+        return finished(
+            phases: phases, streamed: .zero, notes: notes, shape: shape,
+            configuration: configuration, otherAppsInUse: otherAppsInUse
+        )
+    }
+
+    /// The budget, the verdict and the remedies, shared by both kinds of plan.
+    private func finished(
+        phases: [DiffusionPlan.Phase], streamed: Bytes, notes: [String],
+        shape: DiffusionShape, configuration: ImageConfiguration, otherAppsInUse: Bytes
+    ) -> DiffusionPlan {
         // Metal keeps a floor for command buffers and pipeline state.
-        phases = phases.map {
-            .init(name: $0.name, detail: $0.detail, resident: $0.resident + .mib(320))
+        let phases = phases.map {
+            DiffusionPlan.Phase(name: $0.name, detail: $0.detail, resident: $0.resident + .mib(320))
         }
 
         let systemWiredAllowance = profile.totalMemory * 0.10
@@ -402,6 +525,24 @@ public struct DiffusionPlanner: Sendable {
                     saving: saving,
                     cost: "A one-off conversion, and the disk space to keep the copy.",
                     kind: .lowerQuantization
+                ))
+            }
+        }
+
+        // Tiled decoding, where the runtime's low-memory mode really does tile this family's
+        // decode — measured, unlike the families where it changes nothing.
+        if peakName == "Decode", !configuration.lowRAM, shape.lowMemoryDecodeTileMegapixels != nil {
+            var tiled = configuration
+            tiled.lowRAM = true
+            let saving = plan.peak - self.plan(shape: shape, configuration: tiled).peak
+            if saving > .mib(256) {
+                results.append(.init(
+                    title: "Turn on low-memory mode to decode in tiles",
+                    detail: "The VAE decodes the image a 512×512 tile at a time, holding one "
+                        + "tile's working memory instead of the whole image's.",
+                    saving: saving,
+                    cost: "A little time at the end of each image.",
+                    kind: .reduceContext
                 ))
             }
         }
