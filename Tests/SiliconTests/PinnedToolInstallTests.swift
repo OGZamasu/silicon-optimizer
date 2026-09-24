@@ -389,6 +389,65 @@ struct PinnedToolInstallTests {
         #expect(locks(on312) == ["mflux-py3.12.txt"])
     }
 
+    /// The Python an environment was made from has been uninstalled (`brew uninstall
+    /// python@3.12`): its `bin/python3` still links to it, dangling. A plain `venv` over that
+    /// leaves the link as it is and every install fails at its first pip, so it is made again
+    /// like any other environment that cannot run — and what shared it goes back in.
+    @Test func anEnvironmentWhosePythonWasUninstalledIsMadeAgain() throws {
+        let root = try PinnedInstallTests.scratch("python-uninstalled")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func orphaned(_ name: String) throws -> URL {
+            let environment = root.appendingPathComponent(name, isDirectory: true)
+            let bin = environment.appendingPathComponent("bin", isDirectory: true)
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            try "home = \(root.path)/gone/bin\nversion = 3.12.9\n".write(
+                to: environment.appendingPathComponent("pyvenv.cfg"),
+                atomically: true, encoding: .utf8
+            )
+            try FileManager.default.createSymbolicLink(
+                atPath: bin.appendingPathComponent("python3.12").path,
+                withDestinationPath: root.appendingPathComponent("gone/bin/python3.12").path
+            )
+            try FileManager.default.createSymbolicLink(
+                atPath: bin.appendingPathComponent("python3").path,
+                withDestinationPath: "python3.12"
+            )
+            FileManager.default.createFile(
+                atPath: bin.appendingPathComponent("mflux-generate").path, contents: Data(),
+                attributes: [.posixPermissions: 0o755]
+            )
+            try FileManager.default.createDirectory(
+                at: environment.appendingPathComponent("lib/python3.12/site-packages/mlx_audio"),
+                withIntermediateDirectories: true
+            )
+            return environment
+        }
+        func locks(_ plan: [PinnedInstall.Command]) -> [String] {
+            Self.installs(plan).map { URL(fileURLWithPath: $0.arguments.last!).lastPathComponent }
+        }
+
+        // 3.12 is a version MFLUX's locks cover; the environment is still unusable.
+        let forMFlux = try orphaned("mflux")
+        let mflux = try MFluxRuntime.installPlan(
+            basePython: Self.homebrew314, locks: Self.lockRoot, environment: forMFlux
+        )
+        #expect(mflux.first?.arguments == ["-m", "venv", "--clear", forMFlux.path])
+        #expect(locks(mflux) == ["mflux-py3.14.txt", "build-py3.14.txt", "voice-py3.14.txt"])
+
+        let forVoice = try orphaned("voice")
+        let voice = try VoiceRuntime.toolsInstallPlan(
+            basePython: Self.homebrew314, locks: Self.lockRoot, environment: forVoice
+        )
+        #expect(voice.first?.arguments == ["-m", "venv", "--clear", forVoice.path])
+        #expect(locks(voice) == ["mflux-py3.14.txt", "build-py3.14.txt", "voice-py3.14.txt"])
+
+        let forTracker = try orphaned("tracker")
+        let tracker = try TrackerRuntime.installPlan(
+            basePython: Self.homebrew314, locks: Self.lockRoot, environment: forTracker
+        )
+        #expect(tracker.first?.arguments == ["-m", "venv", "--clear", forTracker.path])
+    }
+
     @Test func theNewestCoveredInterpreterIsTheBase() {
         let installed: Set<String> = ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/opt/homebrew/bin/python3.13",
                                       "/usr/local/bin/python3.14", "/opt/homebrew/bin/python3.12"]
