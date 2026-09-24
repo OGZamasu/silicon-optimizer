@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import SiliconControl
 @testable import SiliconRuntime
+@testable import SiliconUI
 
 /// The optional media installers run other people's code, so what they fetch is pinned:
 /// a reviewed commit, a hash-locked dependency set, digest-checked weights. These pin the
@@ -193,6 +194,52 @@ struct PinnedInstallTests {
         )
         #expect(plan.contains { $0.arguments.last?.hasSuffix("requirements-py3.12.txt") == true })
         #expect(!plan.contains { $0.arguments.contains("venv") })
+    }
+
+    /// python.org's installer puts 3.12 in its framework and links it from /usr/local/bin.
+    /// The face camera used to look in a list of its own that had neither, fell back to
+    /// macOS's 3.9, and told a Mac with a perfectly good 3.12 that no Python of a known
+    /// version was there and to install another.
+    @Test func theFaceCameraFindsPythonOrgs312() throws {
+        let pythonOrg: Set<String> = [
+            "/usr/bin/python3", "/usr/local/bin/python3.12",
+            "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        ]
+        let chosen = try #require(AppModel.faceCamPython(isExecutable: pythonOrg.contains))
+        #expect(chosen.path == "/usr/local/bin/python3.12")
+
+        // The framework alone — the installer's links declined — is found too.
+        let frameworkOnly: Set<String> = [
+            "/usr/bin/python3", "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        ]
+        #expect(AppModel.faceCamPython(isExecutable: frameworkOnly.contains)?.path
+                == "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12")
+
+        let root = try Self.scratch("facecam-python-org")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plan = try FaceCamRuntime.installPlan(
+            basePython: chosen, git: URL(fileURLWithPath: "/usr/bin/git"),
+            locks: Self.lockRoot, environment: root
+        )
+        #expect(plan.first?.executable == chosen)
+        #expect(plan.contains { $0.arguments.last?.hasSuffix("requirements-py3.12.txt") == true })
+    }
+
+    /// And with nothing the locks cover, the refusal is the true one: no Python of a known
+    /// version was found — not macOS's 3.9 passed off as the one that was.
+    @Test func withNoCoveredPythonTheFaceCameraSaysSo() throws {
+        #expect(AppModel.faceCamPython(isExecutable: { $0 == "/usr/bin/python3" }) == nil)
+        let root = try Self.scratch("facecam-no-python")
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(throws: PinnedInstall.PlanError.unsupportedPython(
+            tool: PinnedInstall.deepLiveCam.name, found: nil,
+            supported: PinnedInstall.deepLiveCamPythons
+        )) {
+            try FaceCamRuntime.installPlan(
+                basePython: nil, git: URL(fileURLWithPath: "/usr/bin/git"),
+                locks: Self.lockRoot, environment: root
+            )
+        }
     }
 
     @Test func pythonVersionsComeFromNamesAndEnvironments() throws {

@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import Foundation
+import SiliconControl
 import SiliconRuntime
 
 /// The live face camera: your camera in, the character's face out, straight into OBS.
@@ -125,7 +126,7 @@ extension AppModel {
         let steps: [RepairStep]
         do {
             steps = try FaceCamRuntime.installPlan(
-                basePython: URL(fileURLWithPath: Self.faceCamPython),
+                basePython: Self.faceCamPython(),
                 git: URL(fileURLWithPath: "/usr/bin/git")
             ).map {
                 RepairStep(executable: $0.executable, arguments: $0.arguments,
@@ -146,16 +147,17 @@ extension AppModel {
     }
 
     /// Deep-Live-Cam's dependencies have no wheels for the newest Python, so its
-    /// environment is built on the newest one they do support.
-    static var faceCamPython: String {
-        let candidates = [
-            "/opt/homebrew/bin/python3.13",
-            "/opt/homebrew/bin/python3.12",
-            "/usr/local/bin/python3.13",
-            "/usr/bin/python3",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-            ?? "/usr/bin/python3"
+    /// environment is built on the newest one they do support — looked for where Homebrew
+    /// and python.org put one, as every other tool's is.
+    ///
+    /// It used to have a list of its own, which missed python.org's 3.12 and fell back to
+    /// macOS's 3.9: a Mac with a perfectly good 3.12 was told no Python of a known version
+    /// was there and to install another. Nil when there is none; the plan then says which
+    /// versions it needs.
+    nonisolated static func faceCamPython(
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+    ) -> URL? {
+        PinnedInstall.basePython(for: PinnedInstall.deepLiveCamPythons, isExecutable: isExecutable)
     }
 
     /// The engine is a child process; nothing stops it for us when the app quits.
