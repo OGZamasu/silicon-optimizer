@@ -27,7 +27,10 @@ struct ControlServerRestartTests {
         model.makeControlServer = { host in
             let server = ControlServer(
                 host: host, handshakeURL: handshakeURL, buddy: registry,
-                events: BuddyEventHub(), discoverTailnetAddress: { nil }
+                events: BuddyEventHub(), media: MediaRegistry(url: nil),
+                uploadsRoot: directory.appendingPathComponent("uploads"),
+                postersRoot: directory.appendingPathComponent("posters"),
+                discoverTailnetAddress: { nil }
             )
             built.append(server)
             return server

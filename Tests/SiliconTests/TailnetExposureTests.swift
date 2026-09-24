@@ -662,7 +662,9 @@ struct TailnetExposureTests {
             host = BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false)
             server = ControlServer(
                 host: host, handshakeURL: handshakeURL, buddy: registry,
-                events: BuddyEventHub(),
+                events: BuddyEventHub(), media: MediaRegistry(url: nil),
+                uploadsRoot: directory.appendingPathComponent("uploads"),
+                postersRoot: directory.appendingPathComponent("posters"),
                 // Never the real CLI unless a test says so explicitly: a test must not bind
                 // whatever tailnet this machine happens to be on by accident.
                 discoverTailnetAddress: { discovery.current },

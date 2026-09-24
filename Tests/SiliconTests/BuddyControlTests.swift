@@ -1169,6 +1169,9 @@ struct BuddyControlTests {
         )
         let server = ControlServer(
             host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
             eventWriteDeadline: writeDeadline,
             // Never the real CLI: a test must not bind whatever tailnet this machine is on.
             discoverTailnetAddress: { nil }

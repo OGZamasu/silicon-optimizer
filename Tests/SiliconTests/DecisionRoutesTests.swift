@@ -190,6 +190,9 @@ struct DecisionRoutesTests {
         let server = ControlServer(
             host: host, handshakeURL: handshakeURL,
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
             discoverTailnetAddress: { nil }
         )
         try await server.start()

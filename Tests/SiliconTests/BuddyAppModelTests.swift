@@ -427,7 +427,10 @@ struct BuddyLiveEventTests {
         let server = ControlServer(
             host: model, handshakeURL: handshakeURL,
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
-            events: hub, discoverTailnetAddress: { nil }
+            events: hub, media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
+            discoverTailnetAddress: { nil }
         )
         try await server.start()
         defer { Task { await server.stop() } }

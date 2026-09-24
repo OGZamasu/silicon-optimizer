@@ -131,7 +131,10 @@ struct RequestReadDeadlineTests {
             host: BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false),
             handshakeURL: handshakeURL,
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
-            events: BuddyEventHub(), readDeadlines: deadlines,
+            events: BuddyEventHub(), media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
+            readDeadlines: deadlines,
             discoverTailnetAddress: { nil }
         )
         try await server.start()
