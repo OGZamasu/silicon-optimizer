@@ -270,6 +270,12 @@ public actor HarnessRuntime {
         return (parts[0], parts.count > 1 ? parts[1] : 0, parts.count > 2 ? parts[2] : 0)
     }
 
+    /// How long `node --version` may take before a candidate is skipped. A real Node
+    /// answers in well under a second; tests raise it, because a stand-in script forked on
+    /// a Mac under heavy load can miss three seconds, and a skipped fixture lets discovery
+    /// fall through to whatever Node the machine running the tests has.
+    @TaskLocal static var nodeProbeDeadline: TimeInterval = 3
+
     private static func nodeVersion(at path: String) -> (Int, Int, Int)? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
@@ -280,7 +286,7 @@ public actor HarnessRuntime {
         process.standardInput = FileHandle.nullDevice
         guard (try? process.run()) != nil else { return nil }
 
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(nodeProbeDeadline)
         while process.isRunning && Date() < deadline {
             usleep(20_000)
         }

@@ -615,8 +615,16 @@ struct BundledAgentPackageLockTests {
     }
 
     /// Node 22 ships npm 10: that Node is new enough and its npm is not, and the message
-    /// has to say which one to update.
+    /// has to say which one to update. The fixture's version probe gets a minute — under
+    /// load a forked script can miss the default three seconds, and a skipped candidate
+    /// leaves nothing to say anything about.
     @Test func aNodeRejectedForItsNpmSaysWhatToDo() throws {
+        try HarnessRuntime.$nodeProbeDeadline.withValue(60) {
+            try nodeRejectedForItsNpmSaysWhatToDo()
+        }
+    }
+
+    private func nodeRejectedForItsNpmSaysWhatToDo() throws {
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.appendingPathComponent(
             "silicon-npm-rejection-\(UUID().uuidString)", isDirectory: true
@@ -639,6 +647,7 @@ struct BundledAgentPackageLockTests {
             minimumVersion: HarnessRuntime.harnessMinimumNodeVersion, requiresNpm11: true
         )
         #expect(npmRejected.node == nil)
+        #expect(npmRejected.rejectedPath == oldNpm, "the fixture's version probe did not answer")
         #expect(npmRejected.rejectedForNpm)
         // This one lives in a folder nobody installs Node into: another tool's. Its npm is
         // not the user's to upgrade, so the message points at Settings instead.
@@ -654,6 +663,7 @@ struct BundledAgentPackageLockTests {
             minimumVersion: HarnessRuntime.harnessMinimumNodeVersion, requiresNpm11: true
         )
         #expect(nodeRejected.node == nil)
+        #expect(nodeRejected.rejectedPath == oldNode, "the fixture's version probe did not answer")
         #expect(!nodeRejected.rejectedForNpm)
         #expect(nodeRejected.rejectionSentence?.contains("incompatible") == true)
     }

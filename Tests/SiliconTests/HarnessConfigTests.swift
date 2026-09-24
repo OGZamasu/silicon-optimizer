@@ -280,6 +280,11 @@ struct HarnessConfigTests {
         #expect(new > (floor.major, floor.minor, floor.patch))
     }
 
+    /// Every check here is on fixture scripts in a temporary folder. A negative answer is
+    /// asked of `pick` with the fixture as its only candidate, which must say *why* it was
+    /// turned down — `locateNode` would fall through to the real Nodes on the machine, and a
+    /// fixture whose version probe timed out would pass a `!=` without being judged at all.
+    /// The probe gets a minute: this is about ranking, not about how fast a shell forks.
     @Test func verifiedSidecarsUseNpmCompatibleNodeWithoutChangingDefaultDiscovery() throws {
         #expect(!HarnessRuntime.supportsNpm11((20, 16, 9)))
         #expect(HarnessRuntime.supportsNpm11((20, 17, 0)))
@@ -308,62 +313,93 @@ struct HarnessConfigTests {
             try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
         }
 
-        try setNodeVersion("20.12.0")
-        #expect(HarnessRuntime.locateNode(customPath: node.path).node?.path == node.path)
-        #expect(HarnessRuntime.locateNode(
-            customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
-            requiresNpm11: true
-        ).node?.path != node.path)
-
-        let npm = directory.appendingPathComponent("npm")
-        try "#!/bin/sh\necho 11.19.0\n".write(to: npm, atomically: true, encoding: .utf8)
-        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: npm.path)
-        try setNodeVersion("21.0.0")
-        #expect(HarnessRuntime.locateNode(
-            customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
-            requiresNpm11: true
-        ).node?.path != node.path)
-        try setNodeVersion("20.17.0")
-        #expect(HarnessRuntime.locateNode(
-            customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
-            requiresNpm11: true
-        ).node?.path == node.path)
-
-        func candidate(_ name: String, nodeVersion: String, npmVersion: String) throws -> URL {
-            let candidateDirectory = directory.appendingPathComponent(name, isDirectory: true)
-            try manager.createDirectory(at: candidateDirectory, withIntermediateDirectories: true)
-            let candidateNode = candidateDirectory.appendingPathComponent("node")
-            let candidateNpm = candidateDirectory.appendingPathComponent("npm")
-            try "#!/bin/sh\necho v\(nodeVersion)\n".write(
-                to: candidateNode, atomically: true, encoding: .utf8
-            )
-            try "#!/bin/sh\necho \(npmVersion)\n".write(
-                to: candidateNpm, atomically: true, encoding: .utf8
-            )
-            for executable in [candidateNode, candidateNpm] {
-                try manager.setAttributes(
-                    [.posixPermissions: 0o755], ofItemAtPath: executable.path
+        /// A custom path that qualifies is returned before anything else is looked at; one
+        /// that comes back from anywhere else means the fixture was never judged.
+        func expectFixtureChosen(
+            _ discovery: HarnessRuntime.NodeDiscovery, _ expected: URL,
+            sourceLocation: SourceLocation = #_sourceLocation
+        ) {
+            if let chosen = discovery.node?.path, !chosen.hasPrefix(directory.path) {
+                Issue.record(
+                    "discovery fell back to \(chosen), outside the fixture: its probe failed",
+                    sourceLocation: sourceLocation
                 )
             }
-            return candidateNode
+            #expect(discovery.node?.path == expected.path, sourceLocation: sourceLocation)
         }
 
-        let newerNodeWithOldNpm = try candidate(
-            "newer-old-npm", nodeVersion: "26.0.0", npmVersion: "10.9.3"
-        )
-        let olderCompatiblePair = try candidate(
-            "older-good-npm", nodeVersion: "24.0.0", npmVersion: "11.19.0"
-        )
-        let chosen = HarnessRuntime.pick(
-            from: [newerNodeWithOldNpm.path, olderCompatiblePair.path],
-            includingRejected: nil, minimumVersion: CodexRuntime.minimumNodeVersion,
-            requiresNpm11: true
-        )
-        #expect(chosen.node?.path == olderCompatiblePair.path)
-        #expect(HarnessRuntime.locateNode(
-            customPath: newerNodeWithOldNpm.path,
-            minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
-        ).node?.path != newerNodeWithOldNpm.path)
+        /// The fixture alone, turned down: `pick` must name it and the version it read.
+        func expectRejected(
+            _ candidate: URL, version: String, forNpm: Bool,
+            sourceLocation: SourceLocation = #_sourceLocation
+        ) {
+            let discovery = HarnessRuntime.pick(
+                from: [], includingRejected: candidate.path,
+                minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
+            )
+            #expect(discovery.node == nil, sourceLocation: sourceLocation)
+            #expect(discovery.rejectedPath == candidate.path,
+                    "the fixture's version probe did not answer", sourceLocation: sourceLocation)
+            #expect(discovery.rejectedVersion == version, sourceLocation: sourceLocation)
+            #expect(discovery.rejectedForNpm == forNpm, sourceLocation: sourceLocation)
+        }
+
+        try HarnessRuntime.$nodeProbeDeadline.withValue(60) {
+            try setNodeVersion("20.12.0")
+            expectFixtureChosen(HarnessRuntime.locateNode(customPath: node.path), node)
+            // No npm beside it: for a verified sidecar it is not even a candidate.
+            let withoutNpm = HarnessRuntime.pick(
+                from: [], includingRejected: node.path,
+                minimumVersion: CodexRuntime.minimumNodeVersion, requiresNpm11: true
+            )
+            #expect(withoutNpm.node == nil && withoutNpm.rejectedPath == nil)
+
+            let npm = directory.appendingPathComponent("npm")
+            try "#!/bin/sh\necho 11.19.0\n".write(to: npm, atomically: true, encoding: .utf8)
+            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: npm.path)
+            try setNodeVersion("21.0.0")
+            expectRejected(node, version: "v21.0.0", forNpm: false)
+            try setNodeVersion("20.17.0")
+            expectFixtureChosen(HarnessRuntime.locateNode(
+                customPath: node.path, minimumVersion: CodexRuntime.minimumNodeVersion,
+                requiresNpm11: true
+            ), node)
+
+            func candidate(_ name: String, nodeVersion: String, npmVersion: String) throws -> URL {
+                let candidateDirectory = directory.appendingPathComponent(name, isDirectory: true)
+                try manager.createDirectory(
+                    at: candidateDirectory, withIntermediateDirectories: true
+                )
+                let candidateNode = candidateDirectory.appendingPathComponent("node")
+                let candidateNpm = candidateDirectory.appendingPathComponent("npm")
+                try "#!/bin/sh\necho v\(nodeVersion)\n".write(
+                    to: candidateNode, atomically: true, encoding: .utf8
+                )
+                try "#!/bin/sh\necho \(npmVersion)\n".write(
+                    to: candidateNpm, atomically: true, encoding: .utf8
+                )
+                for executable in [candidateNode, candidateNpm] {
+                    try manager.setAttributes(
+                        [.posixPermissions: 0o755], ofItemAtPath: executable.path
+                    )
+                }
+                return candidateNode
+            }
+
+            let newerNodeWithOldNpm = try candidate(
+                "newer-old-npm", nodeVersion: "26.0.0", npmVersion: "10.9.3"
+            )
+            let olderCompatiblePair = try candidate(
+                "older-good-npm", nodeVersion: "24.0.0", npmVersion: "11.19.0"
+            )
+            let chosen = HarnessRuntime.pick(
+                from: [newerNodeWithOldNpm.path, olderCompatiblePair.path],
+                includingRejected: nil, minimumVersion: CodexRuntime.minimumNodeVersion,
+                requiresNpm11: true
+            )
+            #expect(chosen.node?.path == olderCompatiblePair.path)
+            expectRejected(newerNodeWithOldNpm, version: "v26.0.0", forNpm: true)
+        }
     }
 
     @Test func insertsAProvidersKeyWhenTheSectionExistsWithoutOne() {
