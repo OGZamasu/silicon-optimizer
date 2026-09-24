@@ -363,7 +363,10 @@ extension AppModel {
                 for batchID in Set(videoBatchQueue.items.map(\.batchID)) {
                     try videoBatchQueue.exportManifest(batchID: batchID)
                 }
+                let before = videoBatchQueue.items
                 try videoBatchQueue.clearFinished()
+                let kept = Set(videoBatchQueue.items.map(\.id))
+                noteClearedVideos(before.filter { !kept.contains($0.id) })
             default: throw ControlHostError.badRequest(ControlServer.unknownQueueAction)
             }
         } catch { throw ControlHostError.badRequest(error.localizedDescription) }

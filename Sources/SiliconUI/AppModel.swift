@@ -2586,6 +2586,9 @@ public final class AppModel {
     public internal(set) var videoQueueMessage: String?
     @ObservationIgnored var videoQueueTask: Task<Void, Never>?
     @ObservationIgnored var videoQueueRenderTask: Task<VideoResult, any Error>?
+    /// Clips "Clear finished" took out of the queue that `/events` has not read yet. See
+    /// `noteClearedVideos`.
+    @ObservationIgnored var clearedVideoItems: [VideoQueueItem] = []
     /// Reconcile the historical Wan default once a real model-aware advertisement is
     /// available. Later manual choices, including unavailable ones, remain untouched.
     private var hasReconciledInitialVideoSelection = false

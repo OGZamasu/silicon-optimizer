@@ -342,6 +342,8 @@ extension AppModel {
         // being built waits for the next one rather than falling between the two.
         let imageEndings = self.imageEndings.take()
         let meshEndings = self.meshEndings.take()
+        let cleared = clearedVideoItems
+        clearedVideoItems = []
         var jobs: [String: ControlAPI.JobEvent] = [:]
         let queue = await videoQueue()
         let roots = await controlMediaRoots()
@@ -392,6 +394,22 @@ extension AppModel {
                 jobs[id] = Self.jobEvent(id: id, kind: kind, ending: ending, mediaID: mediaID)
             }
         }
+        // How each clip that was cleared since the last reading ended, for one that ends and
+        // is cleared inside a single reading: the watcher never saw its ending, and without
+        // this it could only say the clip was removed.
+        var settled: [String: ControlAPI.JobEvent] = [:]
+        for item in cleared where jobs[item.id] == nil {
+            var mediaID: String?
+            if item.status == .completed, let file = item.file {
+                mediaID = await registry.register(path: file.path, within: roots)
+            }
+            // The fields `jobEvent(for:)` would give it: "Clear finished" takes only
+            // completed and confirmed-cancelled clips, never a failed one.
+            settled[item.id] = ControlAPI.JobEvent(
+                id: item.id, kind: "video", status: item.status.rawValue, title: item.batchName,
+                reason: item.status == .cancelled ? item.cancel?.detail : nil, mediaID: mediaID
+            )
+        }
         await registry.persist()
 
         var downloads: [String: ControlAPI.DownloadEvent] = [:]
@@ -406,7 +424,16 @@ extension AppModel {
             )
         }
         return BuddyEventPump.Snapshot(
-            status: await status(), downloads: downloads, jobs: jobs
+            status: await status(), downloads: downloads, jobs: jobs, settled: settled
+        )
+    }
+
+    /// Keeps what "Clear finished" took out of the video queue until `/events` has read it.
+    /// A handful of clears between two readings a second apart is already more than happens;
+    /// the cap is for nobody watching at all.
+    func noteClearedVideos(_ items: [VideoQueueItem]) {
+        clearedVideoItems = Array(
+            (clearedVideoItems + items).suffix(VideoBatchQueue.maximumHistory)
         )
     }
 
@@ -653,15 +680,21 @@ public final class BuddyEventPump {
         public var status: ControlAPI.Status
         public var downloads: [String: ControlAPI.DownloadEvent]
         public var jobs: [String: ControlAPI.JobEvent]
+        /// The last word on jobs that have just left the reading, when the Mac knows it —
+        /// clips cleared from the video queue before a reading saw how they ended. Not news
+        /// in itself, and never part of an opening; see `changes`.
+        public var settled: [String: ControlAPI.JobEvent]
 
         public init(
             status: ControlAPI.Status,
             downloads: [String: ControlAPI.DownloadEvent],
-            jobs: [String: ControlAPI.JobEvent]
+            jobs: [String: ControlAPI.JobEvent],
+            settled: [String: ControlAPI.JobEvent] = [:]
         ) {
             self.status = status
             self.downloads = downloads
             self.jobs = jobs
+            self.settled = settled
         }
     }
 
@@ -773,8 +806,9 @@ public final class BuddyEventPump {
     /// Something that leaves the reading is news too. A phone holds on to every download
     /// and render it has been told about until a frame says it is over, so one that simply
     /// stops being mentioned stays "happening now" on the phone for ever. A download is
-    /// announced once more as `settle` says it ended; a render taken out of a queue, as
-    /// cancelled. Anything whose last frame already said it was over is left alone.
+    /// announced once more as `settle` says it ended; a job as the reading's `settled` says
+    /// it ended, or else — taken out of a queue before it ran — as cancelled. Anything whose
+    /// last frame already said it was over is left alone.
     static func changes(
         from previous: Snapshot?, to current: Snapshot,
         settling settle: (ControlAPI.DownloadEvent) -> ControlAPI.DownloadEvent = BuddyEventPump.stopped
@@ -797,7 +831,7 @@ public final class BuddyEventPump {
         }
         for (id, last) in (previous?.jobs ?? [:]).sorted(by: { $0.key < $1.key })
         where current.jobs[id] == nil && !isOver(last) {
-            events.append(.job(removed(last)))
+            events.append(.job(current.settled[id] ?? removed(last)))
         }
         return events
     }

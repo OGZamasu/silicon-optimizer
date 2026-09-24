@@ -343,6 +343,48 @@ struct BuddyAppModelTests {
         #expect(stopped.fraction == 0.97)
     }
 
+    /// A clip that finishes and is cleared from the queue inside one reading was never seen
+    /// to end by the watcher. It is announced as it ended — completed, with its file — and
+    /// not as a clip somebody removed.
+    @Test func aClipClearedBeforeTheWatcherSawItEndIsAnnouncedAsItEnded() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-cleared-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let videos = folder.appendingPathComponent("Videos")
+        let queue = VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json"))
+        let item = try queue.enqueueSingle(VideoRequest(
+            entryID: "ltx2-distilled", prompt: "A tram", seconds: 5, resolution: "720p",
+            outputDirectory: videos
+        ))
+        try queue.begin(item.id, nodeName: "fixture", nodeURL: URL(string: "http://node.test")!)
+        try queue.accepted(item.id, job: .init(id: "job-1"))
+        let model = BuddyTestStore.model(in: folder, videoQueue: queue)
+
+        let before = await model.buddyEventSnapshot()
+        #expect(before.jobs[item.id]?.status == "rendering")
+
+        let clip = videos.appendingPathComponent("tram.mp4")
+        try FileManager.default.createDirectory(at: videos, withIntermediateDirectories: true)
+        try Data("clip".utf8).write(to: clip)
+        try queue.complete(item.id, result: VideoResult(
+            file: clip, modelName: "LTX-2", prompt: "A tram", elapsed: 12
+        ))
+        _ = try await model.controlVideoQueue(.init(action: "clear_finished"))
+        #expect(queue.items.isEmpty)
+
+        let after = await model.buddyEventSnapshot()
+        let sent = BuddyEventPump.changes(from: before, to: after).compactMap { event in
+            if case .job(let job) = event { job } else { nil }
+        }
+        #expect(sent.map(\.id) == [item.id])
+        #expect(sent.first?.status == "completed")
+        #expect(sent.first?.mediaID != nil)
+        #expect(sent.first?.reason == nil)
+        // Read once: the reading after says nothing more about it.
+        let later = await model.buddyEventSnapshot()
+        #expect(BuddyEventPump.changes(from: after, to: later).isEmpty)
+    }
+
     /// TRELLIS.2 counts as able to run once its environment is set up — it fetches its own
     /// 13 GB of weights mid-run if they are not there. A weights download stopped at the
     /// Mac leaves exactly that state, and must reach a phone as stopped, not arrived.
@@ -577,17 +619,26 @@ enum BuddyTestStore {
     /// empty queue, output folders, a media table and a Hugging Face cache of its own, all
     /// under a temporary folder nothing else uses, and the conversation store redirected as
     /// every suite's is.
+    ///
+    /// - Parameters:
+    ///   - folder: Where it all goes; a fresh temporary folder unless the test needs to
+    ///     know where, to put clips in its queue under its video folder.
+    ///   - videoQueue: A queue the test has filled, stored in that folder too.
     @MainActor
-    static func model(settings: Settings = .init()) -> AppModel {
+    static func model(
+        settings: Settings = .init(),
+        in folder: URL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("buddy-model-\(UUID())"),
+        videoQueue: VideoBatchQueue? = nil
+    ) -> AppModel {
         redirect()
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("buddy-model-\(UUID())")
         var settings = settings
         settings.imageOutputDirectory = folder.appendingPathComponent("Images").path
         settings.meshOutputDirectory = folder.appendingPathComponent("Meshes").path
         settings.videoOutputDirectory = folder.appendingPathComponent("Videos").path
         let model = AppModel(
-            videoQueue: VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
+            videoQueue: videoQueue
+                ?? VideoBatchQueue(storeURL: folder.appendingPathComponent("queue.json")),
             settings: settings
         )
         model.eventMediaRegistry = MediaRegistry(url: nil)
