@@ -106,9 +106,9 @@ public enum MeshRuntimeError: Error, LocalizedError {
 
 /// What the 3D backends need on disk, resolved from the configured trellis2 base directory.
 ///
-/// Everything lives under one base (default `/Volumes/T9/trellis2`) because that is how the
-/// engines were set up: TRELLIS.2 in `trellis-mac/` with its venv, Hunyuan3D in
-/// `hunyuan3d-swift/` with its weights.
+/// Everything lives under one base, a `trellis2` folder (`AppModel.trellisBaseDirectory`),
+/// because that is how the engines were set up: TRELLIS.2 in `trellis-mac/` with its venv,
+/// Hunyuan3D in `hunyuan3d-swift/` with its weights.
 public struct MeshInstallation: Sendable {
     /// The one thing standing between this backend and a working generation — which decides
     /// what the UI offers: a download button fixes `.weights`, a Settings field fixes

@@ -152,14 +152,14 @@ struct GatewayMediaTests {
 
     @Test func findsMediaPathsInProse() {
         let text = """
-        Done. Your clip is at /Users/mbp/Movies/Silicon Optimizer/clip-1.mp4 — I also \
+        Done. Your clip is at /Users/you/Movies/Silicon Optimizer/clip-1.mp4 — I also \
         made /tmp/picture.png earlier, plus `/out/mesh.glb` and /out/a.wav or /out/b.mp3. \
         Not media: /etc/hosts, example.mp4 without a path, and http://example.com/x.mp4 \
-        stays a URL. Mention /Users/mbp/Movies/Silicon Optimizer/clip-1.mp4 twice, list once.
+        stays a URL. Mention /Users/you/Movies/Silicon Optimizer/clip-1.mp4 twice, list once.
         """
         let paths = GatewayAPI.mediaPaths(in: text)
         // The default output folder has a space in it; the whole path must survive.
-        #expect(paths.contains("/Users/mbp/Movies/Silicon Optimizer/clip-1.mp4"))
+        #expect(paths.contains("/Users/you/Movies/Silicon Optimizer/clip-1.mp4"))
         #expect(paths.filter { $0.hasSuffix("clip-1.mp4") }.count == 1)
         #expect(paths.contains("/tmp/picture.png"))
         #expect(paths.contains("/out/mesh.glb"))

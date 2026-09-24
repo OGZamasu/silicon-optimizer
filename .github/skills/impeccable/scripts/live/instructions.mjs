@@ -15,12 +15,20 @@
  * hand-maintained doc can.
  */
 
+import { buildAcceptScriptArgs } from './accept-args.mjs';
 import { VISUAL_ACTIONS } from './vocabulary.mjs';
 
 // Element fields come from the inspected page's DOM, so a command the agent
-// is told to run carries them as single-quoted POSIX shell words.
+// is told to run carries them as single-quoted POSIX shell words, glued to
+// their flag: the helpers match flags anywhere in argv, so a separate word
+// such as '--target=/elsewhere' would be read as that flag, not as a value.
 function shellQuote(value) {
   return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+// A word the shell passes through unchanged stays bare; anything else is quoted.
+function shellWord(value) {
+  return /^[A-Za-z0-9_./:=-]+$/.test(value) ? value : shellQuote(value);
 }
 
 // Mount failures, and preflight errors that echo the element's locators, are
@@ -88,7 +96,7 @@ function generateInstructions(event, scriptsPath) {
   } else if (scaffold) {
     steps.push(`The wrapper is already written into ${scaffold.file}. Splice preview CSS plus all ${event.count} variants at line ${scaffold.insertLine} in ONE edit, following the returned cssAuthoring contract (styleTag, selector strategy, forbidden patterns). Each variant div holds exactly ONE top-level element (same tag as the original); first visible, others display: none.`);
   } else {
-    steps.push(`Preflight could not scaffold${event.scaffoldError ? ` (helper error: ${quotedPageText(event.scaffoldError, 500)})` : ''}. Run node ${scriptsPath}/live-wrap.mjs --id ${id} --count ${event.count} --element-id ${shellQuote(event.element?.id)} --classes ${shellQuote((Array.isArray(event.element?.classes) ? event.element.classes : []).join(','))} --tag ${shellQuote(event.element?.tagName)} --text <first ~80 chars of the picked element's textContent, as one single-quoted shell word>. Keep the flags separate; --text disambiguates repeated siblings. On a fallback error, follow live.md's Handle fallback.`);
+    steps.push(`Preflight could not scaffold${event.scaffoldError ? ` (helper error: ${quotedPageText(event.scaffoldError, 500)})` : ''}. Run node ${scriptsPath}/live-wrap.mjs --id ${id} --count ${event.count} --element-id=${shellQuote(event.element?.id)} --classes=${shellQuote((Array.isArray(event.element?.classes) ? event.element.classes : []).join(','))} --tag=${shellQuote(event.element?.tagName)} --text=<first ~80 chars of the picked element's textContent, as one single-quoted shell word right after the =>. Keep the flags separate; --text disambiguates repeated siblings. On a fallback error, follow live.md's Handle fallback.`);
   }
 
   steps.push(VISUAL_ACTIONS.includes(event.action) && event.action !== 'impeccable'
@@ -122,7 +130,7 @@ function insertScaffoldInstructions(event, scriptsPath) {
   if (scaffold && scaffold.sourceWritten === false) {
     return `${base} Splice your variants into scaffold.wrapperBlock at the marker and insert the result at line ${scaffold.replaceStartLine} of ${scaffold.file} in ONE edit.`;
   }
-  return `${base} If no scaffold payload is present, run node ${scriptsPath}/live-insert.mjs --id ${event.id} --count ${event.count} --position ${event.insert?.position || 'after'} with the anchor flags from event.insert.anchor, then splice variants at the returned insertLine.`;
+  return `${base} If no scaffold payload is present, run node ${scriptsPath}/live-insert.mjs --id ${event.id} --count ${event.count} --position ${event.insert?.position || 'after'} with the anchor flags from event.insert.anchor, each value glued to its flag as live.md shows, then splice variants at the returned insertLine.`;
 }
 
 function acceptInstructions(event, scriptsPath) {
@@ -141,7 +149,10 @@ function acceptInstructions(event, scriptsPath) {
   }
   if (result.mode === 'error') {
     if (result.error === 'source_locked') {
-      return `${prefix}The source file is briefly locked by a publisher. Re-run the exact same live-accept.mjs command (idempotent); do NOT hand-edit the file, and do not poll past this.`;
+      // The exact command, so the agent never rebuilds it from the event and
+      // puts page text such as pageUrl on it.
+      const args = buildAcceptScriptArgs(event).map(shellWord).join(' ');
+      return `${prefix}The source file is briefly locked by a publisher. Re-run exactly \`node ${scriptsPath}/live-accept.mjs ${args}\` (idempotent) until it goes through; do NOT hand-edit the file, and do not poll past this.`;
     }
     if (result.error === 'accept_receipt_conflict') {
       return `${prefix}This session already resolved as ${result.priorOperation || 'a prior operation'}; do not edit anything. Run node ${scriptsPath}/live-status.mjs and tell the user what the session resolved to.`;

@@ -78,6 +78,16 @@ public final class AppModel {
     /// the selector's.
     @ObservationIgnored
     var makeRuntime: (@MainActor (RuntimeSelector.Selection) -> any InferenceRuntime)?
+    /// Where `trellisBaseDirectory` looks for the 3D engines: this Mac's home folder and
+    /// disks in the app, a temporary tree under a test.
+    @ObservationIgnored
+    var trellisSearchRoots: @MainActor () -> (home: URL, disks: [URL]) = {
+        (FileManager.default.homeDirectoryForCurrentUser, Settings.localDiskRoots())
+    }
+    /// How long a search that found nothing stands before the next one, so a Mac without the
+    /// engines is not searched on every redraw of the 3D tab.
+    @ObservationIgnored var trellisSearchInterval: Duration = .seconds(15)
+    @ObservationIgnored private var trellisSearchMiss: (at: ContinuousClock.Instant, fallback: URL)?
 
     /// User-supplied llama.cpp flags from Advanced mode, applied to the next load.
     public private(set) var extraArguments: [String] = []
@@ -950,6 +960,37 @@ public final class AppModel {
 
     public func refreshMeshInstallations() { meshLibraryVersion += 1 }
 
+    /// Where the 3D engines are: the folder Settings names, or — while it names none — a
+    /// `trellis2` folder with an engine in it at the top of the home folder or of a local disk
+    /// (`Settings.trellisBaseDirectory(home:disks:)`). Looked for when 3D needs it, not once at
+    /// launch, so a disk plugged in later is found; what is found is written into Settings,
+    /// where it shows and stays put. With none found, the home folder's `trellis2`, where the
+    /// 3D tab then says what is missing.
+    public var trellisBaseDirectory: URL {
+        if let configured = settings.configuredTrellisBaseDirectory { return configured }
+        if let miss = trellisSearchMiss, ContinuousClock.now - miss.at < trellisSearchInterval {
+            return miss.fallback
+        }
+        let roots = trellisSearchRoots()
+        guard let found = Settings.trellisBaseDirectory(home: roots.home, disks: roots.disks)
+        else {
+            let fallback = roots.home.appendingPathComponent("trellis2", isDirectory: true)
+            trellisSearchMiss = (.now, fallback)
+            return fallback
+        }
+        trellisSearchMiss = nil
+        // Written after the view update that asked, never during it.
+        Task { @MainActor [weak self] in
+            guard let self, self.settings.configuredTrellisBaseDirectory == nil else { return }
+            self.settings.trellisBaseDirectory = found.path
+            // Only the app's own settings document is written back. A model handed its
+            // settings — a test, a preview — keeps the choice in memory and away from the
+            // Keychain that `save()` also writes.
+            if self.readsCredentialsFromKeychain { self.settings.save() }
+        }
+        return found
+    }
+
     static func hunyuanWeightsSlot(for entryID: String) -> String {
         entryID == MeshCatalog.hunyuanTurbo.id ? "shape-large" : "shape-small"
     }
@@ -957,7 +998,7 @@ public final class AppModel {
     /// Whether a backend can run right now, and why not when it cannot.
     public func meshInstallation(for entry: MeshEntry) -> MeshInstallation {
         _ = meshLibraryVersion
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return MeshLocator.trellis(base: base)
@@ -1012,7 +1053,7 @@ public final class AppModel {
 
     /// The one-click fix when a backend's `missing` is `.weights`.
     public func meshWeightsDownload(for entry: MeshEntry) -> MeshInstaller.Download? {
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return MeshInstaller.Download(
@@ -1767,7 +1808,7 @@ public final class AppModel {
     /// The one-time hy3d build, run for the user — xcodebuild because command-line SwiftPM
     /// never compiles mlx-swift's Metal shaders.
     public func buildHy3DEngine() {
-        let package = settings.resolvedTrellisBaseDirectory
+        let package = trellisBaseDirectory
             .appendingPathComponent("hunyuan3d-swift")
         runRepair(id: "hy3d-build", steps: [
             RepairStep(
@@ -1886,7 +1927,7 @@ public final class AppModel {
     }
 
     func makeMeshRuntime(for entry: MeshEntry) -> (any MeshRuntime)? {
-        let base = settings.resolvedTrellisBaseDirectory
+        let base = trellisBaseDirectory
         switch entry.backend {
         case .trellis:
             return TrellisRuntime(base: base)
@@ -4062,6 +4103,9 @@ public final class AppModel {
     }
 
     private var generationTask: Task<Void, Never>?
+    /// Which `send` holds `generationTask`. A stopped answer winds down a moment after Stop,
+    /// when the next answer may already hold the handle, so each clears only its own.
+    @ObservationIgnored private var currentGeneration: UUID?
 
     public var isGenerating: Bool { generationTask != nil }
 
@@ -4078,7 +4122,16 @@ public final class AppModel {
             )
             return
         }
-        guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
+        send(text, images: images, to: runtime)
+    }
+
+    /// `send` once a model is known to be loaded: apart so the tests can answer from a runtime
+    /// of their own.
+    func send(_ text: String, images: [String], to runtime: any InferenceRuntime) {
+        // One answer at a time. A second — Return pressed again mid-answer — took the first's
+        // handle, so Stop could no longer stop it and both wrote into the same thread.
+        guard generationTask == nil,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
         else { return }
         noteActivity()
 
@@ -4105,12 +4158,14 @@ public final class AppModel {
         // posting into the conversation this is answering would carry a half-written reply
         // as context. See `AppModel+Buddy`.
         let answering = conversations[index].id
+        let generation = UUID()
+        currentGeneration = generation
         BuddyGenerations.shared.begin(answering)
         generationTask = Task { [weak self] in
             defer {
                 Task { @MainActor in
-                    self?.generationTask = nil
                     BuddyGenerations.shared.end(answering)
+                    if self?.currentGeneration == generation { self?.generationTask = nil }
                 }
             }
             do {
@@ -4119,9 +4174,9 @@ public final class AppModel {
                     guard let self else { return }
                     switch event {
                     case .token(let token):
-                        self.append(token, toMessage: replyID, reasoning: false)
+                        self.append(token, to: replyID, in: answering, reasoning: false)
                     case .reasoningToken(let token):
-                        self.append(token, toMessage: replyID, reasoning: true)
+                        self.append(token, to: replyID, in: answering, reasoning: true)
                     case .finished(let metrics):
                         self.lastGeneration = metrics
                     }
@@ -4132,24 +4187,9 @@ public final class AppModel {
                 guard let self else { return }
                 self.append(
                     "\n\n_Generation failed: \(error.localizedDescription)_",
-                    toMessage: replyID, reasoning: false
+                    to: replyID, in: answering, reasoning: false
                 )
             }
-        }
-    }
-
-    private func append(_ token: String, toMessage id: UUID, reasoning: Bool) {
-        guard let conversationIndex = conversations.firstIndex(
-            where: { $0.id == selectedConversationID }
-        ), let messageIndex = conversations[conversationIndex].messages.firstIndex(
-            where: { $0.id == id }
-        ) else { return }
-
-        if reasoning {
-            conversations[conversationIndex].messages[messageIndex].reasoning =
-                (conversations[conversationIndex].messages[messageIndex].reasoning ?? "") + token
-        } else {
-            conversations[conversationIndex].messages[messageIndex].content += token
         }
     }
 
@@ -4159,7 +4199,8 @@ public final class AppModel {
     }
 
     public func regenerate() {
-        guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
+        guard generationTask == nil,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
               let lastUser = conversations[index].messages.last(where: { $0.role == .user })
         else { return }
 

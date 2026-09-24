@@ -302,8 +302,12 @@ installer never terminates other processes automatically.
 ## Tests
 
 ```sh
-python3 -m unittest discover -s Resources/video-node -v
+Scripts/test-video-node.sh
 ```
+
+It runs this directory's suite and the batch example's
+(`python3 -m unittest discover -s Resources/video-node -p 'test_*.py' -v`, then the same for
+`Resources/video-node/examples`).
 
 Tests use temporary directories and mocked hardware/processes. The HTTP
 integration test starts loopback-only node and fake Phosphene servers and checks

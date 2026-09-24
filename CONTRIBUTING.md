@@ -30,15 +30,22 @@ against the committed digests.
 
 ## Pull requests get no automated checks here — run them yourself
 
-`.github/workflows/ci.yml` runs on `push` to `main` and on `workflow_dispatch`, and
-deliberately **not** on `pull_request`. It runs on a self-hosted macOS runner, a real Mac
-belonging to the maintainer, and on a public repository a `pull_request` trigger would let
-any fork execute arbitrary code on that machine.
+The project uses no GitHub Actions or other hosted CI: every check is a script in this
+repository, run on a Mac. So nothing turns green on your PR by itself. Run
+`swift build && swift test` and say the result in the PR description, along with whichever
+of these your change touches:
 
-So nothing turns green on your PR by itself. Run `swift build && swift test` locally and
-say the result in the PR description. A change that touches the control API or the
-contract should say which of `Scripts/check-contract.sh`, `Scripts/verify-mcp.sh` and
-`Scripts/verify-cloud.sh` you ran.
+- `Scripts/test-video-node.sh` — the local video node under `Resources/video-node/`
+- `Scripts/test-release-security.sh` — `Scripts/release.sh`, `Scripts/verify-vendor-runtime.sh`
+  and the release supply-chain policy
+- `node --test .github/skills/impeccable/scripts/security-hardening.test.mjs` — the
+  Impeccable skill's scripts
+- `Scripts/check-contract.sh`, `Scripts/verify-mcp.sh` and `Scripts/verify-cloud.sh` — the
+  control API and the contract
+
+`SILICON_NETWORK_TESTS=1 swift test --filter CatalogIntegration` checks the catalog against
+Hugging Face. It depends on repositories this project does not control, so a failure there
+is news about upstream rather than about your change.
 
 ## The contract is shared with two other repositories
 

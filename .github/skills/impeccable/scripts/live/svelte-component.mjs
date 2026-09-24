@@ -28,7 +28,7 @@ import {
   splitSelectorList,
 } from './accept-css.mjs';
 import { verifyAcceptedSource } from './accept-verify.mjs';
-import { grantsGroupOrOtherAccess } from '../lib/impeccable-paths.mjs';
+import { grantsGroupOrOtherAccess, moveNoFollow } from '../lib/impeccable-paths.mjs';
 
 // Preview modules stay under node_modules on purpose: SvelteKit restricts
 // vite's server.fs.allow to src/lib, src/routes, .svelte-kit, and
@@ -150,10 +150,10 @@ export function quarantineLegacySvelteComponentSessions(cwd, privateRoot) {
   for (const { source, rootRel, id } of candidates) {
     const destination = path.join(privateRoot, 'legacy-svelte-quarantine',
       `${rootRel === SVELTE_COMPONENT_ROOT ? 'node' : rootRel ? 'legacy' : 'record'}-${id}-${randomUUID()}${rootRel ? '' : '.json'}`);
-    // Same-filesystem rename preserves the entire prior session for recovery.
-    // EXDEV or any other failure aborts startup rather than serving raw source.
+    // The move preserves the entire prior session for recovery, across volumes
+    // too. Any failure aborts startup rather than serving raw source.
     try {
-      fs.renameSync(source, destination);
+      moveNoFollow(source, destination);
     } catch (error) {
       const recovered = quarantined.map((item) => `${item.source} -> ${item.destination}`).join('; ');
       throw new Error(`Svelte quarantine failed for ${source}; already preserved: ${recovered || 'none'}`, { cause: error });
