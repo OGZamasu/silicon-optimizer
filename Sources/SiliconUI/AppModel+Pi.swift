@@ -65,6 +65,8 @@ extension AppModel {
     }
 
     func restartPi() {
+        piLifecycleGeneration &+= 1
+        let generation = piLifecycleGeneration
         piState = .starting("Preparing the workspace…")
         piItems.removeAll()
         piBusy = false
@@ -97,7 +99,7 @@ extension AppModel {
                 nodePath: self.settings.nodeBinaryPath ?? "",
                 onState: { state in
                     Task { @MainActor [weak self] in
-                        self?.applyPiRuntimeState(state)
+                        self?.applyPiRuntimeState(state, generation: generation)
                     }
                 }
             )
@@ -120,6 +122,7 @@ extension AppModel {
     }
 
     func stopPi() {
+        piLifecycleGeneration &+= 1
         piEventTask?.cancel()
         piEventTask = nil
         let runtime = piRuntime
@@ -128,7 +131,12 @@ extension AppModel {
         Task { await runtime?.stop() }
     }
 
-    private func applyPiRuntimeState(_ state: PiRuntime.State) {
+    /// Applies a state reported by the start numbered `generation`, unless Pi has been stopped
+    /// or restarted since. Stop and an engine switch cancel the start, and a start cancelled
+    /// while it probes npm finds no usable npm and reports that — "npm older than 11.19" —
+    /// which, arriving after Stop had set idle, stayed on screen as though it were true.
+    func applyPiRuntimeState(_ state: PiRuntime.State, generation: Int) {
+        guard generation == piLifecycleGeneration else { return }
         switch state {
         case .idle: piState = .idle
         case .starting(let stage): piState = .starting(stage)
@@ -290,7 +298,8 @@ extension AppModel {
     /// The three-way rule is the Codex hook's, for the same reason: `.confirm` is what a
     /// person is for, and a screening that could not happen is not a yes.
     func screenPiToolCall(
-        _ request: PiGuardrailRequest, using service: JevService = .shared
+        _ request: PiGuardrailRequest, using service: JevService = .shared,
+        router: DecisionRouter? = nil
     ) async {
         // Off means off. Pi ran unattended before this feature existed, and a guardrail
         // nobody switched on must not start holding tool calls.
@@ -316,14 +325,16 @@ extension AppModel {
             recentTranscript: recentPiToolResults(),
             protecting: [PiRuntime.configurationDirectory.path],
             autoApproveArmed: autoApprove,
-            using: service
+            using: service,
+            router: router
         )
         card.screening = screening
 
         // They may have answered while the request was in flight. Their decision stands.
         guard !card.answered else { return }
 
-        if autoApprove, let verdict = screening.verdict {
+        // Only Jev's own verdict is answered for the person; a free lane's waits for them.
+        if autoApprove, screening.answeredByJev, let verdict = screening.verdict {
             switch verdict {
             case .act:
                 markPiToolCall(request.callID, with: screening)

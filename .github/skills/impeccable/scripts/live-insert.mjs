@@ -72,6 +72,11 @@ export function buildInsertWrapperLines({ id, count, indent, commentSyntax, isJs
 }
 
 function argVal(args, flag) {
+  // Same grammar as live-wrap: the generate preflight passes --flag=value.
+  const prefix = flag + '=';
+  for (const arg of args) {
+    if (arg.startsWith(prefix)) return arg.slice(prefix.length);
+  }
   const idx = args.indexOf(flag);
   return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : null;
 }

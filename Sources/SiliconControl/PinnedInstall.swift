@@ -235,14 +235,15 @@ public enum PinnedInstall {
     /// Fetching the commit by id, not cloning a branch, is the pin: git checks every object
     /// it receives against its id. The last command proves the result before anything in it
     /// is used.
+    ///
+    /// `git init` is always the first command. In an existing repository it changes nothing,
+    /// and whether the repository will still be there is not known when the plan is made: an
+    /// environment made again clears the checkouts kept inside it before this runs.
     public static func fetch(_ source: Source, into directory: URL, git: URL) -> [Command] {
         let label = "Downloading \(source.name) (reviewed revision \(source.shortCommit))"
-        var commands: [Command] = []
-        if !FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git").path) {
-            commands.append(Command(
-                label: label, executable: git, arguments: ["init", "--quiet", directory.path]
-            ))
-        }
+        var commands = [Command(
+            label: label, executable: git, arguments: ["init", "--quiet", directory.path]
+        )]
         commands.append(Command(
             label: label, executable: git,
             arguments: ["-C", directory.path, "fetch", "--quiet", "--depth", "1",

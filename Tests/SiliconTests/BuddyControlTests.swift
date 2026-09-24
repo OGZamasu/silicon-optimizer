@@ -893,6 +893,38 @@ struct BuddyControlTests {
         }
     }
 
+    /// A client may key on the first frame being a heartbeat — it is what says the stream is
+    /// up — so it must be first even when the hub already has frames waiting the moment the
+    /// subscription starts. The forwarder and the heartbeat used to start side by side, and
+    /// whichever the scheduler ran first wrote first.
+    @Test func theFirstFrameIsAHeartbeatEvenWithFramesAlreadyWaiting() async throws {
+        let hub = BuddyEventHub()
+        try await withServer(hub: hub) { fixture in
+            let paired = try await fixture.pair()
+            // Frames arriving as fast as the hub takes them, so every subscription starts
+            // with some already queued.
+            let posting = Task {
+                while !Task.isCancelled {
+                    await hub.post(.download(.init(
+                        id: "qwen3-coder", name: "Qwen3-Coder", fraction: 0.5,
+                        bytesReceived: 512, bytesExpected: 1024, bytesPerSecond: 128
+                    )))
+                    await Task.yield()
+                }
+            }
+            defer { posting.cancel() }
+
+            for attempt in 0..<24 {
+                let (client, token) = attempt.isMultiple(of: 2)
+                    ? (fixture.phone, paired.token) : (fixture.local, fixture.local.token)
+                let frames = try await client.events(
+                    "GET", "/events", token: token, body: nil
+                ) { $0.contains { $0.name == "download" } }
+                #expect(frames.first?.name == "heartbeat", "attempt \(attempt)")
+            }
+        }
+    }
+
     /// Revoking has to reach what a device is already holding. Waiting for its next request
     /// would leave an SSE subscription alive for as long as the phone cared to keep it.
     @Test func revokingADeviceEndsTheStreamItIsHolding() async throws {
@@ -1137,6 +1169,9 @@ struct BuddyControlTests {
         )
         let server = ControlServer(
             host: host, handshakeURL: handshakeURL, buddy: registry, events: hub,
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
             eventWriteDeadline: writeDeadline,
             // Never the real CLI: a test must not bind whatever tailnet this machine is on.
             discoverTailnetAddress: { nil }

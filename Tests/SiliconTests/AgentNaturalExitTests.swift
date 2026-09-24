@@ -3,7 +3,7 @@ import Testing
 @testable import SiliconRuntime
 @testable import SiliconUI
 
-@Suite("Agent natural exits", .serialized)
+@Suite("Agent natural exits", .serialized, .redirectedConversationStore)
 struct AgentNaturalExitTests {
     private final class StateCapture: @unchecked Sendable {
         private let lock = NSLock()
@@ -140,6 +140,52 @@ struct AgentNaturalExitTests {
         model.applyQwenProcessID(12346, generation: 2)
         #expect(model.qwenState == .failed(message: "current exit"))
         #expect(model.qwenProcessID == nil)
+    }
+
+    /// Codex had none of the guards above. The runtime's stop waits for a slow process to
+    /// exit, and a start that began meanwhile came up — then the stop finished and marked
+    /// the live session idle, with its sidecar still running.
+    @Test @MainActor func aStopThatFinishesLateCannotIdleANewerCodexSession() async throws {
+        let model = AppModel(settings: .init())
+        let endpoint = URL(string: "codex://app-server")!
+        model.codexRuntime = CodexRuntime()
+        model.codexState = .ready(endpoint: endpoint)
+
+        model.stopCodex()
+        #expect(model.codexState == .stopping)
+        // What `startCodexIfNeeded` does before its runtime reports, then the report: the
+        // new session is up before the stop's own completion reaches the main actor.
+        model.codexLifecycleGeneration &+= 1
+        let current = model.codexLifecycleGeneration
+        model.codexState = .starting(stage: "Looking for Node.js…")
+        model.applyCodexRuntimeState(.ready(endpoint: endpoint), generation: current)
+        model.applyCodexProcessID(4242, generation: current)
+
+        // Let the stop's task run to the end.
+        for _ in 0..<20 {
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.codexState == .ready(endpoint: endpoint))
+        #expect(model.codexProcessID == 4242)
+
+        // The rest of the harness rules hold too: an older session's exit is not this one's,
+        // and this one's exit is final for it.
+        model.applyCodexRuntimeState(.failed(message: "old exit"), generation: current - 1)
+        #expect(model.codexState == .ready(endpoint: endpoint))
+        model.applyCodexRuntimeState(.failed(message: "current exit"), generation: current)
+        model.applyCodexRuntimeState(.ready(endpoint: endpoint), generation: current)
+        model.applyCodexProcessID(4242, generation: current)
+        #expect(model.codexState == .failed(message: "current exit"))
+        #expect(model.codexProcessID == nil)
+
+        // And a stop nothing overtook still lands.
+        model.stopCodex()
+        for _ in 0..<20 where model.codexState != .idle {
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(model.codexState == .idle)
     }
 }
 

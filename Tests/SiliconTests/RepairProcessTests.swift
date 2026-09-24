@@ -19,22 +19,28 @@ struct RepairProcessTests {
         )
     }
 
+    /// A step on a set of running steps of its own, so a suite that stops "every" step as
+    /// the app quits cannot reach these, nor these it.
+    private func run(_ script: String, grace: TimeInterval) async -> String? {
+        await AppModel.runProcess(
+            step: step(script), process: RepairProcess(running: RepairProcess.Running()),
+            outputGrace: grace
+        ) { _ in }
+    }
+
     /// The exit was noticed on one queue and the output read on another, and the answer went
     /// out on the exit alone — so a last line still in the pipe was dropped, and a step with
     /// one line of output failed with an empty message. Made deterministic here by writing
     /// that line from a process that outlives the step by a moment.
     @Test func aFailedStepsLastLineIsInItsMessage() async {
-        let message = await AppModel.runProcess(
-            step: step("(sleep 0.3; echo 'x.whl did not match its reviewed SHA-256') & exit 1"),
-            outputGrace: patient
-        ) { _ in }
+        let message = await run(
+            "(sleep 0.3; echo 'x.whl did not match its reviewed SHA-256') & exit 1", grace: patient
+        )
         #expect(message == "x.whl did not match its reviewed SHA-256")
     }
 
     @Test func aFailedStepsEarlierLinesStillLeadUpToIt() async {
-        let message = await AppModel.runProcess(
-            step: step("echo one; echo two; echo 'the reason'; exit 3"), outputGrace: patient
-        ) { _ in }
+        let message = await run("echo one; echo two; echo 'the reason'; exit 3", grace: patient)
         #expect(message == "one\ntwo\nthe reason")
     }
 
@@ -46,10 +52,9 @@ struct RepairProcessTests {
         let pidFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("repair-holder-\(UUID().uuidString).pid")
         defer { try? FileManager.default.removeItem(at: pidFile) }
-        let message = await AppModel.runProcess(
-            step: step("/bin/sleep 60 & echo $! > '\(pidFile.path)'; echo 'gave up'; exit 2"),
-            outputGrace: 0.5
-        ) { _ in }
+        let message = await run(
+            "/bin/sleep 60 & echo $! > '\(pidFile.path)'; echo 'gave up'; exit 2", grace: 0.5
+        )
         let holder = try #require(Int32(
             try String(contentsOf: pidFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -60,6 +65,6 @@ struct RepairProcessTests {
     }
 
     @Test func aStepThatSucceedsHasNoMessage() async {
-        #expect(await AppModel.runProcess(step: step("echo fine"), outputGrace: patient) { _ in } == nil)
+        #expect(await run("echo fine", grace: patient) == nil)
     }
 }

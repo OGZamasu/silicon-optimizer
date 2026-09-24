@@ -47,6 +47,8 @@ enum AgentPackageInstallError: LocalizedError {
     case npmTooOld(String)
     case npmFailed(String, Int32, String)
     case npmTimedOut(String)
+    case versionProbeTimedOut(String)
+    case versionProbeKilled(String, Int32)
     case missingBin(String)
 
     var errorDescription: String? {
@@ -68,6 +70,12 @@ enum AgentPackageInstallError: LocalizedError {
                 + "locked artifact.\(detail.isEmpty ? "" : "\n\(detail)")"
         case .npmTimedOut(let name):
             return "Installing the verified \(name) package timed out."
+        case .versionProbeKilled(let path, let signal):
+            return "\(path) was stopped by signal \(signal) before it reported its version. "
+                + "Try again."
+        case .versionProbeTimedOut(let path):
+            return "\(path) did not report its version in time. On a busy Mac, or the first "
+                + "time macOS sees a new Node.js, that can happen once — try again."
         case .missingBin(let name):
             return "The verified \(name) package did not contain its expected entry point."
         }
@@ -101,11 +109,19 @@ enum AgentPackageInstaller {
     /// installed from.
     static let manifestFileName = ".silicon-verified.json"
 
+    /// How long `node --version` and `npm --version` may take before the probe is killed and
+    /// the start fails. A real Node answers in well under a second; tests whose fixture runs
+    /// the machine's own Node raise it, because a version-manager shim given a fresh `HOME`
+    /// first installs a runtime into it, which can take longer than this under load.
+    @TaskLocal static var versionProbeDeadline: TimeInterval = 10
+
     static func install(
         _ package: AgentPackage, node: URL, sourceRoot: URL? = nil,
         destinationRoot: URL? = nil, allowLocalArtifacts: Bool = false
     ) async throws -> InstalledAgentPackage {
         let cancellation = InstallCancellation()
+        // Read here: the install runs on a thread of its own, where task-locals are not set.
+        let probeDeadline = versionProbeDeadline
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 // A thread of its own rather than a task. Everything below waits on child
@@ -119,6 +135,7 @@ enum AgentPackageInstaller {
                             package, node: node, sourceRoot: sourceRoot,
                             destinationRoot: destinationRoot,
                             allowLocalArtifacts: allowLocalArtifacts,
+                            probeDeadline: probeDeadline,
                             isCancelled: cancellation.isCancelled
                         )
                     })
@@ -146,7 +163,8 @@ enum AgentPackageInstaller {
 
     private static func installSynchronously(
         _ package: AgentPackage, node: URL, sourceRoot: URL?,
-        destinationRoot: URL?, allowLocalArtifacts: Bool, isCancelled: () -> Bool
+        destinationRoot: URL?, allowLocalArtifacts: Bool, probeDeadline: TimeInterval,
+        isCancelled: () -> Bool
     ) throws -> InstalledAgentPackage {
         let manager = FileManager.default
         let manifests = sourceRoot ?? defaultSourceRoot()
@@ -167,7 +185,12 @@ enum AgentPackageInstaller {
         // The tree is keyed by what decides its contents: the bundled manifest and lock, and
         // the Node line whose ABI any native module was built or chosen for.
         let lockDigest = sha256Hex(try Data(contentsOf: manifest) + Data(contentsOf: lock))
-        let nodeLine = nodeMajorVersion(node, in: root, isCancelled: isCancelled) ?? "unknown"
+        // A probe that was cancelled or timed out throws rather than reading as "unknown": the
+        // key it would make names no tree there is, and the prune below would take that as
+        // licence to delete the verified one.
+        let nodeLine = try nodeMajorVersion(
+            node, in: root, deadline: probeDeadline, isCancelled: isCancelled
+        ) ?? "unknown"
         let key = String(sha256Hex(Data("\(lockDigest)\nnode \(nodeLine)\n".utf8)).prefix(16))
         let tree = root.appendingPathComponent("\(package.id)-\(key)", isDirectory: true)
         let expected = TreeIdentity(package: package.spec, lock: lockDigest, node: nodeLine)
@@ -184,7 +207,7 @@ enum AgentPackageInstaller {
 
         let staging = try installFresh(
             package, node: node, manifest: manifest, lock: lock, root: root,
-            isCancelled: isCancelled
+            probeDeadline: probeDeadline, isCancelled: isCancelled
         )
         var installedSuccessfully = false
         defer {
@@ -212,7 +235,7 @@ enum AgentPackageInstaller {
     /// Runs the strict `npm ci` into a new owned directory and returns it.
     private static func installFresh(
         _ package: AgentPackage, node: URL, manifest: URL, lock: URL, root: URL,
-        isCancelled: () -> Bool
+        probeDeadline: TimeInterval, isCancelled: () -> Bool
     ) throws -> URL {
         let manager = FileManager.default
         let staging = root.appendingPathComponent("\(package.id)-\(UUID().uuidString)",
@@ -238,7 +261,8 @@ enum AgentPackageInstaller {
             cache: root.appendingPathComponent("cache", isDirectory: true)
         )
         try requireAuditedNpmVersion(
-            npm, in: staging, environment: npmEnvironment, isCancelled: isCancelled
+            npm, in: staging, environment: npmEnvironment, deadline: probeDeadline,
+            isCancelled: isCancelled
         )
         let log = staging.appendingPathComponent("npm-install.log")
         try Data().write(to: log)
@@ -444,13 +468,15 @@ enum AgentPackageInstaller {
         }
     }
 
-    /// The Node's major version, which fixes the ABI of any native module in the tree.
+    /// The Node's major version, which fixes the ABI of any native module in the tree. Nil
+    /// when the Node answered with something else; a probe that never answered throws.
     private static func nodeMajorVersion(
-        _ node: URL, in directory: URL, isCancelled: () -> Bool
-    ) -> String? {
-        guard let result = try? probeVersion(node, in: directory, environment: [
+        _ node: URL, in directory: URL, deadline: TimeInterval, isCancelled: () -> Bool
+    ) throws -> String? {
+        let result = try probeVersion(node, in: directory, environment: [
             "HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        ], isCancelled: isCancelled), result.status == 0, result.output.hasPrefix("v"),
+        ], deadline: deadline, isCancelled: isCancelled)
+        guard result.status == 0, result.output.hasPrefix("v"),
               let major = result.output.dropFirst().split(separator: ".").first
         else { return nil }
         return String(major)
@@ -506,7 +532,7 @@ enum AgentPackageInstaller {
             )
             let npm = node.deletingLastPathComponent().appendingPathComponent("npm")
             let result = try probeVersion(
-                npm, in: directory, environment: environment,
+                npm, in: directory, environment: environment, deadline: versionProbeDeadline,
                 isCancelled: { Task<Never, Never>.isCancelled }
             )
             return result.status == 0 && isAuditedNpmVersion(result.output)
@@ -535,10 +561,11 @@ enum AgentPackageInstaller {
     /// the tested 11.19.0 policy behavior or a newer release, never just a major version.
     private static func requireAuditedNpmVersion(
         _ npm: URL, in directory: URL, environment: [String: String],
-        isCancelled: () -> Bool
+        deadline: TimeInterval, isCancelled: () -> Bool
     ) throws {
         let result = try probeVersion(
-            npm, in: directory, environment: environment, isCancelled: isCancelled
+            npm, in: directory, environment: environment, deadline: deadline,
+            isCancelled: isCancelled
         )
         guard result.status == 0, isAuditedNpmVersion(result.output) else {
             throw AgentPackageInstallError.npmTooOld(
@@ -557,10 +584,14 @@ enum AgentPackageInstaller {
         return (major, minor, patch) >= (11, 19, 0)
     }
 
-    /// `<executable> --version`, bounded, in `directory`, with only `environment`.
+    /// `<executable> --version`, bounded by `deadline`, in `directory`, with only
+    /// `environment`. Throws `CancellationError` when cancelled, `versionProbeTimedOut` when it
+    /// had to be killed and `versionProbeKilled` when something else's signal ended it — a
+    /// `killall node`, memory pressure, a code-signing kill of a Node just replaced. None of
+    /// those is an answer, and a caller must not read one into it.
     private static func probeVersion(
         _ executable: URL, in directory: URL, environment: [String: String],
-        isCancelled: () -> Bool
+        deadline: TimeInterval, isCancelled: () -> Bool
     ) throws -> (output: String, status: Int32) {
         let log = directory.appendingPathComponent("version-\(UUID().uuidString).log")
         try Data().write(to: log)
@@ -573,13 +604,15 @@ enum AgentPackageInstaller {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = handle
         process.standardError = handle
+        var timedOut = false
         do {
             try process.run()
-            let deadline = Date().addingTimeInterval(10)
-            while process.isRunning && Date() < deadline && !isCancelled() {
+            let giveUp = Date().addingTimeInterval(deadline)
+            while process.isRunning && Date() < giveUp && !isCancelled() {
                 Thread.sleep(forTimeInterval: 0.1)
             }
             if process.isRunning {
+                timedOut = !isCancelled()
                 process.terminate()
                 let grace = Date().addingTimeInterval(1)
                 while process.isRunning && Date() < grace {
@@ -597,6 +630,12 @@ enum AgentPackageInstaller {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         try? FileManager.default.removeItem(at: log)
         if isCancelled() { throw CancellationError() }
+        if timedOut { throw AgentPackageInstallError.versionProbeTimedOut(executable.path) }
+        if process.terminationReason == .uncaughtSignal {
+            throw AgentPackageInstallError.versionProbeKilled(
+                executable.path, process.terminationStatus
+            )
+        }
         return (output, process.terminationStatus)
     }
 

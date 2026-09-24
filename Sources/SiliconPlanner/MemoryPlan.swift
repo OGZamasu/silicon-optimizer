@@ -64,18 +64,26 @@ public struct MemoryPlan: Sendable, Equatable {
         /// Cost in quality or speed, described plainly.
         public var cost: String
         public var kind: Kind
+        /// For `enableExpertStreaming`, the pool it proposes — the number in its title. Apply
+        /// sets exactly this; working it out again elsewhere is how "127 of 128" came to
+        /// apply 128, a pool that streams nothing.
+        public var expertSlots: Int?
 
         public enum Kind: String, Sendable, Equatable {
             case reduceContext, lowerQuantization, quantizeKVCache
             case enableFlashAttention, enableExpertStreaming, switchRuntime, closeApps
         }
 
-        public init(title: String, detail: String, saving: Bytes, cost: String, kind: Kind) {
+        public init(
+            title: String, detail: String, saving: Bytes, cost: String, kind: Kind,
+            expertSlots: Int? = nil
+        ) {
             self.title = title
             self.detail = detail
             self.saving = saving
             self.cost = cost
             self.kind = kind
+            self.expertSlots = expertSlots
         }
     }
 }

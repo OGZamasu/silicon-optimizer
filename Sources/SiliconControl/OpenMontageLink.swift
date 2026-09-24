@@ -20,6 +20,13 @@ public enum OpenMontageLink {
     /// provider is behind the app" gets noticed.
     public static let markerName = ".silicon-optimizer-provider"
 
+    /// Written into the checkout by Set up before anything else and removed by its last step.
+    /// A setup that stopped partway — a fetch that failed after `git init` left an empty
+    /// repository, or a dependency install that failed after the checkout — otherwise looked
+    /// exactly like someone's own clone: only Link was offered, and linking marked a folder
+    /// with no source or environment in it "Linked".
+    public static let setupMarkerName = ".silicon-optimizer-setup"
+
     /// The files that make up the provider, relative to both the bundle's source directory
     /// and the checkout. The tests directory is deliberately not among them.
     static let providerPaths = ["tools/silicon", "skills/core/silicon-optimizer.md"]
@@ -93,7 +100,9 @@ public enum OpenMontageLink {
         }
 
         let checkout = checkoutURL(in: env)
-        guard FileManager.default.fileExists(atPath: checkout.appendingPathComponent(".git").path)
+        // An unfinished setup is offered Set up again, which picks up where it stopped.
+        guard FileManager.default.fileExists(atPath: checkout.appendingPathComponent(".git").path),
+              !isUnfinishedSetup(checkout)
         else { return .notInstalled }
 
         guard let installed = providerVersion(at: checkout.appendingPathComponent(markerName))
@@ -102,6 +111,19 @@ public enum OpenMontageLink {
         return installed == available
             ? .ready(providerVersion: installed)
             : .providerOutdated(installed: installed, available: available)
+    }
+
+    /// Whether `checkout` is a setup of this app's that did not finish: its marker is there, or
+    /// nothing is but a repository — what a failed fetch left before the marker existed.
+    static func isUnfinishedSetup(_ checkout: URL) -> Bool {
+        let files = FileManager.default
+        if files.fileExists(atPath: checkout.appendingPathComponent(setupMarkerName).path) {
+            return true
+        }
+        guard files.fileExists(atPath: checkout.appendingPathComponent(".git").path),
+              let contents = try? files.contentsOfDirectory(atPath: checkout.path)
+        else { return false }
+        return contents.allSatisfy { $0 == ".git" || $0 == ".DS_Store" }
     }
 
     static func providerVersion(at url: URL) -> String? {
@@ -174,7 +196,9 @@ public enum OpenMontageLink {
     /// commit in `PinnedInstall.openMontage`, checked before anything in it is used, and the
     /// Python packages are the hash-locked set for that commit and that Python. An existing
     /// checkout's Git revision and Remotion dependencies are not updated by this plan: it is
-    /// checked against the reviewed commit, and setup stops if it is anything else.
+    /// checked against the reviewed commit, and setup stops if it is anything else. A setup
+    /// of this app's that stopped partway is not an existing checkout: it is set up again,
+    /// marked as unfinished from the first step until the last.
     public static func plan(in env: Environment) throws -> (steps: [Step], notes: [String]) {
         guard let git = env.git else { throw LinkError.noGit }
 
@@ -184,12 +208,14 @@ public enum OpenMontageLink {
         let source = PinnedInstall.openMontage
         var steps: [Step] = []
         var notes: [String] = []
-        let existingCheckout = FileManager.default.fileExists(
+        let unfinishedSetup = isUnfinishedSetup(checkout)
+        let existingCheckout = !unfinishedSetup && FileManager.default.fileExists(
             atPath: checkout.appendingPathComponent(".git").path)
         let existingVenv = FileManager.default.isExecutableFile(atPath: venvPython.path)
         // A clone would have refused a folder that is already there; fetching into it would
-        // not, and must not write over someone's files.
-        if !existingCheckout,
+        // not, and must not write over someone's files. What an unfinished setup left is this
+        // app's own.
+        if !existingCheckout, !unfinishedSetup,
            let contents = try? FileManager.default.contentsOfDirectory(atPath: checkout.path),
            !contents.isEmpty {
             throw LinkError.checkoutInTheWay
@@ -206,6 +232,19 @@ public enum OpenMontageLink {
             throw PinnedInstall.PlanError.unsupportedPython(
                 tool: source.name, found: version, supported: PinnedInstall.openMontagePythons
             )
+        }
+
+        let setupMarker = checkout.appendingPathComponent(setupMarkerName)
+        if !existingCheckout {
+            let label = "Preparing ~/OpenMontage"
+            steps.append(Step(
+                label: label, executable: URL(fileURLWithPath: "/bin/mkdir"),
+                arguments: ["-p", checkout.path], workingDirectory: env.home
+            ))
+            steps.append(Step(
+                label: label, executable: URL(fileURLWithPath: "/usr/bin/touch"),
+                arguments: [setupMarker.path], workingDirectory: env.home
+            ))
         }
 
         let pinned = existingCheckout
@@ -267,6 +306,14 @@ public enum OpenMontageLink {
                 + "Install Node from nodejs.org, then run `npm ci` in "
                 + "~/OpenMontage/remotion-composer to add it."
             )
+        }
+
+        if !existingCheckout {
+            // Reached only when every step that is not optional succeeded.
+            steps.append(Step(
+                label: "Finishing the setup", executable: URL(fileURLWithPath: "/bin/rm"),
+                arguments: ["-f", setupMarker.path], workingDirectory: env.home
+            ))
         }
 
         return (steps, notes)

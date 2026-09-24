@@ -80,10 +80,10 @@ extension AppModel {
     public func imageRoutingCandidates() -> [MediaCandidate] {
         let runsOn = imageRenderTarget == nil
             ? MediaCandidate.thisMac : MediaCandidate.pairedMachine
-        let installed = DiffusionCatalog.all.filter { DiffusionInstaller.isInstalled($0) }
+        let installed = DiffusionCatalog.all.filter { isImageModelInstalled($0) }
         let offered = installed.isEmpty ? DiffusionCatalog.all : installed
         return offered.map {
-            .image($0, installed: DiffusionInstaller.isInstalled($0), runsOn: runsOn)
+            .image($0, installed: isImageModelInstalled($0), runsOn: runsOn)
         }
     }
 }

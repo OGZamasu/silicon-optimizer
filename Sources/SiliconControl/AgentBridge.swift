@@ -226,10 +226,7 @@ public enum AgentBridge {
     @discardableResult
     public static func connectCodex(in env: Environment) throws -> String {
         let url = codexConfigURL(in: env)
-        let escaped = env.mcpPath
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let commandLine = "command = \"\(escaped)\""
+        let commandLine = "command = \"\(TOMLString.escaped(env.mcpPath))\""
 
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         var lines = text.isEmpty ? [String]() : text.components(separatedBy: "\n")
@@ -318,17 +315,14 @@ public enum AgentBridge {
         if quote == "'" {
             return rest.firstIndex(of: "'").map { String(rest[..<$0]) }
         }
-        var value = ""
+        // The closing quote is the first one no backslash escapes; what lies before it is
+        // decoded the way it was written.
         var escaped = false
-        for character in rest {
-            if escaped {
-                value.append(character)
-                escaped = false
-                continue
-            }
+        for index in rest.indices {
+            let character = rest[index]
+            if escaped { escaped = false; continue }
             if character == "\\" { escaped = true; continue }
-            if character == "\"" { return value }
-            value.append(character)
+            if character == "\"" { return TOMLString.unescaped(rest[..<index]) }
         }
         return nil
     }

@@ -164,12 +164,12 @@ public struct NodeDecisionLane: DecisionLane {
         }
     }
 
-    /// The capability `kind` a node advertises a decision lane under, in `/v1/node`.
+    /// The capability `kind` a node may advertise a decision lane under, in `/v1/node`.
     ///
-    /// A convention on the frozen `NodeCapability` shape rather than a new field: it
-    /// already carries `id`, `kind`, `ready`, `typical_seconds` and `detail`, and the Mac
-    /// already parses all five. So the node adds a capability and this Mac sees it with no
-    /// wire change on either side.
+    /// silicon-node does not: it reports its lane as a top-level `decisions` object, which
+    /// the app reads first. This kind — a convention on the frozen `NodeCapability` shape,
+    /// which already carries `id`, `kind`, `ready`, `typical_seconds` and `detail` — is
+    /// still accepted, so a node that advertises its lane this way is found as well.
     public static let capabilityKind = "decision"
 
     private static func session(deadline: TimeInterval) -> URLSession {

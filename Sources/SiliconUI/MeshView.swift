@@ -27,7 +27,7 @@ struct MeshView: View {
     /// Live reachability of the LATO.2 service: nil while checking, then the truth.
     /// "Configured" and "connected" are different claims, and the banner makes only
     /// the one it has verified.
-    @State private var latoReachable: Bool?
+    @State private var latoReachable: Lato2Runtime.Reachability?
 
     /// Sharing: a handle on the live viewer for exact-pose snapshots, render progress
     /// while a GIF spins up, and a short confirmation that fades on its own.
@@ -337,7 +337,7 @@ struct MeshView: View {
                 .controlSize(.small)
             } else if installation.missing == .engine, entry.backend == .hunyuan,
                       FileManager.default.fileExists(
-                          atPath: model.settings.resolvedTrellisBaseDirectory
+                          atPath: model.trellisBaseDirectory
                               .appendingPathComponent("hunyuan3d-swift").path
                       ) {
                 repairRow(id: "hy3d-build", buttonTitle: "Build it for me") {
@@ -350,8 +350,9 @@ struct MeshView: View {
         .background(.background.secondary, in: .rect(cornerRadius: 7))
     }
 
-    /// The verified truth about the LATO.2 service, checked against its /health endpoint
-    /// the moment the entry is selected — not inferred from a URL being typed in.
+    /// The verified truth about the LATO.2 service, checked the moment the entry is
+    /// selected — up at /health, and willing to take a job from this Mac's credential —
+    /// not inferred from a URL being typed in.
     @ViewBuilder
     private var latoProbeRow: some View {
         let configured = model.settings.lato2ServiceURL
@@ -363,14 +364,25 @@ struct MeshView: View {
                 Text("Checking the service…")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-            case true?:
+            case .answering?:
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .imageScale(.small)
                     .foregroundStyle(.green)
                 Text("Service is answering.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-            case false?:
+            case .refused(let reason)?:
+                Image(systemName: "lock.slash")
+                    .imageScale(.small)
+                    .foregroundStyle(.orange)
+                Text("Answering, but refuses this Mac.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help(reason)
+                Button("Check again") { latoReachable = nil }
+                    .controlSize(.small)
+                    .font(.caption2)
+            case .unreachable?:
                 Image(systemName: "antenna.radiowaves.left.and.right.slash")
                     .imageScale(.small)
                     .foregroundStyle(.red)
@@ -389,8 +401,9 @@ struct MeshView: View {
         }
         .task(id: "\(configured)-\(latoReachable == nil)") {
             guard latoReachable == nil, let url = URL(string: configured) else { return }
-            let reachable = await Lato2Runtime.probe(baseURL: url)
-            latoReachable = reachable
+            latoReachable = await Lato2Runtime.probe(
+                baseURL: url, token: AppModel.lato2Credential(for: url, in: model.swarmConfig)
+            )
         }
         .onChange(of: configured) { latoReachable = nil }
     }

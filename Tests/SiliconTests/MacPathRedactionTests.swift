@@ -143,7 +143,8 @@ struct MacPathRedactionTests {
         #expect(redaction.scrub("/Users/you/Movies/Silicon/a.mp4 and /Users/you/Desktop/b.png")
             == "Silicon/a.mp4 and ~/Desktop/b.png")
         #expect(redaction.scrub("\"/Users/you\"") == "\"~\"")
-        #expect(redaction.scrub("/Users/youngest/a.png") == "/Users/youngest/a.png")
+        // Not the home folder, so not `~` — but still a path on this Mac, so its name only.
+        #expect(redaction.scrub("/Users/youngest/a.png") == "a.png")
         #expect(redaction.scrub("/private/Users/you/a.png") == "~/a.png")
         #expect(redaction.scrub("/mnt/Users/you/a.png") == "/mnt/Users/you/a.png")
         #expect(redaction.scrub("No path here.") == "No path here.")
@@ -152,6 +153,95 @@ struct MacPathRedactionTests {
         #expect(redaction.name("/Users/you/Movies/Silicon/Lisbon/") == "Lisbon")
         #expect(redaction.name("clip.mp4") == "clip.mp4")
         #expect(redaction.name("") == "")
+    }
+
+    /// A tool that fails hands back the tail of its own log, and a traceback names every
+    /// folder on the way down — none of them an output root or the home folder.
+    @Test func aPathOutsideEveryKnownFolderIsCutToItsName() {
+        let redaction = MacPathRedaction(
+            roots: ["/Volumes/External/Silicon Videos"], home: "/Users/you"
+        )
+        let traceback = #"File "/Volumes/External/trellis2/trellis/pipelines/base.py", line 12"#
+        #expect(redaction.scrub(traceback) == #"File "base.py", line 12"#)
+        #expect(redaction.scrub(
+            "OSError: [Errno 2] No such file or directory: '/Volumes/External/models/ckpt.bin'"
+        ) == "OSError: [Errno 2] No such file or directory: 'ckpt.bin'")
+        // Folder names with spaces, and two paths in one sentence.
+        #expect(redaction.scrub("copy /Volumes/External/Local Models/x.png to /private/tmp/y.png")
+            == "copy x.png to y.png")
+        #expect(redaction.scrub("--output=/opt/homebrew/var/mesh.glb failed")
+            == "--output=mesh.glb failed")
+        #expect(redaction.scrub("/usr/bin/python3: can't open file") == "python3: can't open file")
+        // However the path is put: a file URL, a search path's later entries, straight
+        // after a colon, in curly quotes, in backticks, in guillemets.
+        #expect(redaction.scrub(
+            "NSURL=file:///Volumes/External/trellis2/out/mesh.glb, NSUnderlyingError"
+        ) == "NSURL=file://mesh.glb, NSUnderlyingError")
+        #expect(redaction.scrub("PYTHONPATH=/opt/lib:/Volumes/External/trellis2/src")
+            == "PYTHONPATH=lib:src")
+        #expect(redaction.scrub("error:/Volumes/External/models/ckpt.bin")
+            == "error:ckpt.bin")
+        #expect(redaction.scrub("Couldn’t open “/Volumes/External/Local Models/x.png”.")
+            == "Couldn’t open “x.png”.")
+        #expect(redaction.scrub("run `/Volumes/External/trellis2/run.sh` again")
+            == "run `run.sh` again")
+        #expect(redaction.scrub("« /Volumes/External/a/b.png »") == "« b.png »")
+        // A file name with the sentence after it is where the path ends, so a slash later
+        // in the sentence is not taken for one of its folders.
+        #expect(redaction.scrub("/Volumes/External/Local Models/m.gguf needs 12 GB/s here")
+            == "m.gguf needs 12 GB/s here")
+        #expect(redaction.scrub("/private/tmp/x.png and/or /Volumes/External/y.png")
+            == "x.png and/or y.png")
+        // Whatever the labels already made safe stays as they left it.
+        #expect(redaction.scrub("/Volumes/External/Silicon Videos/a.mp4, /Users/you/b/c.png")
+            == "Silicon Videos/a.mp4, ~/b/c.png")
+
+        // Not paths on this disk: a node's API, a URL, arithmetic, a name that only starts
+        // like a folder.
+        for untouched in [
+            "POST /v1/jobs answered 500.",
+            "Could not reach http://100.64.0.9:8000/v1/jobs/Users/x.",
+            "and/or 16/9", "/Volumesque/a/b", "./run.sh failed",
+            // A Windows node's paths, native and through WSL, are not this Mac's.
+            "C:\\Users\\bob\\x.gguf", "/mnt/c/Users/bob/x.gguf",
+        ] {
+            #expect(redaction.scrub(untouched) == untouched, "\(untouched)")
+        }
+    }
+
+    /// The same, as a phone and the swarm meet it: a mesh tool's failure, quoted back.
+    @Test func aToolsTracebackReachesAPhoneOrAPeerWithoutItsFolders() async throws {
+        try await BuddyMediaFixture.withServer(swarmToken: Self.swarmToken) { fixture in
+            let image = try fixture.writeOutput(
+                named: "kettle.png", bytes: BuddyMediaRoutesTests.pngBytes(count: 64)
+            )
+            let mediaID = try #require(
+                await fixture.registry.register(path: image.path, within: [fixture.outputs.path])
+            )
+            let sentence = "The mesh tool stopped: Traceback (most recent call last):\n"
+                + #"  File "/Volumes/External/trellis2/trellis/pipelines/base.py", line 12"#
+                + "\nRuntimeError: out of memory"
+            await fixture.host.setMeshFailure(sentence)
+            let phone = try await fixture.pair()
+
+            for token in [phone.token, Self.swarmToken] {
+                let (status, body) = try await fixture.phone.call(
+                    "POST", "/mesh/generate", token: token, body: #"{"mediaID":"\#(mediaID)"}"#
+                )
+                #expect(status == 400)
+                let told = try #require(Self.message(body))
+                #expect(!told.contains("/Volumes"), "\(told)")
+                #expect(!told.contains("trellis2"), "\(told)")
+                #expect(told.contains(#"File "base.py", line 12"#), "\(told)")
+            }
+            // The Mac's own tools still read the whole thing.
+            let (status, body) = try await fixture.local.call(
+                "POST", "/mesh/generate", token: fixture.local.token,
+                body: #"{"mediaID":"\#(mediaID)"}"#
+            )
+            #expect(status == 400)
+            #expect(Self.message(body) == sentence)
+        }
     }
 
     // MARK: - Helpers

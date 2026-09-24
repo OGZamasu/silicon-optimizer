@@ -451,7 +451,8 @@ struct ChatView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        // Return still submits mid-answer; the draft stays for when the answer is done.
+        guard !text.isEmpty, !model.isGenerating else { return }
         model.send(text, images: attachments)
         draft = ""
         attachments = []

@@ -38,25 +38,34 @@ export function buildGenerationPreflight(event, scriptsDir, { cache = null } = {
   if (!target.elementId && !target.classes) return null;
 
   const script = path.join(scriptsDir, isInsert ? 'live-insert.mjs' : 'live-wrap.mjs');
-  const args = [script, '--id', event.id, '--count', String(event.count || 3)];
+  // Every value rides glued to its flag. The element strings are the page's:
+  // passed as their own argv word, a textContent of "--file=admin.html" or
+  // "--target=/elsewhere" was read by the helpers (which match flags anywhere
+  // in argv) as a flag, steering the scaffold to another file or project.
+  // Glued, it can only ever be the value of the flag in front of it.
+  const args = [script, option('--id', event.id), option('--count', event.count || 3)];
   // Compute the scaffold but do not write it into source for source-preview
   // targets. The agent writes wrapper + variants atomically; a premature
   // server-side write reloads the framework and strands the browser at 0/N.
   // No-op on the svelte-component path, which never writes the route source.
   args.push('--defer-source-write');
-  if (isInsert) args.push('--position', target.position);
-  if (target.elementId) args.push('--element-id', target.elementId);
-  if (target.classes) args.push('--classes', target.classes);
-  if (target.tag) args.push('--tag', target.tag);
-  if (target.text) args.push('--text', target.text);
-  if (!isInsert && event.pageUrl) args.push('--page-url', event.pageUrl);
+  if (isInsert) args.push(option('--position', target.position));
+  if (target.elementId) args.push(option('--element-id', target.elementId));
+  if (target.classes) args.push(option('--classes', target.classes));
+  if (target.tag) args.push(option('--tag', target.tag));
+  if (target.text) args.push(option('--text', target.text));
+  // No --page-url: the helpers ignore it, and it is page free text.
   const signature = targetSignature(event);
   // A cached resolution points the helper straight at the file, skipping the
   // tree search. The helper still reads current content, so line ranges stay
   // fresh; only discovery is cached.
   const cachedFile = cache ? cache.get(signature) : null;
-  if (cachedFile) args.push('--file', cachedFile);
+  if (cachedFile) args.push(option('--file', cachedFile));
   return { script, args, mode: isInsert ? 'insert' : 'replace', signature };
+}
+
+function option(flag, value) {
+  return `${flag}=${value}`;
 }
 
 /**

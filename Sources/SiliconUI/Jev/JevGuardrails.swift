@@ -54,11 +54,24 @@ public enum GuardrailScreening: Sendable, Equatable {
         return GuardrailPolicy.signals(for: response, facts: facts)
     }
 
-    /// The line an approval card shows.
+    /// The line an approval card shows, naming who screened the call — a card saying "Jev"
+    /// over a verdict Laya reached would be the Decisions panel's old mistake the other way
+    /// round.
     public var summary: String {
         switch self {
-        case .screened(let verdict, _, _, _): verdict.summary
-        case .unavailable(let reason): "Jev: not screened — \(reason)"
+        case .screened(let verdict, _, let response, _):
+            guard !Self.isJevAnswer(response),
+                  let lane = response.provider.flatMap(DecisionLaneID.named)
+            else { return verdict.summary }
+            let screener = switch lane {
+            case .laya: "Laya"
+            case .node: "Laya on a node"
+            case .oneToken: "The loaded model"
+            case .jev: "Jev"
+            }
+            return verdict.summary(by: screener)
+        case .unavailable(let reason):
+            return "Jev: not screened — \(reason)"
         }
     }
 
@@ -73,6 +86,28 @@ public enum GuardrailScreening: Sendable, Equatable {
     public var isBlocked: Bool {
         if case .screened(.block, _, _, _) = self { return true }
         return false
+    }
+
+    /// Whether Jev itself screened the call — the only verdict "Auto-approve calls Jev
+    /// rates safe" may act on without the person.
+    ///
+    /// A free lane screens calls too now: Laya when the guardrail is pinned "Always local",
+    /// or when Jev is not keyed, over budget or failing under Automatic. Its verdict goes
+    /// on the card for the person to weigh. Answering for them on it would turn "no key,
+    /// budget spent, TypeSafe unreachable" into a silent yes, which this feature promises
+    /// never to do.
+    public var answeredByJev: Bool {
+        guard case .screened(_, _, let response, _) = self else { return false }
+        return Self.isJevAnswer(response)
+    }
+
+    /// A free lane names itself in `provider` — that is part of what a `DecisionLane`
+    /// promises — so anything else came through Jev's door.
+    static func isJevAnswer(_ response: ControlAPI.DecideResponse) -> Bool {
+        guard let provider = response.provider,
+              let lane = DecisionLaneID.named(provider)
+        else { return true }
+        return lane.costsMoney
     }
 
     /// The screening as the control API and the phones carry it.
@@ -116,6 +151,8 @@ public enum JevGuardrails {
     /// environment, opens a file or sends a transcript.
     /// - Parameter service: the Jev door to ask through. The app leaves it at the shared
     ///   one; a test hands over a service pointed at a loopback double.
+    /// - Parameter router: which lanes may answer. Nil — what the app passes — is the
+    ///   router governing `service`; a test hands over one with its own lanes registered.
     /// - Parameter log: where the screening is remembered. The app's shared log, unless a
     ///   test that counts what was remembered hands over one of its own.
     public static func screen(
@@ -129,9 +166,11 @@ public enum JevGuardrails {
         protecting: [String] = [],
         autoApproveArmed: Bool = false,
         using service: JevService = .shared,
+        router: DecisionRouter? = nil,
         log: GuardrailScreeningLog = .shared
     ) async -> GuardrailScreening {
-        if let reason = await unavailableReason(from: service) {
+        let router = router ?? .router(for: service)
+        if let reason = await unavailableReason(from: service, router: router) {
             // Not recorded: the feature being off is not a screening that went wrong, and
             // a buffer full of "guardrails are off" tells nobody anything.
             return .unavailable(reason: reason)
@@ -149,17 +188,22 @@ public enum JevGuardrails {
 
         let started = Date()
         do {
-            // One request, nine questions, through the one governed door.
+            // One request, nine questions, to whichever lane the owner's pin for this
+            // ability allows — Jev only through the one governed door.
             let response = try await GuardrailQuestions.ask(
-                state: prepared.state, using: service
+                state: prepared.state, via: router
             )
             // Wall clock rather than the response's own figure: what matters to a person
             // watching an approval card is how long the app made them wait, which includes
             // the queueing and the retries.
             let latency = Date().timeIntervalSince(started) * 1_000
+            // Armed only for Jev's own answer: a free lane's verdict is never acted on
+            // without the person — see `GuardrailScreening.answeredByJev` — so for the
+            // policy nobody is about to answer in their place.
+            let armed = autoApproveArmed && GuardrailScreening.isJevAnswer(response)
             let screening = GuardrailScreening.screened(
                 verdict: GuardrailPolicy.verdict(
-                    for: response, facts: prepared.facts, autoApproveArmed: autoApproveArmed
+                    for: response, facts: prepared.facts, autoApproveArmed: armed
                 ),
                 latencyMS: latency,
                 response: response,
@@ -185,25 +229,39 @@ public enum JevGuardrails {
     /// guardrail that is on but *cannot answer* is a different situation, and it falls back
     /// to the person rather than to silence.
     public static func isTurnedOn(using service: JevService = .shared) async -> Bool {
-        let settings = await service.settings()
-        return settings.enabled && settings.isOn(.guardrails)
+        await service.settings().isTurnedOn(.guardrails)
     }
 
     /// Why a screening would not happen, or nil when it would.
     ///
     /// Asked before building the state so a disabled guardrail costs nothing, and phrased
     /// for a person: these strings end up on an approval card.
-    static func unavailableReason(from service: JevService) async -> String? {
-        if await DecisionRouter.router(for: service).canAnswer(.guardrails) { return nil }
+    ///
+    /// The switch is asked before the lanes. A local lane answers whatever ability it is
+    /// asked about, so with a model loaded the lanes alone would screen every Codex call on
+    /// a guardrail nobody switched on — and off by default, off means off, is this
+    /// feature's promise.
+    static func unavailableReason(
+        from service: JevService, router: DecisionRouter? = nil
+    ) async -> String? {
         let settings = await service.settings()
         if !settings.enabled { return "Jev is off in Settings → TypeSafe (Jev)." }
         if !settings.isOn(.guardrails) {
             return "Guardrails are off in Settings → TypeSafe (Jev)."
         }
-        // The two remaining conditions are deliberately not distinguished here: telling a
-        // caller which one it is would mean reading the Keychain to find out, and drawing a
-        // card must not put a consent dialog on screen.
-        return "Jev has no key on this Mac, or this month's budget is spent."
+        if await (router ?? .router(for: service)).canAnswer(.guardrails) { return nil }
+        switch settings.laneOverride(.guardrails) {
+        case .off:
+            return "Guardrails are switched off in Settings → Decisions."
+        case .alwaysLocal:
+            return "Guardrails are set to Always local in Settings → Decisions, and no "
+                + "local lane is ready."
+        case .automatic, .alwaysJev:
+            // The two remaining conditions are deliberately not distinguished here: telling
+            // a caller which one it is would mean reading the Keychain to find out, and
+            // drawing a card must not put a consent dialog on screen.
+            return "Jev has no key on this Mac, or this month's budget is spent."
+        }
     }
 
     // MARK: - What is remembered

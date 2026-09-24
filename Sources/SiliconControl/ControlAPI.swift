@@ -524,7 +524,8 @@ public enum ControlAPI {
         public struct Message: Codable, Sendable {
             public var role: String
             public var content: String
-            /// Base64 `data:` URLs. Only meaningful for vision models.
+            /// Base64 `data:` URLs, and nothing else — see `ChatImages`. Only meaningful for
+            /// vision models.
             public var images: [String]
 
             public init(role: String, content: String, images: [String] = []) {
@@ -541,6 +542,39 @@ public enum ControlAPI {
             self.messages = messages
             self.temperature = temperature
             self.maxTokens = maxTokens
+        }
+    }
+
+    /// What a chat image may be: a picture, carried inline.
+    ///
+    /// An image goes to the runtime as an OpenAI `image_url`, and the llama-server this app
+    /// bundles reads an `http(s)` one as an address to download — following redirects, with
+    /// whatever credentials the address carries. Accepted from a swarm node or a phone paired
+    /// for chat only, that makes this Mac fetch anything it can reach on their behalf, its
+    /// own loopback and the rest of the tailnet included, and a stored one is fetched again
+    /// on every later turn of the conversation. Every client this API has had sends
+    /// `data:image/…;base64,…`, so that is the one shape there is.
+    public enum ChatImages {
+
+        public static let notInline =
+            "Images must be sent inline, as base64 data: URLs of a picture. This Mac does not "
+                + "fetch an image from an address."
+
+        /// `data:`, a picture's media type, `;base64`, then the bytes. Only the header is
+        /// looked at: the payload is the runtime's to decode, and its size is capped elsewhere.
+        public static func isInline(_ image: String) -> Bool {
+            // The header is a few dozen characters; one that has not ended by here is not a
+            // header, and a two-megabyte payload is not scanned looking for it.
+            let head = image.prefix(256)
+            guard let comma = head.firstIndex(of: ",") else { return false }
+            let header = head[..<comma].lowercased()
+            return header.hasPrefix("data:image/") && header.hasSuffix(";base64")
+                && !header.contains(where: \.isWhitespace)
+        }
+
+        /// Nil when every image is inline, a sentence when one is not.
+        public static func refusal(forImages images: [String]) -> String? {
+            images.allSatisfy(isInline) ? nil : notInline
         }
     }
 

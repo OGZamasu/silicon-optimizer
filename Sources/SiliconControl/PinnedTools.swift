@@ -99,28 +99,68 @@ extension PinnedInstall {
     }
 
     /// The environment a tool installs into, and the version its locks are chosen by: an
-    /// existing environment's own, or — for a new one — the base interpreter's, which then
-    /// makes it. Either must be one the locks cover; anything else is refused before a single
-    /// command runs.
+    /// existing environment's own when the locks cover it, and otherwise the base
+    /// interpreter's, which makes it — or makes it again.
+    ///
+    /// Again, because an environment here is the app's, not the user's. One an older install
+    /// made with a Python no lock covers — macOS's own 3.9, which all of these were once
+    /// installed on, or the shared environment's 3.12 under the voice tools' 3.13 floor — was
+    /// refused on every install, with advice to install a Python that nothing would then use.
+    /// Only with no covered interpreter to make it from is a plan refused, before a single
+    /// command runs; and then installing one is advice that works. An environment whose
+    /// interpreter has gone — the Python it was made from uninstalled, its link left dangling —
+    /// is made again the same way: a plain `venv` over it leaves the link as it was, and every
+    /// install after it failed at its first pip.
     public static func environment(
         _ environment: URL, tool: String, supported: [String], basePython: URL?
     ) throws -> (python: URL, version: String, commands: [Command]) {
         let python = environment.appendingPathComponent("bin/python3")
-        if FileManager.default.isExecutableFile(atPath: python.path) {
-            let version = pythonVersion(ofVirtualEnvironment: environment)
-            guard let version, supported.contains(version) else {
-                throw PlanError.unsupportedPython(tool: tool, found: version, supported: supported)
-            }
-            return (python, version, [])
+        let existing = hasEnvironment(at: environment)
+        let found = existing ? pythonVersion(ofVirtualEnvironment: environment) : nil
+        if let found, supported.contains(found),
+           FileManager.default.isExecutableFile(atPath: python.path) {
+            return (python, found, [])
         }
         let version = basePython.flatMap(pythonVersion(ofInterpreter:))
         guard let basePython, let version, supported.contains(version) else {
-            throw PlanError.unsupportedPython(tool: tool, found: version, supported: supported)
+            throw PlanError.unsupportedPython(
+                tool: tool, found: existing ? found : version, supported: supported
+            )
         }
+        guard existing else {
+            return (python, version, [Command(
+                label: "Making its Python environment",
+                executable: basePython, arguments: ["-m", "venv", environment.path]
+            )])
+        }
+        // `--clear` empties the folder first: packages built for another Python are no use to
+        // this one, and a plan that kept anything else in there has to make it again.
         return (python, version, [Command(
-            label: "Making its Python environment",
-            executable: basePython, arguments: ["-m", "venv", environment.path]
+            label: "Making its Python environment again, with Python \(version)",
+            executable: basePython, arguments: ["-m", "venv", "--clear", environment.path]
         )])
+    }
+
+    /// Whether `environment(_:tool:supported:basePython:)` would make `environment` again —
+    /// it is there, but made with a Python `supported` does not include, or one that no longer
+    /// runs — and so clear out whatever else is installed in it.
+    public static func needsRemaking(_ environment: URL, supported: [String]) -> Bool {
+        guard hasEnvironment(at: environment) else { return false }
+        let python = environment.appendingPathComponent("bin/python3")
+        guard FileManager.default.isExecutableFile(atPath: python.path),
+              let found = pythonVersion(ofVirtualEnvironment: environment)
+        else { return true }
+        return !supported.contains(found)
+    }
+
+    /// Whether an environment was ever made at `environment`: its `pyvenv.cfg`, or a
+    /// `bin/python3` — a link counts even when what it points at is gone.
+    static func hasEnvironment(at environment: URL) -> Bool {
+        let manager = FileManager.default
+        let python = environment.appendingPathComponent("bin/python3")
+        return manager.fileExists(atPath: environment.appendingPathComponent("pyvenv.cfg").path)
+            || (try? manager.destinationOfSymbolicLink(atPath: python.path)) != nil
+            || manager.fileExists(atPath: python.path)
     }
 
     /// Installs a checkout that `verify` has just proved is the pinned commit, and nothing

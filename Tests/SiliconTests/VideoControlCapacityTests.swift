@@ -9,7 +9,7 @@ struct VideoControlCapacityTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let handshakeURL = directory.appendingPathComponent("control.json")
         let host = WaitingVideoHost()
-        let server = ControlServer(host: host, handshakeURL: handshakeURL)
+        let server = ControlServer.inTemporaryFolder(directory, host: host)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 16
         configuration.timeoutIntervalForResource = 15
@@ -52,7 +52,7 @@ struct VideoControlCapacityTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let handshakeURL = directory.appendingPathComponent("control.json")
         let host = WaitingVideoHost()
-        let server = ControlServer(host: host, handshakeURL: handshakeURL)
+        let server = ControlServer.inTemporaryFolder(directory, host: host)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 100
         configuration.timeoutIntervalForRequest = 15
@@ -135,6 +135,24 @@ struct VideoControlCapacityTests {
             guard ContinuousClock.now < deadline else { throw TestControlError.timeout }
             try await Task.sleep(for: .milliseconds(10))
         }
+    }
+}
+
+private extension ControlServer {
+    /// A server that keeps every file it writes or reads in `directory`, has a device
+    /// registry of its own, and never looks for this Mac's tailnet. Left to its defaults it
+    /// would read the owner's paired devices — and, if they allow a tailnet, bind this Mac's
+    /// real tailscale address — and a queue poll would sweep the owner's real uploads folder
+    /// and rewrite their media table.
+    static func inTemporaryFolder(_ directory: URL, host: any ControlHost) -> ControlServer {
+        ControlServer(
+            host: host, handshakeURL: directory.appendingPathComponent("control.json"),
+            buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
+            events: BuddyEventHub(), media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
+            discoverTailnetAddress: { nil }
+        )
     }
 }
 

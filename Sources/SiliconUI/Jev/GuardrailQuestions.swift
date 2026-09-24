@@ -918,11 +918,14 @@ public enum GuardrailVerdict: Sendable, Equatable {
 
     /// The line the approval cards show: "Jev: safe", "Jev: review: destructive,
     /// outside_working_tree", "Jev: block: exfiltrates".
-    public var summary: String {
+    public var summary: String { summary(by: "Jev") }
+
+    /// The same line, naming whichever lane screened the call.
+    public func summary(by screener: String) -> String {
         switch self {
-        case .act: "Jev: safe"
-        case .confirm(let reasons): "Jev: review: " + reasons.joined(separator: ", ")
-        case .block(let reasons): "Jev: block: " + reasons.joined(separator: ", ")
+        case .act: "\(screener): safe"
+        case .confirm(let reasons): "\(screener): review: " + reasons.joined(separator: ", ")
+        case .block(let reasons): "\(screener): block: " + reasons.joined(separator: ", ")
         }
     }
 }

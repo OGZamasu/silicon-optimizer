@@ -28,6 +28,33 @@ public enum GatewayAPI {
         "node/\(peerSlug)/\(model)"
     }
 
+    /// The longest model name a peer may put into a gateway id. Real names — HF repo ids,
+    /// GGUF file names, a node's served id — are a fraction of this.
+    public static let maximumPeerModelNameBytes = 200
+
+    /// Whether a model name a swarm peer reported may become a gateway id at all.
+    ///
+    /// The name is the peer's text, not this app's, and a gateway id does not stay in the
+    /// gateway: it is the default written into Codex's config.toml, a harness's saved
+    /// choice, and what a phone is offered — picked automatically when it is the first
+    /// serving model. Every file it lands in escapes it, and this is the second wall: one
+    /// line, bounded, no quote, no backslash, nothing invisible. Every real model name
+    /// fits; nothing that could end a string in one of those files does.
+    public static func isAcceptablePeerModelName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= maximumPeerModelNameBytes,
+              name.trimmingCharacters(in: .whitespaces) == name
+        else { return false }
+        return name.unicodeScalars.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator,
+                 .surrogate, .privateUse, .unassigned:
+                return false
+            default:
+                return scalar != "\"" && scalar != "\\"
+            }
+        }
+    }
+
     public static func modelID(cloudProvider: String, model: String) -> String {
         "cloud/\(cloudProvider)/\(model)"
     }
@@ -580,6 +607,32 @@ public enum GatewayAPI {
         guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
         else { return false }
         return json["stream"] as? Bool ?? false
+    }
+
+    /// Whether every image a chat-completions request carries is a picture sent inline.
+    ///
+    /// The gateway hands the messages to the backend as they came, and the llama-server this
+    /// app bundles — like a node's — downloads an `image_url` that is an address. The chat
+    /// routes on the control server take only `data:` pictures (`ControlAPI.ChatImages`),
+    /// and so does this one: a harness attaching a screenshot sends it inline, and nothing
+    /// that reaches a model through this Mac makes the Mac fetch an address. A body that is
+    /// not JSON carries no images; the backend will say what is wrong with it.
+    public static func carriesOnlyInlineImages(body: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let messages = json["messages"] as? [[String: Any]]
+        else { return true }
+        for message in messages {
+            guard let parts = message["content"] as? [[String: Any]] else { continue }
+            for part in parts {
+                // `{"url": …}` is the schema; a bare string is what some clients send.
+                let image = (part["image_url"] as? [String: Any])?["url"] ?? part["image_url"]
+                guard let image else { continue }
+                guard let url = image as? String, ControlAPI.ChatImages.isInline(url) else {
+                    return false
+                }
+            }
+        }
+        return true
     }
 
     // MARK: - Media serving
