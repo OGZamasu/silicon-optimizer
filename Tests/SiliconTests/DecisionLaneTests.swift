@@ -581,6 +581,36 @@ struct PerLaneCalibrationTests {
         ) == defaults, "floors measured on one revision are not applied to another")
     }
 
+    /// `GET /jev/calibration?lane=laya` reads Laya's own run. The route asked the host for
+    /// it and the Mac never answered — the protocol's default, meant for hosts with no
+    /// lanes, stood in for it — so every lane but the one-token one was a 404.
+    @MainActor @Test func eachLanesCalibrationCanBeReadBack() async throws {
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure()
+        let model = AppModel(settings: .init())
+
+        var laya = ControlAPI.JevCalibration.fixture(lane: "laya")
+        laya.modelID = "laya-run"
+        try CalibrationQuestions.save(laya, to: await harness.service.calibrationURL(for: .laya))
+        var node = ControlAPI.JevCalibration.fixture(lane: "node")
+        node.modelID = "node-run"
+        try CalibrationQuestions.save(node, to: await harness.service.calibrationURL(for: .node))
+
+        let readLaya = await model.decisionCalibration(lane: "laya", using: harness.service)
+        #expect(readLaya?.modelID == "laya-run")
+        #expect(readLaya?.lane == "laya")
+        let readNode = await model.decisionCalibration(lane: "node", using: harness.service)
+        #expect(readNode?.modelID == "node-run")
+
+        // No lane, or `local`, is the one-token lane, which has never been calibrated here.
+        #expect(await model.decisionCalibration(lane: nil, using: harness.service) == nil)
+        #expect(await model.decisionCalibration(lane: "local", using: harness.service) == nil)
+        // Jev is the reference, not a lane with a calibration; an unknown word is nothing.
+        #expect(await model.decisionCalibration(lane: "typesafe", using: harness.service) == nil)
+        #expect(await model.decisionCalibration(lane: "quantum", using: harness.service) == nil)
+    }
+
     /// A file written before there was more than one lane has no `lane` field, and is read
     /// as the lane it can only have been.
     @Test func aFileFromBeforeLanesReadsAsTheLaneItMeasured() throws {

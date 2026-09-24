@@ -290,7 +290,8 @@ extension AppModel {
     /// The three-way rule is the Codex hook's, for the same reason: `.confirm` is what a
     /// person is for, and a screening that could not happen is not a yes.
     func screenPiToolCall(
-        _ request: PiGuardrailRequest, using service: JevService = .shared
+        _ request: PiGuardrailRequest, using service: JevService = .shared,
+        router: DecisionRouter? = nil
     ) async {
         // Off means off. Pi ran unattended before this feature existed, and a guardrail
         // nobody switched on must not start holding tool calls.
@@ -316,14 +317,16 @@ extension AppModel {
             recentTranscript: recentPiToolResults(),
             protecting: [PiRuntime.configurationDirectory.path],
             autoApproveArmed: autoApprove,
-            using: service
+            using: service,
+            router: router
         )
         card.screening = screening
 
         // They may have answered while the request was in flight. Their decision stands.
         guard !card.answered else { return }
 
-        if autoApprove, let verdict = screening.verdict {
+        // Only Jev's own verdict is answered for the person; a free lane's waits for them.
+        if autoApprove, screening.answeredByJev, let verdict = screening.verdict {
             switch verdict {
             case .act:
                 markPiToolCall(request.callID, with: screening)
