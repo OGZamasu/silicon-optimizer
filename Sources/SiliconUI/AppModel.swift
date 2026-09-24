@@ -2783,12 +2783,12 @@ public final class AppModel {
     /// of them runs stop-then-start strictly in order and exactly one server is live after
     /// the last.
     private var swarmRestart: Task<Void, Never>?
-    /// Builds the control server. Tests swap this for one that publishes to a scratch
-    /// handshake file and a private device registry, so restarting never touches the user's.
     /// Where `/events` publishes the files renders finished with. The shared table the
     /// control server serves `/media/{id}` from; a test gives the model one of its own, so
     /// nothing it watches is written into the owner's.
     @ObservationIgnored var eventMediaRegistry: MediaRegistry = .shared
+    /// Builds the control server. Tests swap this for one that publishes to a scratch
+    /// handshake file and a private device registry, so restarting never touches the user's.
     @ObservationIgnored var makeControlServer: @MainActor (AppModel) -> ControlServer = {
         ControlServer(host: $0)
     }
