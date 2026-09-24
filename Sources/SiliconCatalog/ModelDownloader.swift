@@ -19,6 +19,18 @@ public actor ModelDownloader {
 
         public var fraction: Double { bytesReceived.fraction(of: bytesExpected) }
 
+        public init(
+            bytesReceived: Bytes, bytesExpected: Bytes, bytesPerSecond: Double,
+            currentFile: String, fileIndex: Int, fileCount: Int
+        ) {
+            self.bytesReceived = bytesReceived
+            self.bytesExpected = bytesExpected
+            self.bytesPerSecond = bytesPerSecond
+            self.currentFile = currentFile
+            self.fileIndex = fileIndex
+            self.fileCount = fileCount
+        }
+
         public var estimatedTimeRemaining: TimeInterval? {
             guard bytesPerSecond > 1 else { return nil }
             let remaining = Double((bytesExpected - bytesReceived).rawValue)

@@ -538,10 +538,28 @@ public final class AppModel {
         let download = ImageDownloadTask(entry: entry)
         imageDownloads[entry.id] = download
 
+        let adapterFiles = entry.adapter.map { _ in
+            DiffusionAdapterFiles(locks: imageAdapterLocks, hub: imageModelHub)
+        }
+
         download.task = Task { [weak self] in
             do {
+                // For an adapter entry this is its base's weights, which it cannot run without.
                 try await installer.download(entry) { progress in
                     Task { @MainActor in self?.imageDownloads[entry.id]?.progress = progress }
+                }
+                // Then the one adapter file, checked against its reviewed digest.
+                if let adapter = entry.adapter, let adapterFiles {
+                    let variant = adapter.defaultVariant
+                    try await adapterFiles.prepare(variant, of: adapter) { received, expected in
+                        Task { @MainActor in
+                            self?.imageDownloads[entry.id]?.progress = ModelDownloader.Progress(
+                                bytesReceived: received, bytesExpected: expected,
+                                bytesPerSecond: 0, currentFile: variant.file,
+                                fileIndex: 0, fileCount: 1
+                            )
+                        }
+                    }
                 }
                 guard let self else { return }
                 self.imageLibraryVersion += 1
@@ -565,11 +583,17 @@ public final class AppModel {
         imageDownloads[id] = nil
     }
 
+    /// Removes the entry's own files. An adapter's are only the adapter's: the base weights
+    /// it ran on stay, and so does the base entry (`DiffusionInstaller.removalTargets`).
     public func uninstallImageModel(_ entry: DiffusionEntry) {
-        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository, hub: imageModelHub)
-        try? FileManager.default.removeItem(at: directory)
+        for directory in DiffusionInstaller.removalTargets(for: entry, hub: imageModelHub) {
+            try? FileManager.default.removeItem(at: directory)
+        }
         imageLibraryVersion += 1
     }
+
+    /// Where the reviewed adapter manifests are read from. Tests point it at their own.
+    var imageAdapterLocks: URL { PinnedInstall.defaultLockRoot() }
 
     public func diffusionPlanner() -> DiffusionPlanner { DiffusionPlanner(profile: profile) }
 

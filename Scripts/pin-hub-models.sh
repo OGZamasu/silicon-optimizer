@@ -14,6 +14,12 @@
 # Needs curl and python3. LFS files are recorded by the digest the Hub publishes for them;
 # small files are downloaded and checked against the git blob id the Hub lists for them at
 # that commit before their SHA-256 is recorded.
+#
+# Also the Qwen-Image 2.1 few-step adapters: the app downloads the chosen adapter file itself
+# and merges it into the transformer, so what it merges is exactly the file listed here.
+#
+#   Scripts/pin-hub-models.sh                                   # every repository
+#   Scripts/pin-hub-models.sh PrunaAI/Pruna-Qwen-Image-2.1      # only these
 
 set -euo pipefail
 
@@ -21,10 +27,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/Resources/pinned-installs/models"
 mkdir -p "$OUT"
 
-/usr/bin/env python3 - "$OUT" <<'PY'
+/usr/bin/env python3 - "$OUT" "$@" <<'PY'
 import fnmatch, hashlib, json, sys, urllib.request
 
 out = sys.argv[1]
+only = set(sys.argv[2:])
 # mlx_audio.utils.DEFAULT_ALLOW_PATTERNS (0.5.0) and mlx_speech._hub._DEFAULT_ALLOW_PATTERNS
 # (0.5.2); fnmatch's * crosses "/", as it does in huggingface_hub.
 MLX_AUDIO = ["*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken", "*.txt", "*.jinja",
@@ -66,13 +73,22 @@ PINS = [
      ["added_tokens.json", "config.json", "generation_config.json", "merges.txt",
       "model.safetensors", "normalizer.json", "preprocessor_config.json",
       "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json"]),
+    # Pruna's few-step LoRA adapters for Qwen-Image 2.1: the two adapter files and nothing
+    # else. The base model is pinned by revision in DiffusionCatalog.
+    ("PrunaAI/Pruna-Qwen-Image-2.1", "113e63bb993001b3411eb3470b84fc444040cd7e", [],
+     ["p_qwen_image_2.1_8step_v0.1.safetensors", "p_qwen_image_2.1_5step_v0.1.safetensors"]),
 ]
+unknown = only - {repository for repository, *_ in PINS}
+if unknown:
+    sys.exit(f"not pinned here: {', '.join(sorted(unknown))}")
 
 def get(url):
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "pin-hub-models"})) as r:
         return r.read()
 
 for repository, commit, patterns, paths in PINS:
+    if only and repository not in only:
+        continue
     tree = json.loads(get(f"https://huggingface.co/api/models/{repository}/tree/{commit}?recursive=1"))
     files = {entry["path"]: entry for entry in tree if entry["type"] == "file"}
     chosen = sorted({p for p in files if any(fnmatch.fnmatch(p, pattern) for pattern in patterns)}

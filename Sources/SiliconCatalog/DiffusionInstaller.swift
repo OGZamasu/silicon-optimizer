@@ -81,14 +81,63 @@ public struct DiffusionInstaller: Sendable {
     /// comes from the catalog entry because it is not the same across families: FLUX.1 keeps its
     /// T5-XXL in `text_encoder_2`, and a check that did not look for it would call a repository
     /// missing 9.5 GB of weights complete.
+    ///
+    /// An adapter entry is installed when its base's weights are and its default adapter file
+    /// is in place too — either alone runs nothing.
     public static func isInstalled(_ entry: DiffusionEntry, hub: URL) -> Bool {
-        guard let snapshot = latestSnapshot(for: entry.repository, hub: hub)
-        else { return false }
+        guard weightsInPlace(entry, hub: hub) else { return false }
+        guard let adapter = entry.adapter else { return true }
+        return isAdapterInPlace(adapter.defaultVariant, of: adapter, hub: hub)
+    }
+
+    /// Whether the Hub weights `entry` runs on — its own, or its base's — are all there.
+    public static func weightsInPlace(_ entry: DiffusionEntry, hub: URL) -> Bool {
+        guard let snapshot = weightsSnapshot(for: entry, hub: hub) else { return false }
         return entry.componentDirectories.allSatisfy { component in
             let directory = snapshot.appendingPathComponent(component)
             let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
             return (contents ?? []).contains { $0.hasSuffix(".safetensors") }
         }
+    }
+
+    /// The snapshot `entry`'s weights are read from: the pinned revision's when it has one —
+    /// never a newer snapshot that happens to be beside it — and otherwise the newest.
+    public static func weightsSnapshot(for entry: DiffusionEntry, hub: URL) -> URL? {
+        guard let revision = entry.revision else {
+            return latestSnapshot(for: entry.weightsRepository, hub: hub)
+        }
+        let pinned = cacheDirectory(for: entry.weightsRepository, hub: hub)
+            .appendingPathComponent("snapshots/\(revision)", isDirectory: true)
+        return FileManager.default.fileExists(atPath: pinned.path) ? pinned : nil
+    }
+
+    /// Where an adapter file lives once fetched: the hub cache's own layout, at the adapter's
+    /// pinned revision.
+    public static func adapterFile(
+        _ variant: DiffusionAdapter.Variant, of adapter: DiffusionAdapter, hub: URL
+    ) -> URL {
+        cacheDirectory(for: adapter.repository, hub: hub)
+            .appendingPathComponent("snapshots/\(adapter.revision)", isDirectory: true)
+            .appendingPathComponent(variant.file)
+    }
+
+    /// Whether the adapter file is there. Only a file whose digest matched is ever moved into
+    /// place, and the runner checks the digest again before it merges anything, so presence is
+    /// what this asks.
+    public static func isAdapterInPlace(
+        _ variant: DiffusionAdapter.Variant, of adapter: DiffusionAdapter, hub: URL
+    ) -> Bool {
+        let path = adapterFile(variant, of: adapter, hub: hub).resolvingSymlinksInPath().path
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        return attributes?[.type] as? FileAttributeType == .typeRegular
+            && ((attributes?[.size] as? NSNumber)?.int64Value ?? 0) > 0
+    }
+
+    /// What removing `entry` deletes: its own repository's cache and nothing else. For an
+    /// adapter that is the adapter's files — never its base's weights, which belong to the base
+    /// entry and stay installed, and usable, for as long as that entry is.
+    public static func removalTargets(for entry: DiffusionEntry, hub: URL) -> [URL] {
+        [cacheDirectory(for: entry.repository, hub: hub)]
     }
 
     public static func latestSnapshot(for repository: String, hub: URL) -> URL? {
@@ -127,7 +176,7 @@ public struct DiffusionInstaller: Sendable {
     /// the sizes is exactly what is left to fetch. That is also how "already installed" is
     /// distinguished from "partly installed" without guessing.
     public func plan(_ entry: DiffusionEntry) async throws -> Plan {
-        let repository = entry.repository
+        let repository = entry.weightsRepository
         let output = try await run(
             arguments: downloadArguments(entry) + ["--dry-run", "--format", "json"],
             collectingOutput: true
@@ -170,7 +219,9 @@ public struct DiffusionInstaller: Sendable {
 
     // MARK: - Download
 
-    /// Fetches the repository, reporting progress by watching the cache grow.
+    /// Fetches the repository, reporting progress by watching the cache grow. For an adapter
+    /// entry that is its base's weights; the adapter file is fetched, and checked against its
+    /// reviewed digest, by `DiffusionAdapterFiles`.
     ///
     /// The CLI hides its progress bars when stdout is not a terminal, so there is nothing to
     /// parse. Sizing the job up front and polling the blob directory gives a real byte count
@@ -180,7 +231,7 @@ public struct DiffusionInstaller: Sendable {
         _ entry: DiffusionEntry,
         onProgress: @Sendable @escaping (ModelDownloader.Progress) -> Void
     ) async throws {
-        let repository = entry.repository
+        let repository = entry.weightsRepository
         let sizing = try await plan(entry)
         guard !sizing.isComplete else { return }
 
@@ -213,7 +264,7 @@ public struct DiffusionInstaller: Sendable {
         if lowered.contains("access denied") || lowered.contains("requires approval") {
             throw InstallError.accessDenied(repository: repository)
         }
-        guard Self.isInstalled(entry, hub: hub) else {
+        guard Self.weightsInPlace(entry, hub: hub) else {
             throw InstallError.failed(
                 output.split(separator: "\n").suffix(4).joined(separator: "\n")
             )
@@ -221,7 +272,12 @@ public struct DiffusionInstaller: Sendable {
     }
 
     func downloadArguments(_ entry: DiffusionEntry) -> [String] {
-        var arguments = ["download", entry.repository]
+        var arguments = ["download", entry.weightsRepository]
+        // The commit, not a branch: the snapshot lands under `snapshots/<revision>`, which is
+        // exactly where `weightsSnapshot` and the runtime look.
+        if let revision = entry.revision {
+            arguments += ["--revision", revision]
+        }
         // One `--include` per pattern: passing several values to a single flag makes the CLI
         // read the extras as positional filenames and drop the flag entirely, with only a
         // warning — which quietly fetches the whole repository instead of the parts wanted.

@@ -9,7 +9,9 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
     public var license: String
     public var summary: String
     public var shape: DiffusionShape
-    /// Hugging Face repository the runtime fetches weights from.
+    /// Hugging Face repository the runtime fetches weights from — for an adapter entry, the
+    /// adapter's own repository, which is the page its licence is on and the only thing
+    /// removing it removes. Its weights come from `weightsRepository`.
     public var repository: String
     /// Bit widths this model is worth running at, best first.
     public var quantizations: [Quantization]
@@ -37,11 +39,27 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
     /// Directories that must contain weights for the model to count as installed.
     public var componentDirectories: [String]
 
+    /// The commit the weights are fetched and read at, or nil for the older entries, which
+    /// follow the repository's `main`. A pinned entry is fetched with `--revision` and run from
+    /// exactly that snapshot, so what renders is the revision that was reviewed.
+    ///
+    /// Like `downloadPatterns` and `componentDirectories`, this describes the weights in
+    /// `weightsRepository` — for an adapter entry, its base's.
+    public var revision: String?
+
+    /// The entry whose weights this one runs on, when it is an adapter rather than a model:
+    /// installing it installs that entry's weights too, and removing it never removes them.
+    public var baseEntryID: String?
+
+    /// The LoRA adapter this entry merges into its base's weights before rendering.
+    public var adapter: DiffusionAdapter?
+
     public init(
         id: String, name: String, author: String, license: String, summary: String,
         shape: DiffusionShape, repository: String, quantizations: [Quantization],
         rating: Int, isGated: Bool = false, supportsQuantizedReuse: Bool = true,
-        downloadPatterns: [String], componentDirectories: [String]
+        downloadPatterns: [String], componentDirectories: [String],
+        revision: String? = nil, baseEntryID: String? = nil, adapter: DiffusionAdapter? = nil
     ) {
         self.id = id
         self.name = name
@@ -56,6 +74,32 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
         self.supportsQuantizedReuse = supportsQuantizedReuse
         self.downloadPatterns = downloadPatterns
         self.componentDirectories = componentDirectories
+        self.revision = revision
+        self.baseEntryID = baseEntryID
+        self.adapter = adapter
+    }
+
+    /// Where the weights `downloadPatterns` name live: the base entry's repository for an
+    /// adapter, this entry's own otherwise.
+    public var weightsRepository: String {
+        baseEntryID.flatMap(DiffusionCatalog.entry(id:))?.repository ?? repository
+    }
+
+    /// The step counts this entry can run at, when it cannot run at any other: an adapter is
+    /// trained for its own sigma schedule and nothing else. Nil means any count.
+    public var stepChoices: [Int]? {
+        adapter.map { $0.variants.map(\.steps) }
+    }
+
+    /// `steps` if this entry can run at it, otherwise the nearest count it can — the larger of
+    /// two equally near, since the larger is the better image.
+    public func normalizedSteps(_ steps: Int) -> Int {
+        guard let choices = stepChoices, !choices.isEmpty, !choices.contains(steps)
+        else { return steps }
+        return choices.min {
+            let (left, right) = (abs($0 - steps), abs($1 - steps))
+            return left == right ? $0 > $1 : left < right
+        }!
     }
 
     /// What `mflux-generate` fetches for the FLUX.1 family. Note `text_encoder_2` — the T5-XXL,
@@ -105,10 +149,73 @@ public struct DiffusionEntry: Sendable, Codable, Hashable, Identifiable {
         "tokenizer/**",
     ]
 
+    /// What `mflux-generate-qwen-2.1` reads, from mflux 0.20.0's `Qwen21WeightDefinition`: its
+    /// `get_download_patterns()` plus the tokenizer definition's own `processor/**`. The
+    /// repository also carries `scheduler/` and a 3 MB `assets/` image, neither of which it
+    /// opens; the tokenizer lives in `processor/`, not `tokenizer/` as in every family above.
+    public static let qwenImage21Patterns = [
+        "vae/*.safetensors", "vae/*.json",
+        "transformer/*.safetensors", "transformer/*.json",
+        "text_encoder/*.safetensors", "text_encoder/*.json",
+        "processor/**",
+    ]
+
     public var parameterLabel: String {
         let billions = Double(shape.totalParameters) / 1e9
         return billions >= 10 ? String(format: "%.0fB", billions)
                               : String(format: "%.1fB", billions)
+    }
+}
+
+/// A LoRA adapter published for a catalogue model: small files that change how its
+/// transformer behaves, merged into the base weights before the run.
+///
+/// Each variant is trained for one sampler schedule and is useless with any other, which is why
+/// the schedule lives beside the file here rather than in the runtime: the file and its sigmas
+/// are one fact. The files' digests are not repeated here — they are in the reviewed manifest
+/// `Scripts/pin-hub-models.sh` writes, which is what the download is checked against.
+public struct DiffusionAdapter: Sendable, Codable, Hashable {
+
+    public struct Variant: Sendable, Codable, Hashable, Identifiable {
+        public var id: String { file }
+        /// How the choice reads in a picker.
+        public var label: String
+        /// The adapter file inside the repository.
+        public var file: String
+        /// One per step, highest first. The terminal 0 is appended by the sampler, and nothing
+        /// else is done to them: no shift, static or resolution-dependent.
+        public var sigmas: [Double]
+
+        public var steps: Int { sigmas.count }
+
+        public init(label: String, file: String, sigmas: [Double]) {
+            self.label = label
+            self.file = file
+            self.sigmas = sigmas
+        }
+    }
+
+    public var repository: String
+    /// The reviewed commit; the files are fetched from exactly this revision.
+    public var revision: String
+    /// What `B·A` is multiplied by when merged: PEFT's `lora_alpha / r`. The runner reads both
+    /// from the file and refuses one whose ratio is not this.
+    public var scale: Double
+    /// Best first. Installing the entry fetches the first; the others are fetched the first
+    /// time one is chosen.
+    public var variants: [Variant]
+
+    public init(repository: String, revision: String, scale: Double, variants: [Variant]) {
+        self.repository = repository
+        self.revision = revision
+        self.scale = scale
+        self.variants = variants
+    }
+
+    public var defaultVariant: Variant { variants[0] }
+
+    public func variant(steps: Int) -> Variant? {
+        variants.first { $0.steps == steps }
     }
 }
 
@@ -122,6 +229,7 @@ public enum DiffusionCatalog {
     public static let all: [DiffusionEntry] = [
         fluxSchnell, flux2Klein4B, flux2Klein9B, fluxDev,
         fluxKreaDev, qwenImage, zImageTurbo, zImage, ernieImageTurbo, ernieImage,
+        qwenImage21, qwenImage21Pruna,
     ]
 
     public static func entry(id: String) -> DiffusionEntry? {
@@ -474,5 +582,115 @@ public enum DiffusionCatalog {
         supportsQuantizedReuse: false,
         downloadPatterns: DiffusionEntry.erniePatterns,
         componentDirectories: ["transformer", "text_encoder", "vae"]
+    )
+
+    // MARK: - Qwen-Image 2.1
+
+    /// Qwen's Research Licence, which both Qwen-Image 2.1 and Pruna's adapters (a derivative
+    /// of it) are distributed under: research and non-commercial use only.
+    public static let qwenResearchLicence = "Qwen RESEARCH LICENSE AGREEMENT (research, non-commercial)"
+
+    /// The Qwen-Image 2.1 commit both entries are fetched and run at.
+    public static let qwenImage21Revision = "790c92633540aa0cb11d9abf19eb46d861714758"
+
+    /// Qwen-Image 2.1 — a 7.1B single-stream, block-causal transformer (32 blocks, 32 heads ×
+    /// 128, MLP ratio 3), a Qwen3-VL text encoder and a 64-channel causal VAE that compresses
+    /// 16× per side, so one latent token covers a 16×16 pixel tile and there is no patching.
+    /// Counted from the safetensors headers at the pinned revision: 7.115B transformer; the
+    /// text-encoder files hold 8.77B, of which mflux loads only the 7.568B language model —
+    /// the vision tower and the output head are never read — and always in bf16; the VAE is
+    /// 338M parameters stored and run in fp32.
+    public static let qwenImage21 = DiffusionEntry(
+        id: "qwen-image-2.1",
+        name: "Qwen-Image 2.1",
+        author: "Qwen",
+        license: qwenResearchLicence,
+        summary: """
+            Qwen's second-generation image model: a 7B transformer with strong text rendering, \
+            behind a Qwen3-VL text encoder that is never quantized and is most of what it costs \
+            to load. Forty steps and no guidance. Research licence — not for commercial use.
+            """,
+        shape: DiffusionShape(
+            blockCount: 32,
+            hiddenSize: 4096,
+            headCount: 32,
+            transformerParameters: 7_115_000_000,
+            vaeParameters: 338_000_000,
+            textEncoderParameters: 7_568_000_000,
+            vaeScaleFactor: 16,
+            latentChannels: 64,
+            patchSize: 1,
+            maxTextTokens: 2048,
+            nativeResolution: 1024,
+            defaultSteps: 40
+        ),
+        repository: "Qwen/Qwen-Image-2.1",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 4,
+        // Its entry point has no --base-model at all, and the few-step entry below merges an
+        // adapter into full-precision weights, which a quantized copy no longer has.
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.qwenImage21Patterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"],
+        revision: qwenImage21Revision
+    )
+
+    /// Pruna's few-step LoRA adapters for Qwen-Image 2.1 (v0.1, DMD-trained): the same model,
+    /// with one adapter merged into its transformer, in 8 steps or 5 instead of 40 — each on the
+    /// sigma schedule it was trained for, with no guidance and no negative prompt. Trained at
+    /// 1024² only. Runs on the base entry's weights; the adapter itself is one 336 MB file.
+    public static let qwenImage21Pruna = DiffusionEntry(
+        id: "qwen-image-2.1-pruna",
+        name: "Qwen-Image 2.1 · Pruna few-step",
+        author: "Pruna AI / Qwen",
+        license: qwenResearchLicence,
+        summary: """
+            Qwen-Image 2.1 with Pruna's few-step adapter merged in: 8 steps instead of 40, or 5 \
+            when speed matters more than finish. A first release — below the base model's \
+            quality — trained at 1024². Uses Qwen-Image 2.1's weights plus one small file. \
+            Research licence — not for commercial use.
+            """,
+        shape: DiffusionShape(
+            blockCount: 32,
+            hiddenSize: 4096,
+            headCount: 32,
+            transformerParameters: 7_115_000_000,
+            vaeParameters: 338_000_000,
+            textEncoderParameters: 7_568_000_000,
+            vaeScaleFactor: 16,
+            latentChannels: 64,
+            patchSize: 1,
+            maxTextTokens: 2048,
+            nativeResolution: 1024,
+            defaultSteps: 8
+        ),
+        repository: "PrunaAI/Pruna-Qwen-Image-2.1",
+        quantizations: [.mlx4, .mlx6, .mlx8],
+        rating: 3,
+        supportsQuantizedReuse: false,
+        downloadPatterns: DiffusionEntry.qwenImage21Patterns,
+        componentDirectories: ["transformer", "text_encoder", "vae"],
+        revision: qwenImage21Revision,
+        baseEntryID: "qwen-image-2.1",
+        adapter: DiffusionAdapter(
+            repository: "PrunaAI/Pruna-Qwen-Image-2.1",
+            revision: "113e63bb993001b3411eb3470b84fc444040cd7e",
+            // lora_alpha 128 over r 64, from the files' own PEFT metadata.
+            scale: 2.0,
+            variants: [
+                .init(
+                    label: "8 steps",
+                    file: "p_qwen_image_2.1_8step_v0.1.safetensors",
+                    // Shift 2 on evenly spaced t, σ = 2t / (1 + t), as the model card gives it.
+                    sigmas: [1.0, 14.0 / 15.0, 6.0 / 7.0, 10.0 / 13.0, 2.0 / 3.0, 6.0 / 11.0,
+                             0.4, 2.0 / 9.0]
+                ),
+                .init(
+                    label: "5 steps — faster, lower quality",
+                    file: "p_qwen_image_2.1_5step_v0.1.safetensors",
+                    sigmas: [1.0, 0.94, 6.0 / 7.0, 2.0 / 3.0, 0.4]
+                ),
+            ]
+        )
     )
 }
