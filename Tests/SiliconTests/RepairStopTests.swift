@@ -10,9 +10,19 @@ import Testing
 ///
 /// The steps here are shell scripts that start a child of their own and sleep, standing in for
 /// pip and the compilers xcodebuild starts. Nothing is downloaded or built.
-@Suite("Stopping an in-app install", .serialized)
+@Suite("Stopping an in-app install", .serialized, .redirectedConversationStore)
 @MainActor
 struct RepairStopTests {
+
+    /// A model with injected settings and a scratch video queue: nothing it reads or writes
+    /// is the owner's.
+    private func scratchModel(_ settings: Settings = .init()) -> AppModel {
+        AppModel(
+            videoQueue: VideoBatchQueue(storeURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("scratch-video-queue-\(UUID().uuidString).json")),
+            settings: settings
+        )
+    }
 
     /// A step that records its own pid and its child's, then waits on the child for a minute
     /// and leaves `finished` behind if it ever gets that far.
@@ -86,7 +96,7 @@ struct RepairStopTests {
     func stopEndsTheStepsProcesses() async throws {
         let sleeping = try SleepingStep()
         defer { sleeping.clean() }
-        let model = AppModel(settings: .init())
+        let model = scratchModel()
         var succeeded = false
         model.runRepair(id: "repair-stop-test", steps: [sleeping.step]) { succeeded = true }
         let (leader, child) = try await sleeping.pids()
@@ -123,7 +133,7 @@ struct RepairStopTests {
     func quittingStopsARunningStep() async throws {
         let sleeping = try SleepingStep()
         defer { sleeping.clean() }
-        let model = AppModel(settings: .init())
+        let model = scratchModel()
         // This model's own set of running steps, so "all" is only this test's.
         model.runningRepairs = RepairProcess.Running()
         model.runRepair(id: "repair-quit-test", steps: [sleeping.step]) {}
@@ -176,7 +186,7 @@ struct RepairStopTests {
 
     @Test("A failed step still reports its error, and clearing it allows another try")
     func aFailureIsStillShown() async throws {
-        let model = AppModel(settings: .init())
+        let model = scratchModel()
         let failing = AppModel.RepairStep(
             executable: URL(fileURLWithPath: "/bin/sh"),
             arguments: ["-c", "echo 'the lock did not match'; exit 1"],

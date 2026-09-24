@@ -7,12 +7,22 @@ import Testing
 /// A start cancelled while it probes npm finds no npm it can use and says so — "npm older than
 /// 11.19" — and that report lands after Stop has already set the engine idle. It must not stick:
 /// a state belongs to the start that reported it, and a stopped or replaced start has no say.
-@Suite("Pi engine state")
+@Suite("Pi engine state", .redirectedConversationStore)
 @MainActor
 struct PiStateTests {
 
+    /// A model with injected settings and a scratch video queue: nothing it reads or writes
+    /// is the owner's.
+    private func scratchModel(_ settings: Settings = .init()) -> AppModel {
+        AppModel(
+            videoQueue: VideoBatchQueue(storeURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("scratch-video-queue-\(UUID().uuidString).json")),
+            settings: settings
+        )
+    }
+
     @Test func aStartStoppedWhileProbingCannotLeaveAFailureBehind() {
-        let model = AppModel(settings: .init())
+        let model = scratchModel()
         let cancelledStart = model.piLifecycleGeneration
         model.stopPi()
         #expect(model.piState == .idle)
@@ -27,7 +37,7 @@ struct PiStateTests {
     }
 
     @Test func theCurrentStartsStateStillApplies() {
-        let model = AppModel(settings: .init())
+        let model = scratchModel()
         model.stopPi()
         let current = model.piLifecycleGeneration
         model.applyPiRuntimeState(.failed(message: "Pi exited (1)."), generation: current)

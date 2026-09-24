@@ -8,9 +8,19 @@ import Testing
 /// image-model installer has to download, check and remove in that same cache: when it used
 /// `~/.cache` instead, "Download" put 15 GB on the startup disk, the first render fetched it
 /// all again into the library, and Remove deleted the copy nothing read.
-@Suite("Image model weights live where MFLUX reads them")
+@Suite("Image model weights live where MFLUX reads them", .redirectedConversationStore)
 @MainActor
 struct ImageModelCacheTests {
+
+    /// A model with injected settings and a scratch video queue: nothing it reads or writes
+    /// is the owner's.
+    private func scratchModel(_ settings: Settings = .init()) -> AppModel {
+        AppModel(
+            videoQueue: VideoBatchQueue(storeURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("scratch-video-queue-\(UUID().uuidString).json")),
+            settings: settings
+        )
+    }
 
     private func library() throws -> URL {
         let url = FileManager.default.temporaryDirectory
@@ -74,7 +84,7 @@ struct ImageModelCacheTests {
     /// the real `~/.cache/huggingface` — a link into a real model library on some Macs — for
     /// anything, least of all a removal: it gets a scratch hub of its own.
     @Test func aModelWithInjectedSettingsNeverResolvesTheRealCache() throws {
-        let model = AppModel(settings: .init())
+        let model = scratchModel()
         defer { try? FileManager.default.removeItem(at: model.fallbackHuggingFaceHub) }
         let scratch = FileManager.default.temporaryDirectory.standardizedFileURL.path + "/"
         #expect(model.imageModelHub.standardizedFileURL.path.hasPrefix(scratch))
@@ -107,7 +117,7 @@ struct ImageModelCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
         var settings = Settings()
         settings.modelLibraryDirectory = root.path
-        let model = AppModel(settings: settings)
+        let model = scratchModel(settings)
         let hub = try #require(settings.resolvedEngineCacheDirectory)
             .appendingPathComponent("hub", isDirectory: true)
         let entry = throwawayEntry()
@@ -130,7 +140,7 @@ struct ImageModelCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
         var settings = Settings()
         settings.modelLibraryDirectory = root.path
-        let model = AppModel(settings: settings)
+        let model = scratchModel(settings)
         let hub = try #require(settings.resolvedEngineCacheDirectory)
             .appendingPathComponent("hub", isDirectory: true)
         let entry = DiffusionCatalog.flux2Klein4B
