@@ -13,8 +13,8 @@ public actor ControlServer {
 
     private let host: any ControlHost
     private var listener: NWListener?
-    private var activeConnections = 0
-    private static let maximumConnections = 64
+    /// Who holds which of this server's sockets. See `ConnectionBudget`.
+    private var connections = ConnectionBudget()
     // Durable video waits must not occupy every socket needed to inspect or
     // control the queue. Reject overflow before the host can enqueue anything.
     static let maximumSynchronousVideos = 8
@@ -87,9 +87,9 @@ public actor ControlServer {
     /// Streams open right now. Read by the tests that prove a dead client is reaped.
     public var openEventStreams: Int { activeEventStreams }
 
-    /// Connections open right now, of `maximumConnections`. Read by the test that proves a
-    /// reader which stops reading mid-file does not keep one of them for ever.
-    public var openConnections: Int { activeConnections }
+    /// Connections open right now, on both listeners. Read by the test that proves a reader
+    /// which stops reading mid-file does not keep one of them for ever.
+    public var openConnections: Int { connections.total }
 
     /// How long one SSE frame may take to leave before the connection is given up on.
     ///
@@ -600,25 +600,66 @@ public actor ControlServer {
     /// with its token on it, would otherwise authenticate through any local process — and
     /// the shared swarm secret is only a credential out there while the owner has actually
     /// asked for the swarm to reach this Mac.
-    enum Origin: Sendable, Equatable {
+    enum Origin: Sendable, Hashable {
         case primary
         case tailnet
     }
 
+    /// How many of this server's sockets one caller may hold.
+    ///
+    /// A slot is taken the moment a connection arrives, before a byte of it has been read,
+    /// let alone its bearer checked — there is nothing else to count by yet. One budget for
+    /// both listeners meant any host on the tailnet could open sixty-four idle connections
+    /// and leave the MCP bridge and every phone with none, over and over, fifteen seconds
+    /// at a time. So loopback has a budget of its own that nothing out there can spend, and
+    /// on the tailnet no single address may hold more than a quarter of that listener's.
+    struct ConnectionBudget: Sendable {
+        /// Each listener's own. Loopback's is the ceiling it has always had.
+        static let perListener = 64
+        /// One tailnet address's share: well past a phone's stream, chat and a few media
+        /// ranges at once, or a node's synchronous renders, and small enough that three
+        /// more hosts still have most of the listener.
+        static let perTailnetSource = 16
+
+        private var byOrigin: [Origin: Int] = [:]
+        private var bySource: [String: Int] = [:]
+
+        var total: Int { byOrigin.values.reduce(0, +) }
+
+        /// Takes a slot for `source` on `origin`'s listener, or answers false.
+        mutating func admit(from origin: Origin, source: String) -> Bool {
+            guard byOrigin[origin, default: 0] < Self.perListener else { return false }
+            if origin == .tailnet {
+                guard bySource[source, default: 0] < Self.perTailnetSource else { return false }
+                bySource[source, default: 0] += 1
+            }
+            byOrigin[origin, default: 0] += 1
+            return true
+        }
+
+        mutating func release(from origin: Origin, source: String) {
+            byOrigin[origin] = max(0, byOrigin[origin, default: 0] - 1)
+            guard origin == .tailnet else { return }
+            let left = bySource[source, default: 0] - 1
+            bySource[source] = left > 0 ? left : nil
+        }
+    }
+
     private func accept(_ connection: NWConnection, from origin: Origin) {
-        guard activeConnections < Self.maximumConnections else {
+        // Read before `start`: an inbound connection knows who dialled it from the outset.
+        let source = Self.remoteAddress(of: connection)
+        guard connections.admit(from: origin, source: source) else {
             connection.cancel()
             return
         }
-        activeConnections += 1
         connection.start(queue: .global(qos: .userInitiated))
-        Task { await serve(connection, from: origin) }
+        Task { await serve(connection, from: origin, source: source) }
     }
 
-    private func serve(_ connection: NWConnection, from origin: Origin) async {
+    private func serve(_ connection: NWConnection, from origin: Origin, source: String) async {
         defer {
             connection.cancel()
-            activeConnections -= 1
+            connections.release(from: origin, source: source)
         }
         do {
             let request: HTTPRequest
