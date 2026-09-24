@@ -271,6 +271,24 @@ struct AutoConfiguratorTests {
         }
     }
 
+    /// Expert streaming is what lets a mixture-of-experts model bigger than the budget run at
+    /// all: gpt-oss-120b is 63 GB of weights, and a 64 GB Mac's budget is about 50. The pool
+    /// is sized from what the plan's fixed costs leave — which a zero-slot plan cannot say,
+    /// because the planner refuses to price one and hands back an empty plan instead.
+    @Test func aMoEModelTooBigToSitInMemoryIsOfferedWithStreaming() throws {
+        var profile = m3Max36
+        profile.totalMemory = .gib(64)
+        let entry = ModelCatalog.gptOSS120B
+        let pick = try #require(AutoConfigurator(profile: profile).best(for: entry))
+        let streaming = try #require(pick.configuration.expertStreaming)
+        let experts = try #require(entry.shape.moe).expertCount
+        #expect(streaming.slotCount >= 8 && streaming.slotCount < experts)
+        #expect(pick.plan.verdict.isUsable)
+        #expect(pick.plan.resident <= pick.plan.budget)
+        #expect(AutoConfigurator(profile: profile).rank().contains { $0.entry.id == entry.id },
+                "hidden from the catalogue")
+    }
+
     @Test func eightGigabyteMachineGetsASmallModel() {
         var profile = m3Max36
         profile.totalMemory = .gib(8)
