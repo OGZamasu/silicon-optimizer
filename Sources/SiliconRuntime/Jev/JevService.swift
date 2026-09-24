@@ -929,6 +929,9 @@ public actor JevService {
     /// before is worth trying again.
     public func keyDidChange() {
         keyReadRefused = false
+        // A read that started under the old key and comes back empty says nothing about
+        // the new one, so it must not mark the new one refused.
+        keyGeneration += 1
     }
 
     // MARK: Settings
@@ -996,13 +999,19 @@ public actor JevService {
 
     private func hasKey() -> Bool {
         if keyReadRefused { return false }
+        // A read under way means a key is listed — and asking the Keychain again from this
+        // actor while that read's consent dialog is up is the one thing that must not
+        // happen: even an attributes-only query may queue behind the dialog, and then the
+        // whole actor waits on it again.
+        if keyRead != nil { return true }
         if let keyIsSetProvider { return keyIsSetProvider() }
         return keyProvider() != nil
     }
 
-    /// The Keychain's own queue. Serial, so a read waits behind a consent dialog that is
-    /// already up rather than stacking a second one on top of it.
-    private static let keychainQueue = DispatchQueue(label: "dev.siliconoptimizer.jev.key")
+    /// The Keychain's own queue for this service. Serial, so a read waits behind a consent
+    /// dialog that is already up rather than stacking a second one on top of it; one per
+    /// service, so a test's dialog cannot hold up another test's reads.
+    private let keychainQueue = DispatchQueue(label: "dev.siliconoptimizer.jev.key")
 
     /// Reads the key without holding this actor while it does.
     ///
@@ -1020,9 +1029,10 @@ public actor JevService {
         }
         let provider = keyProvider
         let generation = keyGeneration
+        let queue = keychainQueue
         let read = Task<String?, Never> {
             await withCheckedContinuation { continuation in
-                Self.keychainQueue.async { continuation.resume(returning: provider()) }
+                queue.async { continuation.resume(returning: provider()) }
             }
         }
         keyRead = read

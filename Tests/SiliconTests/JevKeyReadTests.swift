@@ -188,6 +188,28 @@ struct JevKeyReadTests {
         #expect(server.requests.isEmpty)
     }
 
+    /// A key saved while an older read's dialog is still up is a new question. That read
+    /// coming back refused says nothing about the new key, so it must not mark it refused.
+    @Test func aReadRefusedAfterTheKeyChangedDoesNotRefuseTheNewKey() async throws {
+        let server = try untouchedServer("the old key's read was refused")
+        defer { server.stop() }
+        let dialog = ConsentDialog(answering: nil)
+        let harness = try await dialogHarness(dialog: dialog, server: server)
+        defer { harness.clean() }
+
+        let asking = Task {
+            try await harness.service.ask(
+                .decideTool, state: .string("Charged twice."), questions: jevQuestions
+            )
+        }
+        await dialog.waitUntilShown()
+        await harness.service.keyDidChange()
+        dialog.answer()
+        await #expect(throws: JevError.noKey) { try await asking.value }
+
+        #expect(await harness.service.isAvailable(.decideTool), "the new key was marked refused")
+    }
+
     /// Deny — or a build whose code identity the item will not accept — leaves the key
     /// listed and unreadable. That is remembered: the next decision falls back instead of
     /// raising the same dialog to be refused the same way, until the key changes.
