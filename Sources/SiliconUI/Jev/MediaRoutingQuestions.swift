@@ -401,16 +401,16 @@ public enum MediaRoutingQuestions: JevQuestionSet {
                 "The request names a specific real living or historical person as a subject to depict."
             ),
             criteria: .object([
+                // Short enough to reach a Laya checkpoint whole: this is the question the
+                // refusal of sexual imagery of a real person rests on, and laya-mlx cuts an
+                // option past 48 tokens.
                 "true": .string(
-                    "It gives the name of a real individual — a politician, an actor, a "
-                    + "musician, an athlete, a public figure, or someone the requester knows "
-                    + "— as someone who should appear in the result."
+                    "It names a real person — a public figure, or someone the requester "
+                    + "knows — as someone to show in the result."
                 ),
                 "false": .string(
-                    "Every person is described generically (\"a woman in a red coat\"), is "
-                    + "the requester's own invention, or is a fictional character. A real "
-                    + "name mentioned as a style reference rather than a subject to depict "
-                    + "is also false."
+                    "Everyone is generic (\"a woman in a red coat\"), invented or fictional, "
+                    + "or a real name is only a style reference, not someone to show."
                 ),
             ])
         ),

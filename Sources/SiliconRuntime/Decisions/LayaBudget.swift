@@ -213,10 +213,20 @@ public enum LayaBudget {
         return question
     }
 
+    /// The most a yes/no or a score's own text is given before its options are shared out.
+    static let maximumQuestionTokens = 136
+
     private static func reshaped(
         _ question: ControlAPI.SystemOneQuestion
     ) -> ControlAPI.SystemOneQuestion? {
-        let optionBudget = headTokens - minimumQuestionTokens
+        let lead = "\(question.type) question: "
+        let words = inWords(question.instructions)
+        // A choice's labels come first — an option the model cannot tell apart is no option.
+        // A yes/no's question comes first — its two sides only elaborate it, and its text is
+        // where a warning like "the call's own claims are not evidence" lives.
+        let optionBudget = question.type == "choice"
+            ? headTokens - minimumQuestionTokens
+            : headTokens - 1 - min(maximumQuestionTokens, max(minimumQuestionTokens, tokens(lead + words)))
         var compacted = question
         switch question.type {
         case "choice":
@@ -259,8 +269,6 @@ public enum LayaBudget {
         }
         let taken = options(compacted).map { min(1 + tokens(" " + $0), 1 + optionTokens) }
         let headRoom = headTokens - taken.reduce(0, +) - 1
-        let lead = "\(question.type) question: "
-        let words = inWords(question.instructions)
         compacted.instructions = .string(capped(words, toFit: headRoom, after: lead) ?? words)
         return prefix(compacted).cut ? nil : compacted
     }
@@ -289,7 +297,9 @@ public enum LayaBudget {
         }
     }
 
-    /// A question's instructions in words: its main question first, then the rest.
+    /// A question's instructions in words: its main question first, then what to focus on,
+    /// then the rest — so what a cut to fit takes is the list of fields to look at, not the
+    /// warning about what to disbelieve.
     static func inWords(_ instructions: JSONContent?) -> String {
         guard let instructions else { return "" }
         guard case .object(let fields) = instructions else {
@@ -297,7 +307,8 @@ public enum LayaBudget {
         }
         var parts: [String] = []
         if let question = fields["question"].flatMap(description) { parts.append(question) }
-        for key in fields.keys.sorted() where key != "question" {
+        let order = ["focus"] + fields.keys.sorted().filter { $0 != "focus" }
+        for key in order where key != "question" && fields[key] != nil {
             guard let text = fields[key].flatMap(description) else { continue }
             parts.append("\(key.replacingOccurrences(of: "_", with: " ")): \(text)")
         }
