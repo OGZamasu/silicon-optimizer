@@ -200,7 +200,7 @@ public actor CodexRuntime {
         # Managed by Silicon Optimizer — regenerated each time Codex starts.
         # Edits here are overwritten; change things in the app instead.
 
-        model = "\(defaultModel)"
+        model = "\(tomlEscaped(defaultModel))"
         model_provider = "\(providerID)"
 
         [model_providers.\(providerID)]
@@ -235,11 +235,10 @@ public actor CodexRuntime {
         return document
     }
 
-    /// TOML basic-string escaping for paths: backslashes and quotes.
+    /// The model id can end in a swarm peer's own name for one of its models, which is why
+    /// every string in this file goes through the full escaper, not only the paths.
     static func tomlEscaped(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        TOMLString.escaped(value)
     }
 
     public static func ensureConfigured(

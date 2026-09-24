@@ -255,10 +255,10 @@ struct SwarmMemberParsingTests {
     @Test("today's shape parses, tomorrow's counters ride along")
     func parseClients() {
         let list: [[String: Any]] = [
-            ["name": "Christopher’s MacBook Pro",
+            ["name": "Alex’s MacBook Pro",
              "created": "2026-08-21 10:30:42",
              "last_seen": "2026-08-21 13:55:51"],
-            ["name": "Tristan’s MacBook Pro",
+            ["name": "Sam’s MacBook Pro",
              "created": "2026-08-21 13:46:43",
              "last_seen": "2026-08-21 13:55:48",
              "jobs_total": 7,
@@ -276,7 +276,7 @@ struct SwarmMemberParsingTests {
 
     @Test("member ids stay unique across nodes sharing a person")
     func memberIDs() {
-        let info = AppModel.PeerClientInfo(name: "Tristan’s MacBook Pro")
+        let info = AppModel.PeerClientInfo(name: "Sam’s MacBook Pro")
         let a = AppModel.SwarmMember(peerName: "silicon-node", info: info)
         let b = AppModel.SwarmMember(peerName: "attic-pc", info: info)
         #expect(a.id != b.id)

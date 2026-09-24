@@ -106,6 +106,8 @@ extension AppModel {
 
         let runtime = codexRuntime ?? CodexRuntime()
         codexRuntime = runtime
+        codexLifecycleGeneration &+= 1
+        let generation = codexLifecycleGeneration
         codexState = .starting(stage: "Looking for Node.js…")
         registerCodexTermination()
 
@@ -122,19 +124,53 @@ extension AppModel {
                 defaultModel: model.isEmpty ? "local/none" : model,
                 trustedProjectPath: workingDirectory
             ) { [weak self] state in
-                Task { @MainActor in self?.codexState = state }
+                Task { @MainActor in self?.applyCodexRuntimeState(state, generation: generation) }
             }
             let pid = await runtime.processIdentifier
-            await MainActor.run { [weak self] in self?.codexProcessID = pid }
+            await MainActor.run { [weak self] in
+                self?.applyCodexProcessID(pid, generation: generation)
+            }
             guard let events else { return }
             for await event in events {
-                await MainActor.run { [weak self] in self?.handleCodexEvent(event) }
+                await MainActor.run { [weak self] in
+                    guard let self, self.codexLifecycleGeneration == generation else { return }
+                    self.handleCodexEvent(event)
+                }
             }
         }
     }
 
+    /// Every callback is a separate main-actor task, so they can land out of order and
+    /// after a later stop or start: only the current session's count, and nothing revives
+    /// a start that already failed.
+    func applyCodexRuntimeState(_ state: RuntimeState, generation: Int) {
+        guard codexLifecycleGeneration == generation else { return }
+        if case .failed = codexState { return }
+        if case .ready = codexState, case .starting = state { return }
+        codexState = state
+        if case .failed = state { codexProcessID = nil }
+    }
+
+    func applyCodexProcessID(_ pid: Int32?, generation: Int) {
+        guard codexLifecycleGeneration == generation else { return }
+        switch codexState {
+        case .starting, .ready: codexProcessID = pid
+        case .idle, .stopping, .failed: break
+        }
+    }
+
+    /// Where a stop lands once the process is gone — unless something started since. The
+    /// runtime's stop waits for a slow process to exit, and a start that began meanwhile
+    /// must not be marked idle under a live sidecar.
+    func finishCodexStop(generation: Int) {
+        guard codexLifecycleGeneration == generation else { return }
+        codexState = .idle
+    }
+
     public func stopCodex() {
         guard let runtime = codexRuntime else { return }
+        codexLifecycleGeneration &+= 1
+        let generation = codexLifecycleGeneration
         codexState = .stopping
         codexProcessID = nil
         codexThreadID = nil
@@ -142,7 +178,7 @@ extension AppModel {
         codexApprovals.removeAll()
         Task {
             await runtime.stop()
-            await MainActor.run { [weak self] in self?.codexState = .idle }
+            await MainActor.run { [weak self] in self?.finishCodexStop(generation: generation) }
         }
     }
 
@@ -152,6 +188,8 @@ extension AppModel {
         guard let runtime = codexRuntime else { return startCodexIfNeeded() }
         // Stop must finish before start begins: the two share one runtime actor, and a
         // start that overlaps a stop can have its fresh process torn down under it.
+        codexLifecycleGeneration &+= 1
+        let generation = codexLifecycleGeneration
         codexState = .stopping
         codexProcessID = nil
         codexThreadID = nil
@@ -160,8 +198,9 @@ extension AppModel {
         Task {
             await runtime.stop()
             await MainActor.run { [weak self] in
-                self?.codexState = .idle
-                self?.startCodexIfNeeded()
+                guard let self, self.codexLifecycleGeneration == generation else { return }
+                self.finishCodexStop(generation: generation)
+                self.startCodexIfNeeded()
             }
         }
     }

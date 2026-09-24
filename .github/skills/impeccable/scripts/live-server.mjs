@@ -989,7 +989,12 @@ function isPageCorsRequest(req, pathname) {
 
 function createRequestHandler({ detectScript, liveScriptParts }) {
   return (req, res) => {
-    const url = new URL(req.url, liveHelperBase(state.port));
+    // Any web page can make a browser send a target such as `//[`, which parses
+    // as an authority and throws. Unguarded, that exception ended the helper
+    // before any auth check.
+    let url;
+    try { url = new URL(req.url, liveHelperBase(state.port)); }
+    catch { res.writeHead(400); res.end('Bad request'); return; }
     // The inspected page owns only a page-scoped capability. It may come from
     // a localhost dev server or a non-loopback alias, but controller responses
     // must never be CORS-readable by either. Same-origin controller fetches

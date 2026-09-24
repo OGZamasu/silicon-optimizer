@@ -59,9 +59,10 @@ tested Mac and settings, not a performance promise for other machines.
 
 The portable implementation adds automated tests around the node contract,
 installation, restart recovery, prompt validation, batch behavior, and timeout
-handling. Its CI uses fake renderers and temporary data; it does not download
-weights or claim to measure generation quality. Model capability checks still
-come from the installed renderer at runtime. Higher resolutions and 15-second
+handling. Those tests (`Scripts/test-video-node.sh`) use fake renderers and
+temporary data; they do not download weights or claim to measure generation
+quality. Model capability checks still come from the installed renderer at
+runtime. Higher resolutions and 15-second
 clips require more time and memory than this batch's 10-second draft setting.
 
 A separate live smoke test of the portable adapter also completed a two-window

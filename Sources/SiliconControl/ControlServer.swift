@@ -1602,7 +1602,7 @@ public actor ControlServer {
             case ("POST", "/mesh/plan"):
                 return try .encode(await host.planMesh(
                     try await resolvedMesh(request.decode(ControlAPI.MeshRequest.self),
-                                           as: caller)
+                                           as: caller, requiringSubject: false)
                 ))
             case ("POST", "/mesh/generate"):
                 return try .encode(await shown(await media.decorated(
@@ -2389,8 +2389,12 @@ public actor ControlServer {
         caller == .control
     }
 
+    /// A render needs its subject; a plan does not. The planner prices a model, a pipeline
+    /// and a vertex budget — never the picture — so `plan_3d`, which has no image argument
+    /// at all, must not be refused for lacking one. A path a caller may not name is refused
+    /// on both routes alike, so the planner is no oracle for which files exist.
     private func resolvedMesh(
-        _ request: ControlAPI.MeshRequest, as caller: Caller
+        _ request: ControlAPI.MeshRequest, as caller: Caller, requiringSubject: Bool = true
     ) async throws -> ControlAPI.MeshRequest {
         var copy = request
         if let resolved = await resolvedPath(
@@ -2404,10 +2408,15 @@ public actor ControlServer {
         if request.uploadID != nil || request.mediaID != nil {
             throw ControlAPI.UnreadableSubject()
         }
-        guard let path = request.imagePath, !path.isEmpty,
-              Self.mayNamePaths(caller) else {
+        guard let path = request.imagePath, !path.isEmpty else {
+            // The MCP bridge sends an empty path when it was given none.
+            guard requiringSubject else {
+                copy.imagePath = nil
+                return copy
+            }
             throw ControlAPI.MissingSubject()
         }
+        guard Self.mayNamePaths(caller) else { throw ControlAPI.MissingSubject() }
         return copy
     }
 
