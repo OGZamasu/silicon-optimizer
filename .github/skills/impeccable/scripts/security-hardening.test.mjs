@@ -1245,6 +1245,23 @@ test('an approved page proposal reaches the agent with only the fields the brows
   assert.equal(event.scaffoldAttempted, true, 'the helper ran its own preflight');
 });
 
+test('a request target that is not a URL gets a 400, and the live server keeps serving', async (t) => {
+  const root = tempDir(t);
+  const port = await freePort();
+  const started = spawnSync(process.execPath, [liveServer, '--background', `--port=${port}`], {
+    cwd: root, encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(started.status, 0, started.stderr || started.stdout);
+  const info = JSON.parse(started.stdout.trim().split('\n').filter(Boolean).at(-1));
+  t.after(() => { try { process.kill(info.pid); } catch {} });
+  // Any web page can make the browser ask for this: `//[` reads as an authority, not a path.
+  for (const pathname of ['//[', '//[/control']) {
+    assert.equal((await request({ port, pathname })).status, 400, pathname);
+  }
+  assert.equal((await request({ port, pathname: '/control' })).status, 200);
+  process.kill(info.pid, 0);
+});
+
 test('the page proposes only browser actions, and an insert names only a known action', async (t) => {
   const root = tempDir(t);
   const port = await freePort();
