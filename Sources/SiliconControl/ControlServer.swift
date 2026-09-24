@@ -1023,6 +1023,22 @@ public actor ControlServer {
             + "to dial. Turn Silicon Buddy on in Settings → Silicon Buddy on the Mac and "
             + "wait for it to report an address."
 
+    /// What `POST /buddy/pair` says on the loopback listener, and where it sends the caller.
+    ///
+    /// A code is spent where the device will go on dialling, because the token it mints is
+    /// a credential there and nowhere else: on loopback `identify` refuses a device token on
+    /// sight. Spent here, a valid code burned the one the owner was looking at, wrote down a
+    /// device that could never authenticate, and told a client that kept `127.0.0.1` to dial
+    /// the tailnet listener's port on an address where nothing answers it. So the refusal
+    /// comes before the registry sees the code, and names the listener that will take it —
+    /// or, with none up, says what minting a code says.
+    public static func pairingBelongsOnTheTailnet(_ endpoint: TailnetEndpoint?) -> String {
+        let why = "A pairing code is spent on Silicon Buddy's tailnet listener, not on this "
+            + "Mac's loopback control port, where the device token it mints would be refused."
+        guard let endpoint else { return why + " " + buddyListenerDown }
+        return why + " Send the code to \(endpoint.address) on port \(endpoint.port) instead."
+    }
+
     /// The one sentence for a scope this server does not have. It names the two it does,
     /// so a caller that guessed wrong does not have to go and find them.
     public static let unknownScopeRefusal =
@@ -1486,6 +1502,13 @@ public actor ControlServer {
         // present anything. What stands in for a credential is the six-digit code the owner
         // is looking at, plus the rate limit that makes guessing it pointless.
         if request.method == "POST", request.path == "/buddy/pair" {
+            // Answered before the body is looked at, so nothing in it reaches the registry:
+            // the code stays open, no device is written, and the rate limiter is not charged
+            // for a request that was never going to be heard on this listener.
+            guard origin == .tailnet else {
+                let endpoint = await buddy.allowsTailnetDevices ? tailnetEndpoint : nil
+                return .error(403, Self.pairingBelongsOnTheTailnet(endpoint))
+            }
             guard let pairing = try? request.decode(ControlAPI.BuddyPairRequest.self) else {
                 return .error(400, "Could not read the pairing request.")
             }
@@ -1493,8 +1516,12 @@ public actor ControlServer {
             // The port a device should keep dialling is the one it just reached us on —
             // the tailnet listener's, which is fixed across launches precisely so a paired
             // phone can find this Mac again. The tests bind it somewhere else so they can
-            // tell the two listeners apart.
-            let reachablePort = boundEndpoint?.port ?? port
+            // tell the two listeners apart. A listener closed while this request was still
+            // arriving has no port to give, and loopback's is never the answer: a code spent
+            // on an address nothing answers is worse than a plain no.
+            guard let reachablePort = tailnetEndpoint?.port else {
+                return .error(409, Self.buddyListenerDown)
+            }
             switch await buddy.pair(
                 pairing, from: source, macName: macName, port: reachablePort
             ) {
