@@ -7,7 +7,11 @@ import SiliconCore
 /// Face repositories of a dozen-odd files that the runtime resolves through its own cache, so
 /// fetching them by hand would mean either duplicating that cache or teaching the runtime to look
 /// somewhere else. Both are worse than driving `hf` — the CLI that ships inside the same
-/// environment as MFLUX, writing to the same cache MFLUX already reads.
+/// environment as MFLUX, writing to the same cache MFLUX already reads. "The same cache" is a
+/// choice to keep making: MFLUX is run with `HF_HOME` set to the engine cache in the model
+/// library whenever there is one, so every download, check and removal here takes that same
+/// `hubCache`. Without it the weights went to `~/.cache` on the startup disk, the first render
+/// fetched them all again into the library, and Remove deleted the copy nothing read.
 ///
 /// Without this the first generation silently downloads 15 GB mid-run, behind a progress bar that
 /// only says "Fetching weights…".
@@ -40,10 +44,14 @@ public struct DiffusionInstaller: Sendable {
 
     private let executable: URL
     private let token: String?
+    private let hubCache: URL?
 
-    public init(executable: URL, token: String? = nil) {
+    /// - Parameter hubCache: The `HF_HOME` MFLUX is run with — the model library's engine
+    ///   cache — or nil for Hugging Face's default under `~/.cache`.
+    public init(executable: URL, token: String? = nil, hubCache: URL? = nil) {
         self.executable = executable
         self.token = token
+        self.hubCache = hubCache
     }
 
     /// `hf`, which ships alongside `mflux-generate` in the same environment.
@@ -54,11 +62,13 @@ public struct DiffusionInstaller: Sendable {
 
     // MARK: - Cache inspection
 
-    /// Hugging Face rewrites `org/name` as `models--org--name` under its hub cache.
-    public static func cacheDirectory(for repository: String) -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    /// Hugging Face rewrites `org/name` as `models--org--name` under its hub cache, which is
+    /// `hub` inside `HF_HOME`.
+    public static func cacheDirectory(for repository: String, hubCache: URL? = nil) -> URL {
+        let home = hubCache ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface", isDirectory: true)
         let slug = "models--" + repository.replacingOccurrences(of: "/", with: "--")
-        return home.appendingPathComponent(".cache/huggingface/hub/\(slug)")
+        return home.appendingPathComponent("hub/\(slug)")
     }
 
     /// Whether the weights the runtime needs are already on disk.
@@ -68,8 +78,9 @@ public struct DiffusionInstaller: Sendable {
     /// comes from the catalog entry because it is not the same across families: FLUX.1 keeps its
     /// T5-XXL in `text_encoder_2`, and a check that did not look for it would call a repository
     /// missing 9.5 GB of weights complete.
-    public static func isInstalled(_ entry: DiffusionEntry) -> Bool {
-        guard let snapshot = latestSnapshot(for: entry.repository) else { return false }
+    public static func isInstalled(_ entry: DiffusionEntry, hubCache: URL? = nil) -> Bool {
+        guard let snapshot = latestSnapshot(for: entry.repository, hubCache: hubCache)
+        else { return false }
         return entry.componentDirectories.allSatisfy { component in
             let directory = snapshot.appendingPathComponent(component)
             let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
@@ -77,8 +88,9 @@ public struct DiffusionInstaller: Sendable {
         }
     }
 
-    public static func latestSnapshot(for repository: String) -> URL? {
-        let snapshots = cacheDirectory(for: repository).appendingPathComponent("snapshots")
+    public static func latestSnapshot(for repository: String, hubCache: URL? = nil) -> URL? {
+        let snapshots = cacheDirectory(for: repository, hubCache: hubCache)
+            .appendingPathComponent("snapshots")
         let entries = (try? FileManager.default.contentsOfDirectory(
             at: snapshots, includingPropertiesForKeys: [.contentModificationDateKey]
         )) ?? []
@@ -92,8 +104,9 @@ public struct DiffusionInstaller: Sendable {
     }
 
     /// Bytes on disk, following the symlinks the hub cache uses to point snapshots at blobs.
-    public static func installedSize(_ repository: String) -> Bytes {
-        let blobs = cacheDirectory(for: repository).appendingPathComponent("blobs")
+    public static func installedSize(_ repository: String, hubCache: URL? = nil) -> Bytes {
+        let blobs = cacheDirectory(for: repository, hubCache: hubCache)
+            .appendingPathComponent("blobs")
         let entries = (try? FileManager.default.contentsOfDirectory(
             at: blobs, includingPropertiesForKeys: [.fileSizeKey]
         )) ?? []
@@ -168,7 +181,7 @@ public struct DiffusionInstaller: Sendable {
         let sizing = try await plan(entry)
         guard !sizing.isComplete else { return }
 
-        let already = Self.installedSize(repository)
+        let already = Self.installedSize(repository, hubCache: hubCache)
         let expected = already + sizing.bytesToDownload
         // Same moving window as the GGUF downloader. This path polls the cache directory rather
         // than counting bytes off a stream, which is chunkier still — a file appears all at once
@@ -177,7 +190,7 @@ public struct DiffusionInstaller: Sendable {
 
         let watcher = Task {
             while !Task.isCancelled {
-                let current = Self.installedSize(repository)
+                let current = Self.installedSize(repository, hubCache: hubCache)
                 let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
                 onProgress(ModelDownloader.Progress(
                     bytesReceived: current,
@@ -197,7 +210,7 @@ public struct DiffusionInstaller: Sendable {
         if lowered.contains("access denied") || lowered.contains("requires approval") {
             throw InstallError.accessDenied(repository: repository)
         }
-        guard Self.isInstalled(entry) else {
+        guard Self.isInstalled(entry, hubCache: hubCache) else {
             throw InstallError.failed(
                 output.split(separator: "\n").suffix(4).joined(separator: "\n")
             )
@@ -220,6 +233,12 @@ public struct DiffusionInstaller: Sendable {
         var environment = base
         environment["PYTHONUNBUFFERED"] = "1"
         if let token, !token.isEmpty { environment["HF_TOKEN"] = token }
+        if let hubCache {
+            environment["HF_HOME"] = hubCache.path
+            // Set too, so a hub cache inherited from the app's own environment cannot send the
+            // download somewhere the checks above do not look.
+            environment["HF_HUB_CACHE"] = hubCache.appendingPathComponent("hub").path
+        }
         return environment
     }
 

@@ -451,19 +451,25 @@ public final class AppModel {
 
     public func isImageModelInstalled(_ entry: DiffusionEntry) -> Bool {
         _ = imageLibraryVersion
-        return DiffusionInstaller.isInstalled(entry)
+        return DiffusionInstaller.isInstalled(entry, hubCache: settings.resolvedEngineCacheDirectory)
     }
 
     public func installedImageModelSize(_ entry: DiffusionEntry) -> Bytes {
         _ = imageLibraryVersion
-        return DiffusionInstaller.installedSize(entry.repository)
+        return DiffusionInstaller.installedSize(
+            entry.repository, hubCache: settings.resolvedEngineCacheDirectory
+        )
     }
 
+    /// Downloads into the cache MFLUX is run against (`MFluxRuntime`'s `hubCache`), so the
+    /// first render finds what was installed rather than fetching it again.
     private func imageInstaller() -> DiffusionInstaller? {
         guard let mflux = (imageRuntime ?? MFluxRuntime.locate())?.executable,
               let hf = DiffusionInstaller.locate(besideMFlux: mflux) else { return nil }
         let token = settings.huggingFaceToken.isEmpty ? nil : settings.huggingFaceToken
-        return DiffusionInstaller(executable: hf, token: token)
+        return DiffusionInstaller(
+            executable: hf, token: token, hubCache: settings.resolvedEngineCacheDirectory
+        )
     }
 
     public func installImageModel(_ entry: DiffusionEntry) {
@@ -507,7 +513,9 @@ public final class AppModel {
     }
 
     public func uninstallImageModel(_ entry: DiffusionEntry) {
-        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository)
+        let directory = DiffusionInstaller.cacheDirectory(
+            for: entry.repository, hubCache: settings.resolvedEngineCacheDirectory
+        )
         try? FileManager.default.removeItem(at: directory)
         imageLibraryVersion += 1
     }
