@@ -29,15 +29,18 @@ struct RepairStopTests {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
 
+        var script: String {
+            """
+            echo $$ > "\(leaderFile.path).tmp" && mv "\(leaderFile.path).tmp" "\(leaderFile.path)"
+            /bin/sleep 60 &
+            echo $! > "\(childFile.path).tmp" && mv "\(childFile.path).tmp" "\(childFile.path)"
+            wait
+            : > "\(finished.path)"
+            """
+        }
+
         var step: AppModel.RepairStep {
-            let script = """
-                echo $$ > "\(leaderFile.path).tmp" && mv "\(leaderFile.path).tmp" "\(leaderFile.path)"
-                /bin/sleep 60 &
-                echo $! > "\(childFile.path).tmp" && mv "\(childFile.path).tmp" "\(childFile.path)"
-                wait
-                : > "\(finished.path)"
-                """
-            return AppModel.RepairStep(
+            AppModel.RepairStep(
                 executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script],
                 currentDirectory: nil, label: "Installing"
             )
@@ -133,6 +136,40 @@ struct RepairStopTests {
         #expect(!Self.isAlive(leader), "the step outlived the app")
         #expect(!Self.isAlive(child), "what the step started outlived the app")
         #expect(!FileManager.default.fileExists(atPath: sleeping.finished.path))
+    }
+
+    /// A crash runs no quit handler. The step is on record, and the next launch's reap has to
+    /// end what it started as well as the step: a `curl` left under `sh`, the compilers under
+    /// `xcodebuild`, pip's build backend. Each launch is its own registry here, on a scratch
+    /// store, as in the registry's own tests.
+    @Test("After a crash, the next launch reaps the step and everything it started")
+    func theNextLaunchReapsTheWholeStep() async throws {
+        let sleeping = try SleepingStep()
+        defer { sleeping.clean() }
+        let store = sleeping.directory.appendingPathComponent("child-processes.json")
+        let crashed = ChildProcessRegistry()
+        crashed.open(at: store)
+        // bash rather than sh: macOS's /bin/sh execs the real shell a moment after launch, and
+        // whether the registry still knows a process that has exec'd is its own question.
+        let step = Process()
+        step.executableURL = URL(fileURLWithPath: "/bin/bash")
+        step.arguments = ["-c", sleeping.script]
+        step.standardOutput = FileHandle.nullDevice
+        step.standardError = FileHandle.nullDevice
+        try step.run()
+        crashed.register(pid: step.processIdentifier)
+        let (leader, child) = try await sleeping.pids()
+
+        let next = ChildProcessRegistry()
+        let orphans = next.open(at: store)
+        #expect(orphans.map(\.pid) == [leader])
+        next.reap(orphans)
+
+        try await Self.waitUntil("the step and its child exited") {
+            !Self.isAlive(leader) && !Self.isAlive(child)
+        }
+        #expect(!Self.isAlive(leader), "the step outlived the reap")
+        #expect(!Self.isAlive(child), "what the step started outlived the reap")
     }
 
     @Test("A failed step still reports its error, and clearing it allows another try")

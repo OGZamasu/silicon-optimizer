@@ -155,8 +155,14 @@ public final class ChildProcessRegistry: @unchecked Sendable {
     @discardableResult
     public func reap(_ orphans: [Entry]) -> [Entry] {
         var killed: [Entry] = []
+        var groups: [pid_t] = []
         for orphan in orphans where Self.isStillAlive(orphan) {
-            kill(orphan.pid, SIGTERM)
+            if Self.leadsItsOwnGroup(orphan.pid) {
+                killpg(orphan.pid, SIGTERM)
+                groups.append(orphan.pid)
+            } else {
+                kill(orphan.pid, SIGTERM)
+            }
             killed.append(orphan)
         }
         // The port matters more than the memory here: a survivor still holding the harness's
@@ -170,12 +176,26 @@ public final class ChildProcessRegistry: @unchecked Sendable {
         for orphan in killed where Self.isStillAlive(orphan) {
             kill(orphan.pid, SIGKILL)
         }
+        // Whatever an orphan started and left in its group — a step's `curl` under `sh`, the
+        // compilers under `xcodebuild`, pip's build backend — goes with it. A group cannot
+        // outlive its last member, and no pid is handed out while a group of that number
+        // exists, so a group still answering here is the orphan's own.
+        for group in groups where killpg(group, 0) == 0 {
+            killpg(group, SIGKILL)
+        }
         // Only now: until the reap has happened the file is the sole record of these processes,
         // so a crash between `open` and here has to leave the next launch something to retry
         // with. Afterwards it should describe what is actually running, which is whatever this
         // launch has spawned so far.
         persist()
         return killed
+    }
+
+    /// Whether `pid` leads a process group of its own, as every child Foundation's `Process`
+    /// starts does — and never the group this app is in.
+    private static func leadsItsOwnGroup(_ pid: pid_t) -> Bool {
+        let group = getpgid(pid)
+        return group == pid && group != getpgrp()
     }
 
     /// Writes the current membership out, so a launch that never gets to run a handler still
