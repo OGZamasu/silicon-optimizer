@@ -67,6 +67,9 @@ public actor ControlServer {
     /// How long one SSE frame may take to leave, and how this Mac's tailnet address is
     /// found. Both are injected so the tests can drive them without a tailnet or a stall.
     private let eventWriteDeadline: Duration
+    /// How long a request may take to arrive. Injected so the tests can drive a slow upload
+    /// without taking a minute over it.
+    private let readDeadlines: ReadDeadlines
     private let discoverTailnetAddress: @Sendable () -> String?
     /// Runs `POST /load` detached from the request that asked for it, and refuses a second
     /// load rather than throwing away the first. Injected only in the sense that its
@@ -100,6 +103,55 @@ public actor ControlServer {
     /// the first frame it fails to take rather than by a backlog; if the token rate ever
     /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
     public static let defaultEventWriteDeadline: Duration = .seconds(20)
+
+    /// How long a request may take to arrive.
+    ///
+    /// It used to be fifteen seconds for the whole thing, headers and body together. That
+    /// was written for JSON, and it is what the 24 MiB a phone may upload for a mesh ran
+    /// into: below about thirteen megabits a second the connection was cut part-way through,
+    /// no answer was ever written, and the phone could only say it could not reach the Mac.
+    ///
+    /// The headers keep an absolute deadline — they are a few hundred bytes any live client
+    /// sends at once. The body is held to progress instead: it may go `idle` without a byte,
+    /// and it must be done by `idle` plus its length at `minimumBytesPerSecond`. The second
+    /// rule is what the old one was for: a client that dribbles a byte just inside every
+    /// idle window cannot keep a connection slot for longer than a slow link honestly would.
+    public struct ReadDeadlines: Sendable {
+        public var headers: Duration
+        public var idle: Duration
+        public var minimumBytesPerSecond: Int
+
+        public init(headers: Duration, idle: Duration, minimumBytesPerSecond: Int) {
+            self.headers = headers
+            self.idle = idle
+            self.minimumBytesPerSecond = minimumBytesPerSecond
+        }
+
+        /// 16 KiB/s is about 130 kbit/s, well under what even a weak mobile connection
+        /// uploads at. A 24 MiB upload must be in within about 26 minutes, a 4 MiB request
+        /// within about 4½, and a pairing request within 19 seconds.
+        public static let standard = ReadDeadlines(
+            headers: .seconds(15), idle: .seconds(15), minimumBytesPerSecond: 16 * 1024
+        )
+
+        /// When a body of `length` bytes, begun at `start`, must have arrived by.
+        func ceiling(
+            forBodyOf length: Int, from start: ContinuousClock.Instant
+        ) -> ContinuousClock.Instant {
+            start + idle + .seconds(Double(length) / Double(max(1, minimumBytesPerSecond)))
+        }
+
+        /// The watchdog's deadline, moved by the reader as bytes arrive.
+        final class Due: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: ContinuousClock.Instant
+
+            init(_ value: ContinuousClock.Instant) { self.value = value }
+
+            var instant: ContinuousClock.Instant { lock.withLock { value } }
+            func move(to instant: ContinuousClock.Instant) { lock.withLock { value = instant } }
+        }
+    }
 
     /// How long `POST /load` holds the connection before answering with the load still in
     /// flight.
@@ -179,6 +231,7 @@ public actor ControlServer {
         postersRoot: URL = BuddyPosters.root,
         uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
         eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
+        readDeadlines: ReadDeadlines = .standard,
         loadPatience: Duration = ControlServer.defaultLoadPatience,
         loadClock: @escaping @Sendable () -> Date = { Date() },
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
@@ -201,6 +254,7 @@ public actor ControlServer {
             uploadsRoot: uploadsRoot, postersRoot: postersRoot
         )
         self.eventWriteDeadline = eventWriteDeadline
+        self.readDeadlines = readDeadlines
         self.loadPatience = loadPatience
         self.loads = LoadDispatcher(now: loadClock)
         self.discoverTailnetAddress = discoverTailnetAddress
@@ -664,7 +718,9 @@ public actor ControlServer {
         do {
             let request: HTTPRequest
             do {
-                request = try await HTTPRequest.read(from: connection) { method, path, headers in
+                request = try await HTTPRequest.read(
+                    from: connection, deadlines: readDeadlines
+                ) { method, path, headers in
                     await self.bodyLimit(
                         forMethod: method, path: path, headers: headers, from: origin
                     )
@@ -2607,18 +2663,14 @@ struct HTTPRequest {
     /// one, least of all while the refusal it produces still quotes the larger figure.
     static func read(
         from connection: NWConnection,
+        deadlines: ControlServer.ReadDeadlines = .standard,
         maximumBody limit: @Sendable (String, String, [String: String]) async -> Int
             = { _, _, _ in maximumBody }
     ) async throws -> HTTPRequest {
-        // Absolute request-header/body deadline. Canceling the connection unblocks any
-        // pending Network.framework receive, so a byte-at-a-time client cannot retain a
-        // listener slot forever.
-        let deadline = Task<Void, Never> {
-            do { try await Task.sleep(for: .seconds(15)) } catch { return }
-            guard !Task.isCancelled else { return }
-            connection.cancel()
-        }
-        defer { deadline.cancel() }
+        // The deadline moves on as the body arrives. See `ControlServer.ReadDeadlines`.
+        let due = ControlServer.ReadDeadlines.Due(ContinuousClock.now + deadlines.headers)
+        var watchdog = watch(connection, until: due)
+        defer { watchdog.cancel() }
 
         var buffer = Data()
         var headerEnd: Range<Data.Index>?
@@ -2661,8 +2713,16 @@ struct HTTPRequest {
             // Refused on the declared length, before a byte of it is read: the point of a
             // cap is not to receive the thing and then disapprove of it.
             guard length <= allowed else { throw ParseError.bodyTooLarge(allowed) }
+            let ceiling = deadlines.ceiling(forBodyOf: length, from: ContinuousClock.now)
+            due.move(to: min(ContinuousClock.now + deadlines.idle, ceiling))
+            // The body's first deadline can fall before what was left of the headers', and
+            // a watchdog asleep until then would not see it. From here on it only moves
+            // later, which the one watching notices when it wakes.
+            watchdog.cancel()
+            watchdog = watch(connection, until: due)
             while body.count < length {
                 body.append(try await receive(from: connection))
+                due.move(to: min(ContinuousClock.now + deadlines.idle, ceiling))
                 if body.count > allowed { throw ParseError.bodyTooLarge(allowed) }
             }
         } else if !body.isEmpty {
@@ -2684,6 +2744,23 @@ struct HTTPRequest {
             headers: headers,
             body: Data(body)
         )
+    }
+
+    /// Cancels `connection` once `due` has passed — which is what unblocks a receive that
+    /// is still waiting — and sleeps on whenever it wakes to find the deadline moved later.
+    private static func watch(
+        _ connection: NWConnection, until due: ControlServer.ReadDeadlines.Due
+    ) -> Task<Void, Never> {
+        Task {
+            while !Task.isCancelled {
+                let deadline = due.instant
+                guard ContinuousClock.now < deadline else {
+                    connection.cancel()
+                    return
+                }
+                try? await Task.sleep(until: deadline, clock: .continuous)
+            }
+        }
     }
 
     static func receive(from connection: NWConnection) async throws -> Data {
