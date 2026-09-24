@@ -560,6 +560,9 @@ extension AppModel {
         // — same refusals, same file, same numbers.
         if lane == .oneToken { return try await calibrateJev() }
 
+        if let refusal = await Self.calibrationPinRefusal(using: .shared) {
+            throw ControlHostError.badRequest(refusal)
+        }
         guard await JevService.shared.isAvailable(.calibration) else {
             throw ControlHostError.badRequest(
                 "Calibration asks Jev for the reference answers. Add a TypeSafe API key and "

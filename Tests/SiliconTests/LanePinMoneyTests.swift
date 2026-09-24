@@ -368,3 +368,221 @@ struct VerificationLanePinTests {
         #expect(server.requests.isEmpty)
     }
 }
+
+// MARK: - /decide and calibration
+
+/// `POST /decide`, driven through the static half of `AppModel.decide` with a service, a
+/// router and a stand-in for the loaded model of the test's own.
+@Suite("Decide honours the decide tool's pin")
+@MainActor
+struct DecideLanePinTests {
+
+    private static let providers = ["auto", "local", "laya", "node", "typesafe"]
+
+    /// A loaded model that is never sure: every question it answers sits in the middle of
+    /// the band, so an `auto` cascade that was allowed to escalate would.
+    private final class LoadedModel: @unchecked Sendable {
+        let calls = Counter()
+        func answer(
+            _ request: ControlAPI.DecideRequest
+        ) async throws -> ControlAPI.DecideResponse {
+            await calls.bump()
+            return ControlAPI.DecideResponse(
+                model: "Test 1B", usage: .init(inputTokens: 0, outputTokens: 0),
+                answers: request.questions.keys.reduce(into: [:]) { $0[$1] = .noul(0.5) },
+                provider: DecisionLaneID.oneToken.wireName, latencyMS: 1
+            )
+        }
+    }
+
+    private func decide(
+        _ provider: String, service: JevService, router: DecisionRouter,
+        model: LoadedModel?
+    ) async throws -> ControlAPI.DecideResponse {
+        try await AppModel.decide(
+            .init(state: .string("Charged twice."), questions: jevQuestions, provider: provider),
+            hasLoadedModel: model != nil,
+            oneToken: { asked in
+                guard let model else { throw ControlHostError.noModelLoaded }
+                return try await model.answer(asked)
+            },
+            floors: { _ in .init(confidence: 0.6, noulLow: 0.25, noulHigh: 0.75) },
+            service: service, router: router
+        )
+    }
+
+    private func refusal(_ body: () async throws -> ControlAPI.DecideResponse) async -> String? {
+        do {
+            _ = try await body()
+            return nil
+        } catch let error as ControlHostError {
+            return error.localizedDescription
+        } catch {
+            return "not a ControlHostError: \(error)"
+        }
+    }
+
+    /// The proof the cluster is about: with Jev switched on, keyed and uncapped, and the
+    /// cascade armed, a decide tool pinned "Always local" or "Off" reaches TypeSafe through
+    /// no provider, with or without a model loaded, with or without Laya.
+    @Test func noProviderReachesTypeSafeForAPinnedDecideTool() async throws {
+        for pin in [DecisionLaneOverride.alwaysLocal, .off] {
+            for loaded in [false, true] {
+                for layaReady in [false, true] {
+                    let (harness, server) = try await everythingOnHarness(
+                        "a decide tool pinned \(pin) sent a request to TypeSafe"
+                    )
+                    defer { server.stop(); harness.clean() }
+                    try await harness.service.update { $0.laneOverrides[.decideTool] = pin }
+                    let router = DecisionRouter(service: harness.service)
+                    if layaReady {
+                        await router.register(ScriptedLane(.laya, answers: ["refund": .noul(0.5)]))
+                    }
+                    for provider in Self.providers {
+                        _ = try? await decide(
+                            provider, service: harness.service, router: router,
+                            model: loaded ? LoadedModel() : nil
+                        )
+                    }
+                    #expect(server.requests.isEmpty)
+                    #expect(await harness.service.ledger().month().total.calls == 0)
+                }
+            }
+        }
+    }
+
+    /// "Always local": the free lanes answer, an unsure answer is not escalated, `typesafe`
+    /// is refused by name, and with nothing local the refusal says so rather than asking
+    /// for a TypeSafe key.
+    @Test func alwaysLocalAnswersFromTheFreeLanesAndSaysWhyItWillNotAskJev() async throws {
+        let (harness, server) = try await everythingOnHarness(
+            "an Always-local decide tool sent a request to TypeSafe"
+        )
+        defer { server.stop(); harness.clean() }
+        try await harness.service.update { $0.laneOverrides[.decideTool] = .alwaysLocal }
+        let router = DecisionRouter(service: harness.service)
+
+        let nothing = await refusal {
+            try await decide("auto", service: harness.service, router: router, model: nil)
+        }
+        #expect(nothing == AppModel.decideLocalPinHasNoLane)
+
+        let named = await refusal {
+            try await decide("typesafe", service: harness.service, router: router, model: nil)
+        }
+        #expect(named?.contains("Always local") == true)
+        #expect(named?.hasPrefix("not a") == false, "refused by the door, not by decide")
+
+        let laya = ScriptedLane(.laya, answers: ["refund": .noul(0.5)])
+        await router.register(laya)
+        let answered = try await decide(
+            "auto", service: harness.service, router: router, model: LoadedModel()
+        )
+        #expect(answered.provider == "laya", "an unsure local answer was not escalated")
+        #expect(server.requests.isEmpty)
+    }
+
+    /// "Off" answers nothing — not the free lanes either — whichever provider is named.
+    @Test func offAnswersNothingWhicheverLaneIsNamed() async throws {
+        let (harness, server) = try await everythingOnHarness(
+            "a switched-off decide tool sent a request to TypeSafe"
+        )
+        defer { server.stop(); harness.clean() }
+        try await harness.service.update { $0.laneOverrides[.decideTool] = .off }
+        let laya = ScriptedLane(.laya, answers: ["refund": .noul(0.9)])
+        let router = DecisionRouter(service: harness.service)
+        await router.register(laya)
+        let model = LoadedModel()
+
+        for provider in Self.providers {
+            let why = await refusal {
+                try await decide(provider, service: harness.service, router: router, model: model)
+            }
+            #expect(why?.contains("switched off") == true, "\(provider) answered: \(why ?? "nil")")
+        }
+        #expect(await model.calls.count == 0)
+        #expect(await laya.count() == 0)
+        #expect(server.requests.isEmpty)
+    }
+
+    /// "Always Jev": Jev answers alone, with no uncalibrated first pass, and a named local
+    /// lane is refused.
+    @Test func alwaysJevAsksJevAloneWithNoFreeFirstPass() async throws {
+        let typeSafe = try CapturingServer { _, _ in .init(body: jevAnswer) }
+        defer { typeSafe.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(typeSafe.port)")!)
+        try await harness.enable()
+        try await harness.service.update { $0.laneOverrides[.decideTool] = .alwaysJev }
+        let laya = ScriptedLane(.laya, answers: ["refund": .noul(0.5)])
+        let router = DecisionRouter(service: harness.service)
+        await router.register(laya)
+        let model = LoadedModel()
+
+        let answered = try await decide(
+            "auto", service: harness.service, router: router, model: model
+        )
+        #expect(try answered.noul("refund") == 0.93)
+        #expect(typeSafe.requests.count == 1)
+        #expect(await model.calls.count == 0)
+        #expect(await laya.count() == 0)
+
+        let why = await refusal {
+            try await decide("local", service: harness.service, router: router, model: model)
+        }
+        #expect(why?.contains("Always Jev") == true)
+    }
+
+    /// And unpinned, nothing changed: the loaded model answers first and only the unsure
+    /// answer goes to Jev, billed to the decide tool.
+    @Test func automaticStillCascades() async throws {
+        let typeSafe = try CapturingServer { _, _ in .init(body: jevAnswer) }
+        defer { typeSafe.stop() }
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(baseURL: URL(string: "http://127.0.0.1:\(typeSafe.port)")!)
+        try await harness.service.update { settings in
+            settings.enabled = true
+            settings.features[.decideTool] = true
+            settings.features[.calibration] = true
+        }
+        let model = LoadedModel()
+
+        let answered = try await decide(
+            "auto", service: harness.service, router: DecisionRouter(service: harness.service),
+            model: model
+        )
+        #expect(answered.provider == "local+typesafe")
+        #expect(await model.calls.count == 1)
+        #expect(typeSafe.requests.count == 1)
+        #expect(await harness.service.ledger().month().features["decideTool"]?.calls == 1)
+    }
+}
+
+@Suite("Calibration honours its pin")
+struct CalibrationLanePinTests {
+
+    /// A calibration is a comparison against Jev, billed to Decision calibration, so that
+    /// ability pinned away from Jev cannot run one — and the refusal names the pin rather
+    /// than asking for a TypeSafe key the owner already has.
+    @Test func aCalibrationPinnedAwayFromJevIsRefusedByName() async throws {
+        let (harness, server) = try await everythingOnHarness(
+            "a calibration pinned away from Jev sent a request to TypeSafe"
+        )
+        defer { server.stop(); harness.clean() }
+
+        try await harness.service.update { $0.laneOverrides[.calibration] = .off }
+        let off = await AppModel.calibrationPinRefusal(using: harness.service)
+        #expect(off?.contains("switched off") == true)
+
+        try await harness.service.update { $0.laneOverrides[.calibration] = .alwaysLocal }
+        let local = await AppModel.calibrationPinRefusal(using: harness.service)
+        #expect(local?.contains("Always local") == true)
+
+        for pin in [DecisionLaneOverride.automatic, .alwaysJev] {
+            try await harness.service.update { $0.laneOverrides[.calibration] = pin }
+            #expect(await AppModel.calibrationPinRefusal(using: harness.service) == nil)
+        }
+    }
+}

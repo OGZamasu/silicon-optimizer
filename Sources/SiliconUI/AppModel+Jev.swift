@@ -234,6 +234,9 @@ extension AppModel {
                 + "loaded. Load one and try again."
             )
         }
+        if let refusal = await Self.calibrationPinRefusal(using: .shared) {
+            throw ControlHostError.badRequest(refusal)
+        }
         guard await JevService.shared.isAvailable(.calibration) else {
             throw ControlHostError.badRequest(
                 "Calibration asks Jev for the reference answers. Add a TypeSafe API key and "
@@ -250,6 +253,26 @@ extension AppModel {
         CalibrationRun.task = work
         defer { CalibrationRun.task = nil }
         return try await work.value
+    }
+
+    /// Why the owner's pin for Decision calibration forbids a run, or nil when it allows one.
+    ///
+    /// A calibration is a comparison against Jev's answers and is billed to this ability, so
+    /// an ability pinned "Always local" or "Off" cannot run one at all. Said in those words
+    /// rather than left to the "add a TypeSafe API key" refusal below, which would send an
+    /// owner who pinned it away from the cloud on purpose looking for a key they already have.
+    static func calibrationPinRefusal(using service: JevService) async -> String? {
+        switch await service.settings().laneOverride(.calibration) {
+        case .off:
+            return "Decision calibration is switched off in Settings → Decisions, so no "
+                + "calibration runs. Nothing was sent to Jev."
+        case .alwaysLocal:
+            return "Decision calibration is set to Always local in Settings → Decisions. A "
+                + "calibration measures a lane against Jev's answers, so it cannot run without "
+                + "asking Jev. Nothing was sent."
+        case .automatic, .alwaysJev:
+            return nil
+        }
     }
 
     /// Why a finished run must not be written, or nil when it may be.

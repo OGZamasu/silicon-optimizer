@@ -853,6 +853,12 @@ where there is something to cascade from — the free lane answers everything an
 answers it was unsure of are put to Jev — except that the free lane is now Laya when Laya is
 installed.
 
+The decide tool's own pin governs `/decide` whichever `provider` a caller names: **Off**
+answers nothing, **Always local** refuses `typesafe` and never escalates, and **Always Jev**
+skips the free pass and refuses a named local lane. The pin is also checked again at the one
+door every paid call goes through, so an ability pinned **Always local** or **Off** —
+guardrails, verification and calibration included — cannot reach TypeSafe by any path.
+
 ### Thresholds are per lane
 
 A confidence number means whatever the thing that produced it means by it. Laya's 0.7 on a
