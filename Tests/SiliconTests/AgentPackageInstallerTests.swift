@@ -721,3 +721,122 @@ struct BundledAgentPackageLockTests {
         #expect(try !AgentPackageInstaller.verifyTree(tree, expected: identity), "no record")
     }
 }
+
+/// The verified tree is keyed by the Node's major version, and a start deletes the trees for
+/// other keys. A start whose `node --version` never answered — Stop pressed during "Looking
+/// for Node.js…", or a Node slow to launch — must not make up a key and delete the real tree
+/// with it. Checked with a stand-in `node` and `npm`, so no real npm runs.
+@Suite("Agent package trees and an unanswered Node probe", .serialized)
+struct AgentPackageTreeProbeTests {
+    private struct Stage {
+        let root: URL
+        let sourceRoot: URL
+        let destinationRoot: URL
+        let node: URL
+        let slowNode: URL
+        let probing: URL
+        let package = AgentPackage(
+            id: "fixture", name: "fixture-agent", version: "1.0.0",
+            binPath: "node_modules/fixture-agent/bin/agent.js"
+        )
+
+        init() throws {
+            let manager = FileManager.default
+            let root = manager.temporaryDirectory.appendingPathComponent(
+                "silicon-agent-probe-\(UUID().uuidString)", isDirectory: true
+            )
+            self.root = root
+            sourceRoot = root.appendingPathComponent("manifests", isDirectory: true)
+            destinationRoot = root.appendingPathComponent("installed", isDirectory: true)
+            let manifests = sourceRoot.appendingPathComponent("fixture", isDirectory: true)
+            try manager.createDirectory(at: manifests, withIntermediateDirectories: true)
+            try manager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+            let dependencies = ["fixture-agent": "1.0.0"]
+            try JSONSerialization.data(withJSONObject: [
+                "name": "silicon-fixture-sidecar", "private": true, "version": "1.0.0",
+                "dependencies": dependencies,
+            ], options: [.sortedKeys]).write(to: manifests.appendingPathComponent("package.json"))
+            try JSONSerialization.data(withJSONObject: [
+                "lockfileVersion": 3,
+                "packages": [
+                    "": ["dependencies": dependencies],
+                    "node_modules/fixture-agent": [
+                        "version": "1.0.0",
+                        "resolved": "https://registry.npmjs.org/fixture-agent/-/fixture-agent-1.0.0.tgz",
+                        "integrity": "sha512-" + String(repeating: "A", count: 86) + "==",
+                    ],
+                ],
+            ], options: [.sortedKeys]).write(to: manifests.appendingPathComponent("package-lock.json"))
+
+            // A Node that answers at once, and one that takes a minute to (and says when it has
+            // started to). Beside each, an npm whose `ci` lays out the package's entry point.
+            let probing = root.appendingPathComponent("probing")
+            self.probing = probing
+            func tools(_ name: String, nodeScript: String) throws -> URL {
+                let bin = root.appendingPathComponent(name, isDirectory: true)
+                try manager.createDirectory(at: bin, withIntermediateDirectories: true)
+                let npm = """
+                    #!/bin/sh
+                    if [ "$1" = --version ]; then echo 11.19.0; exit 0; fi
+                    /bin/mkdir -p node_modules/fixture-agent/bin
+                    echo "process.exit(0)" > node_modules/fixture-agent/bin/agent.js
+                    """
+                for (tool, script) in [("node", nodeScript), ("npm", npm)] {
+                    let url = bin.appendingPathComponent(tool)
+                    try "\(script)\n".write(to: url, atomically: true, encoding: .utf8)
+                    try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+                }
+                return bin.appendingPathComponent("node")
+            }
+            node = try tools("fast", nodeScript: "#!/bin/sh\necho v24.3.0")
+            slowNode = try tools("slow", nodeScript: """
+                #!/bin/sh
+                : > "\(probing.path)"
+                exec /bin/sleep 60
+                """)
+        }
+
+        func install(node: URL) async throws -> InstalledAgentPackage {
+            try await AgentPackageInstaller.install(
+                package, node: node, sourceRoot: sourceRoot, destinationRoot: destinationRoot
+            )
+        }
+    }
+
+    @Test func stoppingDuringTheNodeProbeKeepsTheVerifiedTree() async throws {
+        let stage = try Stage()
+        defer { try? FileManager.default.removeItem(at: stage.root) }
+        let first = try await stage.install(node: stage.node)
+        #expect(!first.reused)
+
+        let start = Task { try await stage.install(node: stage.slowNode) }
+        let deadline = Date().addingTimeInterval(30)
+        while !FileManager.default.fileExists(atPath: stage.probing.path), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(FileManager.default.fileExists(atPath: stage.probing.path), "the probe never started")
+        start.cancel()
+        await #expect(throws: CancellationError.self) { try await start.value }
+
+        #expect(FileManager.default.fileExists(atPath: first.bin.path),
+                "a cancelled start deleted the verified tree")
+        let again = try await stage.install(node: stage.node)
+        #expect(again.reused, "the next start installed from scratch")
+        #expect(again.directory == first.directory)
+    }
+
+    @Test func aNodeProbeThatTimesOutKeepsTheVerifiedTree() async throws {
+        let stage = try Stage()
+        defer { try? FileManager.default.removeItem(at: stage.root) }
+        let first = try await stage.install(node: stage.node)
+
+        await #expect(throws: AgentPackageInstallError.self) {
+            try await stage.install(node: stage.slowNode)
+        }
+        #expect(FileManager.default.fileExists(atPath: first.bin.path),
+                "a start whose Node never answered deleted the verified tree")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: stage.destinationRoot.path)
+        #expect(entries.filter { $0.hasPrefix("fixture-") } == [first.directory.lastPathComponent],
+                "a tree was made for a Node version nobody read")
+    }
+}

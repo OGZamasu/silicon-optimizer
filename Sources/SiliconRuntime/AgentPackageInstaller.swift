@@ -47,6 +47,7 @@ enum AgentPackageInstallError: LocalizedError {
     case npmTooOld(String)
     case npmFailed(String, Int32, String)
     case npmTimedOut(String)
+    case versionProbeTimedOut(String)
     case missingBin(String)
 
     var errorDescription: String? {
@@ -68,6 +69,9 @@ enum AgentPackageInstallError: LocalizedError {
                 + "locked artifact.\(detail.isEmpty ? "" : "\n\(detail)")"
         case .npmTimedOut(let name):
             return "Installing the verified \(name) package timed out."
+        case .versionProbeTimedOut(let path):
+            return "\(path) did not report its version within ten seconds. On a busy Mac, or "
+                + "the first time macOS sees a new Node.js, that can happen once — try again."
         case .missingBin(let name):
             return "The verified \(name) package did not contain its expected entry point."
         }
@@ -167,7 +171,10 @@ enum AgentPackageInstaller {
         // The tree is keyed by what decides its contents: the bundled manifest and lock, and
         // the Node line whose ABI any native module was built or chosen for.
         let lockDigest = sha256Hex(try Data(contentsOf: manifest) + Data(contentsOf: lock))
-        let nodeLine = nodeMajorVersion(node, in: root, isCancelled: isCancelled) ?? "unknown"
+        // A probe that was cancelled or timed out throws rather than reading as "unknown": the
+        // key it would make names no tree there is, and the prune below would take that as
+        // licence to delete the verified one.
+        let nodeLine = try nodeMajorVersion(node, in: root, isCancelled: isCancelled) ?? "unknown"
         let key = String(sha256Hex(Data("\(lockDigest)\nnode \(nodeLine)\n".utf8)).prefix(16))
         let tree = root.appendingPathComponent("\(package.id)-\(key)", isDirectory: true)
         let expected = TreeIdentity(package: package.spec, lock: lockDigest, node: nodeLine)
@@ -444,13 +451,15 @@ enum AgentPackageInstaller {
         }
     }
 
-    /// The Node's major version, which fixes the ABI of any native module in the tree.
+    /// The Node's major version, which fixes the ABI of any native module in the tree. Nil
+    /// when the Node answered with something else; a probe that never answered throws.
     private static func nodeMajorVersion(
         _ node: URL, in directory: URL, isCancelled: () -> Bool
-    ) -> String? {
-        guard let result = try? probeVersion(node, in: directory, environment: [
+    ) throws -> String? {
+        let result = try probeVersion(node, in: directory, environment: [
             "HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        ], isCancelled: isCancelled), result.status == 0, result.output.hasPrefix("v"),
+        ], isCancelled: isCancelled)
+        guard result.status == 0, result.output.hasPrefix("v"),
               let major = result.output.dropFirst().split(separator: ".").first
         else { return nil }
         return String(major)
@@ -557,7 +566,9 @@ enum AgentPackageInstaller {
         return (major, minor, patch) >= (11, 19, 0)
     }
 
-    /// `<executable> --version`, bounded, in `directory`, with only `environment`.
+    /// `<executable> --version`, bounded, in `directory`, with only `environment`. Throws
+    /// `CancellationError` when cancelled and `versionProbeTimedOut` when it had to be killed:
+    /// neither is an answer, and a caller must not read one into it.
     private static func probeVersion(
         _ executable: URL, in directory: URL, environment: [String: String],
         isCancelled: () -> Bool
@@ -573,6 +584,7 @@ enum AgentPackageInstaller {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = handle
         process.standardError = handle
+        var timedOut = false
         do {
             try process.run()
             let deadline = Date().addingTimeInterval(10)
@@ -580,6 +592,7 @@ enum AgentPackageInstaller {
                 Thread.sleep(forTimeInterval: 0.1)
             }
             if process.isRunning {
+                timedOut = !isCancelled()
                 process.terminate()
                 let grace = Date().addingTimeInterval(1)
                 while process.isRunning && Date() < grace {
@@ -597,6 +610,7 @@ enum AgentPackageInstaller {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         try? FileManager.default.removeItem(at: log)
         if isCancelled() { throw CancellationError() }
+        if timedOut { throw AgentPackageInstallError.versionProbeTimedOut(executable.path) }
         return (output, process.terminationStatus)
     }
 
