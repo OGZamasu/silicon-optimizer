@@ -4062,6 +4062,9 @@ public final class AppModel {
     }
 
     private var generationTask: Task<Void, Never>?
+    /// Which `send` holds `generationTask`. A stopped answer winds down a moment after Stop,
+    /// when the next answer may already hold the handle, so each clears only its own.
+    @ObservationIgnored private var currentGeneration: UUID?
 
     public var isGenerating: Bool { generationTask != nil }
 
@@ -4084,7 +4087,10 @@ public final class AppModel {
     /// `send` once a model is known to be loaded: apart so the tests can answer from a runtime
     /// of their own.
     func send(_ text: String, images: [String], to runtime: any InferenceRuntime) {
-        guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
+        // One answer at a time. A second — Return pressed again mid-answer — took the first's
+        // handle, so Stop could no longer stop it and both wrote into the same thread.
+        guard generationTask == nil,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
         else { return }
         noteActivity()
 
@@ -4111,12 +4117,14 @@ public final class AppModel {
         // posting into the conversation this is answering would carry a half-written reply
         // as context. See `AppModel+Buddy`.
         let answering = conversations[index].id
+        let generation = UUID()
+        currentGeneration = generation
         BuddyGenerations.shared.begin(answering)
         generationTask = Task { [weak self] in
             defer {
                 Task { @MainActor in
-                    self?.generationTask = nil
                     BuddyGenerations.shared.end(answering)
+                    if self?.currentGeneration == generation { self?.generationTask = nil }
                 }
             }
             do {
@@ -4150,7 +4158,8 @@ public final class AppModel {
     }
 
     public func regenerate() {
-        guard let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
+        guard generationTask == nil,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
               let lastUser = conversations[index].messages.last(where: { $0.role == .user })
         else { return }
 

@@ -33,9 +33,62 @@ struct BuiltInChatTests {
         #expect(model.conversations.first { $0.id == other }?.messages.isEmpty == true)
     }
 
-    /// Polls `condition` for up to five seconds; the answer streams on tasks of its own.
-    private func until(_ condition: @MainActor () async -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(5)
+    /// Return pressed again mid-answer started a second answer over the first: Stop could
+    /// then stop only the second, both wrote into the thread, and when the first finished the
+    /// app believed nothing was running — and told a phone the thread was free.
+    @Test func aSecondQuestionMidAnswerIsNotAsked() async throws {
+        let model = AppModel(settings: .init())
+        let runtime = ScriptedChatRuntime()
+        model.newConversation()
+        let thread = try #require(model.selectedConversationID)
+        model.send("First", images: [], to: runtime)
+        try await until { await runtime.chats == 1 }
+
+        model.send("Second", images: [], to: runtime)
+        model.regenerate()
+        #expect(model.transcript(of: thread) == ["First", ""])
+        #expect(model.isGenerating)
+        #expect(model.isAnswering(thread))
+
+        await runtime.say("One.", in: 0)
+        await runtime.finish(0)
+        try await until { !model.isGenerating }
+        #expect(await runtime.chats == 1)
+        #expect(model.transcript(of: thread) == ["First", "One."])
+        #expect(!model.isAnswering(thread))
+    }
+
+    /// Stop, then ask again at once. The stopped answer winds down a moment later, and used to
+    /// clear the new answer's handle as it went — leaving Stop with nothing to stop — and to
+    /// tell a phone the thread was free while the new answer was still being written into it.
+    @Test func aStoppedAnswerWindingDownLeavesTheNextOneRunning() async throws {
+        let model = AppModel(settings: .init())
+        let runtime = ScriptedChatRuntime()
+        model.newConversation()
+        let thread = try #require(model.selectedConversationID)
+        model.send("First", images: [], to: runtime)
+        try await until { await runtime.chats == 1 }
+
+        model.stopGenerating()
+        model.send("Second", images: [], to: runtime)
+        try await until { await runtime.chats == 2 }
+        try await until { await runtime.hasEnded(0) }
+        // The stopped answer's clean-up follows its stream's end on the main actor; give it
+        // every chance to (wrongly) take the running answer with it.
+        try? await until(within: .milliseconds(300)) { !model.isGenerating }
+        #expect(model.isGenerating)
+        #expect(model.isAnswering(thread))
+
+        await runtime.finish(1)
+        try await until { !model.isGenerating }
+        #expect(!model.isAnswering(thread))
+    }
+
+    /// Polls `condition` until it holds; the answer streams on tasks of its own.
+    private func until(
+        within limit: Duration = .seconds(5), _ condition: @MainActor () async -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + limit
         while !(await condition()) {
             guard ContinuousClock.now < deadline else { throw BuiltInChatTestError.timeout }
             try await Task.sleep(for: .milliseconds(5))
@@ -50,6 +103,11 @@ private extension AppModel {
     func reply(in conversation: Conversation.ID) -> String? {
         conversations.first { $0.id == conversation }?.messages.last { $0.role == .assistant }?.content
     }
+
+    /// Every message's text in `conversation`, in order.
+    func transcript(of conversation: Conversation.ID) -> [String]? {
+        conversations.first { $0.id == conversation }?.messages.map(\.content)
+    }
 }
 
 /// A loaded model whose every answer is written by the test, token by token.
@@ -60,18 +118,26 @@ private actor ScriptedChatRuntime: InferenceRuntime {
     var lastMetrics: GenerationMetrics? { nil }
 
     private var answers: [AsyncThrowingStream<ChatEvent, any Error>.Continuation] = []
+    private var ended: Set<Int> = []
 
     /// How many answers have been asked for.
     var chats: Int { answers.count }
+
+    /// Whether answer `index` has stopped being read — finished, or its reader cancelled.
+    func hasEnded(_ index: Int) -> Bool { ended.contains(index) }
 
     func start(_ request: LoadRequest) async throws {}
     func stop() async {}
 
     func chat(_ request: ChatRequest) async throws -> AsyncThrowingStream<ChatEvent, any Error> {
         let (stream, continuation) = AsyncThrowingStream<ChatEvent, any Error>.makeStream()
+        let index = answers.count
+        continuation.onTermination = { _ in Task { await self.markEnded(index) } }
         answers.append(continuation)
         return stream
     }
+
+    private func markEnded(_ index: Int) { ended.insert(index) }
 
     func say(_ token: String, in answer: Int) { answers[answer].yield(.token(token)) }
     func finish(_ answer: Int) { answers[answer].finish() }

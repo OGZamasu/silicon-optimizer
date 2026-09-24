@@ -667,13 +667,19 @@ public final class BuddyGenerations {
 
     public static let shared = BuddyGenerations()
 
-    private var active: Set<Conversation.ID> = []
+    /// Answers in flight per conversation. Counted rather than a set: a stopped answer and
+    /// the one asked straight after overlap for a moment, and the first to end must not mark
+    /// the thread free while the other is still writing into it.
+    private var active: [Conversation.ID: Int] = [:]
 
     public init() {}
 
-    public func isBusy(_ id: Conversation.ID) -> Bool { active.contains(id) }
-    public func begin(_ id: Conversation.ID) { active.insert(id) }
-    public func end(_ id: Conversation.ID) { active.remove(id) }
+    public func isBusy(_ id: Conversation.ID) -> Bool { active[id, default: 0] > 0 }
+    public func begin(_ id: Conversation.ID) { active[id, default: 0] += 1 }
+    public func end(_ id: Conversation.ID) {
+        guard let count = active[id] else { return }
+        active[id] = count > 1 ? count - 1 : nil
+    }
 }
 
 // MARK: - Settings state
