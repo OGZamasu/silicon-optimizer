@@ -156,7 +156,8 @@ public enum ModelRouter {
 
         do {
             let response = try await RoutingQuestions.ask(
-                request: request, candidates: candidates, using: service
+                request: request, candidates: candidates, defaultModel: defaultModel,
+                using: service
             )
             let answers = RoutingAnswers.read(from: response).observing(request)
             let decision = RoutingPolicy.choose(

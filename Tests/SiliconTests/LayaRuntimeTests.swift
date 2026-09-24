@@ -23,7 +23,9 @@ struct FakeSidecar {
     ///   finds no reader — what a sidecar that has just died looks like to the pipe, held
     ///   still long enough to hit every time; `closesOutput` takes one request, closes
     ///   stdout and exits 9 half a second later — a death whose pipe closes before the
-    ///   process is reaped, the order that used to be mistaken for a timeout.
+    ///   process is reaped, the order that used to be mistaken for a timeout; `slowStart`
+    ///   answers like `ok` but takes half a second to say it is ready, the way a real load
+    ///   takes long enough for a second decision to arrive in the middle of it.
     init(_ behaviour: String = "ok") throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("laya-fake-\(UUID().uuidString)", isDirectory: true)
@@ -56,6 +58,8 @@ struct FakeSidecar {
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "starts.log"), "a") as f:
             f.write("1\\n")
         behaviour = \(behaviour.debugDescription)
+        if behaviour == "slowStart":
+            time.sleep(0.5)
         if behaviour == "notInstalled":
             print(json.dumps({"id": hello.get("id"), "ok": False,
                               "kind": "not_installed", "error": "No module named laya_mlx"}),
@@ -468,7 +472,9 @@ struct LayaStoppedReadingRoutingTests {
     /// A model library laid out the way `LayaRuntime` checks for an install, with the fake
     /// standing in for the driver script: the interpreter a symlink to the system one (a
     /// copy is killed at launch), an empty `laya_mlx` package and an empty weights file.
-    static func installedRuntime(for fake: FakeSidecar) async throws -> LayaRuntime {
+    static func installedRuntime(
+        for fake: FakeSidecar, idleUnloadAfter: TimeInterval = LayaRuntime.idleUnloadSeconds
+    ) async throws -> LayaRuntime {
         let manager = FileManager.default
         let library = fake.directory
         let environment = LayaRuntime.environmentDirectory(library: library)
@@ -490,10 +496,163 @@ struct LayaStoppedReadingRoutingTests {
         #expect(manager.createFile(
             atPath: snapshot.appendingPathComponent("model.safetensors").path, contents: Data()
         ))
-        let runtime = LayaRuntime()
+        let runtime = LayaRuntime(idleUnloadAfter: idleUnloadAfter)
         await runtime.configure(library: { library }, script: { fake.script })
         #expect(await runtime.installation(checkpoint: .english).isInstalled)
         return runtime
+    }
+}
+
+// MARK: - One sidecar, and not forever
+
+/// The runtime's two promises about memory: one resident checkpoint however many decisions
+/// arrive at once, and none at all once it has gone unused for long enough.
+@Suite("The Laya runtime's one sidecar")
+struct LayaRuntimeResidencyTests {
+
+    private func starts(_ fake: FakeSidecar) -> Int {
+        let log = fake.directory.appendingPathComponent("starts.log")
+        return ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
+            .split(separator: "\n").count
+    }
+
+    /// Two abilities asking while nothing is loaded — the ordinary case after launch or an
+    /// idle unload. Both used to find no sidecar and start one each; the second replaced the
+    /// first in the runtime, and the first went on holding its gigabyte, unreachable, until
+    /// the app quit.
+    @Test func twoColdDecisionsAtOnceShareOneSidecar() async throws {
+        let fake = try FakeSidecar("slowStart")
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+        let lane = LayaLane(runtime: runtime, checkpoint: { .english })
+
+        async let first = lane.decide(.fixture("first"))
+        async let second = lane.decide(.fixture("second"))
+        let (one, two) = try await (first, second)
+
+        #expect(one.answers["first"] != nil)
+        #expect(two.answers["second"] != nil)
+        #expect(starts(fake) == 1, "one process for both decisions, not one each")
+        await runtime.unload()
+    }
+
+    /// The idle rule applied by itself. `unloadIfIdle` existed, and nothing called it.
+    @Test func aCheckpointNobodyUsesIsReleasedWithoutAnyoneAsking() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(
+            for: fake, idleUnloadAfter: 0.3
+        )
+        let sidecar = try await runtime.sidecar(for: .english)
+        #expect(await runtime.isLoaded)
+
+        // Generous, because the suite shares the machine: slow is fine, never is the bug.
+        for _ in 0..<400 {
+            if await runtime.isLoaded == false { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(await runtime.isLoaded == false, "still resident after going idle")
+        #expect(await sidecar.isRunning == false, "the process went with it")
+    }
+
+    /// And measured from the last use, not from the load, against this runtime's own
+    /// interval — the one the sweep is scheduled by. Asked with explicit clocks, so a
+    /// machine that stalls cannot make it pass or fail.
+    @Test func idlenessIsMeasuredFromTheLastUse() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(
+            for: fake, idleUnloadAfter: 600
+        )
+        let lane = LayaLane(runtime: runtime, checkpoint: { .english })
+        _ = try await lane.decide(.fixture())
+        let loaded = Date()
+        try await Task.sleep(for: .seconds(1))
+        _ = try await lane.decide(.fixture())
+
+        // Past the interval counted from the load, inside it counted from the second use.
+        #expect(await runtime.unloadIfIdle(now: loaded.addingTimeInterval(600.5)) == false)
+        #expect(await runtime.unloadIfIdle(now: Date().addingTimeInterval(601)))
+        #expect(await runtime.isLoaded == false)
+        #expect(starts(fake) == 1)
+    }
+
+    /// A lane keeps the sidecar it was handed for the whole request. An unload landing in
+    /// between — a checkpoint switch, Laya switched off, an install — used to leave that
+    /// sidecar free to start a process of its own when the request reached it: a gigabyte
+    /// the runtime no longer referenced, never idle-unloaded, alive until quit.
+    @Test func aSidecarHeldAcrossAnUnloadDoesNotStartAProcessOfItsOwn() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+        let held = try await runtime.sidecar(for: .english)
+        await runtime.unload()
+
+        do {
+            _ = try await held.decide(
+                state: "x", questions: ["q": ["type": "noul", "instructions": "Is this true?"]]
+            )
+            Issue.record("a sidecar the runtime had let go answered, from a process of its own")
+        } catch let error as LayaSidecarError {
+            // The one kind of failure the lane retries — through the runtime.
+            #expect(error.deservesRestart)
+        }
+        #expect(await held.isRunning == false)
+        #expect(await runtime.isLoaded == false)
+        #expect(starts(fake) == 1, "nothing started behind the runtime's back")
+    }
+
+    /// No owner action at all: two decisions share a sidecar that dies on its first request,
+    /// and each lane takes its one retry. The first retry replaced the dead sidecar through
+    /// the runtime; the second decision, queued on the dead one, restarted it itself — and
+    /// its retry's unconditional unload could stop the healthy replacement the first was
+    /// using. Both decisions still succeeded, so nothing looked wrong: the only sign was a
+    /// second Laya process in Activity Monitor, in 11 of 12 runs.
+    @Test func concurrentRetriesAfterADeathLeaveOneProcess() async throws {
+        for _ in 0..<6 {
+            let fake = try FakeSidecar("slowStart")
+            defer { fake.clean() }
+            // Every start logs its pid, and the first process dies on its first request.
+            let source = FakeSidecar.source("slowStart")
+                .replacingOccurrences(
+                    of: "f.write(\"1\\n\")", with: "f.write(str(os.getpid()) + \"\\n\")"
+                )
+                .replacingOccurrences(
+                    of: "if behaviour == \"dieOnRequest\":",
+                    with: """
+                    marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "died-once")
+                    if not os.path.exists(marker):
+                        open(marker, "w").close()
+                        sys.stdin.readline()
+                        sys.exit(9)
+                    if behaviour == "dieOnRequest":
+                    """
+                )
+            try source.write(to: fake.script, atomically: true, encoding: .utf8)
+            let runtime = try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+            let lane = LayaLane(runtime: runtime, checkpoint: { .english })
+
+            async let first = lane.decide(.fixture("first"))
+            async let second = lane.decide(.fixture("second"))
+            let (one, two) = try await (first, second)
+            #expect(one.answers["first"] != nil && two.answers["second"] != nil)
+
+            let pids = ((try? String(
+                contentsOf: fake.directory.appendingPathComponent("starts.log"), encoding: .utf8
+            )) ?? "").split(separator: "\n").compactMap { Int32($0) }
+            #expect(pids.count >= 2, "the fake did not die and restart")
+            // A retired process is asked to exit and may take a moment; one that nothing
+            // stops never goes.
+            var alive = pids.filter { kill($0, 0) == 0 }
+            for _ in 0..<150 where alive.count > 1 {
+                try await Task.sleep(for: .milliseconds(20))
+                alive = pids.filter { kill($0, 0) == 0 }
+            }
+            #expect(alive.count == 1, "\(alive.count) Laya processes for one runtime")
+            #expect(await runtime.isLoaded)
+            await runtime.unload()
+            for pid in pids { kill(pid, SIGKILL) }
+        }
     }
 }
 
@@ -699,6 +858,18 @@ struct LayaInstallTests {
                 == .environment)
     }
 
+    /// python.org's installer with its links declined leaves the interpreter only in its
+    /// framework. The list used to stop at Homebrew and /usr/local, so such a Mac was told
+    /// no Python was there — the face camera's bug, in Laya's own copy of the list.
+    @Test func aPythonOrgFrameworkOnlyInstallIsFound() {
+        let framework = "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+        let found = LayaRuntime.locatePython(
+            isExecutable: { $0 == framework || $0 == "/usr/bin/python3" },
+            version: { $0.path == framework ? (3, 12) : (3, 9) }
+        )
+        #expect(found?.path == framework)
+    }
+
     @Test func aTooOldInterpreterIsNotUsedToBuildTheEnvironment() {
         // macOS ships 3.9 and laya-mlx needs 3.11: the candidate list is searched newest
         // first and anything older is skipped rather than used and failed later.
@@ -798,5 +969,274 @@ struct LayaInstallTests {
             !LayaRuntime.hasPackage(environment: environment),
             "nothing half-installed: the venv exists, laya_mlx does not"
         )
+    }
+}
+
+// MARK: - The real driver script, over a stand-in library
+
+/// `laya_sidecar.py` itself — the script the app ships, not `FakeSidecar` — over a stand-in
+/// `laya_mlx` that loads nothing: a tokenizer that counts words, a 96-token context with 48 of
+/// question, and a `system_one` that writes down every state it is handed. Its `common`
+/// module builds a question the way laya-mlx 0.1.0's does — each option held to 48 tokens,
+/// the whole question to `head_max_len`, the question's own text cut first — which is enough
+/// to prove what the script does *before* the library sees a request; nothing here needs MLX,
+/// weights or a network.
+///
+/// "Is this true?" with no criteria is "noul question: Is this true?" (5 words) and the two
+/// default options (8 and 6 with their mask tokens), so it leaves 96 − 22 − 1 = 73 tokens of
+/// room for the state.
+struct StubLayaLibrary {
+    let directory: URL
+
+    init() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("laya-stub-\(UUID().uuidString)", isDirectory: true)
+        let package = directory.appendingPathComponent("laya_mlx", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try """
+        import json, os
+        __version__ = "stub"
+        _HERE = os.path.dirname(os.path.abspath(__file__))
+
+        class _Tokenizer:
+            mask_token = "[MASK]"
+            cls_token_id, sep_token_id, mask_token_id = 1, 2, 3
+            def __call__(self, text, add_special_tokens=False):
+                return {"input_ids": [4] * len(text.split())}
+
+        class _Agent:
+            cfg = {"max_len": 96, "head_max_len": 48}
+            tok = _Tokenizer()
+            @staticmethod
+            def _to_internal(q):
+                ins = q["instructions"]
+                crit = q.get("criteria")
+                if q["type"] == "choice" and isinstance(crit, list):
+                    crit = dict.fromkeys(crit)
+                return {"t": q["type"], "ins": ins if isinstance(ins, str) else json.dumps(ins),
+                        "crit": crit}
+            def system_one(self, state, questions):
+                with open(os.path.join(_HERE, "asked.jsonl"), "a") as f:
+                    f.write(json.dumps(list(state) if isinstance(state, dict) else state) + "\\n")
+                return {"answers": {n: {"type": "noul", "noul": 0.5, "confidence": 0.9}
+                                    for n in questions}}
+
+        def load(model_id, **kwargs):
+            return _Agent()
+        """.write(to: package.appendingPathComponent("__init__.py"), atomically: true, encoding: .utf8)
+        try """
+        import json
+
+        def serialize_state(state):
+            return state if isinstance(state, str) else json.dumps(state)
+
+        def _text(value):
+            return value if isinstance(value, str) else json.dumps(value)
+
+        def render_options(q):
+            crit = q.get("crit")
+            if q["t"] == "choice":
+                return [k if v in (None, "") else k + ": " + _text(v) for k, v in crit.items()]
+            if q["t"] == "score":
+                return ["level %d: %s" % (i, _text(c)) for i, c in enumerate(crit)]
+            crit = crit or {}
+            no, yes = crit.get("false"), crit.get("true")
+            return ["false: " + (_text(no) if no not in (None, "") else "no, the statement does not hold"),
+                    "true: " + (_text(yes) if yes not in (None, "") else "yes, the statement holds")]
+
+        def build_prefix(tok, q, head_max_len=192, option_order=None):
+            head = tok("%s question: %s" % (q["t"], q["ins"]))["input_ids"]
+            options = [[tok.mask_token_id] + tok(" " + o)["input_ids"][:48] for o in render_options(q)]
+            budget = head_max_len - sum(len(o) for o in options)
+            if budget < 16:
+                each = max(4, (head_max_len - 16) // max(1, len(options)))
+                options = [o[:each] for o in options]
+                budget = head_max_len - sum(len(o) for o in options)
+            ids = [tok.cls_token_id] + head[:max(8, budget)] + [tok.sep_token_id]
+            markers = []
+            for o in options:
+                markers.append(len(ids))
+                ids.extend(o)
+            ids.append(tok.sep_token_id)
+            return ids, markers
+        """.write(to: package.appendingPathComponent("common.py"), atomically: true, encoding: .utf8)
+    }
+
+    func clean() { try? FileManager.default.removeItem(at: directory) }
+
+    /// Every state `system_one` was handed, one JSON value per line: the key list for an
+    /// object, in the order it arrived.
+    var asked: [String] {
+        let log = directory.appendingPathComponent("laya_mlx/asked.jsonl")
+        return ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+    }
+
+    var configuration: LayaSidecar.Configuration {
+        let script = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/laya/laya_sidecar.py")
+        return .init(
+            python: URL(fileURLWithPath: "/usr/bin/python3"), script: script,
+            checkpoint: .english, environment: ["PYTHONPATH": directory.path],
+            requestTimeout: 10, startTimeout: 30
+        )
+    }
+}
+
+@Suite("The Laya driver script")
+struct LayaDriverScriptTests {
+
+    private var question: [String: Any] { ["q": ["type": "noul", "instructions": "Is this true?"]] }
+
+    /// laya-mlx cuts a state to fit its context and answers about what is left, with the
+    /// same confidence as ever. A routing state — the message and every candidate model —
+    /// runs to a thousand tokens and more against the English checkpoint's 512, and which
+    /// part fell off the end was the part serialised last. The script now measures first
+    /// and refuses, and the router goes on to a lane that can read the whole thing.
+    @Test func aStateLongerThanTheCheckpointReadsIsRefusedNotTruncated() async throws {
+        let library = try StubLayaLibrary()
+        defer { library.clean() }
+        let sidecar = LayaSidecar(
+            configuration: library.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+
+        let long = Array(repeating: "word", count: 100).joined(separator: " ")
+        await #expect(throws: DecisionLaneError.stateTooLong(
+            tokens: 100, limit: 73, checkpoint: LayaCheckpoint.english.displayName
+        )) {
+            _ = try await sidecar.decide(state: long, questions: question)
+        }
+        #expect(library.asked.isEmpty, "the library was handed a state it would have cut")
+
+        // A refusal about one request, not a fault: the process stays, and the next state
+        // that fits is answered.
+        #expect(await sidecar.isRunning)
+        let fits = Array(repeating: "word", count: 73).joined(separator: " ")
+        let answered = try await sidecar.decide(state: fits, questions: question)
+        #expect(answered.answers["q"]?.noul == 0.5)
+        #expect(library.asked.count == 1)
+        await sidecar.stop()
+    }
+
+    /// The question gets the same silent treatment one step earlier: laya-mlx holds each
+    /// option to 48 tokens and the whole question to its head budget, and answers about what
+    /// is left. The script measures the question first and refuses one the library would cut.
+    @Test func aQuestionTheLibraryWouldCutIsRefused() async throws {
+        let library = try StubLayaLibrary()
+        defer { library.clean() }
+        let sidecar = LayaSidecar(
+            configuration: library.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+
+        let long = Array(repeating: "word", count: 60).joined(separator: " ")
+        // "noul question: Is this true?" is 5; the default false option 8; the true one 62.
+        await #expect(throws: DecisionLaneError.questionTooLong(
+            question: "q", tokens: 75, limit: 48, checkpoint: LayaCheckpoint.english.displayName
+        )) {
+            _ = try await sidecar.decide(state: "a state", questions: [
+                "q": ["type": "noul", "instructions": "Is this true?", "criteria": ["true": long]],
+            ])
+        }
+        #expect(library.asked.isEmpty, "the library was handed a question it would have cut")
+
+        #expect(await sidecar.isRunning)
+        _ = try await sidecar.decide(state: "a state", questions: question)
+        #expect(library.asked.count == 1)
+        await sidecar.stop()
+    }
+
+    /// The same state must be the same input every time. Its keys used to go out in the
+    /// launch's dictionary order, so one state read differently from one launch to the
+    /// next — and what a long one lost was chance.
+    @Test func aStateGoesOutWithItsKeysInOneOrder() async throws {
+        let library = try StubLayaLibrary()
+        defer { library.clean() }
+        let sidecar = LayaSidecar(
+            configuration: library.configuration, registry: ChildProcessRegistry()
+        )
+        try await sidecar.start()
+        let keys = ["zeta", "eta", "alpha", "delta", "mu", "beta", "kappa", "gamma"]
+        let state = JSONContent.object(Dictionary(
+            uniqueKeysWithValues: keys.map { ($0, JSONContent.string("x")) }
+        ))
+
+        _ = try await sidecar.decide(state: LayaWire.state(state), questions: question)
+
+        let received = try JSONDecoder().decode(
+            [String].self, from: Data(try #require(library.asked.first).utf8)
+        )
+        #expect(received == keys.sorted())
+        await sidecar.stop()
+    }
+}
+
+// MARK: - One long state, through the router
+
+/// `stateTooLong` is a refusal of one request by a lane that is perfectly well. The router's
+/// catch-all marked any lane that threw as not ready for the readiness window, so one ability's
+/// long state took Laya away from every other ability's short ones for two seconds.
+@Suite("A state Laya refuses, through the router", .serialized)
+struct LayaRefusalRoutingTests {
+
+    /// A fake sidecar that refuses any state containing LONG, the way the real one does a
+    /// state longer than its checkpoint reads.
+    private static func refusingRuntime(_ fake: FakeSidecar) async throws -> LayaRuntime {
+        let hook = "    if \"LONG\" in json.dumps(request.get(\"state\")):\n"
+            + "        print(json.dumps({\"id\": request.get(\"id\"), \"ok\": False, "
+            + "\"kind\": \"state_too_long\", \"error\": \"too long\", \"tokens\": 900, "
+            + "\"room\": 470}), flush=True)\n"
+            + "        continue\n"
+            + "    if behaviour == \"hang\":"
+        let source = FakeSidecar.source("ok")
+        try #require(source.contains("    if behaviour == \"hang\":"))
+        try source.replacingOccurrences(of: "    if behaviour == \"hang\":", with: hook)
+            .write(to: fake.script, atomically: true, encoding: .utf8)
+        return try await LayaStoppedReadingRoutingTests.installedRuntime(for: fake)
+    }
+
+    @Test func aRefusedLongStateLeavesLayaReadyForTheNextShortOne() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await Self.refusingRuntime(fake)
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(key: nil)   // Jev off and keyless: no paid lane exists
+        let router = DecisionRouter(service: harness.service)
+        await router.register(LayaLane(runtime: runtime, checkpoint: { .english }))
+        let questions = ControlAPI.DecideRequest.fixture().questions
+
+        await #expect(throws: DecisionLaneError.stateTooLong(
+            tokens: 900, limit: 470, checkpoint: LayaCheckpoint.english.displayName
+        )) {
+            _ = try await router.decide(.routing, state: .string("LONG routing state"), questions: questions)
+        }
+        let short = try await router.decide(.calibration, state: .string("short"), questions: questions)
+        #expect(short.provider == DecisionLaneID.laya.wireName)
+        await runtime.unload()
+    }
+
+    /// And the refusal still falls through: the long state goes to the next free lane.
+    @Test func aRefusedLongStateIsAnsweredByTheNextLane() async throws {
+        let fake = try FakeSidecar()
+        defer { fake.clean() }
+        let runtime = try await Self.refusingRuntime(fake)
+        let harness = JevHarness()
+        defer { harness.clean() }
+        await harness.configure(key: nil)
+        let router = DecisionRouter(service: harness.service)
+        await router.register(LayaLane(runtime: runtime, checkpoint: { .english }))
+        let oneToken = CountingLane(.oneToken)
+        await router.register(oneToken)
+        let questions = ControlAPI.DecideRequest.fixture().questions
+
+        let long = try await router.decide(.routing, state: .string("LONG routing state"), questions: questions)
+        #expect(long.provider == DecisionLaneID.oneToken.wireName)
+        let short = try await router.decide(.calibration, state: .string("short"), questions: questions)
+        #expect(short.provider == DecisionLaneID.laya.wireName)
+        #expect(await oneToken.count() == 1)
+        await runtime.unload()
     }
 }

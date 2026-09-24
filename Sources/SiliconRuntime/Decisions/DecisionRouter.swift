@@ -29,6 +29,25 @@ public actor DecisionRouter {
     /// What the last decision did, for the Decisions panel's per-ability line.
     private var lastAnswers: [JevFeature: DecisionRecord] = [:]
 
+    /// How an ability's request is reshaped for a lane that reads a Laya checkpoint.
+    ///
+    /// Laya reads 512 tokens of state and 192 of question, and cuts the rest away without a
+    /// word; Jev and the loaded model read the whole request. So the two Laya lanes — this
+    /// Mac's and a node's, which run the same checkpoints — get a form made to fit, and
+    /// everything else gets the request as the feature wrote it. The forms are the
+    /// features' business, so the app supplies them; with none, every lane gets the request
+    /// unchanged and the sidecar refuses what would be cut.
+    ///
+    /// `keeping` names options a form must not leave out of a choice it narrows — the
+    /// owner's default model, say. It means nothing to the other lanes, which are asked
+    /// about every option.
+    public typealias LayaForm = @Sendable (
+        JevFeature, JSONContent, [String: ControlAPI.SystemOneQuestion], Set<String>
+    ) -> (state: JSONContent, questions: [String: ControlAPI.SystemOneQuestion])
+    private var layaForm: LayaForm?
+
+    public func useLayaForm(_ form: @escaping LayaForm) { layaForm = form }
+
     public struct DecisionRecord: Sendable, Equatable {
         public var lane: DecisionLaneID
         /// The peer, when a node answered.
@@ -173,7 +192,8 @@ public actor DecisionRouter {
         state: JSONContent,
         questions: [String: ControlAPI.SystemOneQuestion],
         cacheKey: String? = nil,
-        deadline: TimeInterval? = nil
+        deadline: TimeInterval? = nil,
+        keeping: Set<String> = []
     ) async throws -> ControlAPI.DecideResponse {
         let override = await service.settings().laneOverride(feature)
         let available = await availability(for: feature)
@@ -214,7 +234,7 @@ public actor DecisionRouter {
             do {
                 let response = try await run(
                     id, feature: feature, state: state, questions: questions,
-                    cacheKey: cacheKey, deadline: deadline
+                    cacheKey: cacheKey, deadline: deadline, keeping: keeping
                 )
                 note(feature: feature, response: response, lane: id, questions: questions.count)
                 return response
@@ -226,17 +246,32 @@ public actor DecisionRouter {
                     lane: id, peer: nil, at: Date(), latencyMS: nil,
                     questions: questions.count, failed: error.localizedDescription
                 )
-                // A lane that just failed is not ready, whatever it said two seconds ago.
-                readiness[id] = (false, Date())
+                // A lane that just failed is not ready, whatever it said two seconds ago —
+                // unless what failed was this request rather than the lane. A state longer
+                // than the checkpoint reads is refused with the lane perfectly well, and
+                // marking it down would take it away from every other ability's short
+                // states for the whole readiness window.
+                if !Self.isRefusalOfThisRequest(error) {
+                    readiness[id] = (false, Date())
+                }
             }
         }
         throw lastError ?? DecisionLaneError.nothingAvailable(feature)
     }
 
+    /// Whether a lane's error is about the request it was given, not about the lane.
+    static func isRefusalOfThisRequest(_ error: any Error) -> Bool {
+        guard let error = error as? DecisionLaneError else { return false }
+        switch error {
+        case .stateTooLong, .questionTooLong: return true
+        default: return false
+        }
+    }
+
     private func run(
         _ id: DecisionLaneID, feature: JevFeature, state: JSONContent,
         questions: [String: ControlAPI.SystemOneQuestion],
-        cacheKey: String?, deadline: TimeInterval?
+        cacheKey: String?, deadline: TimeInterval?, keeping: Set<String> = []
     ) async throws -> ControlAPI.DecideResponse {
         if id == .jev {
             // Through the service, always: this is the only path to a paid call in the
@@ -247,6 +282,20 @@ public actor DecisionRouter {
             )
         }
         guard let lane = lanes[id] else { throw DecisionLaneError.nothingAvailable(feature) }
+        var state = state, questions = questions
+        if id == .laya || id == .node, let layaForm {
+            let fitted = layaForm(feature, state, questions, keeping)
+            // A form with nothing left to ask is a refusal of this request, like any other
+            // that is too long for the checkpoint — not a lane that has failed.
+            guard !fitted.questions.isEmpty else {
+                throw DecisionLaneError.questionTooLong(
+                    question: questions.keys.sorted().first ?? "-",
+                    tokens: questions.values.map { LayaBudget.prefix($0).tokens }.max() ?? 0,
+                    limit: LayaBudget.headTokens, checkpoint: "Laya"
+                )
+            }
+            (state, questions) = (fitted.state, fitted.questions)
+        }
         let request = ControlAPI.DecideRequest(
             state: state, questions: questions, model: nil, provider: id.wireName
         )

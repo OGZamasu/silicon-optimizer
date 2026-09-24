@@ -93,33 +93,21 @@ public actor FaceCamRuntime {
     /// only) builds with locked setuptools, Cython and NumPy rather than downloaded ones; and
     /// the weights, fetched at a reviewed revision and digest before the project's own
     /// downloader — which takes them from a moving branch without checking certificates on
-    /// macOS — would. `basePython` makes the environment when there is none.
+    /// macOS — would. `basePython` makes the environment when there is none; with none, and
+    /// no environment, the plan is refused with the versions the locks cover.
     public nonisolated static func installPlan(
-        basePython: URL, git: URL, locks: URL = PinnedInstall.defaultLockRoot(),
+        basePython: URL?, git: URL, locks: URL = PinnedInstall.defaultLockRoot(),
         environment: URL = FaceCamRuntime.environment,
         faceAnalyserModels: URL = FaceCamRuntime.faceAnalyserModels
     ) throws -> [PinnedInstall.Command] {
         let source = PinnedInstall.deepLiveCam
-        let python = environment.appendingPathComponent("bin/python3")
         let repository = environment.appendingPathComponent("Deep-Live-Cam")
         let swapperModel = repository.appendingPathComponent("models/inswapper_128.onnx")
-        let existing = FileManager.default.isExecutableFile(atPath: python.path)
-        let version = existing
-            ? PinnedInstall.pythonVersion(ofVirtualEnvironment: environment)
-            : PinnedInstall.pythonVersion(ofInterpreter: basePython)
-        guard let version, PinnedInstall.deepLiveCamPythons.contains(version) else {
-            throw PinnedInstall.PlanError.unsupportedPython(
-                tool: source.name, found: version, supported: PinnedInstall.deepLiveCamPythons
-            )
-        }
-
-        var commands: [PinnedInstall.Command] = []
-        if !existing {
-            commands.append(PinnedInstall.Command(
-                label: "Making its Python environment",
-                executable: basePython, arguments: ["-m", "venv", environment.path]
-            ))
-        }
+        let (python, version, venv) = try PinnedInstall.environment(
+            environment, tool: source.name, supported: PinnedInstall.deepLiveCamPythons,
+            basePython: basePython
+        )
+        var commands = venv
         commands += PinnedInstall.fetch(source, into: repository, git: git)
         commands.append(PinnedInstall.pipInstall(
             python: python,

@@ -162,10 +162,24 @@ public struct MetricsSampler: Sendable {
         defer { Self.loadState.previous = info }
 
         guard let previous = Self.loadState.previous else { return 0 }
-        let user = Double(info.cpu_ticks.0 - previous.cpu_ticks.0)
-        let system = Double(info.cpu_ticks.1 - previous.cpu_ticks.1)
-        let idle = Double(info.cpu_ticks.2 - previous.cpu_ticks.2)
-        let nice = Double(info.cpu_ticks.3 - previous.cpu_ticks.3)
+        return Self.cpuUtilization(from: previous, to: info)
+    }
+
+    /// The busy share of the ticks between two samples.
+    ///
+    /// The counters are `natural_t` — 32 bits — and host-wide, so they wrap: every core's
+    /// idle ticks land in the one counter, and on a mostly idle Mac it passes 2³² after
+    /// roughly five to fifteen weeks awake. A checked subtraction across that wrap traps,
+    /// and the sampler runs every second for as long as the app is open, so the app died
+    /// on the first sample after it. Wrapping subtraction is the right arithmetic for a
+    /// counter that wraps: the difference is the ticks that elapsed either way.
+    static func cpuUtilization(
+        from previous: host_cpu_load_info, to current: host_cpu_load_info
+    ) -> Double {
+        let user = Double(current.cpu_ticks.0 &- previous.cpu_ticks.0)
+        let system = Double(current.cpu_ticks.1 &- previous.cpu_ticks.1)
+        let idle = Double(current.cpu_ticks.2 &- previous.cpu_ticks.2)
+        let nice = Double(current.cpu_ticks.3 &- previous.cpu_ticks.3)
         let total = user + system + idle + nice
         guard total > 0 else { return 0 }
         return (user + system + nice) / total

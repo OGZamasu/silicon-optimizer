@@ -62,6 +62,29 @@ struct HardwareTests {
         #expect(profile.safeModelBudget.gibibytes >= memoryGiB * 0.55 - 0.01)
     }
 
+    /// The tick counters are 32 bits and host-wide, so they wrap — idle first, after a few
+    /// weeks awake, and the others in time. The sample straddling a wrap has to read as the
+    /// ticks that elapsed — not trap the whole app, which a checked subtraction did. Every
+    /// counter wraps here, so a subtraction left checked on any one of them traps this test.
+    @Test func cpuLoadAcrossACounterWrapIsTheTicksThatElapsed() {
+        let top = UInt32.max
+        let before = host_cpu_load_info(cpu_ticks: (top - 49, top - 49, top - 89, top - 9))
+        // Each counter passes 2^32 — i.e. 0 — and lands a little way past it.
+        let after = host_cpu_load_info(cpu_ticks: (50, 50, 200, 0))
+
+        // 100 user, 100 system, 290 idle and 10 nice: 210 of 500 ticks busy, the same
+        // answer as without the wrap.
+        #expect(abs(MetricsSampler.cpuUtilization(from: before, to: after) - 0.42) < 1e-9)
+    }
+
+    @Test func cpuLoadIsTheBusyShareOfTheTicksBetweenSamples() {
+        let before = host_cpu_load_info(cpu_ticks: (100, 100, 100, 0))
+        let after = host_cpu_load_info(cpu_ticks: (150, 125, 175, 0))
+        #expect(abs(MetricsSampler.cpuUtilization(from: before, to: after) - 0.5) < 1e-9)
+        // No ticks at all between two samples is no load, not a division by zero.
+        #expect(MetricsSampler.cpuUtilization(from: after, to: after) == 0)
+    }
+
     @Test func samplerReadsLiveCounters() {
         let metrics = MetricsSampler().sample()
         #expect(metrics.memoryTotal > .gib(3))

@@ -98,6 +98,67 @@ class Sidecar:
             "version": getattr(laya_mlx, "__version__", None),
         }
 
+    def cut_question(self, questions: dict):
+        """`(question id, tokens, limit)` for the first question laya-mlx would cut, else None.
+
+        The question gets the same silent treatment as a long state, one step earlier:
+        `build_prefix` holds each option to 48 tokens of "label: description" and the whole
+        question to `head_max_len`, cutting the question's own text first and then every
+        option alike, and the answer is about what was left.  So each is measured the way
+        `build_prefix` measures it, and a question it would cut is refused.  Counts only.
+
+        laya-mlx 0.1.0's own internals — `agent._to_internal`, `agent.tok`, `agent.cfg` and
+        `common.render_options` — are what make this the library's arithmetic rather than a
+        guess at it.  They are not a public API: a version bump has to re-check them.
+        """
+        from laya_mlx.common import render_options
+
+        agent = self.agent
+        tok = agent.tok
+        head_len = agent.cfg.get("head_max_len", 192)
+
+        def count(text):
+            return len(tok(text.replace(tok.mask_token, " "), add_special_tokens=False)["input_ids"])
+
+        for question_id, definition in questions.items():
+            q = agent._to_internal(definition)
+            head = count("%s question: %s" % (q["t"], str(q["ins"])))
+            wanted = [1 + count(" " + option) for option in render_options(q)]
+            taken = [min(n, 49) for n in wanted]
+            cut = taken != wanted
+            if head_len - sum(taken) < 16:
+                each = max(4, (head_len - 16) // max(1, len(taken)))
+                cut = cut or any(n > each for n in taken)
+                taken = [min(n, each) for n in taken]
+            cut = cut or head > max(8, head_len - sum(taken))
+            if cut:
+                return question_id, head + sum(wanted), head_len
+        return None
+
+    def overflow(self, state, questions: dict):
+        """`(tokens, room)` when the state is longer than the encoder will read, else None.
+
+        laya-mlx cuts a long state to fit without a word: the tail goes — and with it
+        whatever happened to be serialised last — and the answer about what is left comes
+        back as confident as any other.  So the length is checked first, with the library's
+        own arithmetic from `PrefixCache.prepare`: the state's tokens against what each
+        question's prefix leaves of `max_len`, the tightest question deciding.  Counts only;
+        the state itself is never repeated.  The same private internals as `cut_question`.
+        """
+        from laya_mlx.common import build_prefix, serialize_state
+
+        agent = self.agent
+        tok = agent.tok
+        max_len = agent.cfg.get("max_len", 512)
+        head_len = agent.cfg.get("head_max_len", 192)
+        text = serialize_state(state).replace(tok.mask_token, " ")
+        tokens = len(tok(text, add_special_tokens=False)["input_ids"])
+        room = min(
+            max(0, max_len - len(build_prefix(tok, agent._to_internal(q), head_len)[0]) - 1)
+            for q in questions.values()
+        )
+        return (tokens, room) if tokens > room else None
+
     def decide(self, state, questions: dict) -> dict:
         """One request, however many questions, and how long it took.
 
@@ -195,6 +256,24 @@ def main() -> int:
             continue
 
         try:
+            cut = sidecar.cut_question(questions)
+            if cut:
+                question_id, tokens, limit = cut
+                _out({
+                    "id": request_id, "ok": False, "kind": "question_too_long",
+                    "error": f"A question is {tokens} tokens and the checkpoint reads {limit}.",
+                    "question": question_id, "tokens": tokens, "room": limit,
+                })
+                continue
+            too_long = sidecar.overflow(request.get("state"), questions)
+            if too_long:
+                tokens, room = too_long
+                _out({
+                    "id": request_id, "ok": False, "kind": "state_too_long",
+                    "error": f"The state is {tokens} tokens and the checkpoint reads {room}.",
+                    "tokens": tokens, "room": room,
+                })
+                continue
             answer = sidecar.decide(request.get("state"), questions)
         except Exception as error:
             # The type and the message, never the traceback and never the state. A

@@ -188,3 +188,98 @@ struct AgentNaturalExitTests {
         #expect(model.codexState == .idle)
     }
 }
+
+/// Pi's process, spoken to over the same pipes the app uses, with `/bin/sh` standing in for
+/// Node: `launch` is everything after the install, so nothing here fetches or runs Pi.
+///
+/// The bug: only a non-zero exit that Foundation had already reaped when Pi's output closed
+/// was noticed. A clean exit, or a crash whose pipe closed a moment before the reap, left the
+/// engine `ready` with a handle to a pipe nobody reads — and every message after that was
+/// written into it, the write's EPIPE swallowed, while a phone was told it had been accepted.
+@Suite("Pi's natural exits")
+struct PiNaturalExitTests {
+    private final class States: @unchecked Sendable {
+        private let lock = NSLock()
+        private var states: [PiRuntime.State] = []
+        func record(_ state: PiRuntime.State) { lock.withLock { states.append(state) } }
+        var all: [PiRuntime.State] { lock.withLock { states } }
+    }
+
+    private func launch(
+        _ runtime: PiRuntime, _ script: String, states: States
+    ) async throws -> AsyncStream<String> {
+        try #require(await runtime.launch(
+            executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script],
+            environment: [:], directory: FileManager.default.temporaryDirectory,
+            onState: states.record
+        ))
+    }
+
+    /// Exit status 0 is still Pi gone. Nothing asked it to go, so the engine is not running.
+    @Test func aCleanExitLeavesTheEngineFailedNotReady() async throws {
+        let runtime = PiRuntime()
+        let states = States()
+        let events = try await launch(runtime, "read line; exit 0", states: states)
+        await runtime.send(line: #"{"type":"prompt","message":"hello"}"#)
+        for await _ in events {}
+
+        guard case .failed(let message) = states.all.last else {
+            Issue.record("a Pi that exited is still \(String(describing: states.all.last))")
+            return
+        }
+        #expect(message.hasPrefix("Pi exited."))
+    }
+
+    /// The crash whose output closes before the process is reaped — deterministic here, where
+    /// in the app it was a race lost about one time in ten. Both pipes close first: the old
+    /// check waited for stderr to end, and a shell that kept stderr open until it exited would
+    /// have waited out the reap for it and hidden the race.
+    @Test func aCrashNoticedBeforeTheReapIsStillReportedWithItsStatus() async throws {
+        let runtime = PiRuntime()
+        let states = States()
+        let events = try await launch(
+            runtime, "echo 'it broke' >&2; exec 1>&- 2>&-; sleep 0.5; exit 9", states: states
+        )
+        for await _ in events {}
+
+        guard case .failed(let message) = states.all.last else {
+            Issue.record("a Pi that crashed is still \(String(describing: states.all.last))")
+            return
+        }
+        #expect(message.hasPrefix("Pi exited (9)."))
+        #expect(message.contains("it broke"), "its last words say why")
+    }
+
+    /// Alive but not reading: the message cannot arrive, and the engine must stop looking as
+    /// if it could rather than swallowing the write's error.
+    @Test func aWriteNobodyReadsFailsTheEngine() async throws {
+        let runtime = PiRuntime()
+        let states = States()
+        let events = try await launch(
+            runtime, #"exec 0<&-; echo '{"closed":true}'; sleep 30"#, states: states
+        )
+        // Written only once its end is closed, so the write below cannot beat the close.
+        var lines = events.makeAsyncIterator()
+        #expect(await lines.next() == #"{"closed":true}"#)
+
+        await runtime.send(line: #"{"type":"prompt","message":"hello"}"#)
+
+        guard case .failed = states.all.last else {
+            Issue.record("a Pi that cannot read is still \(String(describing: states.all.last))")
+            await runtime.stop()
+            return
+        }
+        await runtime.stop()
+    }
+
+    /// And the reverse, which the fix must not break: the owner stopping Pi is not Pi failing.
+    @Test func aDeliberateStopIsNotReportedAsAFailure() async throws {
+        let runtime = PiRuntime()
+        let states = States()
+        let events = try await launch(runtime, "exec /bin/sleep 30", states: states)
+        await runtime.stop()
+        for await _ in events {}
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(states.all == [.ready])
+    }
+}

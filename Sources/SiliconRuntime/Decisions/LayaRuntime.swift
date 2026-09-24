@@ -152,8 +152,43 @@ public actor LayaRuntime {
     /// Set while an install is running, so the panel can say so and a second one is refused.
     public private(set) var isInstalling = false
 
-    public init(locks: URL = PinnedInstall.defaultLockRoot()) {
+    /// Whether someone is starting, swapping or stopping the sidecar, and who is waiting to.
+    ///
+    /// Each of those crosses suspension points — a cold load is half a minute — and this actor
+    /// is reentrant across every one of them. Two decisions arriving while nothing was loaded
+    /// both found no sidecar, both started one, and the second assignment dropped the first:
+    /// about a gigabyte of weights in a process nothing would stop until the app quit. So they
+    /// take turns, in arrival order, exactly as `LayaSidecar` does for its pipe, and the
+    /// second caller finds the first one's sidecar up and uses it.
+    private var turnHolder = false
+    private var turnQueue: [CheckedContinuation<Void, Never>] = []
+
+    /// How long a loaded checkpoint may sit unused: `idleUnloadSeconds`, except in a test.
+    private let idleUnloadAfter: TimeInterval
+    private var idleSweep: Task<Void, Never>?
+
+    public init(
+        locks: URL = PinnedInstall.defaultLockRoot(),
+        idleUnloadAfter: TimeInterval = LayaRuntime.idleUnloadSeconds
+    ) {
         self.locks = locks
+        self.idleUnloadAfter = idleUnloadAfter
+    }
+
+    private func acquireTurn() async {
+        if !turnHolder {
+            turnHolder = true
+            return
+        }
+        await withCheckedContinuation { turnQueue.append($0) }
+    }
+
+    private func releaseTurn() {
+        guard !turnQueue.isEmpty else {
+            turnHolder = false
+            return
+        }
+        turnQueue.removeFirst().resume()
     }
 
     public func configure(
@@ -328,6 +363,10 @@ public actor LayaRuntime {
     /// last and usually fails the version check — it is there for a future macOS rather
     /// than as a real candidate today. The bare `python3`s are only taken when their version
     /// is one the dependency locks cover.
+    ///
+    /// python.org's installer puts each version in its framework and, unless the owner
+    /// declines, links it from `/usr/local/bin`; the framework paths are here for a Mac where
+    /// the links were declined, which the list used to miss.
     public static let pythonCandidates = [
         "/opt/homebrew/bin/python3.14",
         "/opt/homebrew/bin/python3.13",
@@ -338,17 +377,21 @@ public actor LayaRuntime {
         "/usr/local/bin/python3.13",
         "/usr/local/bin/python3.12",
         "/usr/local/bin/python3.11",
+    ] + LayaPackage.lockedPythons.reversed().map {
+        "/Library/Frameworks/Python.framework/Versions/\($0)/bin/python\($0)"
+    } + [
         "/usr/bin/python3",
     ]
 
     /// The first interpreter that is both executable and a version the locks cover.
     public static func locatePython(
         candidates: [String] = pythonCandidates,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) },
         version: (URL) -> (Int, Int)? = { probeVersion(of: $0) }
     ) -> URL? {
         for path in candidates {
             let url = URL(fileURLWithPath: path)
-            guard FileManager.default.isExecutableFile(atPath: path),
+            guard isExecutable(path),
                   let (major, minor) = version(url)
             else { continue }
             if LayaPackage.lockedPythons.contains("\(major).\(minor)") {
@@ -640,11 +683,13 @@ public actor LayaRuntime {
     /// The sidecar for this checkpoint, started if it is not up and swapped if the owner
     /// has changed checkpoints since.
     public func sidecar(for checkpoint: LayaCheckpoint) async throws -> LayaSidecar {
+        await acquireTurn()
+        defer { releaseTurn() }
         if let sidecar, activeCheckpoint == checkpoint, await sidecar.isRunning {
             lastUsed = Date()
             return sidecar
         }
-        if sidecar != nil { await unload() }
+        if sidecar != nil { await stopSidecar() }
 
         guard let library = await libraryProvider() else {
             throw LayaSidecarError.pythonMissing("no model library is configured")
@@ -666,13 +711,36 @@ public actor LayaRuntime {
         lastReady = ready
         lastPeakMemoryBytes = ready.peakMemoryBytes
         lastUsed = Date()
+        scheduleIdleUnload()
         return fresh
     }
 
     /// Releases the model. Called by the idle sweep, before an install, and when the owner
     /// switches checkpoints.
     public func unload() async {
-        if let sidecar { await sidecar.stop() }
+        await acquireTurn()
+        defer { releaseTurn() }
+        await stopSidecar()
+    }
+
+    /// Releases the model only if it is still the one that failed.
+    ///
+    /// A lane's one retry after a death: by the time it asks, another lane's retry may have
+    /// replaced the dead sidecar with a healthy one, and an unconditional unload would stop
+    /// that one out from under whoever is using it.
+    public func unload(ifStill failed: LayaSidecar) async {
+        await acquireTurn()
+        defer { releaseTurn() }
+        guard sidecar === failed else { return }
+        await stopSidecar()
+    }
+
+    /// `unload()` for a caller that already holds the turn.
+    private func stopSidecar() async {
+        idleSweep?.cancel()
+        idleSweep = nil
+        // Retired, not merely stopped: a lane may still hold it, and must not restart it.
+        if let sidecar { await sidecar.retire() }
         sidecar = nil
         activeCheckpoint = nil
         lastReady = nil
@@ -701,13 +769,40 @@ public actor LayaRuntime {
     /// weights in the morning.
     public static let idleUnloadSeconds: TimeInterval = 20 * 60
 
-    /// Unloads if nothing has used it for `idleUnloadSeconds`. Returns whether it did.
+    /// Unloads if nothing has used it for the idle interval — `idleUnloadSeconds`, outside a
+    /// test. Returns whether it did.
     @discardableResult
     public func unloadIfIdle(now: Date = Date()) async -> Bool {
+        await acquireTurn()
+        defer { releaseTurn() }
         guard sidecar != nil,
-              now.timeIntervalSince(lastUsed) >= Self.idleUnloadSeconds
+              now.timeIntervalSince(lastUsed) >= idleUnloadAfter
         else { return false }
-        await unload()
+        await stopSidecar()
         return true
+    }
+
+    /// Puts `unloadIfIdle` on a clock, from the moment a sidecar comes up.
+    ///
+    /// Nothing else ever called it, so the rule above was never applied: a checkpoint loaded
+    /// once held its gigabyte until the app quit. This sleeps until the sidecar would become
+    /// idle, looks again — every decision moves `lastUsed` — and ends once nothing is loaded.
+    private func scheduleIdleUnload() {
+        idleSweep?.cancel()
+        idleSweep = Task { [weak self] in
+            while !Task.isCancelled, let wait = await self?.secondsUntilIdle() {
+                if wait > 0 {
+                    try? await Task.sleep(for: .seconds(wait))
+                } else {
+                    await self?.unloadIfIdle()
+                }
+            }
+        }
+    }
+
+    /// Seconds until the loaded sidecar counts as idle, or nil when nothing is loaded.
+    private func secondsUntilIdle() -> TimeInterval? {
+        guard sidecar != nil else { return nil }
+        return idleUnloadAfter - Date().timeIntervalSince(lastUsed)
     }
 }

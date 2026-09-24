@@ -40,19 +40,24 @@ public struct LayaLane: DecisionLane {
         try request.validate()
         let checkpoint = await checkpoint()
         let started = Date()
+        var used: LayaSidecar?
         do {
-            return try await ask(request, checkpoint: checkpoint, started: started)
+            let sidecar = try await runtime.sidecar(for: checkpoint)
+            used = sidecar
+            return try await ask(request, sidecar: sidecar, checkpoint: checkpoint, started: started)
         } catch let error as LayaSidecarError where error.deservesRestart {
-            // One restart, then the truth.
-            await runtime.unload()
-            return try await ask(request, checkpoint: checkpoint, started: started)
+            // One restart, then the truth — of the sidecar that failed, and only if the
+            // runtime still holds it: another decision's retry may already have replaced it.
+            if let used { await runtime.unload(ifStill: used) }
+            let sidecar = try await runtime.sidecar(for: checkpoint)
+            return try await ask(request, sidecar: sidecar, checkpoint: checkpoint, started: started)
         }
     }
 
     private func ask(
-        _ request: ControlAPI.DecideRequest, checkpoint: LayaCheckpoint, started: Date
+        _ request: ControlAPI.DecideRequest, sidecar: LayaSidecar,
+        checkpoint: LayaCheckpoint, started: Date
     ) async throws -> ControlAPI.DecideResponse {
-        let sidecar = try await runtime.sidecar(for: checkpoint)
         let response = try await sidecar.decide(
             state: LayaWire.state(request.state),
             questions: LayaWire.questions(request.questions)
@@ -237,8 +242,12 @@ public enum DecisionLaneError: Error, LocalizedError, Equatable {
     case wrongAnswerKind(question: String, expected: String, got: String)
     case missingAnswer(question: String)
     /// The state is longer than the checkpoint's encoder can see, so an answer would be
-    /// about a truncated version of it.
-    case stateTooLong(bytes: Int, limit: Int, checkpoint: String)
+    /// about a truncated version of it. Counted in the checkpoint's own tokens, by the
+    /// sidecar, against what the longest question leaves of the context.
+    case stateTooLong(tokens: Int, limit: Int, checkpoint: String)
+    /// A question — its own text and its options — is longer than the checkpoint reads of
+    /// one, so it would be answered with part of it cut away.
+    case questionTooLong(question: String, tokens: Int, limit: Int, checkpoint: String)
 
     public var errorDescription: String? {
         switch self {
@@ -253,9 +262,12 @@ public enum DecisionLaneError: Error, LocalizedError, Equatable {
             "Laya answered \"\(question)\" with a \(got); a \(expected) was asked for."
         case .missingAnswer(let question):
             "Laya did not answer \"\(question)\"."
-        case .stateTooLong(let bytes, let limit, let checkpoint):
-            "That state is \(bytes / 1024) KB and \(checkpoint) reads about \(limit / 1024) KB "
-            + "of it. Filter it down, or choose a checkpoint with a longer context."
+        case .stateTooLong(let tokens, let limit, let checkpoint):
+            "That state is \(tokens) tokens and \(checkpoint) reads \(limit) of them. "
+            + "Filter it down, or choose a checkpoint with a longer context."
+        case .questionTooLong(let question, let tokens, let limit, let checkpoint):
+            "Question \"\(question)\" and its options are \(tokens) tokens and \(checkpoint) "
+            + "reads \(limit) of a question. Shorten its descriptions, or offer fewer options."
         }
     }
 }
