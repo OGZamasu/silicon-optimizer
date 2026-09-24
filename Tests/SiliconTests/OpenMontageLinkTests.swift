@@ -148,8 +148,13 @@ struct OpenMontageLinkTests {
         let commit = PinnedInstall.openMontage.commit
 
         let (steps, notes) = try OpenMontageLink.plan(in: env)
+        // Marked unfinished before anything lands in the folder, and done only at the end.
+        let marker = checkout.appendingPathComponent(OpenMontageLink.setupMarkerName).path
+        #expect(steps.prefix(2).map(\.arguments) == [["-p", checkout.path], [marker]])
+        #expect(steps.last?.arguments == ["-f", marker])
+        #expect(steps.last?.optional == false)
         // The pinned commit, by id — never a branch, never a pull.
-        #expect(steps.first?.arguments == ["init", "--quiet", checkout.path])
+        #expect(steps.dropFirst(2).first?.arguments == ["init", "--quiet", checkout.path])
         #expect(steps.contains { $0.arguments.contains("fetch") && $0.arguments.last == commit })
         #expect(!steps.contains { $0.arguments.contains("clone") || $0.arguments.contains("pull") })
         // Checked before anything in it runs: the check comes before the first Python step.
@@ -216,6 +221,56 @@ struct OpenMontageLinkTests {
         #expect(!steps.contains { $0.arguments == ["-m", "venv", ".venv"] })
         #expect(steps.contains { $0.arguments.last?.hasSuffix("requirements-py3.11.txt") == true })
         #expect(notes.contains { $0.contains("Remotion dependencies were left unchanged") })
+    }
+
+    /// What a fetch that failed after `git init` leaves: a repository with no commit in it.
+    /// It must not read as someone's own clone — only Link would be offered, and linking marks
+    /// a folder with nothing in it "Linked" — and Set up must fetch into it, not stop at a
+    /// check of a revision it never got.
+    @Test("a failed fetch leaves a setup to finish, not an empty checkout to link")
+    func failedFetch() throws {
+        var env = try makeEnvironment()
+        defer { cleanUp(env) }
+        env.pythons = [URL(fileURLWithPath: "/opt/homebrew/bin/python3.12")]
+        env.npm = URL(fileURLWithPath: "/usr/local/bin/npm")
+        let checkout = OpenMontageLink.checkoutURL(in: env)
+        try FileManager.default.createDirectory(
+            at: checkout.appendingPathComponent(".git/objects"), withIntermediateDirectories: true)
+        try "ref: refs/heads/main\n".write(
+            to: checkout.appendingPathComponent(".git/HEAD"), atomically: true, encoding: .utf8)
+
+        #expect(OpenMontageLink.detect(in: env) == .notInstalled)
+
+        let (steps, _) = try OpenMontageLink.plan(in: env)
+        let commit = PinnedInstall.openMontage.commit
+        #expect(steps.contains { $0.arguments.contains("fetch") && $0.arguments.last == commit })
+        #expect(steps.contains { $0.arguments.contains("checkout") && $0.arguments.last == commit })
+        #expect(steps.contains { $0.arguments == ["-m", "venv", ".venv"] })
+        #expect(steps.contains { $0.executable == env.npm }, "Remotion is this setup's to install")
+        #expect(steps.last?.arguments.last?.hasSuffix(OpenMontageLink.setupMarkerName) == true)
+    }
+
+    /// A setup that got the source but failed installing its dependencies is still this app's
+    /// unfinished setup: Set up again, not Link.
+    @Test("a setup that failed after the checkout is finished by Set up, not linked")
+    func failedAfterCheckout() throws {
+        var env = try makeEnvironment()
+        defer { cleanUp(env) }
+        env.pythons = [URL(fileURLWithPath: "/opt/homebrew/bin/python3.12")]
+        let checkout = try makeCheckout(in: env)
+        try Data().write(to: checkout.appendingPathComponent(OpenMontageLink.setupMarkerName))
+
+        #expect(OpenMontageLink.detect(in: env) == .notInstalled)
+        let (steps, _) = try OpenMontageLink.plan(in: env)
+        #expect(steps.contains { $0.arguments.contains("fetch") },
+                "a checkout this app made is brought to the reviewed commit, not only checked")
+        #expect(steps.contains { $0.arguments == ["-m", "venv", ".venv"] })
+
+        // What the last step and the provider do once everything else has succeeded.
+        try FileManager.default.removeItem(
+            at: checkout.appendingPathComponent(OpenMontageLink.setupMarkerName))
+        try OpenMontageLink.installProvider(in: env)
+        #expect(OpenMontageLink.detect(in: env) == .ready(providerVersion: "1"))
     }
 
     @Test("a Python the locks were not made for is refused before anything runs")
