@@ -25,17 +25,32 @@ public final class ChildProcessRegistry: @unchecked Sendable {
     ///
     /// The start time is what makes that safe. The kernel reissues pids freely, so a stored pid
     /// on its own is a loaded gun pointed at whatever process inherited it; the same pid with
-    /// the same executable *and* the same start second is the process we started.
+    /// the same start time, to the microsecond, is the process we started.
+    ///
+    /// The executable is recorded but deliberately not part of that identity: `exec` replaces
+    /// it and keeps the pid and the start time. Homebrew's framework `python3.x` is a stub that
+    /// execs the real interpreter inside `Python.app` a moment after launch, so `mlx_lm.server`
+    /// and the other Python engines were recorded under one path and running under another
+    /// by the time anyone checked. Matching on the path skipped all of them at quit and at
+    /// the next launch's reap.
     public struct Entry: Codable, Sendable, Equatable {
         public var pid: Int32
+        /// What the process was running when it was recorded — for the log, not for matching.
         public var executablePath: String
         /// Seconds since the epoch, as the kernel reports the process's start.
         public var startedAt: UInt64
+        /// The rest of the start time. Nil in an entry written by a build that did not record
+        /// it; the second alone still has to do there.
+        public var startedAtMicroseconds: UInt64?
 
-        public init(pid: Int32, executablePath: String, startedAt: UInt64) {
+        public init(
+            pid: Int32, executablePath: String, startedAt: UInt64,
+            startedAtMicroseconds: UInt64? = nil
+        ) {
             self.pid = pid
             self.executablePath = executablePath
             self.startedAt = startedAt
+            self.startedAtMicroseconds = startedAtMicroseconds
         }
     }
 
@@ -70,14 +85,21 @@ public final class ChildProcessRegistry: @unchecked Sendable {
         return Entry(
             pid: pid,
             executablePath: String(cString: buffer),
-            startedAt: UInt64(info.pbi_start_tvsec)
+            startedAt: UInt64(info.pbi_start_tvsec),
+            startedAtMicroseconds: UInt64(info.pbi_start_tvusec)
         )
     }
 
-    /// Whether `entry` still describes the process holding that pid right now.
+    /// Whether `entry` still describes the process holding that pid right now: the same start
+    /// time, whatever it has exec'd into since.
     public static func isStillAlive(_ entry: Entry) -> Bool {
-        guard let live = identify(entry.pid) else { return false }
-        return live.executablePath == entry.executablePath && live.startedAt == entry.startedAt
+        guard let live = identify(entry.pid), live.startedAt == entry.startedAt else {
+            return false
+        }
+        guard let recorded = entry.startedAtMicroseconds,
+              let current = live.startedAtMicroseconds
+        else { return true }
+        return recorded == current
     }
 
     // MARK: - Membership
