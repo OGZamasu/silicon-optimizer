@@ -33,6 +33,9 @@ struct SwarmExposureRetryTests {
             handshakeURL: directory.appendingPathComponent("control.json"),
             buddy: BuddyRegistry(url: directory.appendingPathComponent("buddy.json")),
             events: BuddyEventHub(),
+            media: MediaRegistry(url: nil),
+            uploadsRoot: directory.appendingPathComponent("uploads"),
+            postersRoot: directory.appendingPathComponent("posters"),
             discoverTailnetAddress: { "127.0.0.1" }
         )
         defer { Task { await server.stop() } }

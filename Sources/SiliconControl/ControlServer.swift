@@ -13,8 +13,8 @@ public actor ControlServer {
 
     private let host: any ControlHost
     private var listener: NWListener?
-    private var activeConnections = 0
-    private static let maximumConnections = 64
+    /// Who holds which of this server's sockets. See `ConnectionBudget`.
+    private var connections = ConnectionBudget()
     // Durable video waits must not occupy every socket needed to inspect or
     // control the queue. Reject overflow before the host can enqueue anything.
     static let maximumSynchronousVideos = 8
@@ -24,6 +24,9 @@ public actor ControlServer {
     private var port: Int = 0
     /// The shared swarm secret, accepted alongside the per-launch token when set.
     private var swarmToken: String?
+    /// Every connection the swarm secret is holding open right now, so that `stop()` can
+    /// end them. See there.
+    private var swarmConnections: [UUID: NWConnection] = [:]
     /// Whether the owner has asked for the swarm to reach this Mac, and a swarm token
     /// exists for it to authenticate with. Exposure without one is refused outright.
     public private(set) var swarmExposureRequested = false
@@ -64,6 +67,9 @@ public actor ControlServer {
     /// How long one SSE frame may take to leave, and how this Mac's tailnet address is
     /// found. Both are injected so the tests can drive them without a tailnet or a stall.
     private let eventWriteDeadline: Duration
+    /// How long a request may take to arrive. Injected so the tests can drive a slow upload
+    /// without taking a minute over it.
+    private let readDeadlines: ReadDeadlines
     private let discoverTailnetAddress: @Sendable () -> String?
     /// Runs `POST /load` detached from the request that asked for it, and refuses a second
     /// load rather than throwing away the first. Injected only in the sense that its
@@ -84,9 +90,9 @@ public actor ControlServer {
     /// Streams open right now. Read by the tests that prove a dead client is reaped.
     public var openEventStreams: Int { activeEventStreams }
 
-    /// Connections open right now, of `maximumConnections`. Read by the test that proves a
-    /// reader which stops reading mid-file does not keep one of them for ever.
-    public var openConnections: Int { activeConnections }
+    /// Connections open right now, on both listeners. Read by the test that proves a reader
+    /// which stops reading mid-file does not keep one of them for ever.
+    public var openConnections: Int { connections.total }
 
     /// How long one SSE frame may take to leave before the connection is given up on.
     ///
@@ -97,6 +103,55 @@ public actor ControlServer {
     /// the first frame it fails to take rather than by a backlog; if the token rate ever
     /// outruns a phone's link, coalescing belongs here, not in a longer deadline.
     public static let defaultEventWriteDeadline: Duration = .seconds(20)
+
+    /// How long a request may take to arrive.
+    ///
+    /// It used to be fifteen seconds for the whole thing, headers and body together. That
+    /// was written for JSON, and it is what the 24 MiB a phone may upload for a mesh ran
+    /// into: below about thirteen megabits a second the connection was cut part-way through,
+    /// no answer was ever written, and the phone could only say it could not reach the Mac.
+    ///
+    /// The headers keep an absolute deadline — they are a few hundred bytes any live client
+    /// sends at once. The body is held to progress instead: it may go `idle` without a byte,
+    /// and it must be done by `idle` plus its length at `minimumBytesPerSecond`. The second
+    /// rule is what the old one was for: a client that dribbles a byte just inside every
+    /// idle window cannot keep a connection slot for longer than a slow link honestly would.
+    public struct ReadDeadlines: Sendable {
+        public var headers: Duration
+        public var idle: Duration
+        public var minimumBytesPerSecond: Int
+
+        public init(headers: Duration, idle: Duration, minimumBytesPerSecond: Int) {
+            self.headers = headers
+            self.idle = idle
+            self.minimumBytesPerSecond = minimumBytesPerSecond
+        }
+
+        /// 16 KiB/s is about 130 kbit/s, well under what even a weak mobile connection
+        /// uploads at. A 24 MiB upload must be in within about 26 minutes, a 4 MiB request
+        /// within about 4½, and a pairing request within 19 seconds.
+        public static let standard = ReadDeadlines(
+            headers: .seconds(15), idle: .seconds(15), minimumBytesPerSecond: 16 * 1024
+        )
+
+        /// When a body of `length` bytes, begun at `start`, must have arrived by.
+        func ceiling(
+            forBodyOf length: Int, from start: ContinuousClock.Instant
+        ) -> ContinuousClock.Instant {
+            start + idle + .seconds(Double(length) / Double(max(1, minimumBytesPerSecond)))
+        }
+
+        /// The watchdog's deadline, moved by the reader as bytes arrive.
+        final class Due: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: ContinuousClock.Instant
+
+            init(_ value: ContinuousClock.Instant) { self.value = value }
+
+            var instant: ContinuousClock.Instant { lock.withLock { value } }
+            func move(to instant: ContinuousClock.Instant) { lock.withLock { value = instant } }
+        }
+    }
 
     /// How long `POST /load` holds the connection before answering with the load still in
     /// flight.
@@ -176,6 +231,7 @@ public actor ControlServer {
         postersRoot: URL = BuddyPosters.root,
         uploadSweepInterval: TimeInterval = ControlServer.defaultUploadSweepInterval,
         eventWriteDeadline: Duration = ControlServer.defaultEventWriteDeadline,
+        readDeadlines: ReadDeadlines = .standard,
         loadPatience: Duration = ControlServer.defaultLoadPatience,
         loadClock: @escaping @Sendable () -> Date = { Date() },
         discoverTailnetAddress: @escaping @Sendable () -> String? = {
@@ -198,6 +254,7 @@ public actor ControlServer {
             uploadsRoot: uploadsRoot, postersRoot: postersRoot
         )
         self.eventWriteDeadline = eventWriteDeadline
+        self.readDeadlines = readDeadlines
         self.loadPatience = loadPatience
         self.loads = LoadDispatcher(now: loadClock)
         self.discoverTailnetAddress = discoverTailnetAddress
@@ -274,6 +331,19 @@ public actor ControlServer {
         tailnetOwners = []
         tailnetAddress = nil
         closeTailnetListener()
+        // Cancelling a listener leaves the connections it already accepted open, and the
+        // app stops this server precisely when the swarm is turned off or its secret
+        // changes. A node's `/events` stream or chat stream would otherwise go on being
+        // served — status frames, heartbeats, tokens — by a server that no longer honours
+        // the secret it was opened with. The secret goes with the server, and so does
+        // everything it admitted.
+        //
+        // Only the swarm's. A paired device's streams are ended by the registry when it is
+        // revoked or suspended, and still hold a valid token here; the Mac's own tools may
+        // be waiting on a render that a settings change should not throw away.
+        swarmToken = nil
+        for connection in swarmConnections.values { connection.cancel() }
+        swarmConnections.removeAll()
         try? FileManager.default.removeItem(at: handshakeURL)
     }
 
@@ -584,34 +654,89 @@ public actor ControlServer {
     /// with its token on it, would otherwise authenticate through any local process — and
     /// the shared swarm secret is only a credential out there while the owner has actually
     /// asked for the swarm to reach this Mac.
-    enum Origin: Sendable, Equatable {
+    enum Origin: Sendable, Hashable {
         case primary
         case tailnet
     }
 
+    /// How many of this server's sockets one caller may hold.
+    ///
+    /// A slot is taken the moment a connection arrives, before a byte of it has been read,
+    /// let alone its bearer checked — there is nothing else to count by yet. One budget for
+    /// both listeners meant any host on the tailnet could open sixty-four idle connections
+    /// and leave the MCP bridge and every phone with none, over and over, fifteen seconds
+    /// at a time. So loopback has a budget of its own that nothing out there can spend, and
+    /// on the tailnet no single address may hold more than a quarter of that listener's.
+    struct ConnectionBudget: Sendable {
+        /// Each listener's own. Loopback's is the ceiling it has always had.
+        static let perListener = 64
+        /// One tailnet address's share: well past a phone's stream, chat and a few media
+        /// ranges at once, or a node's synchronous renders, and small enough that three
+        /// more hosts still have most of the listener.
+        static let perTailnetSource = 16
+
+        private let listenerLimit: Int
+        private let sourceLimit: Int
+        private var byOrigin: [Origin: Int] = [:]
+        private var bySource: [String: Int] = [:]
+
+        /// The control server's numbers by default. The swarm's pairing listener, which
+        /// is smaller and entirely unauthenticated, asks for its own.
+        init(perListener: Int = Self.perListener, perTailnetSource: Int = Self.perTailnetSource) {
+            listenerLimit = perListener
+            sourceLimit = perTailnetSource
+        }
+
+        var total: Int { byOrigin.values.reduce(0, +) }
+
+        /// Takes a slot for `source` on `origin`'s listener, or answers false.
+        mutating func admit(from origin: Origin, source: String) -> Bool {
+            guard byOrigin[origin, default: 0] < listenerLimit else { return false }
+            if origin == .tailnet {
+                guard bySource[source, default: 0] < sourceLimit else { return false }
+                bySource[source, default: 0] += 1
+            }
+            byOrigin[origin, default: 0] += 1
+            return true
+        }
+
+        mutating func release(from origin: Origin, source: String) {
+            byOrigin[origin] = max(0, byOrigin[origin, default: 0] - 1)
+            guard origin == .tailnet else { return }
+            let left = bySource[source, default: 0] - 1
+            bySource[source] = left > 0 ? left : nil
+        }
+    }
+
     private func accept(_ connection: NWConnection, from origin: Origin) {
-        guard activeConnections < Self.maximumConnections else {
+        // Read before `start`: an inbound connection knows who dialled it from the outset.
+        let source = Self.remoteAddress(of: connection)
+        guard connections.admit(from: origin, source: source) else {
             connection.cancel()
             return
         }
-        activeConnections += 1
         connection.start(queue: .global(qos: .userInitiated))
-        Task { await serve(connection, from: origin) }
+        Task { await serve(connection, from: origin, source: source) }
     }
 
-    private func serve(_ connection: NWConnection, from origin: Origin) async {
+    private func serve(_ connection: NWConnection, from origin: Origin, source: String) async {
         defer {
             connection.cancel()
-            activeConnections -= 1
+            connections.release(from: origin, source: source)
         }
         do {
             let request: HTTPRequest
             do {
-                request = try await HTTPRequest.read(from: connection) { method, path, headers in
-                    await self.bodyLimit(
+                request = try await HTTPRequest.read(
+                    from: connection, deadlines: readDeadlines
+                ) { method, path, headers in
+                    try await self.bodyLimit(
                         forMethod: method, path: path, headers: headers, from: origin
                     )
                 }
+            } catch HTTPRequest.ParseError.unauthorized {
+                await refuse(unauthorized, on: connection)
+                return
             } catch HTTPRequest.ParseError.bodyTooLarge(let limit) {
                 await refuse(.error(
                     413, "That request body is larger than this device may send (\(limit) bytes)."
@@ -625,6 +750,17 @@ public actor ControlServer {
             }
 
             let caller = await identify(request, from: origin)
+            // Held where `stop()` can end it. A stop that landed while this request was being
+            // identified has already ended everything it could see, and this one was not
+            // there to be seen — so it is refused here instead.
+            var swarmTicket: UUID?
+            if caller == .swarm {
+                guard swarmToken != nil else { return }
+                let ticket = UUID()
+                swarmConnections[ticket] = connection
+                swarmTicket = ticket
+            }
+            defer { if let swarmTicket { swarmConnections[swarmTicket] = nil } }
             // Everything this request sets off runs with the paid lanes shut when a swarm
             // node asked — streams and the synchronous render's task included, because both
             // are started inside this scope. See `PaidLanes`.
@@ -827,6 +963,20 @@ public actor ControlServer {
         return status
     }
 
+    /// Why a chat's images are refused, or nil. Asked by all three chat routes, before the
+    /// host sees the request.
+    ///
+    /// Every caller sends pictures inline — see `ControlAPI.ChatImages`; an address is what
+    /// the runtime would go and fetch. Everyone but this Mac's own token is also held to what
+    /// a paired phone may attach, on `POST /chat` as on the streams: a swarm node's body
+    /// ceiling is sixteen megabytes. The local token keeps only its body ceiling, because
+    /// the MCP bridge attaches files of up to ten megabytes, past a phone's per-image cap.
+    static func chatImageRefusal(_ images: [String], as caller: Caller?) -> String? {
+        if let refusal = ControlAPI.ChatImages.refusal(forImages: images) { return refusal }
+        guard caller != .control else { return nil }
+        return BuddyLimits.refusal(forImages: images)
+    }
+
     /// Why a task in the query string is refused. Exported so the contract fixture and the
     /// server cannot drift into promising different sentences.
     public static let taskBelongsInAPost =
@@ -961,7 +1111,7 @@ public actor ControlServer {
     /// time, and a route that does not write files has no use for a larger one.
     private func bodyLimit(
         forMethod method: String, path: String, headers: [String: String], from origin: Origin
-    ) async -> Int {
+    ) async throws -> Int {
         guard origin == .tailnet else { return HTTPRequest.maximumBody }
         guard let bearer = HTTPRequest.bearerToken(in: headers) else {
             // No bearer on the tailnet means `/buddy/pair`, the one route with nothing to
@@ -975,14 +1125,25 @@ public actor ControlServer {
            honoursSwarmToken(from: origin) {
             return HTTPRequest.maximumBody
         }
-        // The raised ceiling is a property of a *caller*, not of a path. Asked here rather
-        // than after the body, and asked of the registry rather than of the request: an
-        // unknown bearer, a revoked device and a chat-only one all get the ordinary 4 MiB,
-        // so pointing 24 MiB at this route with a guessed token buys nothing. It costs one
-        // token lookup on one route.
-        if method == "POST", path == "/uploads",
-           let device = await buddy.authorize(bearer: bearer),
-           BuddyScope(rawValue: device.scope) == .full {
+        // Asked of the registry, before a byte of body is read: what a bearer nobody issued
+        // may send is what no bearer may. A body is given as long as it keeps arriving at a
+        // slow link's pace (`ReadDeadlines`), so four megabytes from anybody who made up a
+        // token was a connection slot held for four minutes.
+        guard let device = await buddy.authorize(bearer: bearer) else {
+            // An unknown token, a revoked device, the control token out here: the route
+            // would answer 401 whatever the body said. One too big for what no bearer may
+            // send is answered that now, unread — the same 401, which is what tells a
+            // revoked phone to pair again. A small one is read and routed as it always was,
+            // because `/health` and `/buddy/pair` answer whoever asks.
+            let declared = headers["content-length"].flatMap { Int($0) } ?? 0
+            guard declared <= BuddyLimits.unauthenticatedBodyBytes else {
+                throw HTTPRequest.ParseError.unauthorized
+            }
+            return BuddyLimits.unauthenticatedBodyBytes
+        }
+        // The raised ceiling is a property of a *caller*, not of a path: a chat-only device
+        // gets the ordinary 4 MiB here too.
+        if method == "POST", path == "/uploads", BuddyScope(rawValue: device.scope) == .full {
             return BuddyUploads.maximumBytes
         }
         return BuddyLimits.requestBodyBytes
@@ -1032,6 +1193,9 @@ public actor ControlServer {
             guard let chat = try? request.decode(ControlAPI.ChatRequest.self) else {
                 return .refused(.error(400, "Could not read the chat request."))
             }
+            if let refusal = Self.chatImageRefusal(chat.messages.flatMap(\.images), as: caller) {
+                return .refused(.error(400, refusal))
+            }
             body = EventSource { writer in
                 await Self.pumpChat(writer, shown: shown) { try await host.chatStream(chat) }
             }
@@ -1040,6 +1204,9 @@ public actor ControlServer {
             guard caller != nil else { return .refused(unauthorized) }
             guard let message = try? request.decode(ControlAPI.NewMessageRequest.self) else {
                 return .refused(.error(400, "Could not read the message."))
+            }
+            if let refusal = Self.chatImageRefusal(message.images, as: caller) {
+                return .refused(.error(400, refusal))
             }
             body = EventSource { writer in
                 await Self.pumpChat(writer, shown: shown) {
@@ -1157,6 +1324,17 @@ public actor ControlServer {
         stillAuthorized: @escaping @Sendable () async -> Bool = { true }
     ) async {
         guard (try? await writer.open()) != nil else { return }
+        // The first heartbeat goes out here, before there is a subscription for anything to
+        // arrive on. It is what tells a client the stream is up, and clients read it as the
+        // first frame. Started beside the forwarder, it raced whatever the hub already held
+        // — a host posts its current state the moment it is asked to watch — and lost
+        // whenever the scheduler ran the forwarder first.
+        let heartbeat: @Sendable () -> ControlAPI.HeartbeatEvent = {
+            ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
+        }
+        guard await stillAuthorized(),
+              (try? await writer.send(.heartbeat(heartbeat()))) != nil
+        else { return }
         let subscription = await hub.subscribe(as: audience)
         // Strictly after subscribing: a host that starts watching its own state and finds
         // no subscribers would stop again before this reader ever registered.
@@ -1173,12 +1351,10 @@ public actor ControlServer {
                 }
             }
             group.addTask {
-                var beat = ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
                 while !Task.isCancelled {
-                    guard await stillAuthorized() else { return }
-                    guard (try? await writer.send(.heartbeat(beat))) != nil else { return }
                     guard (try? await Task.sleep(for: heartbeatInterval)) != nil else { return }
-                    beat = ControlAPI.HeartbeatEvent(at: ControlAPI.timestamp(Date()))
+                    guard await stillAuthorized() else { return }
+                    guard (try? await writer.send(.heartbeat(heartbeat()))) != nil else { return }
                 }
             }
             // Whichever half ends first ends the response: a broken write means the socket
@@ -1614,7 +1790,11 @@ public actor ControlServer {
             case ("POST", "/benchmark"):
                 return try .encode(await host.benchmark())
             case ("POST", "/chat"):
-                return try .encode(await host.chat(try request.decode(ControlAPI.ChatRequest.self)))
+                let chat = try request.decode(ControlAPI.ChatRequest.self)
+                if let refusal = Self.chatImageRefusal(chat.messages.flatMap(\.images), as: caller) {
+                    return .error(400, refusal)
+                }
+                return try .encode(await host.chat(chat))
             case ("POST", "/decide"), ("POST", "/v1/systemone"):
                 // The second path is TypeSafe's own, so a client written for Jev can be
                 // pointed here with only its base URL changed.
@@ -2509,6 +2689,9 @@ struct HTTPRequest {
         /// A framing this server does not read — chunked, above all. Answered rather than
         /// dropped, because a client that gets nothing back cannot tell that from a crash.
         case lengthRequired
+        /// The headers already say the caller is nobody, and the body is more than nobody
+        /// may send. See `ControlServer.bodyLimit`.
+        case unauthorized
 
         var errorDescription: String? {
             switch self {
@@ -2516,6 +2699,7 @@ struct HTTPRequest {
             case .closed: "Connection closed."
             case .bodyTooLarge(let limit): "Request body over \(limit) bytes."
             case .lengthRequired: "A Content-Length is required."
+            case .unauthorized: "Invalid or missing control token."
             }
         }
     }
@@ -2532,18 +2716,14 @@ struct HTTPRequest {
     /// one, least of all while the refusal it produces still quotes the larger figure.
     static func read(
         from connection: NWConnection,
-        maximumBody limit: @Sendable (String, String, [String: String]) async -> Int
+        deadlines: ControlServer.ReadDeadlines = .standard,
+        maximumBody limit: @Sendable (String, String, [String: String]) async throws -> Int
             = { _, _, _ in maximumBody }
     ) async throws -> HTTPRequest {
-        // Absolute request-header/body deadline. Canceling the connection unblocks any
-        // pending Network.framework receive, so a byte-at-a-time client cannot retain a
-        // listener slot forever.
-        let deadline = Task<Void, Never> {
-            do { try await Task.sleep(for: .seconds(15)) } catch { return }
-            guard !Task.isCancelled else { return }
-            connection.cancel()
-        }
-        defer { deadline.cancel() }
+        // The deadline moves on as the body arrives. See `ControlServer.ReadDeadlines`.
+        let due = ControlServer.ReadDeadlines.Due(ContinuousClock.now + deadlines.headers)
+        var watchdog = watch(connection, until: due)
+        defer { watchdog.cancel() }
 
         var buffer = Data()
         var headerEnd: Range<Data.Index>?
@@ -2578,7 +2758,7 @@ struct HTTPRequest {
         // The path without its query, which is what a route is: `/uploads?x=1` must get the
         // upload ceiling and `/uploads/../load` must not.
         let requestPath = URLComponents(string: "http://localhost\(target)")?.path ?? target
-        let allowed = await limit(method, requestPath, headers)
+        let allowed = try await limit(method, requestPath, headers)
         if let lengthValue = headers["content-length"] {
             guard let length = Int(lengthValue), length >= 0, body.count <= length else {
                 throw ParseError.malformed
@@ -2586,8 +2766,16 @@ struct HTTPRequest {
             // Refused on the declared length, before a byte of it is read: the point of a
             // cap is not to receive the thing and then disapprove of it.
             guard length <= allowed else { throw ParseError.bodyTooLarge(allowed) }
+            let ceiling = deadlines.ceiling(forBodyOf: length, from: ContinuousClock.now)
+            due.move(to: min(ContinuousClock.now + deadlines.idle, ceiling))
+            // The body's first deadline can fall before what was left of the headers', and
+            // a watchdog asleep until then would not see it. From here on it only moves
+            // later, which the one watching notices when it wakes.
+            watchdog.cancel()
+            watchdog = watch(connection, until: due)
             while body.count < length {
                 body.append(try await receive(from: connection))
+                due.move(to: min(ContinuousClock.now + deadlines.idle, ceiling))
                 if body.count > allowed { throw ParseError.bodyTooLarge(allowed) }
             }
         } else if !body.isEmpty {
@@ -2609,6 +2797,23 @@ struct HTTPRequest {
             headers: headers,
             body: Data(body)
         )
+    }
+
+    /// Cancels `connection` once `due` has passed — which is what unblocks a receive that
+    /// is still waiting — and sleeps on whenever it wakes to find the deadline moved later.
+    private static func watch(
+        _ connection: NWConnection, until due: ControlServer.ReadDeadlines.Due
+    ) -> Task<Void, Never> {
+        Task {
+            while !Task.isCancelled {
+                let deadline = due.instant
+                guard ContinuousClock.now < deadline else {
+                    connection.cancel()
+                    return
+                }
+                try? await Task.sleep(until: deadline, clock: .continuous)
+            }
+        }
     }
 
     static func receive(from connection: NWConnection) async throws -> Data {
