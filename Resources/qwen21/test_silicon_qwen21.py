@@ -301,6 +301,23 @@ class ScheduleTests(unittest.TestCase):
                 runner.parse_sigmas(text, steps)
 
 
+class ArgumentTests(unittest.TestCase):
+    BASE = ["--model-path", "/s", "--steps", "40", "--prompt", "p", "--output", "/o.png"]
+    ADAPTER = ["--adapter", "/a", "--adapter-sha256", "0" * 64, "--adapter-scale", "2.0"]
+
+    def check(self, extra):
+        runner.check_arguments(runner.build_parser().parse_args(self.BASE + extra))
+
+    def test_the_base_needs_no_adapter_and_no_schedule(self):
+        self.check([])
+
+    def test_an_adapter_comes_whole_and_with_its_schedule(self):
+        self.check(self.ADAPTER + ["--sigmas", "1.0,0.5"])
+        for extra in (self.ADAPTER, self.ADAPTER[:2], self.ADAPTER[2:] + ["--sigmas", "1.0"]):
+            with self.subTest(extra=extra), self.assertRaises(runner.AdapterError):
+                self.check(extra)
+
+
 class FileTests(unittest.TestCase):
     def test_the_digest_is_the_files(self):
         with Scratch() as directory:

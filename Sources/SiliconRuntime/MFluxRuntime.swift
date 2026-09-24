@@ -25,8 +25,9 @@ public actor MFluxRuntime: ImageRuntime {
     private let hub: URL
     /// The reviewed manifests the adapter files are checked against.
     private let locks: URL
-    /// `silicon_qwen21.py`, which runs an adapter entry; nil when the app carries none.
-    private let adapterRunner: URL?
+    /// `silicon_qwen21.py`, which runs both Qwen-Image 2.1 entries; nil when the app carries
+    /// none.
+    private let qwenRunner: URL?
 
     /// - Parameter huggingFaceToken: Passed to mflux as `HF_TOKEN` so gated repositories can be
     ///   fetched. mflux downloads weights itself rather than going through this app's
@@ -41,20 +42,20 @@ public actor MFluxRuntime: ImageRuntime {
         installation: RuntimeInstallation? = nil, huggingFaceToken: String? = nil,
         hubCache: URL? = nil, hub: URL? = nil,
         locks: URL = PinnedInstall.defaultLockRoot(),
-        adapterRunner: URL? = MFluxRuntime.adapterRunnerScript()
+        qwenRunner: URL? = MFluxRuntime.qwenRunnerScript()
     ) {
         self.installation = installation
         self.huggingFaceToken = huggingFaceToken
         self.hubCache = hubCache
         self.hub = hub ?? HuggingFaceHub.directory(home: hubCache)
         self.locks = locks
-        self.adapterRunner = adapterRunner
+        self.qwenRunner = qwenRunner
     }
 
-    /// The adapter runner shipped with the app: in the bundle's Resources, or — for
+    /// The Qwen-Image 2.1 runner shipped with the app: in the bundle's Resources, or — for
     /// `swift run` and the tests — the repository's. A signed app never falls back to a
     /// checkout, for the same reason `PinnedInstall.defaultLockRoot()` does not.
-    public nonisolated static func adapterRunnerScript(
+    public nonisolated static func qwenRunnerScript(
         bundle: URL = Bundle.main.bundleURL
     ) -> URL? {
         let candidate: URL
@@ -267,8 +268,9 @@ public actor MFluxRuntime: ImageRuntime {
     }
 
     /// What a pinned or adapter entry needs before its process starts: the snapshot its
-    /// weights are read from, and for an adapter the file — fetched now, checked against its
-    /// reviewed digest, if this is the first time its schedule was chosen.
+    /// weights are read from, the runner that reads them, and for an adapter the file —
+    /// fetched now, checked against its reviewed digest, if this is the first time its
+    /// schedule was chosen.
     ///
     /// A pinned entry is never left to fetch its own weights mid-render: MFLUX would take the
     /// repository's `main`, not the reviewed commit, so a missing snapshot is an install to do,
@@ -285,13 +287,18 @@ public actor MFluxRuntime: ImageRuntime {
             )
         }
         builder.weightsSnapshot = snapshot
+        // Both Qwen-Image 2.1 entries go through the runner (`silicon_qwen21.py` says why).
+        if entry.weightsRepository == DiffusionCatalog.qwenImage21.repository {
+            guard let qwenRunner else {
+                throw ImageRuntimeError.generationFailed(
+                    "The Qwen-Image 2.1 runner is missing from the app. Reinstalling the app "
+                    + "puts it back."
+                )
+            }
+            builder.runner = qwenRunner
+        }
 
         guard let adapter = entry.adapter else { return }
-        guard let runner = adapterRunner else {
-            throw ImageRuntimeError.generationFailed(
-                "The adapter runner is missing from the app. Reinstalling the app puts it back."
-            )
-        }
         let steps = builder.request.configuration.steps
         guard let variant = adapter.variant(steps: steps) else {
             throw ImageRuntimeError.generationFailed(
@@ -305,7 +312,7 @@ public actor MFluxRuntime: ImageRuntime {
             try await files.prepare(variant, of: adapter)
         }
         builder.adapterRun = .init(
-            runner: runner, file: files.file(variant, of: adapter), sha256: sha256,
+            file: files.file(variant, of: adapter), sha256: sha256,
             scale: adapter.scale, variant: variant
         )
     }
@@ -405,22 +412,21 @@ public struct MFluxArguments: Sendable {
     /// The pinned revision's snapshot, for an entry with one: passed as the model, which
     /// mflux reads as a local path, so what loads is exactly that commit's files.
     public var weightsSnapshot: URL?
-    /// Set for an adapter entry: the run goes through `silicon_qwen21.py` instead of an
-    /// mflux entry point.
+    /// Set for the Qwen-Image 2.1 entries: the run goes through `silicon_qwen21.py` on the
+    /// environment's own Python instead of an mflux entry point.
+    public var runner: URL?
+    /// The adapter the runner merges in, for an adapter entry.
     public var adapterRun: AdapterRun?
 
     public struct AdapterRun: Sendable, Equatable {
-        public var runner: URL
         public var file: URL
         public var sha256: String
         public var scale: Double
         public var variant: DiffusionAdapter.Variant
 
         public init(
-            runner: URL, file: URL, sha256: String, scale: Double,
-            variant: DiffusionAdapter.Variant
+            file: URL, sha256: String, scale: Double, variant: DiffusionAdapter.Variant
         ) {
-            self.runner = runner
             self.file = file
             self.sha256 = sha256
             self.scale = scale
@@ -428,18 +434,19 @@ public struct MFluxArguments: Sendable {
         }
     }
 
-    /// What the adapter runner starts its stage lines with.
+    /// What the runner starts its stage lines with.
     public static let stagePrefix = "silicon-stage: "
-    /// The adapter runner runs on the MFLUX environment's own interpreter.
-    public static let adapterInterpreter = "python3"
+    /// The runner runs on the MFLUX environment's own interpreter.
+    public static let runnerInterpreter = "python3"
 
     public init(
-        request: ImageRequest, model: InstalledModel,
-        weightsSnapshot: URL? = nil, adapterRun: AdapterRun? = nil
+        request: ImageRequest, model: InstalledModel, weightsSnapshot: URL? = nil,
+        runner: URL? = nil, adapterRun: AdapterRun? = nil
     ) {
         self.request = request
         self.model = model
         self.weightsSnapshot = weightsSnapshot
+        self.runner = runner
         self.adapterRun = adapterRun
     }
 
@@ -450,17 +457,17 @@ public struct MFluxArguments: Sendable {
     /// `mflux-generate` is rejected outright, so the binary is part of the model's identity
     /// rather than a detail of invocation.
     public var executableName: String {
-        adapterRun == nil ? Self.executableName(for: model.catalogID ?? "") : Self.adapterInterpreter
+        runner == nil ? Self.executableName(for: model.catalogID ?? "") : Self.runnerInterpreter
     }
 
     public static func executableName(for catalogID: String) -> String {
         switch catalogID {
         case "flux2-klein-4b", "flux2-klein-9b": "mflux-generate-flux2"
         case "qwen-image": "mflux-generate-qwen"
-        case "qwen-image-2.1": MFluxRuntime.qwenImage21EntryPoint
-        // No entry point takes an adapter for 2.1, so the MFLUX environment's own Python runs
-        // the app's runner, which builds mflux's QwenImage21 itself.
-        case "qwen-image-2.1-pruna": adapterInterpreter
+        // No entry point takes an adapter for 2.1, and the one that runs the base keeps the
+        // text encoder alive into the first step, so both run the app's runner, which builds
+        // mflux's QwenImage21 itself, on the MFLUX environment's own Python.
+        case "qwen-image-2.1", "qwen-image-2.1-pruna": runnerInterpreter
         case "z-image-turbo": "mflux-generate-z-image-turbo"
         case "z-image": "mflux-generate-z-image"
         case "ernie-image-turbo": "mflux-generate-ernie-image-turbo"
@@ -472,7 +479,7 @@ public struct MFluxArguments: Sendable {
     }
 
     public func build() -> [String] {
-        if let adapterRun { return adapterArguments(adapterRun) }
+        if let runner { return runnerArguments(runner) }
         let configuration = request.configuration
         var arguments: [String] = [
             "--model", weightsSnapshot?.path ?? model.catalogID.flatMap(Self.mfluxAlias) ?? model.name,
@@ -514,20 +521,24 @@ public struct MFluxArguments: Sendable {
         return arguments
     }
 
-    /// The adapter runner's command line: the base's pinned snapshot, the adapter file with the
-    /// digest and scale it must match, and the schedule it was trained for — spelled so Python
-    /// reads back the same doubles. No guidance and no negative prompt, ever: the adapters
-    /// are distilled for a single conditional pass.
-    func adapterArguments(_ run: AdapterRun) -> [String] {
+    /// The runner's command line: the pinned snapshot and, for an adapter, the file with the
+    /// digest and scale it must match and the schedule it was trained for — spelled so Python
+    /// reads back the same doubles. Without an adapter it samples on mflux's own schedule for
+    /// the model. No guidance and no negative prompt, ever: 2.1 samples without CFG by default
+    /// and the adapters are distilled for a single conditional pass.
+    func runnerArguments(_ runner: URL) -> [String] {
         let configuration = request.configuration
-        var arguments: [String] = [
-            run.runner.path,
-            "--model-path", weightsSnapshot?.path ?? "",
-            "--adapter", run.file.path,
-            "--adapter-sha256", run.sha256,
-            "--adapter-scale", String(run.scale),
-            "--sigmas", run.variant.sigmas.map { String($0) }.joined(separator: ","),
-            "--steps", String(run.variant.steps),
+        var arguments: [String] = [runner.path, "--model-path", weightsSnapshot?.path ?? ""]
+        if let run = adapterRun {
+            arguments += [
+                "--adapter", run.file.path,
+                "--adapter-sha256", run.sha256,
+                "--adapter-scale", String(run.scale),
+                "--sigmas", run.variant.sigmas.map { String($0) }.joined(separator: ","),
+            ]
+        }
+        arguments += [
+            "--steps", String(adapterRun?.variant.steps ?? configuration.steps),
             "--prompt", request.prompt,
             "--width", String(configuration.width),
             "--height", String(configuration.height),

@@ -52,13 +52,12 @@ struct QwenImage21RunnerTests {
         let snapshot = URL(fileURLWithPath: "/hub/models--Qwen--Qwen-Image-2.1/snapshots/790c926")
         let variant = Self.adapter.defaultVariant
         let run = MFluxArguments.AdapterRun(
-            runner: URL(fileURLWithPath: "/app/qwen21/silicon_qwen21.py"),
             file: URL(fileURLWithPath: "/hub/adapter/p_qwen_image_2.1_8step_v0.1.safetensors"),
             sha256: String(repeating: "ab", count: 32), scale: Self.adapter.scale, variant: variant
         )
         let builder = MFluxArguments(
-            request: request(steps: 8), model: carrier(Self.pruna),
-            weightsSnapshot: snapshot, adapterRun: run
+            request: request(steps: 8), model: carrier(Self.pruna), weightsSnapshot: snapshot,
+            runner: URL(fileURLWithPath: "/app/qwen21/silicon_qwen21.py"), adapterRun: run
         )
         #expect(builder.executableName == "python3")
         let arguments = builder.build()
@@ -82,65 +81,83 @@ struct QwenImage21RunnerTests {
     @Test func theFiveStepChoiceCarriesItsOwnSchedule() throws {
         let variant = try #require(Self.adapter.variant(steps: 5))
         let run = MFluxArguments.AdapterRun(
-            runner: URL(fileURLWithPath: "/r.py"), file: URL(fileURLWithPath: "/a"),
-            sha256: "00", scale: 2.0, variant: variant
+            file: URL(fileURLWithPath: "/a"), sha256: "00", scale: 2.0, variant: variant
         )
         let arguments = MFluxArguments(
             request: request(steps: 5), model: carrier(Self.pruna),
-            weightsSnapshot: URL(fileURLWithPath: "/s"), adapterRun: run
+            weightsSnapshot: URL(fileURLWithPath: "/s"), runner: URL(fileURLWithPath: "/r.py"),
+            adapterRun: run
         ).build()
         #expect(value(after: "--steps", in: arguments) == "5")
         #expect(value(after: "--sigmas", in: arguments)?.split(separator: ",").compactMap { Double($0) }
                 == [1.0, 0.94, 6.0 / 7.0, 2.0 / 3.0, 0.4])
     }
 
-    /// The base runs through MFLUX's own entry point, from its pinned snapshot.
-    @Test func theBaseRunsFromItsPinnedSnapshot() {
+    /// The base goes through the same runner, from its pinned snapshot, with no adapter and
+    /// no schedule of its own — mflux's for the model, as its entry point would use.
+    @Test func theBaseRunsFromItsPinnedSnapshotOnMFLUXsSchedule() {
         let snapshot = URL(fileURLWithPath: "/hub/models--Qwen--Qwen-Image-2.1/snapshots/790c926")
-        var plain = request(steps: 40)
-        plain.guidance = nil
-        let builder = MFluxArguments(request: plain, model: carrier(Self.base), weightsSnapshot: snapshot)
-        #expect(builder.executableName == "mflux-generate-qwen-2.1")
+        let builder = MFluxArguments(
+            request: request(steps: 40), model: carrier(Self.base), weightsSnapshot: snapshot,
+            runner: URL(fileURLWithPath: "/app/qwen21/silicon_qwen21.py")
+        )
+        #expect(builder.executableName == "python3")
         let arguments = builder.build()
-        #expect(value(after: "--model", in: arguments) == snapshot.path)
+        #expect(arguments.first == "/app/qwen21/silicon_qwen21.py")
+        #expect(value(after: "--model-path", in: arguments) == snapshot.path)
         #expect(value(after: "--steps", in: arguments) == "40")
-        #expect(!arguments.contains("--guidance"), "mflux's default for 2.1 is guidance 1.0")
+        for flag in ["--adapter", "--adapter-sha256", "--adapter-scale", "--sigmas", "--guidance", "--negative-prompt"] {
+            #expect(!arguments.contains(flag), "\(flag)")
+        }
+        #expect(MFluxArguments.executableName(for: Self.base.id) == "python3")
     }
 
     /// The runner's parser accepts exactly what the app builds, and reads the sigmas back as
     /// the same doubles — the contract between the two languages, checked in both.
     @Test func theRunnerAcceptsTheAppsCommandLine() throws {
-        for variant in Self.adapter.variants {
-            let run = MFluxArguments.AdapterRun(
-                runner: Self.runnerDirectory.appendingPathComponent("silicon_qwen21.py"),
-                file: URL(fileURLWithPath: "/a/adapter.safetensors"),
-                sha256: String(repeating: "cd", count: 32), scale: 2.0, variant: variant
-            )
-            var withImage = request(steps: variant.steps)
+        let variants: [DiffusionAdapter.Variant?] = Self.adapter.variants + [nil]
+        for variant in variants {
+            let run = variant.map {
+                MFluxArguments.AdapterRun(
+                    file: URL(fileURLWithPath: "/a/adapter.safetensors"),
+                    sha256: String(repeating: "cd", count: 32), scale: 2.0, variant: $0
+                )
+            }
+            let steps = variant?.steps ?? 40
+            var withImage = request(steps: steps)
             withImage.configuration.initImage = URL(fileURLWithPath: "/tmp/base.png")
             withImage.configuration.initImageInfluence = 0.6
             withImage.configuration.lowRAM = true
             let arguments = MFluxArguments(
-                request: withImage, model: carrier(Self.pruna),
-                weightsSnapshot: URL(fileURLWithPath: "/s"), adapterRun: run
+                request: withImage, model: carrier(variant == nil ? Self.base : Self.pruna),
+                weightsSnapshot: URL(fileURLWithPath: "/s"),
+                runner: Self.runnerDirectory.appendingPathComponent("silicon_qwen21.py"),
+                adapterRun: run
             ).build()
             let script = """
                 import json, sys
                 sys.path.insert(0, \(Self.runnerDirectory.path.debugDescription))
                 import silicon_qwen21 as r
                 a = r.build_parser().parse_args(sys.argv[1:])
-                print(json.dumps({"sigmas": [repr(s) for s in r.parse_sigmas(a.sigmas, a.steps)],
-                                  "steps": a.steps, "scale": a.adapter_scale, "quantize": a.quantize,
-                                  "image": a.image, "low_ram": a.low_ram, "prompt": a.prompt}))
+                r.check_arguments(a)
+                sigmas = r.parse_sigmas(a.sigmas, a.steps) if a.sigmas else None
+                print(json.dumps({"sigmas": [repr(s) for s in sigmas] if sigmas else None,
+                                  "adapter": a.adapter, "steps": a.steps, "scale": a.adapter_scale,
+                                  "quantize": a.quantize, "image": a.image, "low_ram": a.low_ram,
+                                  "prompt": a.prompt}))
                 """
             let (status, output) = try Self.python(["-c", script] + arguments.dropFirst())
             #expect(status == 0, "\(output)")
             let parsed = try #require(
                 try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
             )
-            #expect(parsed["steps"] as? Int == variant.steps)
-            #expect((parsed["sigmas"] as? [String])?.compactMap(Double.init) == variant.sigmas)
-            #expect(parsed["scale"] as? Double == 2.0)
+            #expect(parsed["steps"] as? Int == steps)
+            if let variant {
+                #expect((parsed["sigmas"] as? [String])?.compactMap(Double.init) == variant.sigmas)
+                #expect(parsed["scale"] as? Double == 2.0)
+            } else {
+                #expect(parsed["sigmas"] is NSNull && parsed["adapter"] is NSNull)
+            }
             #expect(parsed["quantize"] as? Int == 8)
             #expect(parsed["image"] as? [String] == ["/tmp/base.png", "0.6"])
             #expect(parsed["low_ram"] as? Bool == true)
@@ -276,7 +293,7 @@ struct QwenImage21RunnerTests {
         }
 
         func runtime() -> MFluxRuntime {
-            MFluxRuntime(installation: installation, hub: hub, locks: locks, adapterRunner: runner)
+            MFluxRuntime(installation: installation, hub: hub, locks: locks, qwenRunner: runner)
         }
 
         func clean() { try? FileManager.default.removeItem(at: root) }
@@ -317,6 +334,27 @@ struct QwenImage21RunnerTests {
         #expect(value(after: "--model-path", in: argv)?.hasSuffix("snapshots/\(DiffusionCatalog.qwenImage21Revision)") == true)
         #expect(value(after: "--steps", in: argv) == "8")
         #expect(value(after: "--quantize", in: argv) == "4")
+    }
+
+    /// The base through the same stand-in: the runner, its snapshot, no adapter, its 40 steps.
+    @Test func aBaseRenderRunsTheRunnerWithoutAnAdapter() async throws {
+        let standIn = try StandIn()
+        defer { standIn.clean() }
+        try standIn.placeBase()
+        let output = standIn.root.appendingPathComponent("base.png")
+        let asked = ImageRequest(
+            prompt: "a lighthouse", configuration: ImageConfiguration(steps: 40, quantization: .mlx8),
+            seed: 7, output: output
+        )
+        var finished: ImageResult?
+        for try await event in try await standIn.runtime().generate(asked, model: carrier(Self.base)) {
+            if case .finished(let result) = event { finished = result }
+        }
+        #expect(finished?.image == output)
+        let argv = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: standIn.record)) as? [String])
+        #expect(argv.first == standIn.runner.path)
+        #expect(value(after: "--steps", in: argv) == "40")
+        #expect(!argv.contains("--adapter") && !argv.contains("--sigmas"))
     }
 
     @Test func withoutTheBaseWeightsNothingIsFetchedOrRun() async throws {

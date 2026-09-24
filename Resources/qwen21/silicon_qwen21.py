@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen-Image 2.1 with a few-step LoRA adapter merged in, rendered through MFLUX.
+"""Qwen-Image 2.1, with or without a few-step LoRA adapter merged in, rendered through MFLUX.
 
 Silicon Optimizer runs this with the Python of its own hash-locked MFLUX environment
 (mflux 0.20.0). That release runs Qwen-Image 2.1 but has no LoRA mapping for it and no way to
@@ -19,9 +19,17 @@ does exactly those two things itself, and uses mflux's own classes for everythin
    guidance 1.0 and no negative prompt, so there is no second, unconditional pass.
 
 The prompt is encoded first and the text encoder released before the transformer is
-materialised, so the two largest components are never resident together. Progress is mflux's
-own tqdm bar on stderr; stages are lines starting "silicon-stage: "; the last line is mflux's
-own "Peak MLX memory: N GB" — all things the app already reads.
+materialised, so the two largest components are never resident together. That is also why the
+base model, with no adapter, runs through here rather than `mflux-generate-qwen-2.1`: that
+entry point drops its reference to the text encoder before the first step, but the prompt
+embeddings are still unevaluated then, so the encoder's 15 GB of weights stay referenced until
+the first step evaluates them — the same evaluation that first reads the transformer's. On a
+36 GB Mac that overlap is the difference between fitting and swapping. Without an adapter the
+run is QwenImage21 as mflux builds it, on mflux's own schedule for the model.
+
+Progress is mflux's own tqdm bar on stderr; stages are lines starting "silicon-stage: ", each
+phase's peak a "silicon-memory: " line; the last line is mflux's own "Peak MLX memory: N GB" —
+the one the app parses.
 
 The functions above `main` import nothing beyond the standard library, so the key mapping and
 the merge can be tested with no MLX, no mflux and no weights (test_silicon_qwen21.py).
@@ -56,6 +64,7 @@ _KEY = re.compile(
     + r")\.lora_([AB])\.weight$"
 )
 STAGE = "silicon-stage: "
+MEMORY = "silicon-memory: "
 EXPECTED_MFLUX = "0.20."
 
 
@@ -239,16 +248,39 @@ def stage(text):
     print(STAGE + text, file=sys.stderr, flush=True)
 
 
+class PhaseMemory:
+    """The peak of each phase on its own, as `silicon-memory: <phase> <GB>` lines, so a real
+    run says which phase set the peak — the figure the app's planner is checked against.
+    Registered with mflux as a loop callback, which is how denoising is told from decoding."""
+
+    def __init__(self, mx):
+        self.mx = mx
+        self.overall = 0
+
+    def close(self, phase):
+        peak = self.mx.get_peak_memory()
+        self.overall = max(self.overall, peak)
+        print(f"{MEMORY}{phase} {peak / 10**9:.2f} GB", file=sys.stderr, flush=True)
+        self.mx.reset_peak_memory()
+
+    def call_before_loop(self, seed, prompt, latents, config, **extra):
+        self.close("start")
+
+    def call_after_loop(self, seed, prompt, latents, config):
+        self.close("denoise")
+
+
 # MARK: - The run
 
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--model-path", required=True, help="Qwen-Image 2.1 snapshot directory")
-    parser.add_argument("--adapter", required=True, help="the adapter .safetensors file")
-    parser.add_argument("--adapter-sha256", required=True)
-    parser.add_argument("--adapter-scale", type=float, required=True, help="lora_alpha / r")
-    parser.add_argument("--sigmas", required=True, help="comma-separated, one per step")
+    parser.add_argument("--adapter", default=None, help="the adapter .safetensors file")
+    parser.add_argument("--adapter-sha256", default=None)
+    parser.add_argument("--adapter-scale", type=float, default=None, help="lora_alpha / r")
+    parser.add_argument("--sigmas", default=None,
+                        help="comma-separated, one per step; the adapter's own schedule")
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--width", type=int, default=1024)
@@ -259,6 +291,18 @@ def build_parser():
     parser.add_argument("--low-ram", action="store_true")
     parser.add_argument("--output", required=True)
     return parser
+
+
+def check_arguments(arguments):
+    """An adapter comes with its digest, its scale and its schedule, or not at all; without
+    one the run is the base model on mflux's own schedule."""
+    adapter = (arguments.adapter, arguments.adapter_sha256, arguments.adapter_scale)
+    if any(part is not None for part in adapter) and not all(part is not None for part in adapter):
+        raise AdapterError("--adapter, --adapter-sha256 and --adapter-scale go together")
+    if arguments.adapter is not None and arguments.sigmas is None:
+        raise AdapterError("an adapter runs only on the sigma schedule it was trained for")
+    if arguments.steps < 1:
+        raise AdapterError(f"{arguments.steps} steps")
 
 
 def check_mflux():
@@ -277,12 +321,16 @@ def check_mflux():
 
 def load_model(model_path, adapter_path, expected_scale, quantize):
     """QwenImage21 exactly as Qwen21Initializer.init builds it, with the adapter merged into
-    the full-precision transformer weights before WeightApplier quantizes them."""
+    the full-precision transformer weights before WeightApplier quantizes them. Without an
+    adapter, mflux's own constructor."""
     import mlx.core as mx
     from mlx import nn
     from mflux.models.common.config import ModelConfig
     from mflux.models.qwen21.qwen21_initializer import Qwen21Initializer
     from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
+
+    if adapter_path is None:
+        return QwenImage21(quantize=quantize, model_path=model_path), 0, 0, 0.0
 
     tensors, metadata = read_safetensors_header(adapter_path)
     rank, scale = lora_scale(metadata)
@@ -347,14 +395,16 @@ def fixed_sigma_scheduler(sigmas):
 def main(argv=None):
     arguments = build_parser().parse_args(argv)
     try:
-        sigmas = parse_sigmas(arguments.sigmas, arguments.steps)
-        stage("Checking the adapter")
-        found = sha256_of(arguments.adapter)
-        if found != arguments.adapter_sha256.lower():
-            raise AdapterError(
-                f"{arguments.adapter} is not the reviewed file (SHA-256 {found}); remove the model "
-                "and install it again"
-            )
+        check_arguments(arguments)
+        sigmas = parse_sigmas(arguments.sigmas, arguments.steps) if arguments.sigmas else None
+        if arguments.adapter is not None:
+            stage("Checking the adapter")
+            found = sha256_of(arguments.adapter)
+            if found != arguments.adapter_sha256.lower():
+                raise AdapterError(
+                    f"{arguments.adapter} is not the reviewed file (SHA-256 {found}); remove the "
+                    "model and install it again"
+                )
         check_mflux()
 
         import gc
@@ -367,12 +417,16 @@ def main(argv=None):
         )
 
         started = time.monotonic()
-        stage("Loading Qwen-Image 2.1 and merging the adapter")
+        memory = PhaseMemory(mx)
+        mx.reset_peak_memory()
+        stage("Loading Qwen-Image 2.1" + (" and merging the adapter" if arguments.adapter else ""))
         model, merged, rank, scale = load_model(
             arguments.model_path, arguments.adapter, arguments.adapter_scale, arguments.quantize
         )
-        print(f"Merged the adapter into {merged} modules (rank {rank}, scale {scale:g}).",
-              file=sys.stderr, flush=True)
+        memory.close("load")
+        if arguments.adapter:
+            print(f"Merged the adapter into {merged} modules (rank {rank}, scale {scale:g}).",
+                  file=sys.stderr, flush=True)
 
         # Encode first, then let the text encoder go, before the transformer is read: mflux's
         # own loop evicts it too, but only after the transformer has joined it in memory.
@@ -384,6 +438,7 @@ def main(argv=None):
             text_encoder=model.text_encoder,
         )
         mx.eval(embeds, mask)
+        memory.close("encode")
         model.text_encoder = None
         gc.collect()
         mx.clear_cache()
@@ -396,12 +451,18 @@ def main(argv=None):
         mx.eval(model.transformer.parameters())
         gc.collect()
         mx.clear_cache()
+        memory.close("prepare")
         if arguments.low_ram and TilingConfig.may_tile_implicitly(model):
             model.tiling_config = TilingConfig()
             mx.set_cache_limit(1000**3)
 
-        name = f"silicon_fixed_sigmas_{arguments.steps}"
-        register_contrib(fixed_sigma_scheduler(sigmas), name)
+        # The adapter's own schedule, or mflux's for the model — what mflux-generate-qwen-2.1
+        # samples on.
+        name = "linear"
+        if sigmas is not None:
+            name = f"silicon_fixed_sigmas_{arguments.steps}"
+            register_contrib(fixed_sigma_scheduler(sigmas), name)
+        model.callbacks.register(memory)
         stage(f"Denoising in {arguments.steps} steps")
         image = model.generate_image(
             seed=arguments.seed if arguments.seed is not None else int(time.time()),
@@ -415,9 +476,10 @@ def main(argv=None):
             scheduler=name,
             negative_prompt=None,
         )
+        memory.close("decode")
         image.save(path=arguments.output, overwrite=True)
         print(f"Rendered in {time.monotonic() - started:.1f} s.", file=sys.stderr, flush=True)
-        print(f"Peak MLX memory: {mx.get_peak_memory() / 10**9:.2f} GB", file=sys.stderr, flush=True)
+        print(f"Peak MLX memory: {memory.overall / 10**9:.2f} GB", file=sys.stderr, flush=True)
         return 0
     except AdapterError as error:
         print(f"Adapter refused: {error}", file=sys.stderr, flush=True)
