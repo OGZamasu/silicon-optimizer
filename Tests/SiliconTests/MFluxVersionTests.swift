@@ -136,6 +136,7 @@ struct MFluxQuantizationPlanTests {
         unprotectedShape.parametersKeptAt8BitWhen4Bit = 0
         let delta = DiffusionPlanner.quantizedTransformerBytes(DiffusionCatalog.qwenImage.shape, .mlx4)
             - DiffusionPlanner.weightBytes(unprotectedShape.transformerParameters, .mlx4)
+        #expect(Double(delta.rawValue) / 1e9 > 1.69, "the protected layers cost ~1.7 GB at 4-bit")
         func phases(_ shape: DiffusionShape, prequantized: Bool) -> [String: Bytes] {
             let plan = planner.plan(shape: shape, configuration: ImageConfiguration(
                 width: 1024, height: 1024, steps: 20, quantization: .mlx4,
