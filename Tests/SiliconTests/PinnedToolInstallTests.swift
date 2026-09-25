@@ -207,6 +207,47 @@ struct PinnedToolInstallTests {
         #expect(installs.allSatisfy { $0.arguments.contains("--require-hashes") })
     }
 
+    /// The voice lock is held to MFLUX's current lock, so over an environment where MFLUX is
+    /// installed — perhaps an older MFLUX an older app put there, whose MLX range the voice
+    /// lock's MLX falls outside — MFLUX's own lock goes in first, and the two can never end up
+    /// on versions that were not locked together. Without MFLUX there is nothing to keep in step.
+    @Test func theVoiceToolsReinstallMFLUXsLockFirstWhereMFLUXIs() throws {
+        let root = try PinnedInstallTests.scratch("voice-over-mflux")
+        try requireTemporaryDirectory(root)
+        defer { removeTemporaryDirectory(root) }
+        let environment = root.appendingPathComponent("env")
+        try PinnedInstallTests.fakeEnvironment(at: environment, version: "3.14.6")
+        FileManager.default.createFile(
+            atPath: environment.appendingPathComponent("bin/mflux-generate").path, contents: Data(),
+            attributes: [.posixPermissions: 0o755]
+        )
+        let plan = try VoiceRuntime.toolsInstallPlan(
+            basePython: nil, locks: Self.lockRoot, environment: environment
+        )
+        #expect(!plan.contains { $0.arguments.contains("venv") }, "a covered environment is kept")
+        let locks = Self.installs(plan).map { URL(fileURLWithPath: $0.arguments.last!).lastPathComponent }
+        #expect(locks == ["mflux-py3.14.txt", "build-py3.14.txt", "voice-py3.14.txt"])
+        #expect(Self.installs(plan).allSatisfy { $0.arguments.contains("--require-hashes") })
+        // MFLUX's is wheels only, as its own install is.
+        #expect(Self.installs(plan).first?.arguments.contains(":all:") == true)
+
+        // And the two locks it installs agree on every package they share.
+        let mflux = try PinnedInstallTests.pins(PinnedInstall.lock(
+            "mflux", directory: PinnedInstall.mlxEnvironmentLocks, python: "3.14", in: Self.lockRoot
+        ))
+        let voice = try PinnedInstallTests.pins(PinnedInstall.lock(
+            "voice", directory: PinnedInstall.mlxEnvironmentLocks, python: "3.14", in: Self.lockRoot
+        ))
+        #expect(voice["mlx"] != nil && voice["mlx"] == mflux["mlx"])
+
+        let without = root.appendingPathComponent("no-mflux")
+        try PinnedInstallTests.fakeEnvironment(at: without, version: "3.14.6")
+        let voiceOnly = try VoiceRuntime.toolsInstallPlan(
+            basePython: nil, locks: Self.lockRoot, environment: without
+        )
+        #expect(!Self.installs(voiceOnly).contains { $0.arguments.last!.hasSuffix("mflux-py3.14.txt") })
+    }
+
     @Test func luxTTSFetchesBothSourcesByCommitAndInstallsLinaCodecOffline() throws {
         let root = try PinnedInstallTests.scratch("luxtts-plan")
         defer { try? FileManager.default.removeItem(at: root) }
