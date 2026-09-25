@@ -171,8 +171,14 @@ struct QwenImage21CatalogTests {
             .appendingPathComponent("snapshots/\(revision)", isDirectory: true)
         for component in Self.base.componentDirectories {
             let directory = snapshot.appendingPathComponent(component, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try Data([0]).write(to: directory.appendingPathComponent("weights.safetensors"))
+            if component == "vae" {
+                // One file and no index, as the real VAE is.
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try tinySafetensors().write(to: directory.appendingPathComponent("diffusion_pytorch_model.safetensors"))
+            } else {
+                try placeShardedComponent(at: directory, shards: ["model-00001-of-00002.safetensors",
+                                                                  "model-00002-of-00002.safetensors"])
+            }
         }
     }
 
@@ -186,7 +192,7 @@ struct QwenImage21CatalogTests {
 
     @Test func theAdapterIsInstalledOnlyWithItsBase() throws {
         let hub = try scratchHub()
-        defer { try? FileManager.default.removeItem(at: hub) }
+        defer { removeTemporaryDirectory(hub) }
 
         #expect(!DiffusionInstaller.isInstalled(Self.base, hub: hub))
         #expect(!DiffusionInstaller.isInstalled(Self.pruna, hub: hub))
@@ -201,9 +207,9 @@ struct QwenImage21CatalogTests {
 
         // The base alone is the base; the few-step entry needs its default adapter too, and
         // the 5-step file does not stand in for it.
-        try FileManager.default.removeItem(
-            at: DiffusionInstaller.cacheDirectory(for: Self.adapter.repository, hub: hub)
-        )
+        let adapterCache = DiffusionInstaller.cacheDirectory(for: Self.adapter.repository, hub: hub)
+        try requireScratch(adapterCache)
+        try FileManager.default.removeItem(at: adapterCache)
         try placeAdapter(Self.adapter.variants[1], hub: hub)
         #expect(DiffusionInstaller.isInstalled(Self.base, hub: hub))
         #expect(!DiffusionInstaller.isInstalled(Self.pruna, hub: hub))
@@ -212,7 +218,7 @@ struct QwenImage21CatalogTests {
     /// A pinned entry is read from its own revision's snapshot, not whichever is newest.
     @Test func weightsAtAnotherRevisionAreNotTheInstalledOnes() throws {
         let hub = try scratchHub()
-        defer { try? FileManager.default.removeItem(at: hub) }
+        defer { removeTemporaryDirectory(hub) }
         try placeBaseWeights(hub: hub, revision: String(repeating: "e5", count: 20))
         #expect(!DiffusionInstaller.isInstalled(Self.base, hub: hub))
         #expect(DiffusionInstaller.weightsSnapshot(for: Self.base, hub: hub) == nil)
@@ -220,6 +226,69 @@ struct QwenImage21CatalogTests {
         try placeBaseWeights(hub: hub)
         #expect(DiffusionInstaller.weightsSnapshot(for: Self.pruna, hub: hub)?.lastPathComponent
                 == DiffusionCatalog.qwenImage21Revision)
+    }
+
+    /// The runner reads the pinned snapshot's path directly, past mflux's own completeness
+    /// check, so an interrupted download must not read as installed: every shard the index
+    /// names has to be there, and as long as its header says.
+    @Test func anInterruptedDownloadIsNotInstalled() throws {
+        let hub = try scratchHub()
+        defer { removeTemporaryDirectory(hub) }
+        try placeBaseWeights(hub: hub)
+        try placeAdapter(Self.adapter.defaultVariant, hub: hub)
+        #expect(DiffusionInstaller.isInstalled(Self.base, hub: hub))
+        #expect(DiffusionInstaller.isInstalled(Self.pruna, hub: hub))
+
+        let transformer = try #require(DiffusionInstaller.weightsSnapshot(for: Self.base, hub: hub))
+            .appendingPathComponent("transformer")
+        let second = transformer.appendingPathComponent("model-00002-of-00002.safetensors")
+        let whole = try Data(contentsOf: second)
+
+        // A shard the index names is missing — the download stopped before it.
+        try requireScratch(second)
+        try FileManager.default.removeItem(at: second)
+        #expect(!DiffusionInstaller.isInstalled(Self.base, hub: hub))
+        #expect(!DiffusionInstaller.isInstalled(Self.pruna, hub: hub))
+
+        // Present but short of what its header says.
+        try whole.prefix(whole.count - 2).write(to: second)
+        #expect(!DiffusionInstaller.isInstalled(Self.base, hub: hub))
+
+        // Not even a header.
+        try Data([0]).write(to: second)
+        #expect(!DiffusionInstaller.isInstalled(Self.base, hub: hub))
+
+        // Whole again.
+        try whole.write(to: second)
+        #expect(DiffusionInstaller.isInstalled(Self.base, hub: hub))
+
+        // An index that names nothing is no index of a complete download.
+        try Data("{\"weight_map\": {}}".utf8).write(
+            to: transformer.appendingPathComponent("model.safetensors.index.json")
+        )
+        #expect(!DiffusionInstaller.isInstalled(Self.base, hub: hub))
+    }
+
+    /// Removing the base while the few-step entry is installed says what it will stop.
+    @Test func removingTheBaseSaysItStopsTheFewStepEntry() throws {
+        let model = AppModel(
+            videoQueue: VideoBatchQueue(storeURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("scratch-video-queue-\(UUID().uuidString).json")),
+            settings: .init()
+        )
+        let hub = model.imageModelHub
+        try requireScratch(hub)
+        defer { removeTemporaryDirectory(hub) }
+
+        try placeBaseWeights(hub: hub)
+        #expect(model.imageRemovalWarning(for: Self.base) == nil, "nothing else runs on it yet")
+        try placeAdapter(Self.adapter.defaultVariant, hub: hub)
+        let warning = try #require(model.imageRemovalWarning(for: Self.base))
+        #expect(warning.contains(Self.pruna.name))
+        #expect(warning.contains("will not run"))
+        // Removing the adapter stops nothing else.
+        #expect(model.imageRemovalWarning(for: Self.pruna) == nil)
+        #expect(model.imageRemovalWarning(for: DiffusionCatalog.flux2Klein4B) == nil)
     }
 
     @Test func removingTheAdapterNamesOnlyTheAdaptersFiles() throws {
@@ -240,7 +309,7 @@ struct QwenImage21CatalogTests {
         let hub = model.imageModelHub
         // Proved scratch before anything is written there or a removal is armed.
         try requireScratch(hub)
-        defer { try? FileManager.default.removeItem(at: hub) }
+        defer { removeTemporaryDirectory(hub) }
 
         try placeBaseWeights(hub: hub)
         try placeAdapter(Self.adapter.defaultVariant, hub: hub)
@@ -302,7 +371,7 @@ struct QwenImage21CatalogTests {
     /// the server until it is chosen.
     @Test func installingFetchesOnlyTheDefaultAdapterFile() async throws {
         let root = try scratchHub()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { removeTemporaryDirectory(root) }
         let eight = Data("eight-step adapter".utf8), five = Data("five-step adapter".utf8)
         let files = [Self.adapter.variants[0].file: eight, Self.adapter.variants[1].file: five]
         let (locks, server) = try stage(root: root, served: files, reviewed: files)
@@ -323,7 +392,7 @@ struct QwenImage21CatalogTests {
     /// A file that is not the reviewed one is discarded, and nothing is left in place.
     @Test func aChangedAdapterFileIsRefused() async throws {
         let root = try scratchHub()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { removeTemporaryDirectory(root) }
         let file = Self.adapter.defaultVariant.file
         let (locks, server) = try stage(
             root: root, served: [file: Data("someone else's adapter".utf8)],
@@ -341,7 +410,7 @@ struct QwenImage21CatalogTests {
     /// the file the catalogue names.
     @Test func anUnreviewedRevisionOrFileIsNotFetched() throws {
         let root = try scratchHub()
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { removeTemporaryDirectory(root) }
         let file = Self.adapter.defaultVariant.file
         let (locks, server) = try stage(
             root: root, served: [:], reviewed: [file: Data("x".utf8)],

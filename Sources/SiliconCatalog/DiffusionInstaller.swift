@@ -91,12 +91,97 @@ public struct DiffusionInstaller: Sendable {
     }
 
     /// Whether the Hub weights `entry` runs on — its own, or its base's — are all there.
+    ///
+    /// For a pinned entry, all there means every shard: each one its component's index names,
+    /// present and as long as its own header says it is. Those entries are run from their
+    /// snapshot's path, which bypasses the completeness check and repair mflux applies to a
+    /// repository it resolves itself, so an interrupted download that left some shards would
+    /// otherwise read as installed and fail minutes into loading. The older entries keep the
+    /// lighter check: mflux resolves them itself, and finishes what is missing.
     public static func weightsInPlace(_ entry: DiffusionEntry, hub: URL) -> Bool {
         guard let snapshot = weightsSnapshot(for: entry, hub: hub) else { return false }
         return entry.componentDirectories.allSatisfy { component in
             let directory = snapshot.appendingPathComponent(component)
+            if entry.revision != nil { return shardsComplete(in: directory) }
             let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
             return (contents ?? []).contains { $0.hasSuffix(".safetensors") }
+        }
+    }
+
+    /// Every shard a component's `*.safetensors.index.json` names — or, with no index, every
+    /// `*.safetensors` in it, of which there must be one — present and complete.
+    static func shardsComplete(in directory: URL) -> Bool {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return false }
+        let shards: [String]
+        if let index = names.first(where: { $0.hasSuffix(".safetensors.index.json") }) {
+            guard let data = try? Data(contentsOf: directory.appendingPathComponent(index)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let map = json["weight_map"] as? [String: String], !map.isEmpty
+            else { return false }
+            shards = Array(Set(map.values))
+        } else {
+            shards = names.filter { $0.hasSuffix(".safetensors") }
+        }
+        return !shards.isEmpty && shards.allSatisfy {
+            // A name that is not a plain file name is no shard of this directory.
+            !$0.contains("/") && isCompleteSafetensors(directory.appendingPathComponent($0))
+        }
+    }
+
+    /// Whether a safetensors file is as long as its header says: the 8-byte header length,
+    /// the header, and the data up to the furthest tensor's end. A download cut short, or a
+    /// file truncated since, is shorter. Remembered per path, size and modification date, so
+    /// a view asking again reads nothing.
+    static func isCompleteSafetensors(_ url: URL) -> Bool {
+        let path = url.resolvingSymlinksInPath().path
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.int64Value, size > 8
+        else { return false }
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "\(path)|\(size)|\(modified)"
+        if let known = completeness.value(for: key) { return known }
+
+        var complete = false
+        if let handle = FileHandle(forReadingAtPath: path) {
+            defer { try? handle.close() }
+            if let prefix = try? handle.read(upToCount: 8), prefix.count == 8 {
+                let length = prefix.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.littleEndian
+                if length > 0, length < 100_000_000, Int64(length) + 8 <= size,
+                   let header = try? handle.read(upToCount: Int(length)), header.count == Int(length),
+                   let json = try? JSONSerialization.jsonObject(with: header) as? [String: Any] {
+                    let end = json.compactMap { key, value -> Int64? in
+                        guard key != "__metadata__",
+                              let offsets = (value as? [String: Any])?["data_offsets"] as? [NSNumber],
+                              offsets.count == 2
+                        else { return nil }
+                        return offsets[1].int64Value
+                    }.max() ?? 0
+                    complete = 8 + Int64(length) + end == size
+                }
+            }
+        }
+        completeness.set(complete, for: key)
+        return complete
+    }
+
+    private static let completeness = CompletenessCache()
+
+    private final class CompletenessCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var known: [String: Bool] = [:]
+
+        func value(for key: String) -> Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            return known[key]
+        }
+
+        func set(_ value: Bool, for key: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            known[key] = value
         }
     }
 

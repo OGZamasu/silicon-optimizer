@@ -597,6 +597,20 @@ public final class AppModel {
         imageLibraryVersion += 1
     }
 
+    /// What removing `entry` would stop, when that is more than itself: the installed
+    /// entries that run on its weights — the few-step adapter on Qwen-Image 2.1's. Nil when
+    /// removing it touches nothing else. Removing an adapter never touches its base.
+    public func imageRemovalWarning(for entry: DiffusionEntry) -> String? {
+        let dependents = DiffusionCatalog.all.filter {
+            $0.baseEntryID == entry.id && isImageModelInstalled($0)
+        }
+        guard !dependents.isEmpty else { return nil }
+        let names = dependents.map(\.name).joined(separator: " and ")
+        return "\(names) runs on these weights, so it will not run until \(entry.name) is "
+            + "installed again. Its adapter file stays, so installing either one again "
+            + "fetches only these weights."
+    }
+
     /// Where the reviewed adapter manifests are read from. Tests point it at their own.
     var imageAdapterLocks: URL { PinnedInstall.defaultLockRoot() }
 
