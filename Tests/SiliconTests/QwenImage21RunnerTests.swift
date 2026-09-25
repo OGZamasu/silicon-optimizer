@@ -113,8 +113,15 @@ struct QwenImage21RunnerTests {
     }
 
     /// The runner's parser accepts exactly what the app builds, and reads the sigmas back as
-    /// the same doubles — the contract between the two languages, checked in both.
-    @Test func theRunnerAcceptsTheAppsCommandLine() throws {
+    /// the same doubles — the contract between the two languages, checked in both. A prompt
+    /// that looks like an option reaches the model as a prompt, and sets nothing else.
+    @Test(arguments: [
+        "A glowing neon shop sign that reads \"QWEN IMAGE 2.1\"",
+        "-x --steps 1 --output /tmp/elsewhere.png",
+        "--low-ram",
+        "-- two dashes, then words",
+    ])
+    func theRunnerAcceptsTheAppsCommandLine(prompt: String) throws {
         let variants: [DiffusionAdapter.Variant?] = Self.adapter.variants + [nil]
         for variant in variants {
             let run = variant.map {
@@ -125,9 +132,10 @@ struct QwenImage21RunnerTests {
             }
             let steps = variant?.steps ?? 40
             var withImage = request(steps: steps)
+            withImage.prompt = prompt
             withImage.configuration.initImage = URL(fileURLWithPath: "/tmp/base.png")
             withImage.configuration.initImageInfluence = 0.6
-            withImage.configuration.lowRAM = true
+            withImage.configuration.lowRAM = prompt != "--low-ram"
             let arguments = MFluxArguments(
                 request: withImage, model: carrier(variant == nil ? Self.base : Self.pruna),
                 weightsSnapshot: URL(fileURLWithPath: "/s"),
@@ -144,7 +152,7 @@ struct QwenImage21RunnerTests {
                 print(json.dumps({"sigmas": [repr(s) for s in sigmas] if sigmas else None,
                                   "adapter": a.adapter, "steps": a.steps, "scale": a.adapter_scale,
                                   "quantize": a.quantize, "image": a.image, "low_ram": a.low_ram,
-                                  "prompt": a.prompt}))
+                                  "prompt": a.prompt, "output": a.output}))
                 """
             let (status, output) = try Self.python(["-c", script] + arguments.dropFirst())
             #expect(status == 0, "\(output)")
@@ -160,8 +168,10 @@ struct QwenImage21RunnerTests {
             }
             #expect(parsed["quantize"] as? Int == 8)
             #expect(parsed["image"] as? [String] == ["/tmp/base.png", "0.6"])
-            #expect(parsed["low_ram"] as? Bool == true)
-            #expect(parsed["prompt"] as? String == withImage.prompt)
+            #expect(parsed["low_ram"] as? Bool == withImage.configuration.lowRAM)
+            #expect(parsed["prompt"] as? String == prompt)
+            #expect(parsed["output"] as? String == "/tmp/qwen21 out.png")
+            #expect(arguments.contains("--prompt=" + prompt) && !arguments.contains("--prompt"))
         }
     }
 
@@ -208,8 +218,8 @@ struct QwenImage21RunnerTests {
         }
         #expect(MFluxRuntime.parsePeakMemory(from: "Peak MLX memory: 21.37 GB")
                 == Bytes(Int64(21.37e9)))
-        #expect(MFluxRuntime.diagnose(log: "loading\nAdapter refused: the adapter does not fit")
-                == "Adapter refused: the adapter does not fit")
+        #expect(MFluxRuntime.diagnose(log: "loading\nRefused: the adapter does not fit")
+                == "Refused: the adapter does not fit")
     }
 
     // MARK: - The local path, end to end, with a stand-in environment
@@ -230,6 +240,7 @@ struct QwenImage21RunnerTests {
                 .appendingPathComponent("qwen21-runtime-\(UUID().uuidString)", isDirectory: true)
             let bin = root.appendingPathComponent("env/bin", isDirectory: true)
             try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            try requireTemporaryDirectory(root)
             record = root.appendingPathComponent("argv.json")
             hub = root.appendingPathComponent("hub", isDirectory: true)
             locks = root.appendingPathComponent("locks", isDirectory: true)
@@ -271,7 +282,7 @@ struct QwenImage21RunnerTests {
             for component in DiffusionCatalog.qwenImage21.componentDirectories {
                 let directory = snapshot.appendingPathComponent(component)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try Data([0]).write(to: directory.appendingPathComponent("w.safetensors"))
+                try tinySafetensors().write(to: directory.appendingPathComponent("w.safetensors"))
             }
         }
 
@@ -296,7 +307,7 @@ struct QwenImage21RunnerTests {
             MFluxRuntime(installation: installation, hub: hub, locks: locks, qwenRunner: runner)
         }
 
-        func clean() { try? FileManager.default.removeItem(at: root) }
+        func clean() { removeTemporaryDirectory(root) }
     }
 
     @Test func anAdapterRenderRunsTheRunnerOnTheReviewedFile() async throws {

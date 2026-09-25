@@ -99,9 +99,10 @@ struct QwenImage21ReachTests {
     /// `GET /image/models` — what the phones and `list_image_models` read — carries both
     /// entries, their licence, and the adapter's default of 8 steps, with no change to the
     /// wire type.
-    @Test func theControlAPIListsBothWithTheirLicence() async {
+    @Test func theControlAPIListsBothWithTheirLicence() async throws {
         let model = scratchModel()
-        defer { try? FileManager.default.removeItem(at: model.fallbackHuggingFaceHub) }
+        try requireTemporaryDirectory(model.fallbackHuggingFaceHub)
+        defer { removeTemporaryDirectory(model.fallbackHuggingFaceHub) }
         let listed = await model.imageModels()
         let base = listed.first { $0.id == "qwen-image-2.1" }
         let pruna = listed.first { $0.id == "qwen-image-2.1-pruna" }
@@ -114,10 +115,33 @@ struct QwenImage21ReachTests {
         }
     }
 
+    /// An agent's blank prompt is refused before anything is queued, as the video route
+    /// refuses one — not half an hour of reading weights later. Planning takes no prompt.
+    @Test func aBlankPromptIsRefusedBeforeAnythingRuns() async throws {
+        let model = scratchModel()
+        try requireTemporaryDirectory(model.fallbackHuggingFaceHub)
+        defer { removeTemporaryDirectory(model.fallbackHuggingFaceHub) }
+        var ran = false
+        model.makeImageRuntime = { _ in ran = true; return MFluxRuntime() }
+        for blank in ["", "   ", "\n\t"] {
+            do {
+                _ = try await model.generateImage(.init(prompt: blank, modelID: Self.pruna.id, localOnly: true))
+                Issue.record("a blank prompt was accepted")
+            } catch ControlHostError.badRequest(let message) {
+                #expect(message == "The prompt is empty.")
+            }
+        }
+        #expect(!ran)
+        #expect(model.imageQueue.isEmpty && model.currentImageJob == nil)
+        let plan = try await model.planImage(.init(prompt: "", modelID: Self.pruna.id))
+        #expect(plan.steps == 8)
+    }
+
     /// A phone or agent asking the adapter for another step count gets its nearest schedule.
     @Test func thePlanRouteSnapsTheAdaptersSteps() async throws {
         let model = scratchModel()
-        defer { try? FileManager.default.removeItem(at: model.fallbackHuggingFaceHub) }
+        try requireTemporaryDirectory(model.fallbackHuggingFaceHub)
+        defer { removeTemporaryDirectory(model.fallbackHuggingFaceHub) }
         let eight = try await model.planImage(.init(prompt: "p", modelID: Self.pruna.id, steps: 30))
         #expect(eight.steps == 8)
         let five = try await model.planImage(.init(prompt: "p", modelID: Self.pruna.id, steps: 4))

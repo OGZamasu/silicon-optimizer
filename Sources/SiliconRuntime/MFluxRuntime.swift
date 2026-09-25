@@ -174,7 +174,13 @@ public actor MFluxRuntime: ImageRuntime {
             // An adapter runs only on the steps it was trained for.
             request.configuration.steps = entry.normalizedSteps(request.configuration.steps)
             builder.request = request
-            try await prepare(entry, into: &builder)
+            do {
+                try await prepare(entry, into: &builder)
+            } catch {
+                // A fetch that failed must not leave "Fetching the adapter…" standing.
+                state = .idle
+                throw error
+            }
         }
         // Each model family has its own entry point; resolve it beside the one discovery found.
         let executable = installation.executable
@@ -347,7 +353,7 @@ public actor MFluxRuntime: ImageRuntime {
     static func diagnose(log: String) -> String {
         // The adapter runner's own refusals already say what is wrong and what to do.
         for line in log.split(separator: "\n").reversed() {
-            if line.hasPrefix("Adapter refused: ") || line.hasPrefix("This needs MFLUX ") {
+            if line.hasPrefix("Refused: ") || line.hasPrefix("This needs MFLUX ") {
                 return String(line)
             }
         }
@@ -483,7 +489,7 @@ public struct MFluxArguments: Sendable {
         let configuration = request.configuration
         var arguments: [String] = [
             "--model", weightsSnapshot?.path ?? model.catalogID.flatMap(Self.mfluxAlias) ?? model.name,
-            "--prompt", request.prompt,
+            Self.promptArgument(request.prompt),
             "--width", String(configuration.width),
             "--height", String(configuration.height),
             "--steps", String(configuration.steps),
@@ -539,7 +545,7 @@ public struct MFluxArguments: Sendable {
         }
         arguments += [
             "--steps", String(adapterRun?.variant.steps ?? configuration.steps),
-            "--prompt", request.prompt,
+            Self.promptArgument(request.prompt),
             "--width", String(configuration.width),
             "--height", String(configuration.height),
             "--output", request.output.path,
@@ -557,6 +563,13 @@ public struct MFluxArguments: Sendable {
             arguments.append("--low-ram")
         }
         return arguments
+    }
+
+    /// The prompt attached to its flag, as one argument. As a separate value, a prompt that
+    /// starts with "-" is read as an option — argparse stops with "expected one argument" —
+    /// where attached it is taken as it is, by mflux's parsers and the runner's alike.
+    static func promptArgument(_ prompt: String) -> String {
+        "--prompt=" + prompt
     }
 
     /// Bit widths mflux accepts. Anything else is left unquantized rather than guessed at.

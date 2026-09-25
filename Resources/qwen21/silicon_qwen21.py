@@ -72,7 +72,12 @@ MEMORY = "silicon-memory: "
 EXPECTED_MFLUX = "0.20."
 
 
-class AdapterError(Exception):
+class Refused(Exception):
+    """The run cannot go ahead as asked. Raised before anything large is read, and reported as
+    one line starting "Refused: ", which the app shows as it is."""
+
+
+class AdapterError(Refused):
     """The adapter cannot be merged as it is. Always fatal: a partly merged adapter renders."""
 
 
@@ -312,14 +317,20 @@ def build_parser():
 
 def check_arguments(arguments):
     """An adapter comes with its digest, its scale and its schedule, or not at all; without
-    one the run is the base model on mflux's own schedule."""
+    one the run is the base model on mflux's own schedule. And there has to be a prompt.
+
+    A blank one is refused here, before 30-odd GB are read, rather than where it would fail:
+    mflux's prompt encoder files a blank prompt under " ", so the run's own later lookup of
+    the prompt misses — and by then the text encoder has been released to make room."""
+    if not arguments.prompt or not arguments.prompt.strip():
+        raise Refused("the prompt is empty")
     adapter = (arguments.adapter, arguments.adapter_sha256, arguments.adapter_scale)
     if any(part is not None for part in adapter) and not all(part is not None for part in adapter):
         raise AdapterError("--adapter, --adapter-sha256 and --adapter-scale go together")
     if arguments.adapter is not None and arguments.sigmas is None:
         raise AdapterError("an adapter runs only on the sigma schedule it was trained for")
     if arguments.steps < 1:
-        raise AdapterError(f"{arguments.steps} steps")
+        raise Refused(f"{arguments.steps} steps")
 
 
 def check_mflux():
@@ -547,8 +558,8 @@ def main(argv=None):
         print(f"Rendered in {time.monotonic() - started:.1f} s.", file=sys.stderr, flush=True)
         print(f"Peak MLX memory: {memory.overall / 10**9:.2f} GB", file=sys.stderr, flush=True)
         return 0
-    except AdapterError as error:
-        print(f"Adapter refused: {error}", file=sys.stderr, flush=True)
+    except Refused as error:
+        print(f"Refused: {error}", file=sys.stderr, flush=True)
         return 3
 
 

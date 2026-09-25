@@ -311,6 +311,33 @@ class ArgumentTests(unittest.TestCase):
     def test_the_base_needs_no_adapter_and_no_schedule(self):
         self.check([])
 
+    def test_a_blank_prompt_is_refused_before_anything_loads(self):
+        for blank in ("", " ", "\t\n  "):
+            arguments = runner.build_parser().parse_args(
+                ["--model-path", "/s", "--steps", "40", "--prompt=" + blank, "--output", "/o.png"]
+            )
+            with self.subTest(prompt=blank), self.assertRaisesRegex(runner.Refused, "empty"):
+                runner.check_arguments(arguments)
+        # Through main: refused on the system Python, which has no MLX — so nothing loaded.
+        with Scratch() as directory:
+            status = runner.main(["--model-path", directory, "--steps", "40", "--prompt= ",
+                                  "--output", os.path.join(directory, "out.png")])
+            self.assertEqual(status, 3)
+            self.assertFalse(os.path.exists(os.path.join(directory, "out.png")))
+
+    def test_a_prompt_that_looks_like_an_option_is_a_prompt(self):
+        # The app passes the prompt attached to its flag, so nothing in it is read as a flag.
+        for prompt in ("-x", "--low-ram", "--output=/tmp/elsewhere.png", "-- --steps 1", "-h"):
+            arguments = runner.build_parser().parse_args(
+                self.BASE[:4] + ["--prompt=" + prompt, "--output", "/o.png"]
+            )
+            with self.subTest(prompt=prompt):
+                self.assertEqual(arguments.prompt, prompt)
+                self.assertEqual(arguments.output, "/o.png")
+                self.assertFalse(arguments.low_ram)
+                self.assertEqual(arguments.steps, 40)
+                runner.check_arguments(arguments)
+
     def test_an_adapter_comes_whole_and_with_its_schedule(self):
         self.check(self.ADAPTER + ["--sigmas", "1.0,0.5"])
         for extra in (self.ADAPTER, self.ADAPTER[:2], self.ADAPTER[2:] + ["--sigmas", "1.0"]):

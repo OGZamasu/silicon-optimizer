@@ -983,6 +983,13 @@ extension AppModel {
     public func generateImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
+        // As the video route does. The Images tab and the phones never send one, but an agent
+        // can, and a blank prompt is not something to spend a render — or, for Qwen-Image
+        // 2.1, half an hour of reading weights — finding out about. Planning takes no prompt,
+        // so `resolveImage`, which `planImage` shares, does not ask for one.
+        guard !request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ControlHostError.badRequest("The prompt is empty.")
+        }
         let routed = try await mediaRoutedImage(request)
         var response = try await generateRoutedImage(routed.request)
         response.warning = Self.merged(response.warning, routed.reason)
