@@ -439,7 +439,10 @@ public enum DiffusionCatalog {
             patchSize: 2,
             maxTextTokens: 512,
             nativeResolution: 1328,
-            defaultSteps: 20
+            defaultSteps: 20,
+            // mflux 0.20.0 keeps every block's img_mod_linear (3072 → 6×3072, with bias) at
+            // 8-bit under -q 4: 60 × 3072 × 18432 weights, about 1.7 GB more than all-4-bit.
+            parametersKeptAt8BitWhen4Bit: 60 * 3072 * 18432
         ),
         repository: "Qwen/Qwen-Image",
         quantizations: [.mlx4, .mlx6, .mlx8],

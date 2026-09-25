@@ -97,6 +97,12 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
     /// this family's transformer. Nil takes the planner's per-token estimate.
     public var denoiseBytesPerMegapixel: Double?
 
+    /// Transformer parameters the runtime keeps at 8-bit when asked for 4. mflux 0.20.0's
+    /// Qwen-Image keeps each block's `img_mod_linear` (3072→18432, 60 blocks: 3.40B
+    /// parameters) at 8-bit under `-q 4`, where 4-bit error compounds across the steps; no
+    /// other family in the catalogue protects anything, and nothing is protected at 6 or 8.
+    public var parametersKeptAt8BitWhen4Bit: Int64
+
     /// The area, in megapixels, of the tiles the runtime decodes in when low-memory mode is on,
     /// or nil when low-memory mode does not tile this family's decode (FLUX.2's VAE opts out
     /// of it, which is why the mode was measured to change nothing there).
@@ -127,6 +133,7 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         textEncoderStreamedParameters: Int64? = nil,
         decodeBytesPerMegapixel: Double? = nil,
         denoiseBytesPerMegapixel: Double? = nil,
+        parametersKeptAt8BitWhen4Bit: Int64 = 0,
         lowMemoryDecodeTileMegapixels: Double? = nil
     ) {
         self.blockCount = blockCount
@@ -149,6 +156,7 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         self.textEncoderStreamedParameters = textEncoderStreamedParameters
         self.decodeBytesPerMegapixel = decodeBytesPerMegapixel
         self.denoiseBytesPerMegapixel = denoiseBytesPerMegapixel
+        self.parametersKeptAt8BitWhen4Bit = parametersKeptAt8BitWhen4Bit
         self.lowMemoryDecodeTileMegapixels = lowMemoryDecodeTileMegapixels
     }
 
@@ -160,6 +168,7 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
         case nativeResolution, defaultSteps, peakIsCalibrated, textEncoderBytesPerParameter
         case vaeBytesPerParameter, adapterParameters, runsInStages, decodeBytesPerMegapixel
         case textEncoderStreamedParameters, lowMemoryDecodeTileMegapixels, denoiseBytesPerMegapixel
+        case parametersKeptAt8BitWhen4Bit
     }
 
     public init(from decoder: any Decoder) throws {
@@ -193,6 +202,9 @@ public struct DiffusionShape: Hashable, Sendable, Codable {
             denoiseBytesPerMegapixel: try container.decodeIfPresent(
                 Double.self, forKey: .denoiseBytesPerMegapixel
             ),
+            parametersKeptAt8BitWhen4Bit: try container.decodeIfPresent(
+                Int64.self, forKey: .parametersKeptAt8BitWhen4Bit
+            ) ?? 0,
             lowMemoryDecodeTileMegapixels: try container.decodeIfPresent(
                 Double.self, forKey: .lowMemoryDecodeTileMegapixels
             )

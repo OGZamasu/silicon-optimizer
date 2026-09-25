@@ -248,6 +248,24 @@ public struct DiffusionPlanner: Sendable {
         } ?? weightBytes(shape.textEncoderParameters, quantization)
     }
 
+    /// The transformer's size once quantized — or `parameters` of it, for a slice such as one
+    /// streamed block — counting the layers the runtime keeps at 8-bit when asked for 4.
+    public static func quantizedTransformerBytes(
+        _ shape: DiffusionShape, _ quantization: Quantization,
+        parameters: Int64? = nil
+    ) -> Bytes {
+        let count = parameters ?? shape.transformerParameters
+        guard quantization == .mlx4, shape.parametersKeptAt8BitWhen4Bit > 0,
+              shape.transformerParameters > 0
+        else { return weightBytes(count, quantization) }
+        // A slice holds its share of the protected layers — they are one per block.
+        let protected = Int64(
+            (Double(shape.parametersKeptAt8BitWhen4Bit) * Double(count)
+                / Double(shape.transformerParameters)).rounded()
+        )
+        return weightBytes(count - protected, quantization) + weightBytes(protected, .mlx8)
+    }
+
     /// The VAE's resident size, the same way.
     public static func vaeBytes(_ shape: DiffusionShape, _ quantization: Quantization) -> Bytes {
         shape.vaeBytesPerParameter.map {
@@ -273,7 +291,7 @@ public struct DiffusionPlanner: Sendable {
 
         // Layer streaming: only the resident slice of the denoiser is in memory.
         var transformer = Self.residentWeightBytes(shape.transformerParameters)
-        var loadedTransformer = Self.weightBytes(shape.transformerParameters, quantization)
+        var loadedTransformer = Self.quantizedTransformerBytes(shape, quantization)
         var streamed = Bytes.zero
         var notes: [String] = []
 
@@ -281,7 +299,9 @@ public struct DiffusionPlanner: Sendable {
             let perBlock = Self.residentWeightBytes(shape.parametersPerBlock)
             let full = transformer
             transformer = perBlock * Double(resident)
-            loadedTransformer = Self.weightBytes(shape.parametersPerBlock, quantization)
+            loadedTransformer = Self.quantizedTransformerBytes(
+                shape, quantization, parameters: shape.parametersPerBlock
+            )
                 * Double(resident)
             streamed = full - transformer
             notes.append(
@@ -307,9 +327,14 @@ public struct DiffusionPlanner: Sendable {
         // the text encoder plus 2.30 GB for the rest, and 10.59 GB predicted against 10.52 GB
         // measured at 512x512, where this phase is what the run peaks at.
         let largestComponent = max(shape.transformerParameters, shape.textEncoderParameters)
-        let othersQuantized = Self.weightBytes(shape.totalParameters - largestComponent, quantization)
+        let transformerQuantized = Self.quantizedTransformerBytes(shape, quantization)
+        let othersQuantized = largestComponent == shape.transformerParameters
+            ? Self.weightBytes(shape.totalParameters - largestComponent, quantization)
+            : transformerQuantized
+                + Self.weightBytes(shape.totalParameters - largestComponent - shape.transformerParameters, quantization)
         let loadResident = configuration.weightsArePrequantized
-            ? Self.weightBytes(shape.totalParameters, quantization)
+            ? Self.weightBytes(shape.totalParameters - shape.transformerParameters, quantization)
+                + transformerQuantized
             : Self.weightBytes(largestComponent, .f16) + othersQuantized
 
         if !configuration.weightsArePrequantized, quantization != .f16, quantization != .bf16 {
@@ -395,7 +420,7 @@ public struct DiffusionPlanner: Sendable {
         } ?? textEncoders
         let vae = Self.vaeBytes(shape, quantization)
         let latents = Self.latentBytes(shape, configuration)
-        let transformer = Self.weightBytes(shape.transformerParameters, quantization)
+        let transformer = Self.quantizedTransformerBytes(shape, quantization)
         // While the transformer is read: one block at full precision on its way to being
         // quantized, with the adapter — if there is one — and the fp32 product it merges.
         let adapter = Bytes(shape.adapterParameters * 2)
