@@ -81,14 +81,148 @@ public struct DiffusionInstaller: Sendable {
     /// comes from the catalog entry because it is not the same across families: FLUX.1 keeps its
     /// T5-XXL in `text_encoder_2`, and a check that did not look for it would call a repository
     /// missing 9.5 GB of weights complete.
+    ///
+    /// An adapter entry is installed when its base's weights are and its default adapter file
+    /// is in place too — either alone runs nothing.
     public static func isInstalled(_ entry: DiffusionEntry, hub: URL) -> Bool {
-        guard let snapshot = latestSnapshot(for: entry.repository, hub: hub)
-        else { return false }
+        guard weightsInPlace(entry, hub: hub) else { return false }
+        guard let adapter = entry.adapter else { return true }
+        return isAdapterInPlace(adapter.defaultVariant, of: adapter, hub: hub)
+    }
+
+    /// Whether the Hub weights `entry` runs on — its own, or its base's — are all there.
+    ///
+    /// For a pinned entry, all there means every shard: each one its component's index names,
+    /// present and as long as its own header says it is. Those entries are run from their
+    /// snapshot's path, which bypasses the completeness check and repair mflux applies to a
+    /// repository it resolves itself, so an interrupted download that left some shards would
+    /// otherwise read as installed and fail minutes into loading. The older entries keep the
+    /// lighter check: mflux resolves them itself, and finishes what is missing.
+    public static func weightsInPlace(_ entry: DiffusionEntry, hub: URL) -> Bool {
+        guard let snapshot = weightsSnapshot(for: entry, hub: hub) else { return false }
         return entry.componentDirectories.allSatisfy { component in
             let directory = snapshot.appendingPathComponent(component)
+            if entry.revision != nil { return shardsComplete(in: directory) }
             let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
             return (contents ?? []).contains { $0.hasSuffix(".safetensors") }
         }
+    }
+
+    /// Every shard a component's `*.safetensors.index.json` names — or, with no index, every
+    /// `*.safetensors` in it, of which there must be one — present and complete.
+    static func shardsComplete(in directory: URL) -> Bool {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return false }
+        let shards: [String]
+        if let index = names.first(where: { $0.hasSuffix(".safetensors.index.json") }) {
+            guard let data = try? Data(contentsOf: directory.appendingPathComponent(index)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let map = json["weight_map"] as? [String: String], !map.isEmpty
+            else { return false }
+            shards = Array(Set(map.values))
+        } else {
+            shards = names.filter { $0.hasSuffix(".safetensors") }
+        }
+        return !shards.isEmpty && shards.allSatisfy {
+            // A name that is not a plain file name is no shard of this directory.
+            !$0.contains("/") && isCompleteSafetensors(directory.appendingPathComponent($0))
+        }
+    }
+
+    /// Whether a safetensors file is as long as its header says: the 8-byte header length,
+    /// the header, and the data up to the furthest tensor's end. A download cut short, or a
+    /// file truncated since, is shorter. Remembered per path, size and modification date, so
+    /// a view asking again reads nothing.
+    static func isCompleteSafetensors(_ url: URL) -> Bool {
+        let path = url.resolvingSymlinksInPath().path
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.int64Value, size > 8
+        else { return false }
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "\(path)|\(size)|\(modified)"
+        if let known = completeness.value(for: key) { return known }
+
+        var complete = false
+        if let handle = FileHandle(forReadingAtPath: path) {
+            defer { try? handle.close() }
+            if let prefix = try? handle.read(upToCount: 8), prefix.count == 8 {
+                let length = prefix.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.littleEndian
+                if length > 0, length < 100_000_000, Int64(length) + 8 <= size,
+                   let header = try? handle.read(upToCount: Int(length)), header.count == Int(length),
+                   let json = try? JSONSerialization.jsonObject(with: header) as? [String: Any] {
+                    let end = json.compactMap { key, value -> Int64? in
+                        guard key != "__metadata__",
+                              let offsets = (value as? [String: Any])?["data_offsets"] as? [NSNumber],
+                              offsets.count == 2
+                        else { return nil }
+                        return offsets[1].int64Value
+                    }.max() ?? 0
+                    complete = 8 + Int64(length) + end == size
+                }
+            }
+        }
+        completeness.set(complete, for: key)
+        return complete
+    }
+
+    private static let completeness = CompletenessCache()
+
+    private final class CompletenessCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var known: [String: Bool] = [:]
+
+        func value(for key: String) -> Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            return known[key]
+        }
+
+        func set(_ value: Bool, for key: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            known[key] = value
+        }
+    }
+
+    /// The snapshot `entry`'s weights are read from: the pinned revision's when it has one —
+    /// never a newer snapshot that happens to be beside it — and otherwise the newest.
+    public static func weightsSnapshot(for entry: DiffusionEntry, hub: URL) -> URL? {
+        guard let revision = entry.revision else {
+            return latestSnapshot(for: entry.weightsRepository, hub: hub)
+        }
+        let pinned = cacheDirectory(for: entry.weightsRepository, hub: hub)
+            .appendingPathComponent("snapshots/\(revision)", isDirectory: true)
+        return FileManager.default.fileExists(atPath: pinned.path) ? pinned : nil
+    }
+
+    /// Where an adapter file lives once fetched: the hub cache's own layout, at the adapter's
+    /// pinned revision.
+    public static func adapterFile(
+        _ variant: DiffusionAdapter.Variant, of adapter: DiffusionAdapter, hub: URL
+    ) -> URL {
+        cacheDirectory(for: adapter.repository, hub: hub)
+            .appendingPathComponent("snapshots/\(adapter.revision)", isDirectory: true)
+            .appendingPathComponent(variant.file)
+    }
+
+    /// Whether the adapter file is there. Only a file whose digest matched is ever moved into
+    /// place, and the runner checks the digest again before it merges anything, so presence is
+    /// what this asks.
+    public static func isAdapterInPlace(
+        _ variant: DiffusionAdapter.Variant, of adapter: DiffusionAdapter, hub: URL
+    ) -> Bool {
+        let path = adapterFile(variant, of: adapter, hub: hub).resolvingSymlinksInPath().path
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        return attributes?[.type] as? FileAttributeType == .typeRegular
+            && ((attributes?[.size] as? NSNumber)?.int64Value ?? 0) > 0
+    }
+
+    /// What removing `entry` deletes: its own repository's cache and nothing else. For an
+    /// adapter that is the adapter's files — never its base's weights, which belong to the base
+    /// entry and stay installed, and usable, for as long as that entry is.
+    public static func removalTargets(for entry: DiffusionEntry, hub: URL) -> [URL] {
+        [cacheDirectory(for: entry.repository, hub: hub)]
     }
 
     public static func latestSnapshot(for repository: String, hub: URL) -> URL? {
@@ -127,7 +261,7 @@ public struct DiffusionInstaller: Sendable {
     /// the sizes is exactly what is left to fetch. That is also how "already installed" is
     /// distinguished from "partly installed" without guessing.
     public func plan(_ entry: DiffusionEntry) async throws -> Plan {
-        let repository = entry.repository
+        let repository = entry.weightsRepository
         let output = try await run(
             arguments: downloadArguments(entry) + ["--dry-run", "--format", "json"],
             collectingOutput: true
@@ -170,7 +304,9 @@ public struct DiffusionInstaller: Sendable {
 
     // MARK: - Download
 
-    /// Fetches the repository, reporting progress by watching the cache grow.
+    /// Fetches the repository, reporting progress by watching the cache grow. For an adapter
+    /// entry that is its base's weights; the adapter file is fetched, and checked against its
+    /// reviewed digest, by `DiffusionAdapterFiles`.
     ///
     /// The CLI hides its progress bars when stdout is not a terminal, so there is nothing to
     /// parse. Sizing the job up front and polling the blob directory gives a real byte count
@@ -180,7 +316,7 @@ public struct DiffusionInstaller: Sendable {
         _ entry: DiffusionEntry,
         onProgress: @Sendable @escaping (ModelDownloader.Progress) -> Void
     ) async throws {
-        let repository = entry.repository
+        let repository = entry.weightsRepository
         let sizing = try await plan(entry)
         guard !sizing.isComplete else { return }
 
@@ -213,7 +349,7 @@ public struct DiffusionInstaller: Sendable {
         if lowered.contains("access denied") || lowered.contains("requires approval") {
             throw InstallError.accessDenied(repository: repository)
         }
-        guard Self.isInstalled(entry, hub: hub) else {
+        guard Self.weightsInPlace(entry, hub: hub) else {
             throw InstallError.failed(
                 output.split(separator: "\n").suffix(4).joined(separator: "\n")
             )
@@ -221,7 +357,12 @@ public struct DiffusionInstaller: Sendable {
     }
 
     func downloadArguments(_ entry: DiffusionEntry) -> [String] {
-        var arguments = ["download", entry.repository]
+        var arguments = ["download", entry.weightsRepository]
+        // The commit, not a branch: the snapshot lands under `snapshots/<revision>`, which is
+        // exactly where `weightsSnapshot` and the runtime look.
+        if let revision = entry.revision {
+            arguments += ["--revision", revision]
+        }
         // One `--include` per pattern: passing several values to a single flag makes the CLI
         // read the extras as positional filenames and drop the flag entirely, with only a
         // warning — which quietly fetches the whole repository instead of the parts wanted.

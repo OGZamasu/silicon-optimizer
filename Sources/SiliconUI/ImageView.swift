@@ -153,15 +153,39 @@ struct ImageView: View {
                     .labelsHidden()
                     .frame(width: 100)
                 }
-
-                HStack {
-                    Text("Steps")
-                    Spacer()
-                    Text(String(model.imageConfiguration.steps))
-                        .monospacedDigit()
+                if let entry = currentEntry, entry.adapter != nil,
+                   model.imageConfiguration.width != entry.shape.nativeResolution {
+                    Text("Trained at \(entry.shape.nativeResolution)² only — other sizes may work, "
+                         + "at quality nobody has checked.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                    Stepper("", value: $model.imageConfiguration.steps, in: 1...50)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let entry = currentEntry, let adapter = entry.adapter {
+                    // An adapter runs on the schedules it was trained for and no others, so the
+                    // choice is between them rather than a count.
+                    HStack {
+                        Text("Steps")
+                        Spacer()
+                        Picker("", selection: adapterStepsBinding(entry)) {
+                            ForEach(adapter.variants) { variant in
+                                Text(variant.label).tag(variant.steps)
+                            }
+                        }
                         .labelsHidden()
+                        .fixedSize()
+                    }
+                } else {
+                    HStack {
+                        Text("Steps")
+                        Spacer()
+                        Text(String(model.imageConfiguration.steps))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        Stepper("", value: $model.imageConfiguration.steps, in: 1...50)
+                            .labelsHidden()
+                    }
                 }
 
                 HStack {
@@ -178,9 +202,13 @@ struct ImageView: View {
                 }
 
                 Toggle("Low-memory mode", isOn: $model.imageConfiguration.lowRAM)
-                    .help("Frees the transformer between images. Does not lower the peak of a "
-                          + "single image — measured identical with and without.")
+                    .help(currentEntry?.shape.lowMemoryDecodeTileMegapixels == nil
+                          ? "Frees the transformer between images. Does not lower the peak of a "
+                            + "single image — measured identical with and without."
+                          : "Decodes the image in 512×512 tiles, which lowers the peak of a "
+                            + "single image a long way for this model.")
 
+                mfluxUpdateBanner
                 installBanner
                 loadedModelBanner
 
@@ -370,6 +398,57 @@ struct ImageView: View {
             }
             .padding(10)
             .background(.background.secondary, in: .rect(cornerRadius: 8))
+        }
+    }
+
+    /// Shown when the selected model needs a newer MFLUX than the one installed — Qwen-Image
+    /// 2.1 needs 0.20. The same pinned install as the first one, run over the environment:
+    /// it moves MFLUX and MLX to the locked versions and keeps every model already fetched.
+    @ViewBuilder
+    private var mfluxUpdateBanner: some View {
+        if let entry = currentEntry, model.imageRuntime != nil,
+           !MFluxRuntime.canRun(entry, installation: model.imageRuntime) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    "\(entry.name) needs MFLUX 0.20, and the one installed is older. Updating "
+                        + "keeps your image models; it downloads a few hundred megabytes.",
+                    systemImage: "arrow.up.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+                if let repair = model.repairs["mflux-install"] {
+                    if let error = repair.error {
+                        Text(error)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Button("Try again") {
+                            model.cancelRepair("mflux-install")
+                            model.installMFlux()
+                        }
+                        .controlSize(.small)
+                    } else {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(repair.stage)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
+                } else {
+                    Button("Update MFLUX", systemImage: "arrow.up.circle") {
+                        model.installMFlux()
+                    }
+                    .controlSize(.small)
+                }
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.background.secondary, in: .rect(cornerRadius: 7))
         }
     }
 
@@ -790,6 +869,14 @@ struct ImageView: View {
     private var canGenerate: Bool {
         model.imageRuntime != nil
             && !model.imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// An adapter's step choice: one of its schedules, whatever count was set before.
+    private func adapterStepsBinding(_ entry: DiffusionEntry) -> Binding<Int> {
+        Binding(
+            get: { entry.normalizedSteps(model.imageConfiguration.steps) },
+            set: { model.imageConfiguration.steps = $0 }
+        )
     }
 
     /// Images here are square, so one control drives both dimensions.

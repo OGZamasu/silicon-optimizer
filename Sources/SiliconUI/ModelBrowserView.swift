@@ -597,6 +597,8 @@ struct DownloadProgressView: View {
 private struct DiffusionCatalogRow: View {
     @Environment(AppModel.self) private var model
     var entry: DiffusionEntry
+    /// Set while asking whether to remove weights another installed entry runs on.
+    @State private var removalWarning: String?
 
     var body: some View {
         let plan = model.diffusionPlan(
@@ -631,9 +633,14 @@ private struct DiffusionCatalogRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Badge(text: entry.license, systemImage: "doc.text")
                     HStack(spacing: 10) {
                         Label(entry.parameterLabel, systemImage: "number")
-                        Label("\(entry.shape.defaultSteps) steps", systemImage: "arrow.trianglehead.2.clockwise")
+                        Label(
+                            entry.stepChoices.map { "\($0.map(String.init).joined(separator: " or ")) steps" }
+                                ?? "\(entry.shape.defaultSteps) steps",
+                            systemImage: "arrow.trianglehead.2.clockwise"
+                        )
                         // The peak, not the download size: it is what decides whether this is
                         // worth the disk in the first place.
                         Label(
@@ -653,9 +660,32 @@ private struct DiffusionCatalogRow: View {
 
                 if download == nil {
                     if isInstalled {
-                        Button("Remove") { model.uninstallImageModel(entry) }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+                        Button("Remove") {
+                            // Weights an installed adapter runs on are asked about first.
+                            if let warning = model.imageRemovalWarning(for: entry) {
+                                removalWarning = warning
+                            } else {
+                                model.uninstallImageModel(entry)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .confirmationDialog(
+                            "Remove \(entry.name)?",
+                            isPresented: Binding(
+                                get: { removalWarning != nil },
+                                set: { if !$0 { removalWarning = nil } }
+                            ),
+                            titleVisibility: .visible
+                        ) {
+                            Button("Remove", role: .destructive) {
+                                model.uninstallImageModel(entry)
+                                removalWarning = nil
+                            }
+                            Button("Cancel", role: .cancel) { removalWarning = nil }
+                        } message: {
+                            Text(removalWarning ?? "")
+                        }
                     } else {
                         Button("Install") { model.installImageModel(entry) }
                             .buttonStyle(.borderedProminent)

@@ -1,0 +1,16 @@
+{
+  "repository": "PrunaAI/Pruna-Qwen-Image-2.1",
+  "revision": "113e63bb993001b3411eb3470b84fc444040cd7e",
+  "files": [
+    {
+      "path": "p_qwen_image_2.1_5step_v0.1.safetensors",
+      "sha256": "021a6228a0fcd217275190b89072416a2f28548e8e18fe049531dc9b77ef89bd",
+      "size": 335606144
+    },
+    {
+      "path": "p_qwen_image_2.1_8step_v0.1.safetensors",
+      "sha256": "f0865d68b02511a3a0ed232d9d1aa99cac3a94166f574b38bcbab1a7a297bb15",
+      "size": 335606104
+    }
+  ]
+}

@@ -453,6 +453,11 @@ public final class AppModel {
             guard selectedDiffusionModel != oldValue,
                   let entry = DiffusionCatalog.entry(id: selectedDiffusionModel) else { return }
             imageConfiguration.steps = entry.shape.defaultSteps
+            // Where low-memory mode tiles the decode, it is what decides whether a render fits,
+            // so the switch adopts the recommendation's choice rather than the last model's.
+            if entry.shape.lowMemoryDecodeTileMegapixels != nil {
+                imageConfiguration.lowRAM = recommendedImageConfiguration(for: entry).lowRAM
+            }
         }
     }
 
@@ -469,7 +474,7 @@ public final class AppModel {
     @ObservationIgnored var makeImageRuntime: @MainActor (AppModel) -> any ImageRuntime = {
         MFluxRuntime(
             installation: $0.imageRuntime, huggingFaceToken: $0.settings.huggingFaceToken,
-            hubCache: $0.settings.resolvedEngineCacheDirectory
+            hubCache: $0.settings.resolvedEngineCacheDirectory, hub: $0.imageModelHub
         )
     }
 
@@ -538,10 +543,28 @@ public final class AppModel {
         let download = ImageDownloadTask(entry: entry)
         imageDownloads[entry.id] = download
 
+        let adapterFiles = entry.adapter.map { _ in
+            DiffusionAdapterFiles(locks: imageAdapterLocks, hub: imageModelHub)
+        }
+
         download.task = Task { [weak self] in
             do {
+                // For an adapter entry this is its base's weights, which it cannot run without.
                 try await installer.download(entry) { progress in
                     Task { @MainActor in self?.imageDownloads[entry.id]?.progress = progress }
+                }
+                // Then the one adapter file, checked against its reviewed digest.
+                if let adapter = entry.adapter, let adapterFiles {
+                    let variant = adapter.defaultVariant
+                    try await adapterFiles.prepare(variant, of: adapter) { received, expected in
+                        Task { @MainActor in
+                            self?.imageDownloads[entry.id]?.progress = ModelDownloader.Progress(
+                                bytesReceived: received, bytesExpected: expected,
+                                bytesPerSecond: 0, currentFile: variant.file,
+                                fileIndex: 0, fileCount: 1
+                            )
+                        }
+                    }
                 }
                 guard let self else { return }
                 self.imageLibraryVersion += 1
@@ -565,11 +588,31 @@ public final class AppModel {
         imageDownloads[id] = nil
     }
 
+    /// Removes the entry's own files. An adapter's are only the adapter's: the base weights
+    /// it ran on stay, and so does the base entry (`DiffusionInstaller.removalTargets`).
     public func uninstallImageModel(_ entry: DiffusionEntry) {
-        let directory = DiffusionInstaller.cacheDirectory(for: entry.repository, hub: imageModelHub)
-        try? FileManager.default.removeItem(at: directory)
+        for directory in DiffusionInstaller.removalTargets(for: entry, hub: imageModelHub) {
+            try? FileManager.default.removeItem(at: directory)
+        }
         imageLibraryVersion += 1
     }
+
+    /// What removing `entry` would stop, when that is more than itself: the installed
+    /// entries that run on its weights — the few-step adapter on Qwen-Image 2.1's. Nil when
+    /// removing it touches nothing else. Removing an adapter never touches its base.
+    public func imageRemovalWarning(for entry: DiffusionEntry) -> String? {
+        let dependents = DiffusionCatalog.all.filter {
+            $0.baseEntryID == entry.id && isImageModelInstalled($0)
+        }
+        guard !dependents.isEmpty else { return nil }
+        let names = dependents.map(\.name).joined(separator: " and ")
+        return "\(names) runs on these weights, so it will not run until \(entry.name) is "
+            + "installed again. Its adapter file stays, so installing either one again "
+            + "fetches only these weights."
+    }
+
+    /// Where the reviewed adapter manifests are read from. Tests point it at their own.
+    var imageAdapterLocks: URL { PinnedInstall.defaultLockRoot() }
 
     public func diffusionPlanner() -> DiffusionPlanner { DiffusionPlanner(profile: profile) }
 
@@ -614,25 +657,36 @@ public final class AppModel {
     /// language recommendation, walking down resolution and precision until it fits.
     public func recommendedImageConfiguration(for entry: DiffusionEntry) -> ImageConfiguration {
         let planner = diffusionPlanner()
+        // An adapter trained at one size is recommended at that size: a smaller render that
+        // fits is not a better one when nobody knows what the adapter does there.
+        let sides = entry.adapter == nil ? [entry.shape.nativeResolution, 768, 512]
+            : [entry.shape.nativeResolution]
+        // Low-memory mode is tried too where it lowers the peak — a family whose runtime
+        // decodes in tiles in that mode — and changes nothing for the others.
+        let lowMemory = entry.shape.lowMemoryDecodeTileMegapixels == nil ? [false] : [false, true]
         for quantization in entry.quantizations.reversed() {
-            for side in [entry.shape.nativeResolution, 768, 512] {
-                let candidate = ImageConfiguration(
-                    width: side, height: side,
-                    steps: entry.shape.defaultSteps, quantization: quantization
-                )
-                if planner.plan(
-                    shape: entry.shape, configuration: candidate,
-                    otherAppsInUse: memoryUnavailableDuringImage
-                ).verdict == .comfortable {
-                    return candidate
+            for side in sides {
+                for lowRAM in lowMemory {
+                    let candidate = ImageConfiguration(
+                        width: side, height: side,
+                        steps: entry.shape.defaultSteps, quantization: quantization,
+                        lowRAM: lowRAM
+                    )
+                    if planner.plan(
+                        shape: entry.shape, configuration: candidate,
+                        otherAppsInUse: memoryUnavailableDuringImage
+                    ).verdict == .comfortable {
+                        return candidate
+                    }
                 }
             }
         }
         // Nothing fit outright; fall back to the cheapest thing that runs at all. Low-memory
         // mode is on here not because it lowers the peak — it does not — but because at this
         // point the machine is tight enough that freeing between images is worth having.
+        let side = entry.adapter == nil ? 512 : entry.shape.nativeResolution
         return ImageConfiguration(
-            width: 512, height: 512, steps: entry.shape.defaultSteps,
+            width: side, height: side, steps: entry.shape.defaultSteps,
             quantization: .mlx4, lowRAM: true
         )
     }
@@ -655,8 +709,10 @@ public final class AppModel {
             )
         }
 
+        var configuration = imageConfiguration
+        configuration.steps = entry.normalizedSteps(configuration.steps)
         imageQueue.append(ImageJob(
-            prompt: imagePrompt, configuration: imageConfiguration,
+            prompt: imagePrompt, configuration: configuration,
             modelID: entry.id, modelName: entry.name
         ))
         imagePrompt = ""
@@ -716,27 +772,67 @@ public final class AppModel {
 
     /// The node that can render an image right now, if any.
     public var imageCapableNode: PeerStatus? {
-        swarmPeers.first { peer in
-            peer.reachable && peer.capabilities.contains {
-                Self.isImageCapability($0) && $0.ready && $0.enabled != false
+        Self.imageNode(for: nil, among: swarmPeers)
+    }
+
+    /// The image models a node's `text-to-image` capability says it has installed: the
+    /// comma-separated `models` in its settings (silicon-node, hub #136). The ids are the
+    /// catalogue's own — `qwen-image`, `qwen-image-2.1-pruna` — so a match means the same
+    /// model. Empty when the node does not say.
+    nonisolated static func advertisedImageModels(_ capability: PeerCapability) -> [String] {
+        (capability.settings["models"] ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// The node for an image of `modelID`: one that advertises that very model, if any does,
+    /// and otherwise the first that renders images at all — which renders with a model of its
+    /// own choosing, as every node job did before nodes named their models.
+    nonisolated static func imageNode(for modelID: String?, among peers: [PeerStatus]) -> PeerStatus? {
+        func imageCapability(_ peer: PeerStatus) -> PeerCapability? {
+            guard peer.reachable else { return nil }
+            return peer.capabilities.first {
+                isImageCapability($0) && $0.ready && $0.enabled != false
             }
         }
+        if let modelID, let exact = peers.first(where: { peer in
+            imageCapability(peer).map { advertisedImageModels($0).contains(modelID) } ?? false
+        }) {
+            return exact
+        }
+        return peers.first { imageCapability($0) != nil }
+    }
+
+    /// The model id to send a node with a job for `modelID`: that id when the node advertises
+    /// it, so it renders the same model; nil otherwise, for the node's own default.
+    nonisolated static func nodeImageModel(for modelID: String, on node: PeerStatus) -> String? {
+        let advertised = node.capabilities
+            .filter { isImageCapability($0) && $0.ready && $0.enabled != false }
+            .flatMap(advertisedImageModels)
+        return advertised.contains(modelID) ? modelID : nil
     }
 
     /// Where the next image job runs, honoring the user's choice. Auto means the
     /// strongest machine currently offering images — the fix for the swarm member
     /// whose weak Mac rendered locally and looked broken.
     var imageRenderTarget: PeerStatus? {
+        imageRenderTarget(for: nil)
+    }
+
+    /// The same, for a job of one model: a node that has that model beats one that does not.
+    func imageRenderTarget(for modelID: String?) -> PeerStatus? {
         switch settings.imageRenderLocation ?? "auto" {
         case "local": return nil
-        default: return imageCapableNode
+        default: return Self.imageNode(for: modelID, among: swarmPeers)
         }
     }
 
     private func runImageJob(_ job: ImageJob) {
+        let target = imageRenderTarget(for: job.modelID)
         if Self.shouldRouteImageRemotely(
-            localOnly: job.localOnly, hasCandidate: imageRenderTarget != nil
-        ), let node = imageRenderTarget {
+            localOnly: job.localOnly, hasCandidate: target != nil
+        ), let node = target {
             runImageJob(job, onNode: node)
             return
         }
@@ -868,9 +964,10 @@ public final class AppModel {
         } }
     }
 
-    /// The same job, rendered by a swarm node instead of this Mac (#136). The node
-    /// uses its own image models, so the local model choice doesn't travel; size,
-    /// steps and prompt do. Progress speaks the one line every swarm tool speaks.
+    /// The same job, rendered by a swarm node instead of this Mac (#136). The model travels
+    /// when the node advertises the same id — `qwen-image-2.1-pruna` renders as that on the
+    /// node too — and otherwise the node uses its own default; size, steps and prompt always
+    /// do. Progress speaks the one line every swarm tool speaks.
     private func runImageJob(_ job: ImageJob, onNode node: PeerStatus) {
         noteActivity()
         guard let base = URL(string: node.baseURL.trimmingCharacters(in: .whitespaces))
@@ -893,6 +990,7 @@ public final class AppModel {
             height: job.configuration.height,
             steps: job.configuration.steps,
             seed: job.seed,
+            model: Self.nodeImageModel(for: job.modelID, on: node),
             outputDirectory: settings.resolvedImageOutputDirectory
         )
         let runtime = NodeImageRuntime()
@@ -947,7 +1045,9 @@ public final class AppModel {
                 self.imageState = .idle
                 self.imageProgress = nil
                 if !images.isEmpty {
-                    outcome = .success(QueuedImage(images: images, node: nodeName))
+                    outcome = .success(QueuedImage(
+                        images: images, node: nodeName, nodeModel: request.model
+                    ))
                 }
             } catch {
                 outcome = .failure(error)

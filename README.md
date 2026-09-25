@@ -74,6 +74,24 @@ denoise, decode), so the app shows a bar per phase and tells you which one decid
 your render fits. Usually it's the last one — which is why a render can die at 95% after
 minutes of work. The app warns you before you spend those minutes.
 
+Qwen-Image 2.1 comes two ways: the model itself (40 steps), and with
+[Pruna's few-step LoRA adapter](https://huggingface.co/PrunaAI/Pruna-Qwen-Image-2.1) merged
+in — 8 steps, or 5 when speed matters more than finish. Both are under Qwen's Research
+Licence: research and non-commercial use only. Installing the few-step entry fetches the
+model at a reviewed revision plus one 336 MB adapter file checked against its SHA-256;
+removing it removes only the adapter. MFLUX 0.20 runs the model but has no LoRA support and
+no way to take the adapter's sigma schedule, so the app ships a small runner
+([`Resources/qwen21`](Resources/qwen21/silicon_qwen21.py)) that builds MFLUX's own model,
+merges the adapter into the full-precision transformer before quantizing it, and samples on
+exactly the schedule the adapter was trained for. It runs the stages one at a time — the
+15 GB text encoder a layer at a time, then the transformer a block at a time, then the VAE —
+so an 8-bit render at 1024² peaked at 8.8 GB on a 36 GB M3 Max, for a model that is 33 GB on
+disk. The one thing that grows past that is this model's VAE decode, about 21 GB at 1024²
+untiled; low-memory mode decodes in 512×512 tiles (7 GB), and the planner turns it on for
+Qwen-Image 2.1 when that is what makes a render fit. Both entries need MFLUX 0.20; the Images
+tab offers the update. A paired node that offers the same model id gets the job instead when
+image rendering is on Auto.
+
 ### Speaks, sings and listens
 
 Type a line and hear it: LuxTTS, Kokoro 82M and Sesame CSM 1B all run locally. There is a
@@ -1688,6 +1706,21 @@ exists to fix — one run and its future estimates are corrected.
 
 The error is kept deliberately on the high side, capped at 10%: warning slightly early is a
 much better failure than promising a fit and running your machine out of memory.
+
+Qwen-Image 2.1 runs through the app's staged runner, so it is planned stage by stage and
+measured the same way — mflux 0.20.0, the 8-step Pruna adapter, 8-bit, 1024², low-memory mode,
+M3 Max 36 GB, MLX's own peak per stage:
+
+| Stage | Predicted | Measured |
+|---|---|---|
+| Encode (text encoder, a layer at a time) | 2.0 GB | 1.68 GB |
+| Load (transformer, a block at a time, adapter merged) | 9.6 GB | 8.04 GB |
+| Denoise | 9.2 GB | 8.83 GB |
+| Decode (512×512 tiles) | 7.1 GB | 6.98 GB |
+
+Its VAE needs 20.7 GB of working memory per megapixel untiled — measured at 512×512, twice
+the FLUX VAE's — which is why the decode, not the 7B transformer, is what decides a 1024²
+render on a 36 GB Mac.
 
 Two of the image-model numbers are measured rather than derived, because measurement
 disagreed with theory. The final decode step costs about 9.8 GB per megapixel — twenty times

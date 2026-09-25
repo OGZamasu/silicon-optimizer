@@ -353,9 +353,10 @@ enum Tools {
         Tool(
             name: "list_image_models",
             description: """
-                Image generation models this Mac can run, each with a memory plan. Diffusion \
-                memory is phased — encode, denoise, decode — and the phases release each \
-                other's memory, so what matters is the tallest one rather than the total.
+                Image generation models this Mac can run, each with a memory plan and its \
+                licence (some are research-only, not for commercial use). Diffusion memory is \
+                phased — encode, denoise, decode — and the phases release each other's memory, \
+                so what matters is the tallest one rather than the total.
                 """,
             properties: [:], required: []
         ),
@@ -370,11 +371,14 @@ enum Tools {
             properties: [
                 "prompt": property("string", "Not used for planning, but accepted so the same "
                     + "arguments work for generate_image."),
-                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b. "
-                    + "\"auto\" plans the model the router would pick for this prompt."),
+                "model_id": property("string", "e.g. flux1-schnell, flux2-klein-4b, "
+                    + "qwen-image-2.1-pruna. \"auto\" plans the model the router would pick "
+                    + "for this prompt."),
                 "width": property("number", "Image width in pixels."),
                 "height": property("number", "Image height in pixels."),
-                "steps": property("number", "Denoising steps."),
+                "steps": property("number", "Denoising steps. A few-step adapter such as "
+                    + "qwen-image-2.1-pruna runs only its trained schedules (8, or 5 for speed); "
+                    + "any other count is moved to the nearer."),
                 "quantization": property("string", "MLX-4bit, MLX-6bit or MLX-8bit."),
             ],
             required: []
@@ -382,7 +386,9 @@ enum Tools {
         Tool(
             name: "generate_image",
             description: """
-                Generate an image on this Mac and return the path to it. Runs entirely locally. \
+                Generate an image and return the path to it on this Mac. It renders here, or — \
+                when image rendering is set to Auto and a paired node offers images — on that \
+                node, with the same model id when the node has it installed. \
                 Attempts the run even when the memory plan says it will not comfortably fit — \
                 the estimate is pessimistic on some models — and reports a warning in the \
                 response instead of refusing beforehand. Use plan_image first if you want to \
@@ -398,7 +404,9 @@ enum Tools {
                     + "the prompt; omitted or unset defaults to the best model that fits."),
                 "width": property("number", "Image width in pixels."),
                 "height": property("number", "Image height in pixels."),
-                "steps": property("number", "Denoising steps. Distilled models need very few."),
+                "steps": property("number", "Denoising steps. Distilled models need very few; "
+                    + "a few-step adapter such as qwen-image-2.1-pruna runs only its trained "
+                    + "schedules (8, or 5 for speed) and moves any other count to the nearer."),
                 "quantization": property("string", "MLX-4bit, MLX-6bit or MLX-8bit."),
                 "seed": property("number", "Optional seed for a reproducible image."),
                 "init_image_path": property("string", "Optional revision: absolute path to "
@@ -651,7 +659,7 @@ enum Tools {
             let models: [ControlAPI.ImageModel] = try await client.get("/image/models")
             return models.map { model in
                 var line = "- \(model.name) [\(model.id)] — \(model.parameters), "
-                    + "\(model.blocks) blocks, \(model.defaultSteps) steps"
+                    + "\(model.blocks) blocks, \(model.defaultSteps) steps, \(model.license)"
                 if model.isGated { line += " (gated)" }
                 if let plan = model.recommendation {
                     line += "\n  \(plan.width)x\(plan.height) peaks at "

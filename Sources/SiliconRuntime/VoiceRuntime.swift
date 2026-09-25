@@ -169,13 +169,18 @@ public actor VoiceRuntime {
     ///
     /// An environment no voice lock covers — MFLUX's on 3.12, say — is made again, and MFLUX,
     /// if it was in it, goes back in first: its locks cover every Python the voice tools' do.
+    ///
+    /// MFLUX goes back in first whenever it is there at all, not only when the environment is
+    /// made again. The voice lock is held to MFLUX's *current* lock, so installed over an MFLUX
+    /// an older app put there it would move the packages they share out from under it — MLX
+    /// 0.32 under an mflux 0.18.1 that only accepts MLX below 0.32 — and pip reports that as a
+    /// warning and exits 0. Installing MFLUX's lock first keeps the pair on versions locked
+    /// together, and over an MFLUX that is already current it changes nothing.
     public nonisolated static func toolsInstallPlan(
         basePython: URL?, locks: URL = PinnedInstall.defaultLockRoot(),
         environment: URL = VoiceRuntime.environment
     ) throws -> [PinnedInstall.Command] {
-        let mfluxCleared = PinnedInstall.needsRemaking(
-            environment, supported: PinnedInstall.voicePythons
-        ) && FileManager.default.isExecutableFile(
+        let hasMFlux = FileManager.default.isExecutableFile(
             atPath: environment.appendingPathComponent("bin/mflux-generate").path
         )
         let (python, version, commands) = try PinnedInstall.environment(
@@ -183,7 +188,7 @@ public actor VoiceRuntime {
             basePython: basePython
         )
         var plan = commands
-        if mfluxCleared {
+        if hasMFlux {
             plan.append(MFluxRuntime.packageInstall(python: python, version: version, locks: locks))
         }
         return plan + toolsInstall(python: python, version: version, locks: locks)

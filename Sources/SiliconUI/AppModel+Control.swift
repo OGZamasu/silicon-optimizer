@@ -923,6 +923,9 @@ struct QueuedImage: Sendable {
     var images: [ImageResult]
     /// The node that rendered it, or nil when this Mac did.
     var node: String?
+    /// The catalogue model the node was asked for, when it advertised it; nil when it rendered
+    /// with its own default.
+    var nodeModel: String? = nil
 }
 
 /// Why a queued control-API render ended without a result when the render itself did not
@@ -980,6 +983,13 @@ extension AppModel {
     public func generateImage(
         _ request: ControlAPI.ImageRequest
     ) async throws -> ControlAPI.ImageResponse {
+        // As the video route does. The Images tab and the phones never send one, but an agent
+        // can, and a blank prompt is not something to spend a render — or, for Qwen-Image
+        // 2.1, half an hour of reading weights — finding out about. Planning takes no prompt,
+        // so `resolveImage`, which `planImage` shares, does not ask for one.
+        guard !request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ControlHostError.badRequest("The prompt is empty.")
+        }
         let routed = try await mediaRoutedImage(request)
         var response = try await generateRoutedImage(routed.request)
         response.warning = Self.merged(response.warning, routed.reason)
@@ -1023,15 +1033,17 @@ extension AppModel {
         }
         guard let first = finished.images.first else { throw ImageRuntimeError.noImageProduced }
 
-        // A node's answer names the machine, so agents and ledgers see where it ran (#136).
-        // It used the node's own models, so this Mac's plan and warning are not about it.
+        // A node's answer names the machine, so agents and ledgers see where it ran (#136) —
+        // and the model, when the node rendered the one asked for. Either way this Mac's plan
+        // and warning are not about it.
         if let node = finished.node {
             return ControlAPI.ImageResponse(
                 path: first.image.path,
                 elapsedSeconds: first.elapsed,
                 peakMemoryBytes: nil,
                 predictedPeakBytes: 0,
-                model: "text-to-image on \(node)",
+                model: finished.nodeModel == nil
+                    ? "text-to-image on \(node)" : "\(entry.name) on \(node)",
                 warning: nil
             )
         }
@@ -1087,6 +1099,9 @@ extension AppModel {
         guard (1...200).contains(configuration.steps) else {
             throw ControlHostError.badRequest("Image steps must be between 1 and 200.")
         }
+        // A few-step adapter runs only on the schedules it was trained for; a phone or an
+        // agent asking for another count gets the nearest of those, not a refusal.
+        configuration.steps = entry.normalizedSteps(configuration.steps)
         if let raw = request.quantization, let quantization = Quantization(rawValue: raw) {
             configuration.quantization = quantization
         }
