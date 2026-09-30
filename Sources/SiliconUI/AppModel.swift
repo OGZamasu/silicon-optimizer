@@ -327,7 +327,7 @@ public final class AppModel {
     /// the network only in the running app; under injected settings, memory and a transport
     /// that refuses everything, so no test can reach either.
     @ObservationIgnored lazy var elevenLabsLink: ElevenLabsLink =
-        readsCredentialsFromKeychain ? .live() : .inert()
+        readsCredentialsFromKeychain ? .live(registry: eventMediaRegistry) : .inert()
     /// The ElevenLabs pane's session state (see ElevenLabsPaneState). Here rather than in the
     /// pane's views so results and the voices list survive a trip to another tab; the
     /// remembered section is written to the owner's preferences only in the running app.

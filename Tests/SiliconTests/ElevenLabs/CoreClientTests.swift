@@ -72,6 +72,8 @@ struct CoreClientTests {
         #expect(request.url.absoluteString == "https://api.eu.residency.elevenlabs.io/v1/voices?show_legacy=true")
         #expect(request.header("xi-api-key") == Self.key)
         #expect(!request.url.absoluteString.contains(Self.key))
+        #expect(!"\(request)".contains(Self.key))
+        #expect(!String(reflecting: request).contains(Self.key))
         #expect(request.body == .none)
         #expect(rig.transport.hostViolations.isEmpty)
     }
