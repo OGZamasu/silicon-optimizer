@@ -175,11 +175,12 @@ final class IsolationScreenModel: CreativeScreenModel {
 
     private func loadHistory(page: Int) async {
         guard CreativeRunGate.isKnown(historyRunner) else { return }
+        // Whether this page was searched is what was sent, not what the box says on the answer.
+        let searching = !search.trimmingCharacters(in: .whitespaces).isEmpty
         guard case .json(let value, _)? = await historyRunner.perform(arguments: historyArguments(page: page)) else { return }
         let fetched = (value["items"].arrayValue ?? []).compactMap(IsolationHistoryItem.init(json:))
         items = page == 1 ? fetched : items + fetched.filter { item in !items.contains { $0.id == item.id } }
         self.page = page
-        let searching = !search.trimmingCharacters(in: .whitespaces).isEmpty
         hasMore = (value["has_more"].boolValue ?? false)
             && (searching || pageSize < Int(Self.pageSizeRange.upperBound))
     }

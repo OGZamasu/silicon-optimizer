@@ -74,6 +74,7 @@ final class VoiceChangerScreenModel: CreativeScreenModel {
         for id in Self.operationIDs { runners[id] = session.runner(id, title: "Voice changer") }
         self.runners = runners
         lastRunner = runners[Self.full]!
+        settings.currentVoiceID = { [weak self] in self?.voiceID ?? "" }
     }
 
     var operationID: String { delivery == .stream ? Self.stream : Self.full }

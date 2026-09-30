@@ -115,6 +115,7 @@ final class SpeechScreenModel: CreativeScreenModel {
         for id in Self.operationIDs { runners[id] = session.runner(id, title: "Speech") }
         self.runners = runners
         lastRunner = runners[Self.full]!
+        settings.currentVoiceID = { [weak self] in self?.voiceID ?? "" }
     }
 
     // MARK: - What will be sent

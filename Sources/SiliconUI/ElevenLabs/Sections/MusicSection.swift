@@ -684,12 +684,23 @@ final class MusicScreenModel: CreativeScreenModel {
         fillEdit(from: finetune)
         let runner = runner(Self.getFinetune)
         guard CreativeRunGate.isKnown(runner) else { return }
-        if case .json(let value, _)? = await runner.perform(arguments: ["finetune_id": .string(finetune.id)]),
-           let fresh = MusicFinetune(json: value), selectedFinetune?.id == fresh.id {
-            selectedFinetune = fresh
-            fillEdit(from: fresh)
-            replace(fresh)
-        }
+        guard case .json(let value, _)? = await runner.perform(arguments: ["finetune_id": .string(finetune.id)]),
+              let fresh = MusicFinetune(json: value), fresh.id == finetune.id else { return }
+        replace(fresh)
+        // Another fine-tune may have been chosen while this one's details were on their way.
+        guard selectedFinetune?.id == fresh.id else { return }
+        selectedFinetune = fresh
+        // Edits typed while they were on their way are kept.
+        if editsUntouched { fillEdit(from: fresh) }
+    }
+
+    /// What the edit fields were filled with, to tell the owner's typing from the fill.
+    @ObservationIgnored private var editBaseline: (name: String, genre: String, tags: [String], visibility: String)?
+
+    /// Whether the edit fields still hold what they were filled with.
+    private var editsUntouched: Bool {
+        guard let base = editBaseline else { return true }
+        return base.name == editName && base.genre == editGenre && base.tags == editTags && base.visibility == editVisibility
     }
 
     private func fillEdit(from finetune: MusicFinetune) {
@@ -697,6 +708,7 @@ final class MusicScreenModel: CreativeScreenModel {
         editGenre = finetune.primaryGenre ?? ""
         editTags = finetune.tags
         editVisibility = finetune.visibility ?? ""
+        editBaseline = (editName, editGenre, editTags, editVisibility)
     }
 
     private func replace(_ finetune: MusicFinetune) {
@@ -735,11 +747,15 @@ final class MusicScreenModel: CreativeScreenModel {
     func saveFinetune() async {
         let runner = runner(Self.updateFinetune)
         guard editProblems.isEmpty, CreativeRunGate.isKnown(runner) else { return }
-        if case .json(let value, _)? = await runner.perform(arguments: updateArguments()),
-           let updated = MusicFinetune(json: value) {
-            selectedFinetune = updated
-            replace(updated)
-        }
+        let arguments = updateArguments()
+        guard let id = arguments["finetune_id"]?.stringValue,
+              case .json(let value, _)? = await runner.perform(arguments: arguments),
+              let updated = MusicFinetune(json: value), updated.id == id else { return }
+        replace(updated)
+        // Only the fine-tune still on screen takes the answer; another may be chosen by now.
+        guard selectedFinetune?.id == id else { return }
+        selectedFinetune = updated
+        fillEdit(from: updated)
     }
 
     func deleteSelectedFinetune() async {
@@ -752,7 +768,7 @@ final class MusicScreenModel: CreativeScreenModel {
         )
         guard done != nil else { return }
         finetunes.removeAll { $0.id == finetune.id }
-        selectedFinetune = nil
+        if selectedFinetune?.id == finetune.id { selectedFinetune = nil }
         if finetuneID == finetune.id { finetuneID = "" }
     }
 

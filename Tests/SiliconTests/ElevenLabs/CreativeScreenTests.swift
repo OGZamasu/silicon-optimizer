@@ -163,6 +163,7 @@ struct CreativeScreenTests {
         defer { rig.clean() }
         rig.always("get_voice_settings", .json(["stability": 0.8, "similarity_boost": 0.2, "style": 0.4, "speed": 1.5, "use_speaker_boost": false]))
         let settings = rig.session.speech.settings
+        rig.session.speech.voiceID = "voice-adam"
         await settings.loadSaved(voiceID: "voice-adam")
         #expect(settings.overrides)
         #expect(settings.stability == 0.8)
@@ -1047,6 +1048,97 @@ struct CreativeScreenTests {
         await first.value
         #expect(running.phase == .cancelled, "\(operations[0]): Cancel did not reach the run in flight")
         #expect(busy() == nil)
+    }
+
+    // MARK: - Answers that arrive late
+
+    static func finetuneJSON(_ id: String, _ name: String) -> JSONValue {
+        ["id": .string(id), "name": .string(name), "tags": [], "model_id": "music_v1", "created_at": "2026-09-01T00:00:00Z",
+         "visibility": "private", "created_by": "self", "status": "completed", "training_progress": 1]
+    }
+
+    static func late(_ value: JSONValue, _ delay: Duration = .milliseconds(400)) -> FakeElevenLabsTransport.Reply {
+        var reply = FakeElevenLabsTransport.Reply.json(value)
+        reply.delay = delay
+        return reply
+    }
+
+    /// A save whose answer arrives after another fine-tune was chosen updates the list but not
+    /// the fine-tune on screen or its edit fields.
+    @Test func aLateSaveDoesNotLandOnTheFineTuneChosenSince() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.listFinetunes, .json(["finetunes": [Self.finetuneJSON("A", "Alpha tune"), Self.finetuneJSON("B", "Bravo tune")],
+                                                          "has_more": false]))
+        rig.queue(MusicScreenModel.getFinetune, .json(Self.finetuneJSON("A", "Alpha tune")), .json(Self.finetuneJSON("B", "Bravo tune")))
+        rig.always(MusicScreenModel.updateFinetune, Self.late(Self.finetuneJSON("A", "Alpha renamed")))
+        let music = rig.session.music
+        await music.refreshFinetunes()
+        await music.select(music.finetunes[0])
+        music.editName = "Alpha renamed"
+        let saving = Task { await music.saveFinetune() }
+        try await CreativeRig.waitUntil { !rig.requests(MusicScreenModel.updateFinetune).isEmpty }
+        await music.select(music.finetunes[1])
+        await saving.value
+        #expect(rig.requests(MusicScreenModel.updateFinetune).first?.request.url.path == "/v1/music/finetunes/A")
+        #expect(music.selectedFinetune?.id == "B")
+        #expect(music.editName == "Bravo tune", "B's fields are not overwritten by A's answer")
+        #expect(music.finetunes.first { $0.id == "A" }?.name == "Alpha renamed")
+    }
+
+    /// A fine-tune's details that arrive late keep what the owner typed meanwhile.
+    @Test func lateDetailsKeepWhatWasTypedMeanwhile() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.getFinetune, Self.late(Self.finetuneJSON("A", "Alpha tune")))
+        let music = rig.session.music
+        let finetune = try #require(MusicFinetune(json: Self.finetuneJSON("A", "Alpha tune")))
+        let selecting = Task { await music.select(finetune) }
+        try await CreativeRig.waitUntil { !rig.requests(MusicScreenModel.getFinetune).isEmpty }
+        music.editName = "Typed while loading"
+        await selecting.value
+        #expect(music.editName == "Typed while loading")
+    }
+
+    /// A delete confirmed after another fine-tune was chosen deletes the one it named, and
+    /// leaves the new choice on screen.
+    @Test func aDeleteConfirmedLaterDeletesTheOneItNamed() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.getFinetune, .json(Self.finetuneJSON("B", "Bravo tune")))
+        rig.always(MusicScreenModel.deleteFinetune, .json(["status": "ok"]))
+        let music = rig.session.music
+        let alpha = try #require(MusicFinetune(json: Self.finetuneJSON("A", "Alpha tune")))
+        let bravo = try #require(MusicFinetune(json: Self.finetuneJSON("B", "Bravo tune")))
+        await music.select(alpha)
+        let deleting = Task { await music.deleteSelectedFinetune() }
+        let runner = music.runner(MusicScreenModel.deleteFinetune)
+        try await CreativeRig.waitUntil { runner.phase == .awaitingConfirmation }
+        #expect(runner.confirmation?.title.contains("Alpha tune") == true)
+        await music.select(bravo)
+        runner.confirm()
+        await deleting.value
+        #expect(rig.requests(MusicScreenModel.deleteFinetune).map(\.request.url.path) == ["/v1/music/finetunes/A"])
+        #expect(music.selectedFinetune?.id == "B")
+    }
+
+    /// A voice's saved settings that arrive after another voice was chosen are not loaded.
+    @Test func lateVoiceSettingsDoNotLoadForAnotherVoice() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always("get_voice_settings", Self.late(["stability": 0.9, "similarity_boost": 0.1, "style": 0.5, "speed": 1.1, "use_speaker_boost": false]))
+        let speech = rig.session.speech
+        speech.voiceID = "voice-adam"
+        let loading = Task { await speech.settings.loadSaved(voiceID: "voice-adam") }
+        try await CreativeRig.waitUntil { !rig.requests("get_voice_settings").isEmpty }
+        speech.voiceID = "voice-rachel"
+        await loading.value
+        #expect(!speech.settings.overrides)
+        #expect(speech.settings.stability == 0.5)
+        // Unchanged, they load.
+        await speech.settings.loadSaved(voiceID: "voice-rachel")
+        #expect(speech.settings.overrides)
+        #expect(speech.settings.stability == 0.9)
     }
 
     // MARK: - Second review's nits

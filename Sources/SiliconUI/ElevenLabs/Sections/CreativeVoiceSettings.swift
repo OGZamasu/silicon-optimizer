@@ -22,6 +22,9 @@ final class CreativeVoiceSettings {
     private(set) var loadProblem: String?
 
     @ObservationIgnored private let savedSettings: ElevenLabsRunner?
+    /// The voice chosen on the screen now: saved settings that arrive for a voice no longer
+    /// chosen are not loaded.
+    @ObservationIgnored var currentVoiceID: (@MainActor () -> String)?
 
     /// The names under `voice_settings` a slider or switch sets.
     static let numberNames = ["stability", "similarity_boost", "style", "speed"]
@@ -81,6 +84,8 @@ final class CreativeVoiceSettings {
         guard let savedSettings, !voiceID.isEmpty, CreativeRunGate.isKnown(savedSettings) else { return }
         loadProblem = nil
         if case .json(let value, _)? = await savedSettings.perform(arguments: ["voice_id": .string(voiceID)]) {
+            // The owner may have picked another voice while these were on their way.
+            guard currentVoiceID?() ?? voiceID == voiceID else { return }
             load(value)
             overrides = true
         } else {
