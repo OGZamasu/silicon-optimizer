@@ -64,5 +64,7 @@ struct VoicesStudioSpecTests {
         #expect(VoicesStudioSchema.choices("dubbing_project_create", "model_id").contains("dubbing_v2"))
         #expect(VoicesStudioSchema.minLength("text_to_voice_design", "voice_description") == 20)
         #expect(!VoicesStudioSchema.has("no_such_operation", "x"))
+        #expect(VoicesStudioSchema.choices("public_list_orders", "status").contains("submitted"),
+                "a multi-select filter offers its items' values")
     }
 }

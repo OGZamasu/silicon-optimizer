@@ -335,6 +335,8 @@ enum VoicesStudioSchema {
         if let values = shape["enum"].arrayValue {
             return values.compactMap(\.stringValue)
         }
+        // A list of enum values (a multi-select filter): the items' values.
+        if shape["type"].stringValue == "array" { return enumValues(shape["items"]) }
         // A union of enums (a field that takes a model id or a free string): the listed ones.
         var found: [String] = []
         for variant in variants(of: shape) {

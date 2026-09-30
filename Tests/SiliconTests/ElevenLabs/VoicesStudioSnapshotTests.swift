@@ -176,6 +176,30 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("studio-podcast", height: 900) { StudioScreen(model: model) }
     }
 
+    // MARK: Productions
+
+    @Test func aProductionsOrderWithItsItems() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = ProductionsSectionModel(environment: fixture.environment)
+        let order = try #require(ProductionsOrder(json: VoicesStudioProductionsTests.order("o1", items: [VoicesStudioProductionsTests.dubItem])))
+        let others = try [VoicesStudioProductionsTests.order("o2", state: "done", total: 80),
+                          VoicesStudioProductionsTests.order("o3", state: "submitted", total: 1_150, sandbox: true)]
+            .map { try #require(ProductionsOrder(json: $0)) }
+        model.load(orders: [order] + others, selected: order,
+                   media: [ProductionsMedia(id: "prodmedia_1", name: "launch-video.mp4", contentType: "video/mp4", language: "en")],
+                   languages: ["kind": "pair", "language_pairs": [
+                       ["source_language": ["code": "en", "label": "English"],
+                        "destination_languages": [["code": "es-ES", "label": "Spanish (Spain)"],
+                                                  ["code": "fr-FR", "label": "French (France)"],
+                                                  ["code": "de-DE", "label": "German"]]],
+                   ]])
+        model.item.mediaIDs = ["prodmedia_1"]
+        model.item.sourceLanguage = "en"
+        model.item.destinationLanguages = ["es-ES"]
+        try VoicesStudioSnapshots.render("productions-order", height: 1700) { ProductionsScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {
