@@ -140,7 +140,7 @@ final class ProductionsSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
-        actions.readsShownInPlace = ["public_list_orders"]
+        actions.readsShownInPlace = ["public_list_orders", "public_get_order"]
         actions.onUnknownOutcome = { [weak self] _ in
             if let id = self?.selected?.id { await self?.select(id) }
         }
@@ -222,21 +222,32 @@ final class ProductionsSectionModel {
     }
 
     func createOrder() async {
+        // The name is the one typed when New order was pressed, and it goes to the new order by
+        // its id — never to whichever order is open when the answer comes.
+        let name = newOrderName.trimmingCharacters(in: .whitespaces)
+        let chosen = wantedOrder
         guard let json = await actions.perform(
             "public_create_order", ["sandbox": .bool(newSandbox)], title: newSandbox ? "Sandbox order" : "New order"
         )?.voicesStudioJSON, let id = json["order_id"].stringValue else { return }
-        let name = newOrderName.trimmingCharacters(in: .whitespaces)
-        await select(id)
+        if newOrderName.trimmingCharacters(in: .whitespaces) == name { newOrderName = "" }
         if !name.isEmpty {
-            rename = name
-            await saveName()
+            await actions.perform(
+                "public_update_order", ["order_id": .string(id), "request": ["name": .string(name)]], title: "Rename order"
+            )
         }
-        newOrderName = ""
         await refresh()
+        // The new order is opened unless the owner opened another meanwhile.
+        guard wantedOrder == chosen else { return }
+        await select(id)
     }
 
-    /// The order last chosen: an answer that arrives after another was chosen is dropped.
-    @ObservationIgnored private var wantedOrder: String?
+    /// The order the owner chose last: shown as loading until its details arrive (or with why
+    /// they did not) — never the previous order in its place. An answer about another order
+    /// never takes the screen.
+    private(set) var wantedOrder: String?
+
+    /// Why the chosen order's details could not be read, if they could not.
+    var orderProblem: String? { actions.problem("public_get_order") }
 
     func select(_ orderID: String?) async {
         wantedOrder = orderID
@@ -245,17 +256,27 @@ final class ProductionsSectionModel {
             return
         }
         if selected?.id != orderID {
+            selected = nil
+            rename = ""
             deliverables = []
             item = ProductionsItemDraft()
             itemProblems = []
+            mediaProblems = []
         }
         await fetch(orderID)
     }
 
+    /// After a change to `orderID`: fetch it again on a runner of its own, so the read of an
+    /// order opened meanwhile is not abandoned; the screen takes it only while it is open.
+    private func refetch(_ orderID: String) async {
+        await fetch(orderID, slot: VoicesStudioActions.afterChange)
+    }
+
     /// Fetches one order into the list, and onto the screen only while it is still the chosen
     /// one — so a save that finishes after another order was chosen does not take the screen back.
-    private func fetch(_ orderID: String) async {
-        guard let json = await actions.perform("public_get_order", ["order_id": .string(orderID)], quietly: true)?
+    private func fetch(_ orderID: String, slot: String? = nil) async {
+        guard let json = await actions.perform("public_get_order", ["order_id": .string(orderID)], quietly: true,
+                                               slot: slot)?
             .voicesStudioJSON, let order = ProductionsOrder(json: json) else { return }
         if let index = orders.firstIndex(where: { $0.id == order.id }) { orders[index] = order } else { orders.insert(order, at: 0) }
         guard wantedOrder == orderID else { return }
@@ -270,7 +291,7 @@ final class ProductionsSectionModel {
             "public_update_order", ["order_id": .string(order.id), "request": ["name": .string(rename)]],
             title: "Rename order"
         ) != nil else { return }
-        await fetch(order.id)
+        await refetch(order.id)
     }
 
     // MARK: Media
@@ -312,27 +333,31 @@ final class ProductionsSectionModel {
         guard problems.isEmpty,
               let json = await actions.perform("public_register_media", arguments, files: files, title: "Media for \(order.name)")?
                 .voicesStudioJSON, let id = json["media_id"].stringValue else { return }
-        mediaFile = []
-        mediaURL = ""
-        mediaURLName = ""
-        mediaURLType = ""
-        await lookUpMedia(id)
-        if !item.mediaIDs.contains(id) { item.mediaIDs.append(id) }
+        // The form and the item draft are this order's only while it is open.
+        if wantedOrder == order.id {
+            mediaFile = []
+            mediaURL = ""
+            mediaURLName = ""
+            mediaURLType = ""
+            if !item.mediaIDs.contains(id) { item.mediaIDs.append(id) }
+        }
+        await lookUpMedia(id, in: order.id)
     }
 
-    /// Asks ElevenLabs about a media id — one registered now, or one typed in.
-    func lookUpMedia(_ mediaID: String) async {
-        guard let order = selected,
+    /// Asks ElevenLabs about a media id of `orderID` (the open order when nil) — one registered
+    /// now, or one typed in.
+    func lookUpMedia(_ mediaID: String, in orderID: String? = nil) async {
+        guard let orderID = orderID ?? selected?.id,
               let json = await actions.perform(
-                "public_get_media_info", ["order_id": .string(order.id), "media_id": .string(mediaID)], quietly: true
+                "public_get_media_info", ["order_id": .string(orderID), "media_id": .string(mediaID)], quietly: true
               )?.voicesStudioJSON else { return }
         let entry = ProductionsMedia(
             id: json["media_id"].stringValue ?? mediaID, name: json["name"].stringValue ?? mediaID,
             contentType: json["content_type"].stringValue, language: json["language"].stringValue,
             link: json["signed_url"].stringValue.flatMap(URL.init(string:)).flatMap { $0.scheme == "https" ? $0 : nil }
         )
-        media[order.id, default: []].removeAll { $0.id == entry.id }
-        media[order.id, default: []].append(entry)
+        media[orderID, default: []].removeAll { $0.id == entry.id }
+        media[orderID, default: []].append(entry)
     }
 
     var orderMedia: [ProductionsMedia] { selected.map { media[$0.id] ?? [] } ?? [] }
@@ -413,8 +438,8 @@ final class ProductionsSectionModel {
         guard problems.isEmpty,
               await actions.perform("public_upsert_order_item", arguments, title: "Item for \(order.name)") != nil
         else { return }
-        item = ProductionsItemDraft(kind: item.kind)
-        await fetch(order.id)
+        if wantedOrder == order.id { item = ProductionsItemDraft(kind: item.kind) }
+        await refetch(order.id)
     }
 
     func edit(_ existing: ProductionsItem) {
@@ -431,7 +456,7 @@ final class ProductionsSectionModel {
                 "public_remove_order_item", ["order_id": .string(order.id), "item_id": .string(existing.id)],
                 subject: "the \(VoicesStudioFormat.words(existing.kind).lowercased()) item from “\(order.name)”"
               ) != nil else { return }
-        await fetch(order.id)
+        await refetch(order.id)
     }
 
     // MARK: Submit and deliver
@@ -494,7 +519,7 @@ final class ProductionsSectionModel {
             "public_submit_order", ["order_id": .string(order.id)], subject: "the order “\(order.name)”",
             title: "Submit \(order.name)", question: question
         ) != nil else { return }
-        await fetch(order.id)
+        await refetch(order.id)
     }
 
     func loadDeliverables() async {

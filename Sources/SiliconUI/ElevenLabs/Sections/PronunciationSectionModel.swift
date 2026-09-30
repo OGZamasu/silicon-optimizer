@@ -230,15 +230,26 @@ final class PronunciationSectionModel {
 
     /// Fetches one dictionary into the list, and onto the screen only while it is still the
     /// chosen one — so a change that finishes after another was chosen does not take it back.
-    private func fetch(_ id: String) async {
+    private func fetch(_ id: String, slot: String? = nil) async {
         guard let json = await actions.perform(
-            "get_pronunciation_dictionary_metadata", ["pronunciation_dictionary_id": .string(id)], quietly: true
+            "get_pronunciation_dictionary_metadata", ["pronunciation_dictionary_id": .string(id)], quietly: true,
+            slot: slot
         )?.voicesStudioJSON, let dictionary = PronunciationDictionary(json: json) else { return }
         if let index = dictionaries.firstIndex(where: { $0.id == id }) { dictionaries[index] = dictionary }
         guard wantedDictionary == id else { return }
         selected = dictionary
         rename = dictionary.name
     }
+
+    /// After a change to dictionary `id`: fetch it again on a runner of its own (the read of a
+    /// dictionary opened meanwhile is not abandoned); the screen takes it only while it is open.
+    private func refetch(_ id: String) async {
+        await fetch(id, slot: VoicesStudioActions.afterChange)
+    }
+
+    /// Whether dictionary `id` is still the one open — the only one whose rule editor and marks a
+    /// finished change may clear.
+    private func isOpen(_ id: String) -> Bool { wantedDictionary == id }
 
     // MARK: Rules
 
@@ -279,14 +290,18 @@ final class PronunciationSectionModel {
     func create() async {
         let (arguments, files, operation, problems) = createArguments()
         self.problems = problems
+        let chosen = wantedDictionary
         guard problems.isEmpty,
               let json = await actions.perform(operation, arguments, files: files, title: "Dictionary \(newName)")?
                 .voicesStudioJSON, let id = json["id"].stringValue else { return }
         newName = ""
         newDescription = ""
         newFile = []
-        rules = [PronunciationRule()]
         await refresh()
+        // The rule editor is shared with the open dictionary: it is cleared, and the new
+        // dictionary opened, only if the owner did not open another meanwhile.
+        guard wantedDictionary == chosen else { return }
+        rules = [PronunciationRule()]
         await select(id)
     }
 
@@ -299,8 +314,8 @@ final class PronunciationSectionModel {
                 "add_rules", ["pronunciation_dictionary_id": .string(dictionary.id), "rules": .array(values)],
                 title: "Rules for \(dictionary.name)"
               ) != nil else { return }
-        rules = [PronunciationRule()]
-        await fetch(dictionary.id)
+        if isOpen(dictionary.id) { rules = [PronunciationRule()] }
+        await refetch(dictionary.id)
     }
 
     /// Replaces every rule with the editor's — the rules on screen are what the new version
@@ -317,8 +332,8 @@ final class PronunciationSectionModel {
                     + "\(dictionary.ruleCount) it has now are left in the previous version.",
                 title: "Replace rules of \(dictionary.name)"
               ) != nil else { return }
-        rules = [PronunciationRule()]
-        await fetch(dictionary.id)
+        if isOpen(dictionary.id) { rules = [PronunciationRule()] }
+        await refetch(dictionary.id)
     }
 
     /// Puts the dictionary's current rules in the editor, to change and replace them.
@@ -334,8 +349,8 @@ final class PronunciationSectionModel {
             ["pronunciation_dictionary_id": .string(dictionary.id), "rule_strings": .array(marked.sorted().map(JSONValue.string))],
             title: "Remove rules from \(dictionary.name)"
         ) != nil else { return }
-        marked = []
-        await fetch(dictionary.id)
+        if isOpen(dictionary.id) { marked = [] }
+        await refetch(dictionary.id)
     }
 
     func saveName() async {
@@ -344,7 +359,7 @@ final class PronunciationSectionModel {
             "patch_pronunciation_dictionary",
             ["pronunciation_dictionary_id": .string(dictionary.id), "name": .string(rename)], title: "Rename dictionary"
         ) != nil else { return }
-        await fetch(dictionary.id)
+        await refetch(dictionary.id)
     }
 
     func setArchived(_ archived: Bool) async {
@@ -354,7 +369,7 @@ final class PronunciationSectionModel {
             ["pronunciation_dictionary_id": .string(dictionary.id), "archived": .bool(archived)],
             title: archived ? "Archive \(dictionary.name)" : "Restore \(dictionary.name)"
         ) != nil else { return }
-        await fetch(dictionary.id)
+        await refetch(dictionary.id)
     }
 
     func downloadPLS() async {

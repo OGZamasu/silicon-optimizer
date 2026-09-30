@@ -127,12 +127,22 @@ final class VoicesStudioActions {
     }
 
     /// The runner for `operationID`, made on first use; nil when the catalog has no such
-    /// operation.
-    func runner(_ operationID: String) -> ElevenLabsRunner? {
-        if let existing = runners[operationID] { return existing }
+    /// operation. A `slot` gives the operation a runner of its own for that purpose.
+    func runner(_ operationID: String, slot: String? = nil) -> ElevenLabsRunner? {
+        let key = Self.key(operationID, slot)
+        if let existing = runners[key] { return existing }
         guard let made = ElevenLabsRunner(operationID: operationID, context: context) else { return nil }
-        runners[operationID] = made
+        runners[key] = made
         return made
+    }
+
+    /// The slot for fetching an item again after a change to it. A runner abandons a read in
+    /// flight when it is asked again, so this fetch has a runner of its own: it never abandons
+    /// the read of an item the owner opened meanwhile, nor is abandoned by it.
+    static let afterChange = "after-change"
+
+    private static func key(_ operationID: String, _ slot: String?) -> String {
+        slot.map { "\(operationID)#\($0)" } ?? operationID
     }
 
     /// Whether `operationID` is running right now.
@@ -199,9 +209,10 @@ final class VoicesStudioActions {
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], subject: String? = nil,
         consequence: String? = nil, title: String? = nil, quietly: Bool = false,
-        spends: Bool? = nil, question: VoicesStudioQuestion? = nil
+        spends: Bool? = nil, question: VoicesStudioQuestion? = nil, slot: String? = nil
     ) async -> ElevenLabsResult? {
-        guard let runner = runner(operationID) else {
+        let key = Self.key(operationID, slot)
+        guard let runner = runner(operationID, slot: slot) else {
             missingOperation = operationID
             return nil
         }
@@ -213,7 +224,7 @@ final class VoicesStudioActions {
         refusal = nil
         runner.title = title
         runner.recordsResults = !quietly
-        if !quietly { last = runner } else { readFailures[operationID] = nil }
+        if !quietly { last = runner } else { readFailures[key] = nil }
         if let question, !runner.operation.requiresConfirmation {
             guard await ask(question, for: runner.operation) else { return nil }
         }
@@ -228,7 +239,7 @@ final class VoicesStudioActions {
         spendingOverrides.remove(operationID)
         if quietly {
             // A read replaced by a newer one of the same operation leaves the runner to it.
-            readFailures[operationID] = runner.phase == .failed ? (runner.errorMessage ?? "it failed.") : nil
+            readFailures[key] = runner.phase == .failed ? (runner.errorMessage ?? "it failed.") : nil
         }
         if spendsNow, result == nil, !Self.passingSpends.contains(operationID), Self.outcomeIsUnknown(runner) {
             unknownOutcomes[operationID] = title ?? runner.operation.summary

@@ -585,16 +585,31 @@ final class VoicesSectionModel {
                 if selected.isProfessional { professional = VoicesProfessionalDraft(voice: selected) }
             }
             sampleFiles = [:]
+            // What was picked or read for the previous voice is not offered for this one.
             captcha = nil
+            captchaRecording = []
+            professionalFiles = []
+            verificationFiles = []
+            verificationNote = ""
         }
         await reloadSelected(voiceID)
     }
 
+    /// After a change to `voiceID`: fetch it again, onto the screen only while it is still the
+    /// one open (its own runner, so the read of a voice opened meanwhile is not abandoned).
+    private func refetch(_ voiceID: String) async {
+        await reloadSelected(voiceID, slot: VoicesStudioActions.afterChange)
+    }
+
+    /// Whether `voiceID` is still the voice the owner has open — the only one whose drafts a
+    /// finished change may clear.
+    private func isOpen(_ voiceID: String) -> Bool { wantedVoice == voiceID }
+
     /// Fetches the selected voice (or `voiceID`) again, with its settings.
-    func reloadSelected(_ voiceID: String? = nil) async {
+    func reloadSelected(_ voiceID: String? = nil, slot: String? = nil) async {
         guard let voiceID = voiceID ?? selected?.id,
               let json = await actions.perform(
-                "get_voice_by_id", ["voice_id": .string(voiceID)], quietly: true
+                "get_voice_by_id", ["voice_id": .string(voiceID)], quietly: true, slot: slot
               )?.voicesStudioJSON,
               let voice = VoicesVoice(json: json)
         else { return }
@@ -606,7 +621,7 @@ final class VoicesSectionModel {
         if let settings = voice.settings {
             settingsDraft = settings
         } else if let json = await actions.perform(
-            "get_voice_settings", ["voice_id": .string(voice.id)], quietly: true
+            "get_voice_settings", ["voice_id": .string(voice.id)], quietly: true, slot: slot
         )?.voicesStudioJSON, selected?.id == voice.id {
             settingsDraft = VoicesSettings(json: json)
         }
@@ -627,8 +642,9 @@ final class VoicesSectionModel {
 
     /// Puts the account's default settings in the sliders; nothing is saved until Save.
     func loadDefaultSettings() async {
-        guard let json = await actions.perform("get_voice_settings_default", quietly: true)?.voicesStudioJSON
-        else { return }
+        guard let voiceID = selected?.id,
+              let json = await actions.perform("get_voice_settings_default", quietly: true)?.voicesStudioJSON,
+              isOpen(voiceID) else { return }
         settingsDraft = VoicesSettings(json: json)
     }
 
@@ -637,8 +653,8 @@ final class VoicesSectionModel {
         let (arguments, files) = Self.editArguments(voiceID: voice.id, draft: editDraft)
         guard await actions.perform("edit_voice", arguments, files: files, title: "Edit \(voice.name)") != nil
         else { return }
-        editDraft.files = []
-        await reloadSelected()
+        if isOpen(voice.id) { editDraft.files = [] }
+        await refetch(voice.id)
         await directory.refresh()
     }
 
@@ -676,7 +692,7 @@ final class VoicesSectionModel {
             subject: "the sample “\(sample.fileName)” of “\(voice.name)”"
         ) != nil else { return }
         sampleFiles[sample.id] = nil
-        await reloadSelected()
+        await refetch(voice.id)
     }
 
     func replicate() async {
@@ -703,12 +719,16 @@ final class VoicesSectionModel {
 
     func runClone() async {
         let (arguments, files) = Self.cloneArguments(clone)
+        let chosen = wantedVoice
         guard let json = await actions.perform("add_voice", arguments, files: files, title: "Clone \(clone.name)")?
             .voicesStudioJSON, let voiceID = json["voice_id"].stringValue else { return }
         clone = VoicesCloneDraft()
-        mode = .voices
         await directory.refresh()
         await refresh()
+        // The new voice is opened unless the owner opened another meanwhile; the list shows
+        // it unless the owner moved to another part of the section.
+        guard wantedVoice == chosen else { return }
+        if mode == .clone { mode = .voices }
         await select(voiceID)
     }
 
@@ -721,8 +741,10 @@ final class VoicesSectionModel {
         guard let json = await actions.perform(
             "create_pvc_voice", Self.professionalArguments(professional), title: "Professional voice \(professional.name)"
         )?.voicesStudioJSON, let voiceID = json["voice_id"].stringValue else { return }
+        let chosen = wantedVoice
         professional = VoicesProfessionalDraft()
         await refresh()
+        guard wantedVoice == chosen else { return }
         await select(voiceID)
     }
 
@@ -731,7 +753,7 @@ final class VoicesSectionModel {
         await actions.perform(
             "edit_pvc_voice", Self.professionalArguments(professional, voiceID: voice.id), title: "Edit \(voice.name)"
         )
-        await reloadSelected()
+        await refetch(voice.id)
     }
 
     func addProfessionalSamples() async {
@@ -743,8 +765,8 @@ final class VoicesSectionModel {
             files: ["files": professionalFiles.map { ElevenLabsFile(url: $0) }],
             title: "Samples for \(voice.name)"
         ) != nil else { return }
-        professionalFiles = []
-        await reloadSelected()
+        if isOpen(voice.id) { professionalFiles = [] }
+        await refetch(voice.id)
     }
 
     func saveSample(_ sample: VoicesSample) async {
@@ -754,7 +776,7 @@ final class VoicesSectionModel {
             "edit_pvc_voice_sample", Self.sampleArguments(voiceID: voice.id, sampleID: sample.id, draft: draft),
             title: "Sample \(sample.fileName)"
         )
-        await reloadSelected()
+        await refetch(voice.id)
     }
 
     func loadWaveform(_ sample: VoicesSample) async {
@@ -772,13 +794,15 @@ final class VoicesSectionModel {
             "start_speaker_separation", ["voice_id": .string(voice.id), "sample_id": .string(sample.id)],
             title: "Separate speakers in \(sample.fileName)"
         ) != nil else { return }
-        await loadSpeakers(sample)
+        await loadSpeakers(sample, of: voice.id)
     }
 
-    func loadSpeakers(_ sample: VoicesSample) async {
-        guard let voice = selected,
+    /// The speakers found in a sample of `voiceID` (the open voice when nil) — asked for with
+    /// that voice's id, whichever voice is open by then.
+    func loadSpeakers(_ sample: VoicesSample, of voiceID: String? = nil) async {
+        guard let voiceID = voiceID ?? selected?.id,
               let json = await actions.perform(
-                "get_pvc_sample_speakers", ["voice_id": .string(voice.id), "sample_id": .string(sample.id)],
+                "get_pvc_sample_speakers", ["voice_id": .string(voiceID), "sample_id": .string(sample.id)],
                 quietly: true
               )?.voicesStudioJSON else { return }
         let found = VoicesSpeakers(json: json)
@@ -800,9 +824,13 @@ final class VoicesSectionModel {
         speakerFiles["\(sample.id)/\(speakerID)"]
     }
 
+    /// The text to read aloud for this voice's verification. Shown only while that voice is
+    /// open: read out for another voice, it would be a failed attempt.
     func loadCaptcha() async {
         guard let voice = selected else { return }
-        captcha = await actions.perform("get_pvc_voice_captcha", ["voice_id": .string(voice.id)], title: "Verification text")
+        let text = await actions.perform("get_pvc_voice_captcha", ["voice_id": .string(voice.id)], title: "Verification text")
+        guard isOpen(voice.id) else { return }
+        captcha = text
     }
 
     func verifyCaptcha() async {
@@ -811,8 +839,8 @@ final class VoicesSectionModel {
             "verify_pvc_voice_captcha", ["voice_id": .string(voice.id)],
             files: ["recording": [ElevenLabsFile(url: recording)]], title: "Verify \(voice.name)"
         ) != nil else { return }
-        captchaRecording = []
-        await reloadSelected()
+        if isOpen(voice.id) { captchaRecording = [] }
+        await refetch(voice.id)
     }
 
     func requestManualVerification() async {
@@ -824,9 +852,11 @@ final class VoicesSectionModel {
             files: ["files": verificationFiles.map { ElevenLabsFile(url: $0) }],
             title: "Manual verification for \(voice.name)"
         ) != nil else { return }
-        verificationFiles = []
-        verificationNote = ""
-        await reloadSelected()
+        if isOpen(voice.id) {
+            verificationFiles = []
+            verificationNote = ""
+        }
+        await refetch(voice.id)
     }
 
     /// The model ids ElevenLabs tracks training for on this voice — what "Train" can name.
@@ -847,7 +877,7 @@ final class VoicesSectionModel {
         arguments.voicesStudioSet("model_id", VoicesStudioFormat.text(trainingModel))
         guard await actions.perform("run_pvc_voice_training", arguments, title: "Train \(voice.name)") != nil
         else { return }
-        await reloadSelected()
+        await refetch(voice.id)
     }
 
     // MARK: Similar voices

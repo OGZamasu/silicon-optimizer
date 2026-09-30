@@ -15,7 +15,7 @@ struct ServiceAccount: Identifiable, Hashable, Sendable {
         self.id = id
         name = json["name"].stringValue ?? id
         createdAt = json["created_at_unix"].intValue
-        keys = (json["api-keys"].arrayValue ?? []).compactMap(ServiceAccountKey.init(json:))
+        keys = ServiceAccountKey.keys(in: json, of: id)
     }
 }
 
@@ -31,10 +31,24 @@ struct ServiceAccountKey: Identifiable, Hashable, Sendable {
     var characterCount: Int?
     var allowedIPs: [String]
     var createdAt: Int?
+    /// The service account the key belongs to, as the list says — what on/off and delete act
+    /// on, whichever account is selected when they are pressed.
+    var accountID: String?
+
+    /// The keys in an answer's `api-keys`, each tied to its account (the list's own field, or
+    /// the account they were listed under).
+    static func keys(in json: JSONValue, of accountID: String) -> [ServiceAccountKey] {
+        (json["api-keys"].arrayValue ?? []).compactMap(ServiceAccountKey.init(json:)).map { key in
+            var key = key
+            if key.accountID == nil { key.accountID = accountID }
+            return key
+        }
+    }
 
     init?(json: JSONValue) {
         guard let id = json["key_id"].stringValue else { return nil }
         self.id = id
+        accountID = json["service_account_user_id"].stringValue
         name = json["name"].stringValue ?? id
         hint = json["hint"].stringValue ?? ""
         isDisabled = json["is_disabled"].boolValue ?? false
@@ -188,7 +202,7 @@ final class ServiceAccountsSectionModel {
               let json = await actions.perform(
                 "get_service_account_api_keys_route", ["service_account_user_id": .string(accountID)], quietly: true
               )?.voicesStudioJSON else { return }
-        let keys = (json["api-keys"].arrayValue ?? []).compactMap(ServiceAccountKey.init(json:))
+        let keys = ServiceAccountKey.keys(in: json, of: accountID)
         if let index = accounts.firstIndex(where: { $0.id == accountID }) { accounts[index].keys = keys }
         // Another account may have been chosen meanwhile: these are this account's keys only.
         if selected?.id == accountID { selected?.keys = keys }
@@ -291,8 +305,14 @@ final class ServiceAccountsSectionModel {
         await refreshKeys(accountID)
     }
 
+    /// The account a key belongs to: its own, not whichever is selected when a row is pressed.
+    private func account(of key: ServiceAccountKey) -> ServiceAccount? {
+        guard let id = key.accountID ?? selected?.id else { return nil }
+        return accounts.first { $0.id == id } ?? (selected?.id == id ? selected : nil)
+    }
+
     func setEnabled(_ key: ServiceAccountKey, _ enabled: Bool) async {
-        guard let account = selected,
+        guard let account = account(of: key),
               await actions.perform(
                 "edit_service_account_api_key",
                 ["service_account_user_id": .string(account.id), "api_key_id": .string(key.id), "is_enabled": .bool(enabled)],
@@ -307,7 +327,7 @@ final class ServiceAccountsSectionModel {
     }
 
     func delete(_ key: ServiceAccountKey) async {
-        guard let account = selected,
+        guard let account = account(of: key),
               await actions.perform(
                 "delete_service_account_api_key",
                 ["service_account_user_id": .string(account.id), "api_key_id": .string(key.id)],

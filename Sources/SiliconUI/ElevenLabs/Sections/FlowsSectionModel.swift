@@ -154,6 +154,22 @@ struct FlowsRun: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Where a template run went when it answered while its template was not open.
+struct FlowsRunNotice: Hashable, Sendable {
+    var templateID: String
+    var templateName: String
+    var status: String
+
+    private static let finished: Set<String> = ["completed", "succeeded", "success", "failed", "error", "cancelled"]
+
+    var text: String {
+        let said = VoicesStudioFormat.words(status).lowercased()
+        return (Self.finished.contains(status) ? "Run finished for “\(templateName)”: \(said)."
+                : "Run started for “\(templateName)”: \(said).")
+            + " It is listed under “\(templateName)”."
+    }
+}
+
 // MARK: - Model
 
 /// Flows: speech, image and video generations with any model the spec lists, their status and
@@ -193,7 +209,15 @@ final class FlowsSectionModel {
     var versionID = "latest"
     var inputs: [String: String] = [:]
     var notifyWebhooks = false
-    private(set) var runs: [FlowsRun] = []
+    /// Runs by template id: a run that answers after another template was opened is kept with
+    /// its own template, never listed under the one open.
+    private var runsByTemplate: [String: [FlowsRun]] = [:]
+    /// The runs of the template open now.
+    var runs: [FlowsRun] { template.map { runsByTemplate[$0.id] ?? [] } ?? [] }
+    /// A run that answered while its template was not open: said wherever the owner is now.
+    private(set) var runNotice: FlowsRunNotice?
+    /// The template of the run under way, for fetching its runs if its answer is lost.
+    @ObservationIgnored private var runningFor: String?
     private(set) var inputProblems: [String] = []
 
     init(environment: VoicesStudioEnvironment) {
@@ -206,8 +230,8 @@ final class FlowsSectionModel {
             guard let self else { return }
             if let kind = FlowsKind.allCases.first(where: { $0.createID == operationID }) {
                 await refresh(kind)
-            } else {
-                await loadRuns()
+            } else if let templateID = runningFor {
+                await loadRuns(templateID)
             }
         }
     }
@@ -370,7 +394,7 @@ final class FlowsSectionModel {
         template = fresh
         versionID = "latest"
         inputs = [:]
-        runs = []
+        if runNotice?.templateID == templateID { runNotice = nil }
         await loadRuns()
     }
 
@@ -404,21 +428,32 @@ final class FlowsSectionModel {
         return (arguments, problems)
     }
 
+    /// Runs the open template. The run belongs to that template whatever is open when it
+    /// answers: it is listed under it, and if another template is open by then, a notice says
+    /// where it went.
     func run() async {
         guard let (arguments, problems) = runArguments(), let template else { return }
         inputProblems = problems
-        guard problems.isEmpty,
-              let json = await actions.perform("create_public_template_run", arguments, title: "Run \(template.name)")?
-                .voicesStudioJSON, let run = FlowsRun(json: json) else { return }
-        runs.insert(run, at: 0)
+        guard problems.isEmpty else { return }
+        runningFor = template.id
+        guard let json = await actions.perform("create_public_template_run", arguments, title: "Run \(template.name)")?
+            .voicesStudioJSON, let run = FlowsRun(json: json) else { return }
+        runsByTemplate[template.id, default: []].removeAll { $0.id == run.id }
+        runsByTemplate[template.id, default: []].insert(run, at: 0)
+        if self.template?.id != template.id {
+            runNotice = FlowsRunNotice(templateID: template.id, templateName: template.name, status: run.status)
+        }
     }
 
-    func loadRuns() async {
-        guard let template,
+    /// Lists the runs of `templateID` (the open template when nil). Another template's runs are
+    /// read on a runner of their own, so the open template's list read is not abandoned.
+    func loadRuns(_ templateID: String? = nil) async {
+        guard let templateID = templateID ?? template?.id,
               let json = await actions.perform(
-                "list_public_template_runs", ["template_id": .string(template.id), "page_size": 30], quietly: true
-              )?.voicesStudioJSON, self.template?.id == template.id else { return }
-        runs = (json["runs"].arrayValue ?? []).compactMap(FlowsRun.init(json:))
+                "list_public_template_runs", ["template_id": .string(templateID), "page_size": 30], quietly: true,
+                slot: templateID == template?.id ? nil : VoicesStudioActions.afterChange
+              )?.voicesStudioJSON else { return }
+        runsByTemplate[templateID] = (json["runs"].arrayValue ?? []).compactMap(FlowsRun.init(json:))
     }
 
     func check(_ run: FlowsRun) async {
@@ -426,9 +461,13 @@ final class FlowsSectionModel {
               let json = await actions.perform(
                 "get_public_template_run", ["template_id": .string(template.id), "run_id": .string(run.id)], quietly: true
               )?.voicesStudioJSON, let fresh = FlowsRun(json: json),
-              let index = runs.firstIndex(where: { $0.id == run.id })
+              let index = runsByTemplate[template.id]?.firstIndex(where: { $0.id == run.id })
         else { return }
-        runs[index] = fresh
+        runsByTemplate[template.id]?[index] = fresh
+    }
+
+    func dismissRunNotice() {
+        runNotice = nil
     }
 
     // MARK: Test support
@@ -441,7 +480,7 @@ final class FlowsSectionModel {
     func load(templates: [FlowsTemplate], open: FlowsTemplate? = nil, runs: [FlowsRun] = []) {
         self.templates = templates
         template = open
-        self.runs = runs
+        if let open { runsByTemplate[open.id] = runs }
         loadedTemplates = true
     }
 }

@@ -476,7 +476,7 @@ final class WorkspaceSectionModel {
                 "Share “\(resource.name)” with \(targetName) as \(shareRole)?", button: "Share",
                 consequence: "\(targetName.prefix(1).uppercased() + targetName.dropFirst()) gets the \(shareRole) role on “\(resource.name)”."
             )
-        ) != nil else { return }
+        ) != nil, self.resource?.id == resource.id else { return }
         await loadResource()
     }
 
@@ -492,7 +492,7 @@ final class WorkspaceSectionModel {
                 "Stop sharing “\(resource.name)” with \(targetName)?", button: "Stop sharing",
                 consequence: "\(targetName.prefix(1).uppercased() + targetName.dropFirst()) loses the access to “\(resource.name)” this share gave."
             )
-        ) != nil else { return }
+        ) != nil, self.resource?.id == resource.id else { return }
         await loadResource()
     }
 
@@ -575,7 +575,9 @@ final class WorkspaceSectionModel {
                     : "Agents and tools that use it later sign in with the new settings."
             )
         ) != nil else { return }
-        edit(nil)
+        // Close the editor only if it is still this connection's: another one's (whose form may
+        // be the same kind's) keeps what the owner typed there.
+        if editingConnection?.id == connection.id { edit(nil) }
         await refreshConnections()
     }
 
@@ -587,6 +589,7 @@ final class WorkspaceSectionModel {
                 ? "\(connection.usedBy) agents or tools use it and will no longer be able to sign in."
                 : "Nothing in the workspace uses it."
         ) != nil else { return }
+        if editingConnection?.id == connection.id { edit(nil) }
         await refreshConnections()
     }
 

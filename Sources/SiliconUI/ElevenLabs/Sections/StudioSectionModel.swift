@@ -453,6 +453,7 @@ final class StudioSectionModel {
     func createProject() async {
         let (arguments, files, problems) = Self.projectArguments(draft)
         self.problems = problems
+        let chosen = wantedProject
         guard problems.isEmpty,
               let json = await actions.perform(
                 "add_project", arguments, files: files, title: "Studio project \(draft.name)",
@@ -463,6 +464,8 @@ final class StudioSectionModel {
         draft = StudioProjectDraft()
         showsNewProject = false
         projects.insert(project, at: 0)
+        // The new project is opened unless the owner opened another meanwhile.
+        guard wantedProject == chosen else { return }
         await select(project.id)
     }
 
@@ -492,9 +495,10 @@ final class StudioSectionModel {
         await loadMutedTracks()
     }
 
-    func reloadSelected(_ projectID: String? = nil) async {
+    func reloadSelected(_ projectID: String? = nil, slot: String? = nil) async {
         guard let projectID = projectID ?? selected?.id,
-              let json = await actions.perform("get_project_by_id", ["project_id": .string(projectID)], quietly: true)?
+              let json = await actions.perform("get_project_by_id", ["project_id": .string(projectID)], quietly: true,
+                                               slot: slot)?
                 .voicesStudioJSON, let project = StudioProject(json: json)
         else { return }
         if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
@@ -502,6 +506,17 @@ final class StudioSectionModel {
         selected = project
         editDraft = StudioEditDraft(project: project)
     }
+
+    /// After a change to `projectID`: fetch it again, onto the screen (and into its settings
+    /// form) only while it is still the project open — its own runner, so the read of a project
+    /// opened meanwhile is not abandoned.
+    private func refetch(_ projectID: String) async {
+        await reloadSelected(projectID, slot: VoicesStudioActions.afterChange)
+    }
+
+    /// Whether `projectID` is still the project the owner has open — the only one whose chapter
+    /// list a finished change reloads and whose typing it clears.
+    private func isOpen(_ projectID: String) -> Bool { wantedProject == projectID && selected?.id == projectID }
 
     /// Reloads just the chapter list, as `GET …/chapters` gives it.
     func reloadChapters() async {
@@ -534,9 +549,9 @@ final class StudioSectionModel {
     }
 
     func saveEdit() async {
-        guard let arguments = editArguments(),
+        guard let arguments = editArguments(), let projectID = arguments["project_id"]?.stringValue,
               await actions.perform("edit_project", arguments, title: "Edit \(editDraft.name)") != nil else { return }
-        await reloadSelected()
+        await refetch(projectID)
     }
 
     /// The question before the content is replaced: the spec initialises the project from the
@@ -564,16 +579,18 @@ final class StudioSectionModel {
             "edit_project_content", arguments, files: files, title: "New content for \(project.name)",
             spends: contentAutoConvert, question: question
         ) != nil else { return }
-        contentURL = ""
-        contentDocument = []
-        await reloadSelected()
+        if isOpen(project.id) {
+            contentURL = ""
+            contentDocument = []
+        }
+        await refetch(project.id)
     }
 
     func convert() async {
         guard let project = selected,
               await actions.perform("convert_project_endpoint", ["project_id": .string(project.id)],
                                     title: "Convert \(project.name)") != nil else { return }
-        await reloadSelected()
+        await refetch(project.id)
     }
 
     func delete() async {
@@ -603,10 +620,10 @@ final class StudioSectionModel {
         guard var locators = selected?.dictionaries else { return }
         locators.removeAll { $0.id == dictionary.id }
         if attached { locators.append(StudioDictionaryLocator(id: dictionary.id, versionID: dictionary.latestVersionID)) }
-        guard let arguments = attachArguments(locators),
+        guard let arguments = attachArguments(locators), let projectID = arguments["project_id"]?.stringValue,
               await actions.perform("update_pronunciation_dictionaries", arguments,
                                     title: "Dictionaries of \(selected?.name ?? "")") != nil else { return }
-        await reloadSelected()
+        await refetch(projectID)
     }
 
     // MARK: Snapshots
@@ -716,7 +733,7 @@ final class StudioSectionModel {
         guard let arguments = chapterArguments(), let chapter, let projectID = selected?.id,
               await actions.perform("edit_chapter", arguments, title: "Edit \(chapter.name)") != nil else { return }
         // Another project or chapter may be open by now: reopen this one only if it still is.
-        guard selected?.id == projectID else { return }
+        guard isOpen(projectID) else { return }
         if self.chapter?.id == chapter.id { await openChapter(chapter.id) }
         await reloadChapters()
     }
@@ -726,7 +743,7 @@ final class StudioSectionModel {
               await actions.perform(
                 "convert_chapter_endpoint", ["project_id": .string(project.id), "chapter_id": .string(chapter.id)],
                 title: "Convert \(chapter.name)"
-              ) != nil else { return }
+              ) != nil, isOpen(project.id) else { return }
         await reloadChapters()
     }
 
@@ -735,7 +752,7 @@ final class StudioSectionModel {
               await actions.perform(
                 "delete_chapter_endpoint", ["project_id": .string(project.id), "chapter_id": .string(chapter.id)],
                 subject: "the chapter “\(chapter.name)” of “\(project.name)”"
-              ) != nil else { return }
+              ) != nil, isOpen(project.id) else { return }
         if self.chapter?.id == chapter.id { self.chapter = nil }
         await reloadChapters()
     }
@@ -744,7 +761,8 @@ final class StudioSectionModel {
         guard let project = selected else { return }
         var arguments: [String: JSONValue] = ["project_id": .string(project.id), "name": .string(newChapterName)]
         arguments.voicesStudioSet("from_url", VoicesStudioFormat.text(newChapterURL))
-        guard await actions.perform("add_chapter", arguments, title: "New chapter \(newChapterName)") != nil else { return }
+        guard await actions.perform("add_chapter", arguments, title: "New chapter \(newChapterName)") != nil,
+              isOpen(project.id) else { return }
         newChapterName = ""
         newChapterURL = ""
         await reloadChapters()
@@ -803,13 +821,15 @@ final class StudioSectionModel {
     func createPodcast() async {
         let (arguments, problems) = Self.podcastArguments(podcast)
         self.problems = problems
+        let chosen = wantedProject
         guard problems.isEmpty,
               let json = await actions.perform("create_podcast", arguments, title: "Podcast")?.voicesStudioJSON,
               let project = StudioProject(json: json["project"])
         else { return }
         podcast = StudioPodcastDraft()
-        mode = .projects
         projects.insert(project, at: 0)
+        guard mode == .podcast, wantedProject == chosen else { return }
+        mode = .projects
         await select(project.id)
     }
 

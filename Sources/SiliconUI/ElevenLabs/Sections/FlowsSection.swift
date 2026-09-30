@@ -39,6 +39,22 @@ struct FlowsScreen: View {
                 FlowsTemplatesCard(model: model)
                 if let template = model.template { FlowsTemplateCard(model: model, template: template) }
             }
+            if let notice = model.runNotice {
+                HStack(spacing: 8) {
+                    Label(notice.text, systemImage: "checkmark.circle")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Open “\(notice.templateName)”") {
+                        model.mode = .templates
+                        Task { await model.open(notice.templateID) }
+                    }
+                    .controlSize(.small)
+                    Button("Dismiss") { model.dismissRunNotice() }.controlSize(.small)
+                }
+                .padding(10)
+                .background(.green.opacity(0.08), in: .rect(cornerRadius: 8))
+            }
             VoicesStudioActivity(
                 actions: model.actions,
                 fallback: model.actions.runner(model.mode.kind?.listID ?? "list_public_templates")

@@ -160,16 +160,18 @@ final class AudioNativeSectionModel {
     func create() async {
         let (arguments, files, problems) = Self.createArguments(draft)
         self.problems = problems
+        let chosen = projectID
         guard problems.isEmpty,
               let json = await actions.perform("create_audio_native_project", arguments, files: files,
                                                title: "Audio Native \(draft.name)")?.voicesStudioJSON
         else { return }
         take(json)
-        if let id = json["project_id"].stringValue {
+        draft = AudioNativeDraft()
+        // The new player is opened unless the owner chose another project meanwhile.
+        if let id = json["project_id"].stringValue, projectID == chosen {
             projectID = id
             await loadSettings()
         }
-        draft = AudioNativeDraft()
     }
 
     private func take(_ json: JSONValue) {
@@ -197,6 +199,8 @@ final class AudioNativeSectionModel {
                 files: ["file": [ElevenLabsFile(url: file)]], title: "New content for \(id)"
               )?.voicesStudioJSON else { return }
         take(json)
+        // The file picked, and the settings shown, are this project's only while it is chosen.
+        guard projectID.trimmingCharacters(in: .whitespaces) == id else { return }
         contentFile = []
         await loadSettings()
     }
@@ -207,10 +211,11 @@ final class AudioNativeSectionModel {
         var arguments: [String: JSONValue] = ["url": .string(url)]
         arguments.voicesStudioSet("title", VoicesStudioFormat.text(pageTitle))
         arguments.voicesStudioSet("author", VoicesStudioFormat.text(pageAuthor))
+        let chosen = projectID
         guard let json = await actions.perform("audio_native_update_content_from_url", arguments, title: "Content from \(url)")?
             .voicesStudioJSON else { return }
         take(json)
-        if let id = json["project_id"].stringValue {
+        if let id = json["project_id"].stringValue, projectID == chosen {
             projectID = id
             await loadSettings()
         }

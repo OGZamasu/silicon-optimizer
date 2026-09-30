@@ -34,6 +34,8 @@ struct ProductionsScreen: View {
                     ProductionsMediaCard(model: model)
                     ProductionsItemCard(model: model)
                 }
+            } else if let orderID = model.wantedOrder {
+                ProductionsOrderPendingCard(model: model, orderID: orderID)
             }
             VoicesStudioActivity(actions: model.actions, fallback: model.actions.runner("public_list_orders"))
         }
@@ -84,13 +86,38 @@ struct ProductionsOrdersCard: View {
                     VoicesStudioStatusBadge(status: order.state)
                 }
                 .padding(.vertical, 4).padding(.horizontal, 6)
-                .background(model.selected?.id == order.id ? Color.accentColor.opacity(0.12) : .clear,
+                .background(model.wantedOrder == order.id ? Color.accentColor.opacity(0.12) : .clear,
                             in: .rect(cornerRadius: 6))
                 .contentShape(Rectangle())
                 .onTapGesture { Task { await model.select(order.id) } }
             }
             VoicesStudioMoreButton(hasMore: model.hasMore, loading: model.isListing) {
                 Task { await model.loadMore() }
+            }
+        }
+    }
+}
+
+/// The order chosen while its details are on their way, or why they could not be read —
+/// never the previously open order in its place.
+struct ProductionsOrderPendingCard: View {
+    let model: ProductionsSectionModel
+    let orderID: String
+
+    var body: some View {
+        Card(title: model.orders.first { $0.id == orderID }?.name ?? orderID, systemImage: "doc.text") {
+            if let problem = model.orderProblem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Try again") { Task { await model.select(orderID) } }.controlSize(.small)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading the order…").font(.callout).foregroundStyle(.secondary)
+                }
             }
         }
     }

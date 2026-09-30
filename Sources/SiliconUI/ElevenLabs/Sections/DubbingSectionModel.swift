@@ -384,7 +384,10 @@ final class DubbingSectionModel {
                 .voicesStudioJSON, let id = json["dubbing_id"].stringValue
         else { return }
         draft = DubbingDraft()
+        let chosen = wantedDub
         await refreshDubs()
+        // The new dub is opened unless the owner opened another meanwhile.
+        guard wantedDub == chosen else { return }
         await selectDub(id)
     }
 
@@ -519,12 +522,14 @@ final class DubbingSectionModel {
     func createProject() async {
         let (arguments, files, problems) = Self.projectArguments(projectDraft)
         projectProblems = problems
+        let chosen = wantedProject
         guard problems.isEmpty,
               let json = await actions.perform("dubbing_project_create", arguments, files: files, title: "Dubbing project")?
                 .voicesStudioJSON, let project = DubbingProject(json: json)
         else { return }
         projectDraft = DubbingProjectDraft()
         projects.insert(project, at: 0)
+        guard wantedProject == chosen else { return }
         await selectProject(project.id)
     }
 
@@ -571,6 +576,8 @@ final class DubbingSectionModel {
             selectedLanguageID = nil
             sourceEdits = [:]
             targetEdits = [:]
+            newSegment = DubbingSegmentDraft()   // its speaker and times belong to the previous project
+            lastRegeneration = nil
         }
         if let json = await actions.perform("dubbing_project_get", ["project_id": .string(id)], quietly: true)?
             .voicesStudioJSON, let project = DubbingProject(json: json) {
@@ -613,9 +620,14 @@ final class DubbingSectionModel {
         return arguments
     }
 
+    /// Whether `projectID` is still the project the owner has open — the only one whose list
+    /// and typing a finished change may reload or clear.
+    private func isOpen(_ projectID: String) -> Bool { wantedProject == projectID && selectedProject?.id == projectID }
+
     func addLanguage() async {
-        guard let arguments = addLanguageArguments(),
-              await actions.perform("dubbing_language_create", arguments, title: "Dub into \(newLanguage)") != nil
+        guard let arguments = addLanguageArguments(), let projectID = selectedProject?.id,
+              await actions.perform("dubbing_language_create", arguments, title: "Dub into \(newLanguage)") != nil,
+              isOpen(projectID)
         else { return }
         newLanguage = ""
         await loadLanguages()
@@ -693,8 +705,9 @@ final class DubbingSectionModel {
     }
 
     func saveSourceEdits() async {
-        guard let call = sourceSaveCall(),
-              await actions.perform(call.operationID, call.arguments, title: "Transcript edits") != nil else { return }
+        guard let call = sourceSaveCall(), let projectID = selectedProject?.id,
+              await actions.perform(call.operationID, call.arguments, title: "Transcript edits") != nil,
+              isOpen(projectID) else { return }
         await loadSourceTranscript()
     }
 
@@ -702,7 +715,7 @@ final class DubbingSectionModel {
         guard let call = targetSaveCall(), let languageID = selectedLanguageID, let projectID = selectedProject?.id,
               await actions.perform(call.operationID, call.arguments, title: "Translation edits") != nil else { return }
         // Reload only while the same project and language are open.
-        guard selectedProject?.id == projectID, selectedLanguageID == languageID else { return }
+        guard isOpen(projectID), selectedLanguageID == languageID else { return }
         await loadTargetTranscript(languageID)
     }
 
@@ -712,7 +725,7 @@ final class DubbingSectionModel {
                 "dubbing_transcript_segment_delete",
                 ["project_id": .string(project.id), "segment_id": .string(segment.id)],
                 subject: "the segment “\(segment.text.prefix(40))”"
-              ) != nil else { return }
+              ) != nil, isOpen(project.id) else { return }
         await loadSourceTranscript()
     }
 
@@ -727,8 +740,9 @@ final class DubbingSectionModel {
     }
 
     func addSegment() async {
-        guard let arguments = addSegmentArguments(),
-              await actions.perform("dubbing_transcript_segment_add", arguments, title: "New segment") != nil
+        guard let arguments = addSegmentArguments(), let projectID = selectedProject?.id,
+              await actions.perform("dubbing_transcript_segment_add", arguments, title: "New segment") != nil,
+              isOpen(projectID)
         else { return }
         newSegment = DubbingSegmentDraft()
         await loadSourceTranscript()
@@ -751,11 +765,10 @@ final class DubbingSectionModel {
                 "dubbing_target_transcript_regenerate",
                 ["project_id": .string(project.id), "language_id": .string(languageID)],
                 title: "Regenerate \(language.targetLanguage)"
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, isOpen(project.id) else { return }
         if let charged = json["charged_seconds"].doubleValue {
             lastRegeneration = (charged, json["free_regeneration_seconds_remaining"].doubleValue ?? 0)
         }
-        guard selectedProject?.id == project.id else { return }
         await refreshLanguage(language)
     }
 
