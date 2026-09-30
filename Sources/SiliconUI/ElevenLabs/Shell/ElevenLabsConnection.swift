@@ -25,6 +25,12 @@ final class ElevenLabsConnectionModel {
     /// Set by a Connect that worked, for a line of thanks until the next action.
     private(set) var connected = false
     private(set) var pendingRegionChange: RegionChange?
+    /// Why a region change was not made, said under the picker.
+    private(set) var regionNotice: String?
+
+    /// Why the account cannot change while a run that is not a read is still on the wire.
+    static let busyAccountMessage =
+        "An ElevenLabs run that may be billed is still in progress. Wait for it to finish, or cancel it, first."
 
     init() {}
 
@@ -35,6 +41,12 @@ final class ElevenLabsConnectionModel {
     func connect(key: String, model: AppModel) async -> Bool {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, !verifying else { return false }
+        // A new key for the same account while a billable request is in flight would hand
+        // the owner fresh runners that could send it again.
+        if model.elevenLabsLinked, model.elevenLabsPane.billableRunsInFlight > 0 {
+            failure = Self.busyAccountMessage
+            return false
+        }
         verifying = true
         failure = nil
         connected = false
@@ -62,10 +74,17 @@ final class ElevenLabsConnectionModel {
     /// the stored key may not work on the new host.
     func requestRegion(_ region: ElevenLabsRegion, model: AppModel) {
         let current = model.elevenLabsRegion
+        regionNotice = nil
         guard region != current else { return }
         guard model.elevenLabsLinked else {
             model.elevenLabsRegion = region
             failure = nil
+            return
+        }
+        // Switching rebuilds every runner; one still sending a billable request would be
+        // replaced by an idle one that could send it again.
+        guard model.elevenLabsPane.billableRunsInFlight == 0 else {
+            regionNotice = Self.busyAccountMessage
             return
         }
         pendingRegionChange = RegionChange(

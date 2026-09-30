@@ -161,6 +161,12 @@ struct ElevenLabsSettingsSection: View {
             Text("Data-residency regions are separate workspaces, each with its own key; Global and US only share one.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let notice = connection.regionNotice {
+                Label(notice, systemImage: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .sheet(item: Binding(
             get: { connection.pendingRegionChange },

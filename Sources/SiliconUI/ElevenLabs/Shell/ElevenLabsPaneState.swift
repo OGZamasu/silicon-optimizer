@@ -63,6 +63,23 @@ final class ElevenLabsPaneState {
     private(set) var confirming: ElevenLabsRunner?
     @ObservationIgnored private var waiting: [ElevenLabsRunner] = []
 
+    /// Which account session this is. `reset()` starts a new one; whatever a run started in an
+    /// older session reports afterwards — a result, a refused key — is dropped, so one
+    /// account's answers never land in another's list or banner.
+    @ObservationIgnored private(set) var epoch = 0
+    /// Requests that are not reads, handed to the client and not finished — counted across
+    /// sessions, because a reset does not take them back off the wire. While any is in
+    /// flight, a region switch or a new key is refused: a fresh runner on the same account
+    /// could send it a second time.
+    private(set) var billableRunsInFlight = 0
+    /// Every runner that has run with this pane, weakly, so a reset can reach the ones still
+    /// asking or running.
+    @ObservationIgnored private var runners: [WeakRunner] = []
+
+    private struct WeakRunner {
+        weak var runner: ElevenLabsRunner?
+    }
+
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
     /// Each section's state for the session, and the client it was made for.
@@ -195,8 +212,35 @@ final class ElevenLabsPaneState {
         connectionProblem = nil
     }
 
-    /// Forgets everything tied to the account: on disconnect, or a region change.
+    // MARK: - Runs
+
+    /// A runner is about to run with this pane.
+    func track(_ runner: ElevenLabsRunner) {
+        runners.removeAll { $0.runner == nil }
+        if !runners.contains(where: { $0.runner === runner }) { runners.append(WeakRunner(runner: runner)) }
+    }
+
+    func billableRunStarted() {
+        billableRunsInFlight += 1
+    }
+
+    func billableRunEnded() {
+        billableRunsInFlight = max(0, billableRunsInFlight - 1)
+    }
+
+    /// Forgets everything tied to the account: on disconnect, a new key, or a region change.
+    ///
+    /// Every question still asked is declined — confirming one later would run it against the
+    /// next account — and every run still going is cancelled, so its runner says it may
+    /// already have been billed and refuses nothing it should not. Late answers from before
+    /// are dropped by the epoch.
     func reset() {
+        epoch += 1
+        let asking = [confirming].compactMap { $0 } + waiting
+        confirming = nil
+        waiting = []
+        for runner in asking { runner.decline() }
+        for runner in runners.compactMap(\.runner) { runner.cancel() }
         showsRecents = false
         recents.removeAll()
         connectionProblem = nil

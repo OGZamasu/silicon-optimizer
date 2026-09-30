@@ -124,6 +124,9 @@ final class ElevenLabsRunner: Identifiable {
     /// under another number touches nothing, so it can never mark a newer run cancelled,
     /// failed or done.
     @ObservationIgnored private var generation = 0
+    /// The pane session the current run started in; its reports reach the pane only while
+    /// that session lasts.
+    @ObservationIgnored private var runEpoch: Int?
 
     init(operation: ElevenLabsOperation, context: Context) {
         self.operation = operation
@@ -196,6 +199,8 @@ final class ElevenLabsRunner: Identifiable {
         let run = generation
         refusal = nil
         cancellationNote = nil
+        context.pane?.track(self)
+        runEpoch = context.pane?.epoch
         self.arguments = arguments
         self.files = files
         problems = []
@@ -256,6 +261,12 @@ final class ElevenLabsRunner: Identifiable {
             task = Task { try await client.call(operation, arguments: arguments, files: files) }
         }
         self.task = task
+        // Counted until the request itself ends, whatever becomes of this run meanwhile: a
+        // cancelled request may still be on the wire.
+        let billable = operation.risk != .read
+        let pane = context.pane
+        if billable { pane?.billableRunStarted() }
+        defer { if billable { pane?.billableRunEnded() } }
 
         do {
             let answer = try await task.value
@@ -377,9 +388,9 @@ final class ElevenLabsRunner: Identifiable {
         phase = .succeeded
         finishedAt = Date()
         streamPlayer?.finish()
-        context.pane?.noteSuccess()
-        if recordsResults {
-            context.pane?.record(shown, operation: operation, title: title)
+        if let pane = currentPane {
+            pane.noteSuccess()
+            if recordsResults { pane.record(shown, operation: operation, title: title) }
         }
         return shown
     }
@@ -392,8 +403,14 @@ final class ElevenLabsRunner: Identifiable {
         phase = .failed
         finishedAt = Date()
         stopStreamPlayer()
-        if let error { context.pane?.noteFailure(error) }
+        if let error { currentPane?.noteFailure(error) }
         return nil
+    }
+
+    /// The pane, while it is still in the session this run started in.
+    private var currentPane: ElevenLabsPaneState? {
+        guard let pane = context.pane, pane.epoch == runEpoch else { return nil }
+        return pane
     }
 
     private func stopStreamPlayer() {
