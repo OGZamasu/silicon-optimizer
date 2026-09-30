@@ -400,6 +400,105 @@ struct ElevenLabsControlHandlerTests {
         #expect(parts["parts"][1]["file"] == "/tmp/song.mp3")
     }
 
+    // MARK: Big answers
+
+    /// Past the inline limit the caller gets a shortened copy that still parses, a note that
+    /// says what was cut, and the whole answer saved on the Mac — redacted exactly as the
+    /// inline copy is, because a saved file is one more way to read it.
+    @Test func aBigAnswerIsShortenedInlineAndSavedWholeAndRedacted() async throws {
+        let sink = TemporaryFileSink()
+        defer { sink.removeAll() }
+        let voices: [JSON] = (0..<400).map {
+            ["voice_id": .string("v\($0)"), "description": .string(String(repeating: "x", count: 300)),
+             "webhook_secret": "whsec-planted"]
+        }
+        var handler = ELFixture.handler(backend: RecordingBackend(
+            result: .json(["voices": .array(voices), "has_more": false], .init(status: 200))
+        ))
+        handler.sink = sink
+        handler.inlineBytes = 16_000
+        let json = try ELFixture.json(await handler.call(ELFixture.body("list_voices")))
+        #expect(json["truncated"] == true)
+        let shown = json["json"]["voices"].arrayValue ?? []
+        #expect(!shown.isEmpty && shown.count < 400)
+        #expect(json["json"].encoded().count <= 16_000)
+        #expect(json["json"]["has_more"] == false)
+        #expect(json["note"].stringValue?.contains("shortened copy") == true)
+        #expect(json["note"].stringValue?.contains("fullResult.file") == true)
+
+        let file = try #require(json["fullResult"]["file"].stringValue)
+        let bytes = try Data(contentsOf: URL(fileURLWithPath: file))
+        #expect(json["fullResult"]["contentType"] == "application/json")
+        #expect(json["fullResult"]["bytes"].intValue == bytes.count)
+        let saved = try JSON(data: bytes)
+        #expect(saved["voices"].arrayValue?.count == 400)
+        #expect(saved["voices"][0]["webhook_secret"] == .string(ElevenLabsRedaction.placeholder))
+        #expect(!String(decoding: bytes, as: UTF8.self).contains("whsec-planted"))
+        #expect(sink.written.map(\.path) == [file])
+    }
+
+    @Test func withNowhereToSaveItTheCallerIsToldSo() async throws {
+        var handler = ELFixture.handler(backend: RecordingBackend(
+            result: .json(["items": .array((0..<500).map { .number(Double($0)) })], .init(status: 200))
+        ))
+        handler.inlineBytes = 400
+        let json = try ELFixture.json(await handler.call(ELFixture.body("list_voices")))
+        #expect(json["truncated"] == true)
+        #expect(json["fullResult"] == .null)
+        #expect(json["note"].stringValue?.contains("could not be saved") == true)
+    }
+
+    /// An answer no amount of list-cutting shrinks — one object with thousands of keys —
+    /// still comes back bounded: the start of its text.
+    @Test func anAnswerThatCannotBeShortenedComesBackAsItsStart() async throws {
+        let sink = TemporaryFileSink()
+        defer { sink.removeAll() }
+        var wide: [String: JSON] = [:]
+        for index in 0..<3_000 { wide["field_\(index)"] = .number(Double(index)) }
+        var handler = ELFixture.handler(backend: RecordingBackend(result: .json(.object(wide), .init(status: 200))))
+        handler.sink = sink
+        handler.inlineBytes = 4_000
+        let json = try ELFixture.json(await handler.call(ELFixture.body("list_voices")))
+        let start = try #require(json["json"].stringValue)
+        #expect(start.utf8.count <= 2_000)
+        #expect(start.hasPrefix("{"))
+        #expect(json["note"].stringValue?.contains("the start of its text") == true)
+        #expect(json["fullResult"]["file"].stringValue != nil)
+    }
+
+    @Test func bigTextAndEventsAreBoundedToo() async throws {
+        let sink = TemporaryFileSink()
+        defer { sink.removeAll() }
+        var handler = ELFixture.handler(backend: RecordingBackend(
+            result: .text(String(repeating: "caption line\n", count: 2_000), .init(status: 200, contentType: "text/plain"))
+        ))
+        handler.sink = sink
+        handler.inlineBytes = 1_000
+        let text = try ELFixture.json(await handler.call(ELFixture.body("list_voices")))
+        #expect(text["truncated"] == true)
+        #expect(text["text"].stringValue?.utf8.count == 1_000)
+        let file = try #require(text["fullResult"]["file"].stringValue)
+        #expect(file.hasSuffix(".txt"))
+        #expect(try String(contentsOfFile: file, encoding: .utf8).count == 26_000)
+
+        handler.backend = RecordingBackend(result: .events(
+            (0..<300).map { ["type": "chunk", "index": .number(Double($0))] }, .init(status: 200)
+        ))
+        let events = try ELFixture.json(await handler.call(ELFixture.body("list_voices")))
+        #expect(events["truncated"] == true)
+        #expect((events["events"].arrayValue?.count ?? 0) < 300)
+        #expect(events["fullResult"]["file"].stringValue != nil)
+    }
+
+    @Test func aSmallAnswerIsJustTheAnswer() async throws {
+        let json = try ELFixture.json(await ELFixture.handler(backend: RecordingBackend(
+            result: .json(["voices": [["voice_id": "v1"]]], .init(status: 200))
+        )).call(ELFixture.body("list_voices")))
+        #expect(json["json"] == ["voices": [["voice_id": "v1"]]])
+        #expect(json["truncated"] == .null)
+        #expect(json["note"] == .null)
+    }
+
     /// What reached the client is what the caller sent: the operation it named and its
     /// arguments, untouched.
     @Test func theArgumentsReachTheClientAsSent() async throws {

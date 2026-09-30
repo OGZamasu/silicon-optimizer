@@ -60,7 +60,12 @@ struct ElevenLabsControlHandler: Sendable {
     var state: State
     /// Nil when nothing is linked.
     var backend: (any ElevenLabsControlBackend)?
+    /// Where an answer too big to send inline is saved whole. Nil: it is shortened and the
+    /// caller is told it could not be saved.
+    var sink: (any ElevenLabsFileSink)?
     var catalog: ElevenLabsControlCatalog = .shipped
+    /// JSON, text and events past this are shortened inline.
+    var inlineBytes = ElevenLabsControl.inlineResultBytes
 
     func handle(_ request: ElevenLabsControlRequest) async -> ElevenLabsControlResponse {
         switch request.route {
@@ -362,7 +367,7 @@ struct ElevenLabsControlHandler: Sendable {
         }
         do {
             let result = try await backend.call(operation, arguments: request.arguments, files: [:])
-            return .init(status: 200, body: shape(result, for: operation).encoded())
+            return .init(status: 200, body: await shape(result, for: operation).encoded())
         } catch {
             return failure(error, operation: operation, scrubbing: [])
         }
@@ -464,8 +469,8 @@ struct ElevenLabsControlHandler: Sendable {
     // MARK: Results
 
     /// A result as the caller gets it: the answer, what it cost, and whatever had to be
-    /// masked.
-    func shape(_ result: ElevenLabsResult, for operation: ElevenLabsOperation) -> ElevenLabsJSON {
+    /// masked. Files are named by their path on this Mac — the caller is this Mac's own.
+    func shape(_ result: ElevenLabsResult, for operation: ElevenLabsOperation) async -> ElevenLabsJSON {
         let meta = result.meta
         var object: [String: ElevenLabsJSON] = [
             "operation": .string(operation.id), "method": .string(operation.method),
@@ -486,7 +491,7 @@ struct ElevenLabsControlHandler: Sendable {
             let clean = redacted(value, for: operation)
             masked = clean != value
             object["kind"] = "json"
-            object["json"] = clean
+            object.merge(await inline(clean, as: "json", for: operation)) { $1 }
         case .file(let url, let contentType, let bytes, _):
             object["kind"] = "file"
             object.merge(Self.file(url, contentType: contentType, bytes: bytes)) { $1 }
@@ -494,12 +499,12 @@ struct ElevenLabsControlHandler: Sendable {
             let clean = redacted(text, for: operation)
             masked = clean != text
             object["kind"] = "text"
-            object["text"] = .string(clean)
+            object.merge(await inline(text: clean, contentType: meta.contentType, for: operation)) { $1 }
         case .events(let events, _):
             let clean = events.map { redacted($0, for: operation) }
             masked = clean != events
             object["kind"] = "events"
-            object["events"] = .array(clean)
+            object.merge(await inline(.array(clean), as: "events", for: operation)) { $1 }
         case .parts(let parts, _):
             var shaped: [ElevenLabsJSON] = []
             for part in parts {
@@ -519,13 +524,121 @@ struct ElevenLabsControlHandler: Sendable {
                 }
             }
             object["kind"] = "parts"
-            object["parts"] = .array(shaped)
+            object.merge(await inline(.array(shaped), as: "parts", for: operation)) { $1 }
         }
         if masked {
             object["redacted"] = true
             object["redactionNote"] = .string(redactionNote)
         }
         return .object(object)
+    }
+
+    /// `value` under `key`, or past `inlineBytes` a shortened copy under `key` and the whole
+    /// of it saved: `truncated`, `note`, `fullResult`. What is saved is what the caller may
+    /// see — already redacted — because a file on the Mac is one more way to read it.
+    func inline(
+        _ value: ElevenLabsJSON, as key: String, for operation: ElevenLabsOperation
+    ) async -> [String: ElevenLabsJSON] {
+        let data = value.encoded()
+        guard data.count > inlineBytes else { return [key: value] }
+        var out: [String: ElevenLabsJSON] = ["truncated": true]
+        var note = "The answer is \(Self.size(data.count)) of JSON, more than the "
+            + "\(Self.size(inlineBytes)) sent inline, so `\(key)` is a shortened copy"
+        if let short = Self.shortened(value, toFit: inlineBytes) {
+            out[key] = short.value
+            note += ": lists cut to their first \(short.items) item\(short.items == 1 ? "" : "s") "
+                + "and strings to \(short.characters) characters."
+        } else {
+            out[key] = .string(String(decoding: data.prefix(inlineBytes / 2), as: UTF8.self))
+            note += ": the start of its text, as a string."
+        }
+        let saved = await save(
+            data, name: "\(operation.id).json", contentType: "application/json", for: operation
+        )
+        note += savedNote(saved)
+        if let saved {
+            out["fullResult"] = .object(Self.file(saved, contentType: "application/json", bytes: data.count))
+        }
+        out["note"] = .string(note)
+        return out
+    }
+
+    /// Text, the same way: past `inlineBytes`, its start inline and the whole of it saved.
+    func inline(
+        text: String, contentType: String?, for operation: ElevenLabsOperation
+    ) async -> [String: ElevenLabsJSON] {
+        let data = Data(text.utf8)
+        guard data.count > inlineBytes else { return ["text": .string(text)] }
+        let type = contentType?.split(separator: ";").first.map(String.init) ?? "text/plain"
+        let saved = await save(
+            data, name: "\(operation.id).\(type == "text/html" ? "html" : "txt")",
+            contentType: type, for: operation
+        )
+        var out: [String: ElevenLabsJSON] = [
+            "text": .string(String(decoding: data.prefix(inlineBytes), as: UTF8.self)),
+            "truncated": true,
+            "note": .string(
+                "The answer is \(Self.size(data.count)) of text; `text` is its first "
+                    + "\(Self.size(inlineBytes))." + savedNote(saved)
+            ),
+        ]
+        if let saved {
+            out["fullResult"] = .object(Self.file(saved, contentType: type, bytes: data.count))
+        }
+        return out
+    }
+
+    func savedNote(_ saved: URL?) -> String {
+        saved == nil
+            ? " It could not be saved on the Mac; ask for less (a filter, or a smaller page)."
+            : " The whole answer is saved on the Mac: fullResult.file."
+    }
+
+    /// Writes `data` through the sink, or answers nil.
+    func save(
+        _ data: Data, name: String, contentType: String, for operation: ElevenLabsOperation
+    ) async -> URL? {
+        guard let sink else { return nil }
+        do {
+            let url = try sink.destination(for: operation, suggestedName: name, contentType: contentType)
+            try data.write(to: url, options: .withoutOverwriting)
+            await sink.didWrite(url, contentType: contentType, operation: operation)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    /// `value` with lists cut and strings shortened, by the gentlest of a few steps that makes
+    /// it fit in `budget` bytes — or nil if even the harshest does not.
+    static func shortened(
+        _ value: ElevenLabsJSON, toFit budget: Int
+    ) -> (value: ElevenLabsJSON, items: Int, characters: Int)? {
+        for (items, characters) in [
+            (200, 8_000), (100, 4_000), (50, 2_000), (20, 1_000), (10, 400), (5, 200), (2, 100),
+            (1, 60),
+        ] {
+            let candidate = shrink(value, items: items, characters: characters)
+            if candidate.encoded().count <= budget { return (candidate, items, characters) }
+        }
+        return nil
+    }
+
+    static func shrink(_ value: ElevenLabsJSON, items: Int, characters: Int) -> ElevenLabsJSON {
+        switch value {
+        case .array(let array):
+            return .array(array.prefix(items).map { shrink($0, items: items, characters: characters) })
+        case .object(let object):
+            return .object(object.mapValues { shrink($0, items: items, characters: characters) })
+        case .string(let text) where text.count > characters:
+            return .string(String(text.prefix(characters)) + "…")
+        case .null, .bool, .number, .string:
+            return value
+        }
+    }
+
+    static func size(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     static func file(_ url: URL, contentType: String, bytes: Int) -> [String: ElevenLabsJSON] {
