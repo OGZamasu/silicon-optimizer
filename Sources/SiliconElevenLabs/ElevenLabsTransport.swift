@@ -124,7 +124,7 @@ extension ElevenLabsFileSink {
 // MARK: - Transport
 
 /// One HTTP request, fully built: the transport adds nothing and decides nothing.
-public struct ElevenLabsRequest: Sendable, Hashable, CustomStringConvertible {
+public struct ElevenLabsRequest: Sendable, Hashable, CustomStringConvertible, CustomDebugStringConvertible {
     public enum Body: Sendable, Hashable {
         case none
         case data(Data)
@@ -164,6 +164,9 @@ public struct ElevenLabsRequest: Sendable, Hashable, CustomStringConvertible {
 
     /// Method and URL only; the key lives in a header and headers are never described.
     public var description: String { "\(method) \(url.absoluteString)" }
+
+    /// The same: `String(reflecting:)` and `dump` must not reach the headers either.
+    public var debugDescription: String { description }
 
     /// A header by case-insensitive name.
     public func header(_ name: String) -> String? {
