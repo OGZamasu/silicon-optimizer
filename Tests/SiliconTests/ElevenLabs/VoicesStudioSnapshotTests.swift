@@ -200,6 +200,43 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("productions-order", height: 1700) { ProductionsScreen(model: model) }
     }
 
+    // MARK: Flows
+
+    @Test func flowsImageGenerations() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = FlowsSectionModel(environment: fixture.environment)
+        model.mode = .image
+        model.choose("gpt-image-1", for: .image)
+        model.form(.image)?.nodes.first { $0.field.name == "prompt" }?.text = "A lighthouse at dusk, painted in gouache"
+        model.load(generations: try [
+            ["id": "img_01HZX", "status": "completed", "content_url": "https://files.example/a.png", "content_mime_type": "image/png"],
+            ["id": "img_01HZY", "status": "generating"],
+            ["id": "img_01HZZ", "status": "failed", "error_message": "The prompt was blocked."],
+        ].map { try #require(FlowsGeneration(json: $0)) }, for: .image)
+        try VoicesStudioSnapshots.render("flows-image", height: 1500) { FlowsScreen(model: model) }
+    }
+
+    @Test func flowsTemplateRun() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = FlowsSectionModel(environment: fixture.environment)
+        model.mode = .templates
+        let template = try #require(FlowsTemplate(json: [
+            "id": "t1", "name": "Product video", "description": "A short product video from a script and a photo.",
+            "has_more_versions": false,
+            "versions": [["version_id": "ver2", "published_at_unix": 1_780_000_000, "is_latest": true,
+                          "inputs": [["id": "script", "content_schema": ["type": "string"]],
+                                     ["id": "settings", "content_schema": ["type": "object"]]],
+                          "outputs": [["id": "video", "content_schema": ["type": "string"]]]]],
+        ]))
+        model.load(templates: [template], open: template, runs: [
+            try #require(FlowsRun(json: ["id": "run_1", "status": "completed", "outputs": ["video": "https://files.example/v.mp4"]])),
+        ])
+        model.inputs = ["script": "Meet the new lamp.", "settings": #"{"length": 15}"#]
+        try VoicesStudioSnapshots.render("flows-template", height: 1100) { FlowsScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {

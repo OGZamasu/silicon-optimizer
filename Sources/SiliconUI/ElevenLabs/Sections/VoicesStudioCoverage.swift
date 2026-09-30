@@ -30,6 +30,9 @@ enum VoicesStudioCoverage {
         Entry(section: .productions, controls: ProductionsSectionModel.controls,
               callsWithoutControls: ProductionsSectionModel.callsWithoutControls,
               explorerOnly: ProductionsSectionModel.explorerOnly),
+        Entry(section: .flows, controls: FlowsSectionModel.controls,
+              callsWithoutControls: FlowsSectionModel.callsWithoutControls,
+              explorerOnly: FlowsSectionModel.explorerOnly),
     ]
 
     @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }
