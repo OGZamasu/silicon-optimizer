@@ -361,7 +361,7 @@ final class VoicesSectionModel {
         .init("get_user_voices_v2", "next_page_token"),
         .init("get_user_voices_v2", "include_total_count"),
         .init("get_voice_by_id", "voice_id"),
-        .init("get_voice_by_id", "with_settings"),
+        .init("get_voice_settings", "voice_id"),
         .init("edit_voice_settings", "stability"),
         .init("edit_voice_settings", "similarity_boost"),
         .init("edit_voice_settings", "style"),
@@ -422,7 +422,6 @@ final class VoicesSectionModel {
     /// Operations of this section left to the Explorer, and why.
     static let explorerOnly: [String: String] = [
         "get_voices": "The v1 list; the section lists voices with GET /v2/voices, which pages and filters.",
-        "get_voice_settings": "A voice's settings arrive with GET /v1/voices/{voice_id}?with_settings=true, which the section already makes.",
     ]
 
     /// The settings sliders' ranges: the spec's where it gives one, the documented span where
@@ -586,12 +585,20 @@ final class VoicesSectionModel {
     func reloadSelected(_ voiceID: String? = nil) async {
         guard let voiceID = voiceID ?? selected?.id,
               let json = await actions.perform(
-                "get_voice_by_id", ["voice_id": .string(voiceID), "with_settings": true], quietly: true
+                "get_voice_by_id", ["voice_id": .string(voiceID)], quietly: true
               )?.voicesStudioJSON,
               let voice = VoicesVoice(json: json)
         else { return }
         selected = voice
-        settingsDraft = voice.settings ?? settingsDraft
+        // The answer's `settings` may be null (and `with_settings` is deprecated and ignored):
+        // then the settings route says them.
+        if let settings = voice.settings {
+            settingsDraft = settings
+        } else if let json = await actions.perform(
+            "get_voice_settings", ["voice_id": .string(voice.id)], quietly: true
+        )?.voicesStudioJSON, selected?.id == voice.id {
+            settingsDraft = VoicesSettings(json: json)
+        }
         editDraft = VoicesEditDraft(voice: voice)
         if voice.isProfessional { professional = VoicesProfessionalDraft(voice: voice) }
         if let index = rows.firstIndex(where: { $0.id == voice.id }) { rows[index] = voice }
@@ -665,8 +672,11 @@ final class VoicesSectionModel {
             ["voice_id": .string(voice.id), "target_workspace_id": .string(target),
              "preserve_voice_id": .bool(replicatePreservesID)],
             subject: "“\(voice.name)” to the workspace \(target)",
-            consequence: "A copy of “\(voice.name)” is made in another, isolated workspace, where "
-                + "that workspace's members can use it."
+            question: VoicesStudioQuestion(
+                "Copy “\(voice.name)” to the workspace \(target)?", button: "Copy voice",
+                consequence: "A copy of “\(voice.name)” is made in another, isolated workspace, where "
+                    + "that workspace's members can use it."
+            )
         )
     }
 
@@ -809,6 +819,11 @@ final class VoicesSectionModel {
         guard let voice = selected else { return [] }
         let known = Set(voice.fineTuning?.states.keys.map { $0 } ?? []).union(voice.highQualityBaseModels)
         return known.sorted()
+    }
+
+    /// Whether a training run is under way for the selected voice (queued or fine-tuning).
+    var isTraining: Bool {
+        selected?.fineTuning?.states.values.contains { $0 == "queued" || $0 == "fine_tuning" } ?? false
     }
 
     func train() async {

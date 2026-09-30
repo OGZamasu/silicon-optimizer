@@ -151,7 +151,11 @@ struct StudioNewProjectCard: View {
                 .help(VoicesStudioSchema.description("add_project", "auto_convert"))
             if !model.problems.isEmpty { ElevenLabsProblemList(problems: model.problems) }
             if let runner = model.actions.runner("add_project") {
-                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Create project") { Task { await model.createProject() } }
+                VoicesStudioRunButton(
+                    actions: model.actions, runner: runner, title: "Create project",
+                    costNote: model.draft.autoConvert ? "Converting it as soon as it is created uses credits." : nil,
+                    spends: model.draft.autoConvert
+                ) { Task { await model.createProject() } }
             }
         }
     }
@@ -249,10 +253,15 @@ struct StudioProjectCard: View {
                     TextField("From a web page", text: $model.contentURL).textFieldStyle(.roundedBorder)
                     VoicesStudioFilePicker(title: "…or a document", files: $model.contentDocument)
                     Toggle("Convert to audio afterwards — uses credits", isOn: $model.contentAutoConvert)
-                    HStack {
-                        Spacer()
-                        Button("Replace content") { Task { await model.updateContent() } }
-                            .disabled(model.contentURL.isEmpty && model.contentDocument.isEmpty)
+                    Text("Replacing the content replaces every chapter of “\(project.name)”, and your edits in them.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let runner = model.actions.runner("edit_project_content") {
+                        VoicesStudioRunButton(
+                            actions: model.actions, runner: runner, title: "Replace content…",
+                            disabled: model.contentURL.isEmpty && model.contentDocument.isEmpty,
+                            costNote: model.contentAutoConvert ? "Converting the new content uses credits." : nil,
+                            spends: model.contentAutoConvert
+                        ) { Task { await model.updateContent() } }
                     }
                 }
                 .padding(.top, 6)
@@ -308,7 +317,7 @@ struct StudioChaptersCard: View {
                     Button("Convert") { Task { await model.convertChapter(chapter) } }
                         .controlSize(.small)
                         .help("Uses credits from your ElevenLabs balance")
-                        .disabled(model.actions.billableInFlight != nil)
+                        .disabled(model.actions.runner("convert_chapter_endpoint").map { model.actions.isBlocked($0) } ?? true)
                     Button(role: .destructive) { Task { await model.deleteChapter(chapter) } } label: {
                         Image(systemName: "trash")
                     }
@@ -327,7 +336,7 @@ struct StudioChaptersCard: View {
     }
 
     private func chapterLine(_ chapter: StudioChapter) -> String {
-        var parts: [String] = [VoicesStudioFormat.words(chapter.state)]
+        var parts: [String] = [chapter.state == "default" ? "Ready" : VoicesStudioFormat.words(chapter.state)]
         if let converted = chapter.charactersConverted, let left = chapter.charactersUnconverted {
             parts.append("\((converted).formatted()) of \((converted + left).formatted()) characters converted")
         }

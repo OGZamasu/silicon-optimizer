@@ -64,7 +64,8 @@ final class AudioNativeSectionModel {
 
     var contentFile: [URL] = []
     var contentAutoConvert = true
-    var contentAutoPublish = true
+    /// Off unless asked: publishing changes the player live on the owner's site.
+    var contentAutoPublish = false
     var pageURL = ""
     var pageTitle = ""
     var pageAuthor = ""
@@ -72,6 +73,15 @@ final class AudioNativeSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         directory = environment.voices
+        // A player made or updated whose answer was lost: list the projects again and read the
+        // player's settings, so the owner can see whether it happened.
+        actions.onUnknownOutcome = { [weak self] _ in
+            guard let self else { return }
+            if let json = await actions.perform("get_projects", quietly: true)?.voicesStudioJSON {
+                projects = (json["projects"].arrayValue ?? []).compactMap(StudioProject.init(json:))
+            }
+            await loadSettings()
+        }
     }
 
     // MARK: Spec

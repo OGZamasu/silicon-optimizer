@@ -187,15 +187,28 @@ struct WorkspaceSharingCard: View {
                 Divider()
                 HStack(spacing: 8) {
                     Picker("With", selection: $model.shareTarget) {
-                        Text("Choose").tag("")
+                        Text("Choose a group").tag("")
                         Text("Everyone (baseline role)").tag("default")
-                        ForEach(resource.shareOptions) { Text("\($0.name) (\($0.type))").tag($0.id) }
+                        ForEach(model.groupOptions) { Text($0.name).tag($0.id) }
                     }
                     .fixedSize()
-                    TextField("…or an email", text: $model.shareEmail).textFieldStyle(.roundedBorder)
                     VoicesStudioChoicePicker(title: "Role", selection: $model.shareRole, choices: model.roles,
                                              defaultLabel: "Role")
                         .fixedSize()
+                }
+                HStack(spacing: 8) {
+                    TextField("…or a user's or service account's email", text: $model.shareEmail)
+                    TextField("…or a workspace API key id", text: $model.shareKeyID)
+                        .help(VoicesStudioSchema.description("share_resource_endpoint", "workspace_api_key_id"))
+                }
+                .textFieldStyle(.roundedBorder)
+                let others = resource.shareOptions.filter { $0.type != "group" }
+                if !others.isEmpty {
+                    Text("Also listed: " + others.map { "\($0.name) (\($0.type == "key" ? "key \($0.id)" : $0.type))" }
+                        .joined(separator: ", ") + " — share with them by email or key id.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
                     Spacer()

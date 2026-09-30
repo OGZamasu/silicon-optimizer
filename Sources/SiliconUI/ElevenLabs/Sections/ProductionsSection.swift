@@ -111,6 +111,7 @@ struct ProductionsOrderCard: View {
             }
             if order.isOpen {
                 HStack(spacing: 8) {
+                    Text("Name").font(.callout)
                     TextField("Name", text: $model.rename).textFieldStyle(.roundedBorder)
                     Button("Rename") { Task { await model.saveName() } }
                         .disabled(model.rename.trimmingCharacters(in: .whitespaces).isEmpty || model.rename == order.name)
@@ -143,18 +144,24 @@ struct ProductionsOrderCard: View {
                 }
             }
             if order.isOpen, !order.items.isEmpty, let runner = model.actions.runner("public_submit_order") {
-                // Not the shell's Run button: its note speaks of credits, and submitting charges
-                // the workspace money for the quote.
+                // Not the shell's Run button: submitting charges the workspace money, the
+                // quote, and the question states it.
                 HStack(spacing: 10) {
-                    Button("Submit order…") { Task { await model.submit() } }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.orange)
-                        .disabled(runner.isRunning || model.actions.billableInFlight != nil)
+                    Button(model.quotedTotal.map { "Submit and pay \($0)…" } ?? "Submit order…") {
+                        Task { await model.submit() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .disabled(runner.isRunning || model.submitHold != nil || model.actions.isBlocked(runner))
                     ElevenLabsRiskBadge(risk: .realWorld)
-                    Text(order.sandbox ? "A sandbox order: nothing is charged."
-                         : "Submitting charges the workspace \(order.total.map { $0.formatted(.currency(code: "USD")) } ?? "the quoted amount").")
+                    Text(model.submitHold ?? "Submitting charges the workspace \(model.quotedTotal ?? "")."
+                         + (order.sandbox ? " " + ProductionsSectionModel.sandboxWords : ""))
                         .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if runner.isRunning { ProgressView().controlSize(.small) }
+                }
+                if let problem = model.submitProblem {
+                    Label(problem, systemImage: "hourglass").font(.caption).foregroundStyle(.orange)
                 }
             }
             Divider()

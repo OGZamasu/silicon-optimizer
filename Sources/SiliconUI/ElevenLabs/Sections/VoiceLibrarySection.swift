@@ -50,10 +50,10 @@ struct VoiceLibraryFilters: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            TextField("Search the library", text: $model.search)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { Task { await model.refresh() } }
             HStack(spacing: 8) {
-                TextField("Search the library", text: $model.search)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { Task { await model.refresh() } }
                 Picker("Sort", selection: $model.sort) {
                     Text("Default order").tag("")
                     Text("Newest").tag("created_date")
@@ -63,9 +63,12 @@ struct VoiceLibraryFilters: View {
                 }
                 .labelsHidden()
                 .fixedSize()
-                Toggle("Featured", isOn: $model.featuredOnly)
+                Toggle("Featured only", isOn: $model.featuredOnly)
+                Spacer(minLength: 0)
             }
-            HStack(spacing: 8) {
+            // A grid, not one row: five pickers side by side do not fit a narrow window.
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8, alignment: .leading)],
+                      alignment: .leading, spacing: 6) {
                 facet("Gender", field: "gender", selection: $model.gender)
                 facet("Age", field: "age", selection: $model.age)
                 facet("Accent", field: "accent", selection: $model.accent)
@@ -90,13 +93,24 @@ struct VoiceLibraryFilters: View {
             }
         }
         .labelsHidden()
-        .fixedSize()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 struct VoiceLibraryRow: View {
     @Bindable var model: VoiceLibrarySectionModel
     let voice: VoiceLibraryVoice
+
+    /// One line that wraps: how often it was added and used, its notice period and rate — the
+    /// rate is what changes what the voice costs to use.
+    private var stats: String {
+        var parts: [String] = []
+        if let count = voice.clonedByCount { parts.append("Added \(count.formatted())×") }
+        if let usage = voice.usageLastYear { parts.append("\(usage.formatted()) characters this year") }
+        if let days = voice.noticePeriodDays, days > 0 { parts.append("\(days)-day notice") }
+        if let rate = voice.rate, rate != 1 { parts.append("Rate ×\(rate.formatted(.number.precision(.fractionLength(0...2))))") }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -113,14 +127,10 @@ struct VoiceLibraryRow: View {
                 if let description = voice.description, !description.isEmpty {
                     Text(description).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
-                HStack(spacing: 10) {
-                    if let count = voice.clonedByCount { Text("Added \(count.formatted())×") }
-                    if let usage = voice.usageLastYear { Text("\(usage.formatted()) characters this year") }
-                    if let days = voice.noticePeriodDays, days > 0 { Text("\(days)-day notice") }
-                    if let rate = voice.rate, rate != 1 { Text("Rate ×\(String(format: "%.2g", rate))") }
-                }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                Text(stats)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 6)
             if model.isAdded(voice) {
@@ -133,7 +143,7 @@ struct VoiceLibraryRow: View {
                         set: { model.names[voice.id] = $0 }
                     ))
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 150)
+                    .frame(width: 140)
                     Button("Add to my voices") { Task { await model.add(voice) } }
                         .controlSize(.small)
                         .disabled(model.actions.isRunning("add_sharing_voice"))

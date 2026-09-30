@@ -143,6 +143,9 @@ final class ServiceAccountsSectionModel {
     }
 
     func select(_ id: String?) {
+        // A key shown once belongs to the account it was made for: it is not shown under the
+        // next one.
+        if selected?.id != id { actions.dismissCredentials() }
         selected = accounts.first { $0.id == id }
         editingKey = nil
         keyDraft = ServiceAccountKeyDraft()
@@ -163,8 +166,11 @@ final class ServiceAccountsSectionModel {
         guard !name.isEmpty,
               let json = await actions.perform(
                 "create_service_account", createAccountArguments(), subject: "a service account “\(name)”",
-                consequence: "A new identity joins the workspace; keys made for it can act on the workspace's "
-                    + "resources as its permissions allow."
+                question: VoicesStudioQuestion(
+                    "Create the service account “\(name)”?", button: "Create account",
+                    consequence: "A new identity joins the workspace; keys made for it can act on the workspace's "
+                        + "resources as their permissions allow."
+                )
               )?.voicesStudioJSON else { return }
         newAccountName = ""
         newAccountGroups = [:]
@@ -220,8 +226,11 @@ final class ServiceAccountsSectionModel {
               await actions.perform(
                 "create_service_account_api_key", arguments,
                 subject: "an API key “\(keyDraft.name)” for “\(account.name)”",
-                consequence: "Whoever holds the new key can use the workspace as its permissions allow, and spend "
-                    + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
+                question: VoicesStudioQuestion(
+                    "Make the API key “\(keyDraft.name)” for “\(account.name)”?", button: "Make key",
+                    consequence: "Whoever holds the new key can use the workspace as its permissions allow, and spend "
+                        + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
+                )
               ) != nil else { return }
         keyDraft = ServiceAccountKeyDraft()
         await refreshKeys()
@@ -267,7 +276,10 @@ final class ServiceAccountsSectionModel {
         guard let key = editingKey, let arguments = editKeyArguments() else { return }
         guard await actions.perform(
             "edit_service_account_api_key", arguments, subject: "the API key “\(key.name)”",
-            consequence: "Whatever uses this key gets the new permissions and limits at once."
+            question: VoicesStudioQuestion(
+                "Change the API key “\(key.name)”?", button: "Save changes",
+                consequence: "Whatever uses this key gets the new permissions and limits at once."
+            )
         ) != nil else { return }
         edit(nil)
         await refreshKeys()
@@ -279,8 +291,11 @@ final class ServiceAccountsSectionModel {
                 "edit_service_account_api_key",
                 ["service_account_user_id": .string(account.id), "api_key_id": .string(key.id), "is_enabled": .bool(enabled)],
                 subject: enabled ? "the API key “\(key.name)” back on" : "the API key “\(key.name)” off",
-                consequence: enabled ? "Whatever holds this key can use it again."
-                    : "Whatever uses this key stops working until it is turned back on."
+                question: enabled
+                    ? VoicesStudioQuestion("Turn the API key “\(key.name)” back on?", button: "Turn on",
+                                           consequence: "Whatever holds this key can use it again.")
+                    : VoicesStudioQuestion("Turn off the API key “\(key.name)” of “\(account.name)”?", button: "Turn off key",
+                                           consequence: "Whatever uses this key stops working until it is turned back on.")
               ) != nil else { return }
         await refreshKeys()
     }
@@ -311,7 +326,10 @@ final class ServiceAccountsSectionModel {
             : policy == "forbid" ? "stop every key's holder disabling it" : "go back to each key's own setting and the plan default"
         await actions.perform(
             "set_third_party_disabling_policy", policyArguments(), subject: "the workspace's key-disabling rule",
-            consequence: "Every API key in the workspace will \(words)."
+            question: VoicesStudioQuestion(
+                "Change the workspace's rule for disabling keys?", button: "Change rule",
+                consequence: "Every API key in the workspace will \(words)."
+            )
         )
     }
 
@@ -319,10 +337,17 @@ final class ServiceAccountsSectionModel {
     func disableOwnKey() async {
         await actions.perform(
             "disable", ["api_key_name": "self"], subject: "the API key this app uses",
-            consequence: "ElevenLabs turns off the key this Mac is connected with. This pane, and every agent or "
-                + "tool using that key, stops working until you connect another key in Settings → ElevenLabs."
+            question: Self.killSwitchQuestion
         )
     }
+
+    static let killSwitchQuestion = VoicesStudioQuestion(
+        "Disable the key this Mac uses?", button: "Disable key",
+        consequence: "ElevenLabs turns off the key this Mac is connected with. This pane, and every agent or tool "
+            + "using that key, stops working. This app cannot turn it back on — with its key off it can reach "
+            + "nothing — so turning it on again, or making a new key, happens on elevenlabs.io; then connect the "
+            + "new key in Settings → ElevenLabs."
+    )
 
     // MARK: Test support
 

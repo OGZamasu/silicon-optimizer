@@ -38,7 +38,8 @@ struct WebhookDraft: Hashable, Sendable {
     /// "Name: value" per line.
     var headers = ""
     var events: Set<String> = []
-    var retry = true
+    /// Nil leaves retries as they are: the list never says how they are set.
+    var retry: Bool?
     var disabled = false
 }
 
@@ -134,22 +135,53 @@ final class WebhooksSectionModel {
         await refresh()
     }
 
-    func edit(_ webhook: WorkspaceWebhook?) {
+    /// Whether the webhook being edited was listed with its usages — the only way the list
+    /// carries its `events` ("Only populated when usages are requested"). Without them its
+    /// subscriptions are unknown, so the editor neither shows nor sends them.
+    private(set) var eventsKnown = false
+    /// The subscriptions the webhook had when the editor opened.
+    private var originalEvents: Set<String> = []
+
+    /// Opens the editor, listing the webhooks with their usages first so the events shown (and
+    /// any change to them) start from what ElevenLabs holds.
+    func startEditing(_ webhook: WorkspaceWebhook) async {
+        if let json = await actions.perform(
+            "get_workspace_webhooks_route", ["include_usages": true], quietly: true
+        )?.voicesStudioJSON {
+            webhooks = (json["webhooks"].arrayValue ?? []).compactMap(WorkspaceWebhook.init(json:))
+            includeUsages = true
+            edit(webhooks.first { $0.id == webhook.id } ?? webhook, eventsKnown: true)
+        } else {
+            edit(webhook, eventsKnown: false)
+        }
+    }
+
+    func edit(_ webhook: WorkspaceWebhook?, eventsKnown: Bool? = nil) {
         editing = webhook
         guard let webhook else {
             draft = WebhookDraft()
+            self.eventsKnown = false
+            originalEvents = []
             return
         }
+        self.eventsKnown = eventsKnown ?? includeUsages
+        originalEvents = Set(webhook.events)
         draft = WebhookDraft(name: webhook.name, url: webhook.url, headers: "", events: Set(webhook.events),
-                             retry: true, disabled: webhook.isDisabled)
+                             retry: nil, disabled: webhook.isDisabled)
     }
 
+    /// Only what the owner changed, besides the two fields the spec requires: the name and
+    /// whether it is off. `events` is "the complete set" — sending it replaces every
+    /// subscription — so it goes only when the subscriptions were known and changed.
     func editArguments() -> [String: JSONValue]? {
         guard let webhook = editing else { return nil }
         var arguments: [String: JSONValue] = [
             "webhook_id": .string(webhook.id), "name": .string(draft.name), "is_disabled": .bool(draft.disabled),
-            "events": .array(draft.events.sorted().map(JSONValue.string)), "retry_enabled": .bool(draft.retry),
         ]
+        if eventsKnown, draft.events != originalEvents {
+            arguments["events"] = .array(draft.events.sorted().map(JSONValue.string))
+        }
+        if let retry = draft.retry { arguments["retry_enabled"] = .bool(retry) }
         let headers = Self.headers(draft.headers)
         if !headers.isEmpty { arguments["request_headers"] = .object(headers) }
         return arguments
@@ -157,12 +189,25 @@ final class WebhooksSectionModel {
 
     func save() async {
         guard let webhook = editing, let arguments = editArguments() else { return }
-        let added = draft.events.subtracting(webhook.events).sorted()
+        let added = draft.events.subtracting(originalEvents).sorted()
+        let removed = originalEvents.subtracting(draft.events).sorted()
+        var consequence: [String] = []
+        if arguments["events"] != nil {
+            if !added.isEmpty {
+                consequence.append("\(webhook.url) starts receiving \(added.map(VoicesStudioFormat.words).joined(separator: ", ")) events.")
+            }
+            if !removed.isEmpty {
+                consequence.append("It stops receiving \(removed.map(VoicesStudioFormat.words).joined(separator: ", ")) events.")
+            }
+        } else {
+            consequence.append("Its event subscriptions stay as they are.")
+        }
+        if draft.disabled != webhook.isDisabled {
+            consequence.append(draft.disabled ? "It receives nothing until it is turned on again." : "It receives events again.")
+        }
         guard await actions.perform(
             "edit_workspace_webhook_route", arguments, subject: "the webhook “\(webhook.name)”",
-            consequence: added.isEmpty
-                ? "\(webhook.url) gets \(draft.disabled ? "nothing until turned on again" : "the events listed")."
-                : "\(webhook.url) starts receiving \(added.map(VoicesStudioFormat.words).joined(separator: ", ")) events."
+            consequence: consequence.joined(separator: " ")
         ) != nil else { return }
         edit(nil)
         await refresh()

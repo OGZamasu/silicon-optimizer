@@ -106,9 +106,7 @@ struct VoicesStudioAccountsTests {
         #expect(arguments["allowed_ips"] == ["10.0.0.0/24", "192.0.2.7"])
         #expect(fixture.client.validate("create_service_account_api_key", arguments: arguments).isEmpty)
 
-        let asked = try await voicesStudioConfirm(model.actions.runner("create_service_account_api_key"), answer: true) {
-            await model.createKey()
-        }
+        let asked = try await voicesStudioAsk(model.actions, answer: true) { await model.createKey() }
         #expect(asked?.risk == .realWorld)
         #expect(asked?.consequence.contains("It is shown once") == true)
         let runner = try #require(model.actions.runner("create_service_account_api_key"))
@@ -140,11 +138,9 @@ struct VoicesStudioAccountsTests {
         let fixture = VoicesStudioFixture()
         defer { fixture.clean() }
         let model = ServiceAccountsSectionModel(environment: fixture.environment)
-        let asked = try await voicesStudioConfirm(model.actions.runner("disable"), answer: false) {
-            await model.disableOwnKey()
-        }
-        #expect(asked?.title == "Run the API key this app uses?" || asked?.title.contains("the API key this app uses") == true)
-        #expect(asked?.consequence.contains("stops working until you connect another key") == true)
+        let asked = try await voicesStudioAsk(model.actions, answer: false) { await model.disableOwnKey() }
+        #expect(asked?.title == "Disable the key this Mac uses?")
+        #expect(asked?.consequence.contains("stops working") == true)
         #expect(fixture.transport.recorded.isEmpty)
         for policy in ["allow", "forbid", "clear"] {
             model.policy = policy
@@ -189,7 +185,7 @@ struct VoicesStudioAccountsTests {
             "is_auto_disabled": false, "created_at_unix": 1, "auth_type": "hmac", "events": ["flows"],
         ]))
         model.load(webhooks: [webhook])
-        model.edit(webhook)
+        model.edit(webhook, eventsKnown: true)
         model.draft.events.insert("speech_to_text")
         let arguments = try #require(model.editArguments())
         #expect(arguments["events"] == ["flows", "speech_to_text"])

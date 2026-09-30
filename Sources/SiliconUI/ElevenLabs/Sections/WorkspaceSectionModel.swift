@@ -185,6 +185,7 @@ final class WorkspaceSectionModel {
     var shareRole = ""
     var shareTarget = ""
     var shareEmail = ""
+    var shareKeyID = ""
 
     // Connections
     private(set) var connections: [WorkspaceAuthConnection] = []
@@ -270,8 +271,11 @@ final class WorkspaceSectionModel {
         guard await actions.perform(
             "update_workspace_member", memberArguments(member, seat: seat),
             subject: "\(member.email)'s seat to \(VoicesStudioFormat.words(seat))",
-            consequence: "\(member.email) gets what a \(VoicesStudioFormat.words(seat).lowercased()) seat allows, "
-                + "and the workspace's bill may change with it."
+            question: VoicesStudioQuestion(
+                "Give \(member.email) a \(VoicesStudioFormat.words(seat).lowercased()) seat?", button: "Change seat",
+                consequence: "\(member.email) gets what a \(VoicesStudioFormat.words(seat).lowercased()) seat allows, "
+                    + "from now on."
+            )
         ) != nil else { return }
         seatEdits[member.id] = nil
         await refreshMembers()
@@ -281,8 +285,11 @@ final class WorkspaceSectionModel {
         guard await actions.perform(
             "update_workspace_member", memberArguments(member, locked: locked),
             subject: locked ? "\(member.email) out of the workspace" : "\(member.email) back into the workspace",
-            consequence: locked ? "\(member.email) can no longer use this workspace until unlocked."
-                : "\(member.email) can use this workspace again."
+            question: locked
+                ? VoicesStudioQuestion("Lock \(member.email) out of the workspace?", button: "Lock out",
+                                       consequence: "\(member.email) can no longer use this workspace until unlocked.")
+                : VoicesStudioQuestion("Let \(member.email) back into the workspace?", button: "Unlock",
+                                       consequence: "\(member.email) can use this workspace again.")
         ) != nil else { return }
         await refreshMembers()
     }
@@ -317,11 +324,14 @@ final class WorkspaceSectionModel {
         inviteProblems = call.problems
         guard call.problems.isEmpty else { return }
         let emails = VoicesStudioFormat.list(inviteEmails)
-        let subject = emails.count == 1 ? emails[0] : "\(emails.count) people (\(emails.joined(separator: ", ")))"
+        let subject = emails.count == 1 ? "an invitation to \(emails[0])"
+            : "invitations to \(emails.count) people (\(emails.joined(separator: ", ")))"
         guard await actions.perform(
             call.operationID, call.arguments, subject: subject,
             consequence: "An email goes to \(emails.count == 1 ? emails[0] : "each of them") inviting them to join this "
-                + "workspace\(inviteSeat.isEmpty ? "" : " with a \(VoicesStudioFormat.words(inviteSeat).lowercased()) seat")."
+                + "workspace\(inviteSeat.isEmpty ? "" : " with a \(VoicesStudioFormat.words(inviteSeat).lowercased()) seat")"
+                + ", using one of your seats."
+                + (emails.count > 1 ? " Every address must be in a verified domain of the workspace." : "")
         ) != nil else { return }
         inviteEmails = ""
         inviteUsageLimit = ""
@@ -372,7 +382,10 @@ final class WorkspaceSectionModel {
               await actions.perform(
                 "add_member", ["group_id": .string(group.id), "email": .string(email)],
                 subject: "\(email) to the group “\(group.name)”",
-                consequence: "\(email) gets everything shared with “\(group.name)”."
+                question: VoicesStudioQuestion(
+                    "Add \(email) to the group “\(group.name)”?", button: "Add to group",
+                    consequence: "\(email) gets everything shared with “\(group.name)”."
+                )
               ) != nil else { return }
         memberEmail[group.id] = ""
         await refreshGroups()
@@ -382,7 +395,10 @@ final class WorkspaceSectionModel {
         guard await actions.perform(
             "remove_member", ["group_id": .string(group.id), "email": .string(email)],
             subject: "\(email) from the group “\(group.name)”",
-            consequence: "\(email) loses what they could reach only through “\(group.name)”."
+            question: VoicesStudioQuestion(
+                "Take \(email) out of the group “\(group.name)”?", button: "Remove from group",
+                consequence: "\(email) loses what they could reach only through “\(group.name)”."
+            )
         ) != nil else { return }
         await refreshGroups()
     }
@@ -400,23 +416,30 @@ final class WorkspaceSectionModel {
 
     /// Who a share names: a user or service account by email, a group (or `default`, every
     /// member), or a workspace API key by id — whichever the owner picked or typed.
+    ///
+    /// A share option's `name` is "The name of the principal", not an address, so users and
+    /// service accounts are named by the email typed for them and keys by the key id typed;
+    /// the list offers only groups (and `default`), whose ids it does carry.
     func targetArguments() -> [String: JSONValue] {
         let email = shareEmail.trimmingCharacters(in: .whitespaces)
         if !email.isEmpty { return ["user_email": .string(email)] }
+        let key = shareKeyID.trimmingCharacters(in: .whitespaces)
+        if !key.isEmpty { return ["workspace_api_key_id": .string(key)] }
         if shareTarget == "default" { return ["group_id": "default"] }
-        guard let target = resource?.shareOptions.first(where: { $0.id == shareTarget }) else { return [:] }
-        switch target.type {
-        case "group": return ["group_id": .string(target.id)]
-        case "key": return ["workspace_api_key_id": .string(target.id)]
-        default: return ["user_email": .string(target.name)]
-        }
+        guard let target = groupOptions.first(where: { $0.id == shareTarget }) else { return [:] }
+        return ["group_id": .string(target.id)]
     }
+
+    /// The groups a resource can be shared with, from its share options.
+    var groupOptions: [WorkspaceResource.Target] { resource?.shareOptions.filter { $0.type == "group" } ?? [] }
 
     var targetName: String {
         let email = shareEmail.trimmingCharacters(in: .whitespaces)
         if !email.isEmpty { return email }
+        let key = shareKeyID.trimmingCharacters(in: .whitespaces)
+        if !key.isEmpty { return "the API key \(key)" }
         if shareTarget == "default" { return "every member of the workspace" }
-        return resource?.shareOptions.first { $0.id == shareTarget }?.name ?? "?"
+        return groupOptions.first { $0.id == shareTarget }.map { "the group “\($0.name)”" } ?? "?"
     }
 
     func share() async {
@@ -428,7 +451,10 @@ final class WorkspaceSectionModel {
         arguments["role"] = .string(shareRole)
         guard await actions.perform(
             "share_resource_endpoint", arguments, subject: "“\(resource.name)” with \(targetName)",
-            consequence: "\(targetName) gets the \(shareRole) role on “\(resource.name)”."
+            question: VoicesStudioQuestion(
+                "Share “\(resource.name)” with \(targetName) as \(shareRole)?", button: "Share",
+                consequence: "\(targetName.prefix(1).uppercased() + targetName.dropFirst()) gets the \(shareRole) role on “\(resource.name)”."
+            )
         ) != nil else { return }
         await loadResource()
     }
@@ -441,7 +467,10 @@ final class WorkspaceSectionModel {
         arguments["resource_type"] = .string(resource.type)
         guard await actions.perform(
             "unshare_resource_endpoint", arguments, subject: "“\(resource.name)” from \(targetName)",
-            consequence: "\(targetName) loses the access to “\(resource.name)” this share gave."
+            question: VoicesStudioQuestion(
+                "Stop sharing “\(resource.name)” with \(targetName)?", button: "Stop sharing",
+                consequence: "\(targetName.prefix(1).uppercased() + targetName.dropFirst()) loses the access to “\(resource.name)” this share gave."
+            )
         ) != nil else { return }
         await loadResource()
     }
@@ -487,13 +516,20 @@ final class WorkspaceSectionModel {
         let name = built.arguments["name"]?.stringValue ?? type
         guard await actions.perform(
             "create_auth_connection", built.arguments, subject: "a sign-in connection “\(name)”",
-            consequence: "Agents and tools in this workspace can sign in to another service with these credentials."
+            question: VoicesStudioQuestion(
+                "Create the sign-in connection “\(name)”?", button: "Create connection",
+                consequence: "Agents and tools in this workspace can sign in to another service with these credentials."
+            )
         ) != nil else { return }
         form.reset()
         await refreshConnections()
     }
 
     func edit(_ connection: WorkspaceAuthConnection?) {
+        // Whatever was typed into an edit form — a secret included — does not outlive it.
+        if let previous = editingConnection {
+            forms["update_auth_connection/\(previous.authType)"]?.reset()
+        }
         editingConnection = connection
     }
 
@@ -510,9 +546,15 @@ final class WorkspaceSectionModel {
         built.arguments["auth_connection_id"] = .string(connection.id)
         built.arguments["auth_type"] = .string(connection.authType)
         guard await actions.perform(
-            "update_auth_connection", built.arguments, subject: "the sign-in connection “\(connection.name)”"
+            "update_auth_connection", built.arguments, subject: "the sign-in connection “\(connection.name)”",
+            question: VoicesStudioQuestion(
+                "Change the sign-in connection “\(connection.name)”?", button: "Save connection",
+                consequence: connection.usedBy > 0
+                    ? "The \(connection.usedBy) agents or tools that use it sign in with the new settings from now on."
+                    : "Agents and tools that use it later sign in with the new settings."
+            )
         ) != nil else { return }
-        editingConnection = nil
+        edit(nil)
         await refreshConnections()
     }
 

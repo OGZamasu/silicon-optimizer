@@ -285,6 +285,12 @@ final class StudioSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         directory = environment.voices
+        // A conversion, podcast or project whose answer was lost: fetch the projects (and the
+        // open one) again, so the owner can see whether it was made.
+        actions.onUnknownOutcome = { [weak self] _ in
+            await self?.refresh()
+            if let id = self?.selected?.id { await self?.reloadSelected(id) }
+        }
     }
 
     // MARK: Spec
@@ -447,8 +453,11 @@ final class StudioSectionModel {
         let (arguments, files, problems) = Self.projectArguments(draft)
         self.problems = problems
         guard problems.isEmpty,
-              let json = await actions.perform("add_project", arguments, files: files, title: "Studio project \(draft.name)")?
-                .voicesStudioJSON, let project = StudioProject(json: json["project"])
+              let json = await actions.perform(
+                "add_project", arguments, files: files, title: "Studio project \(draft.name)",
+                // "Convert now" starts a conversion: this create spends credits, and waits like one.
+                spends: draft.autoConvert
+              )?.voicesStudioJSON, let project = StudioProject(json: json["project"])
         else { return }
         draft = StudioProjectDraft()
         showsNewProject = false
@@ -521,15 +530,30 @@ final class StudioSectionModel {
         await reloadSelected()
     }
 
+    /// The question before the content is replaced: the spec initialises the project from the
+    /// new page or document, so every chapter — and the owner's edits in them — goes.
+    func replaceQuestion() -> VoicesStudioQuestion? {
+        guard let project = selected else { return nil }
+        let source = contentDocument.first.map { "“\($0.lastPathComponent)”" }
+            ?? VoicesStudioFormat.text(contentURL)?.stringValue.map { "the page \($0)" } ?? "nothing"
+        let chapters = project.chapters.count
+        return VoicesStudioQuestion(
+            "Replace everything in “\(project.name)” with \(source)?", button: "Replace content",
+            consequence: "Its \(chapters == 1 ? "1 chapter" : "\(chapters) chapters") and your edits in them are replaced "
+                + "by what ElevenLabs reads from \(source)."
+                + (contentAutoConvert ? " It is then converted, which uses credits." : "")
+        )
+    }
+
     func updateContent() async {
-        guard let project = selected else { return }
+        guard let project = selected, let question = replaceQuestion() else { return }
         var arguments: [String: JSONValue] = ["project_id": .string(project.id)]
         arguments.voicesStudioSet("from_url", VoicesStudioFormat.text(contentURL))
         if contentAutoConvert { arguments["auto_convert"] = true }
         let files = contentDocument.first.map { ["from_document": [ElevenLabsFile(url: $0)]] } ?? [:]
         guard await actions.perform(
-            "edit_project_content", arguments, files: files, subject: "“\(project.name)”",
-            title: "New content for \(project.name)"
+            "edit_project_content", arguments, files: files, title: "New content for \(project.name)",
+            spends: contentAutoConvert, question: question
         ) != nil else { return }
         contentURL = ""
         contentDocument = []

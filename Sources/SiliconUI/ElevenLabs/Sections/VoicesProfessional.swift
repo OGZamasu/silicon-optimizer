@@ -35,13 +35,21 @@ private struct VoicesProfessionalFields: View {
     @Binding var draft: VoicesProfessionalDraft
 
     var body: some View {
-        TextField("Name", text: $draft.name).textFieldStyle(.roundedBorder)
-        TextField("Language of the recordings (e.g. en)", text: $draft.language)
-            .textFieldStyle(.roundedBorder)
-            .help(VoicesStudioSchema.description("create_pvc_voice", "language"))
-        TextField("Description (optional)", text: $draft.description, axis: .vertical)
-            .textFieldStyle(.roundedBorder)
-            .lineLimit(1...3)
+        LabeledContent("Name") {
+            TextField("Name", text: $draft.name).textFieldStyle(.roundedBorder).labelsHidden()
+        }
+        LabeledContent("Language") {
+            TextField("Language of the recordings (e.g. en)", text: $draft.language)
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
+                .help(VoicesStudioSchema.description("create_pvc_voice", "language"))
+        }
+        LabeledContent("Description") {
+            TextField("Optional", text: $draft.description, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
+                .lineLimit(1...3)
+        }
         VStack(alignment: .leading, spacing: 2) {
             Text("Labels, one “key: value” per line (language, accent, gender, age)")
                 .font(.caption).foregroundStyle(.secondary)
@@ -317,7 +325,8 @@ struct VoicesProfessionalTraining: View {
                 .help(VoicesStudioSchema.description("run_pvc_voice_training", "model_id"))
                 Button("Start training") { Task { await model.train() } }
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.actions.isRunning("run_pvc_voice_training"))
+                    .disabled(model.actions.isRunning("run_pvc_voice_training") || model.isTraining)
+                    .help(model.isTraining ? "Training is already under way" : "")
                 Button("Check progress") { Task { await model.reloadSelected() } }
             }
         }

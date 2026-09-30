@@ -199,6 +199,16 @@ final class FlowsSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         directory = environment.voices
+        // A generation or run whose answer was lost: list them again, so the owner can see
+        // whether it was started.
+        actions.onUnknownOutcome = { [weak self] operationID in
+            guard let self else { return }
+            if let kind = FlowsKind.allCases.first(where: { $0.createID == operationID }) {
+                await refresh(kind)
+            } else {
+                await loadRuns()
+            }
+        }
     }
 
     // MARK: Spec

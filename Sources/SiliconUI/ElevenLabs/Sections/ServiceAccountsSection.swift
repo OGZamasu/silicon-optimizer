@@ -34,6 +34,7 @@ struct ServiceAccountsScreen: View {
                                  credentialsInline: true)
         }
         .task { await model.refreshIfNeeded() }
+        .onDisappear { model.actions.dismissCredentials() }
     }
 }
 
@@ -102,6 +103,7 @@ struct ServiceAccountKeysCard: View {
         Card(title: "Keys of \(account.name)", systemImage: "key") {
             if let runner = model.actions.runner("create_service_account_api_key"), let credential = runner.credential {
                 ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
+                    .onDisappear { runner.dismissCredential() }
             }
             if account.keys.isEmpty {
                 Text("No keys yet.").font(.callout).foregroundStyle(.secondary)
@@ -129,7 +131,9 @@ struct ServiceAccountKeysCard: View {
             }
             Divider()
             Text(model.editingKey.map { "Change “\($0.name)”" } ?? "New key").font(.headline)
-            TextField("Name", text: $model.keyDraft.name).textFieldStyle(.roundedBorder)
+            LabeledContent("Key name") {
+                TextField("Name", text: $model.keyDraft.name).textFieldStyle(.roundedBorder).labelsHidden()
+            }
             Toggle("May do everything", isOn: $model.keyDraft.allPermissions)
             if !model.keyDraft.allPermissions {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), alignment: .leading)], alignment: .leading) {

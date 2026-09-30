@@ -343,6 +343,7 @@ struct VoicesStudioSnapshotTests {
         let fixture = VoicesStudioFixture()
         defer { fixture.clean() }
         let model = WebhooksSectionModel(environment: fixture.environment)
+        model.includeUsages = true  // the list carries events only with usages
         model.load(webhooks: try [
             ["name": "Ops", "webhook_id": "w1", "webhook_url": "https://example.com/hooks/elevenlabs",
              "is_disabled": false, "is_auto_disabled": false, "created_at_unix": 1, "auth_type": "hmac",

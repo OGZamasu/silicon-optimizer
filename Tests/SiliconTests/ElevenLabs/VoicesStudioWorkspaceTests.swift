@@ -38,7 +38,8 @@ struct VoicesStudioWorkspaceTests {
             await model.invite()
         }
         #expect(asked?.risk == .realWorld)
-        #expect(asked?.title.contains("2 people (sam@example.com, kim@example.com)") == true)
+        #expect(asked?.title == "Send invitations to 2 people (sam@example.com, kim@example.com)?")
+        #expect(asked?.consequence.contains("verified domain") == true)
         #expect(asked?.consequence.contains("lite member seat") == true)
         #expect(fixture.transport.recorded.isEmpty)
 
@@ -58,16 +59,12 @@ struct VoicesStudioWorkspaceTests {
         let member = try #require(WorkspaceMember(json: Self.member))
         model.load(members: [member])
         model.seatEdits[member.id] = "workspace_admin"
-        let asked = try await voicesStudioConfirm(model.actions.runner("update_workspace_member"), answer: true) {
-            await model.changeSeat(member)
-        }
-        #expect(asked?.title.contains("sam@example.com's seat to Workspace admin") == true)
+        let asked = try await voicesStudioAsk(model.actions, answer: true) { await model.changeSeat(member) }
+        #expect(asked?.title == "Give sam@example.com a workspace admin seat?")
         #expect(fixture.body("update_workspace_member") == ["email": "sam@example.com", "workspace_seat_type": "workspace_admin"])
         #expect(model.seatEdits[member.id] == nil)
 
-        let lock = try await voicesStudioConfirm(model.actions.runner("update_workspace_member"), answer: false) {
-            await model.setLocked(member, true)
-        }
+        let lock = try await voicesStudioAsk(model.actions, answer: false) { await model.setLocked(member, true) }
         #expect(lock?.consequence.contains("can no longer use this workspace") == true)
         #expect(fixture.sent("update_workspace_member").count == 1)
     }
@@ -80,18 +77,17 @@ struct VoicesStudioWorkspaceTests {
             "resource_id": "voice1", "resource_name": "Narrator", "resource_type": "voice", "creator_user_id": "u1",
             "anonymous_access_level_override": "viewer", "role_to_group_ids": ["admin": ["g1"]],
             "share_options": [["name": "Editors", "id": "g2", "type": "group"], ["name": "CI key", "id": "k1", "type": "key"],
-                              ["name": "kim@example.com", "id": "u3", "type": "user"]],
+                              ["name": "Kim Lee", "id": "u3", "type": "user"]],
         ]))
         model.load(resource: resource)
         model.shareTarget = "g2"
         #expect(model.targetArguments() == ["group_id": "g2"])
-        model.shareTarget = "k1"
-        #expect(model.targetArguments() == ["workspace_api_key_id": "k1"])
-        model.shareTarget = "u3"
-        #expect(model.targetArguments() == ["user_email": "kim@example.com"])
+        #expect(model.targetName == "the group “Editors”")
         model.shareTarget = "default"
         #expect(model.targetArguments() == ["group_id": "default"])
         #expect(model.targetName == "every member of the workspace")
+        model.shareKeyID = "k1"
+        #expect(model.targetArguments() == ["workspace_api_key_id": "k1"])
         model.shareEmail = "lee@example.com"
         #expect(model.targetArguments() == ["user_email": "lee@example.com"])
         var arguments = model.targetArguments()

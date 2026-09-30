@@ -26,6 +26,7 @@ struct WebhooksScreen: View {
         } content: {
             if let runner = model.actions.runner("create_workspace_webhook_route"), let credential = runner.credential {
                 ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
+                    .onDisappear { runner.dismissCredential() }
             }
             Card(title: "Webhooks", systemImage: "arrow.up.forward.app") {
                 Toggle("Show what uses each webhook (admins)", isOn: $model.includeUsages)
@@ -42,6 +43,7 @@ struct WebhooksScreen: View {
                                  credentialsInline: true)
         }
         .task { await model.refreshIfNeeded() }
+        .onDisappear { model.actions.dismissCredentials() }
     }
 }
 
@@ -62,7 +64,7 @@ struct WebhookRow: View {
                 }
                 if let auth = webhook.authType { Badge(text: auth.uppercased()) }
                 Spacer()
-                Button("Edit") { model.edit(webhook) }.controlSize(.small)
+                Button("Edit") { Task { await model.startEditing(webhook) } }.controlSize(.small)
                 Button(role: .destructive) { Task { await model.delete(webhook) } } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Delete \(webhook.name)")
@@ -97,15 +99,24 @@ struct WebhookFormCard: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text(model.draft.url).font(.caption.monospaced()).foregroundStyle(.secondary)
-                Text("Events").font(.caption.weight(.medium))
-                ForEach(model.eventChoices, id: \.self) { event in
-                    Toggle(VoicesStudioFormat.words(event), isOn: Binding(
-                        get: { model.draft.events.contains(event) },
-                        set: { on in if on { model.draft.events.insert(event) } else { model.draft.events.remove(event) } }
-                    ))
+                if model.eventsKnown {
+                    Text("Events").font(.caption.weight(.medium))
+                    ForEach(model.eventChoices, id: \.self) { event in
+                        Toggle(VoicesStudioFormat.words(event), isOn: Binding(
+                            get: { model.draft.events.contains(event) },
+                            set: { on in if on { model.draft.events.insert(event) } else { model.draft.events.remove(event) } }
+                        ))
+                    }
+                } else {
+                    Text("Its event subscriptions could not be read, so they are left as they are.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Toggle("Retry after a temporary failure", isOn: $model.draft.retry)
-                    .help(VoicesStudioSchema.description("edit_workspace_webhook_route", "retry_enabled"))
+                Picker("Retry after a temporary failure", selection: $model.draft.retry) {
+                    Text("Leave as it is").tag(Bool?.none)
+                    Text("Retry").tag(Bool?.some(true))
+                    Text("Don't retry").tag(Bool?.some(false))
+                }
+                .help(VoicesStudioSchema.description("edit_workspace_webhook_route", "retry_enabled"))
                 Toggle("Turned off", isOn: $model.draft.disabled)
             }
             VStack(alignment: .leading, spacing: 2) {

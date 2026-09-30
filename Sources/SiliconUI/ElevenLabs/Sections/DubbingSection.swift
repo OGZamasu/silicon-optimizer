@@ -110,7 +110,8 @@ struct DubbingCreateCard: View {
             .font(.callout)
             if !model.draftProblems.isEmpty { ElevenLabsProblemList(problems: model.draftProblems) }
             if let runner = model.actions.runner("create_dubbing") {
-                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Start dubbing") {
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Start dubbing",
+                                      costNote: DubbingSectionModel.CostNote.dub) {
                     Task { await model.createDub() }
                 }
             }
@@ -275,11 +276,8 @@ struct DubbingProjectCreateCard: View {
                                    help: VoicesStudioSchema.description("dubbing_project_create", "transcript"))
             if !model.projectProblems.isEmpty { ElevenLabsProblemList(problems: model.projectProblems) }
             if let runner = model.actions.runner("dubbing_project_create") {
-                Text("Creating a project charges for one language up front, before any output exists; the first "
-                     + "language you add (or the one named here) uses it, and each further language is charged separately.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Create project") {
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Create project",
+                                      costNote: DubbingSectionModel.CostNote.project) {
                     Task { await model.createProject() }
                 }
             }
@@ -345,22 +343,26 @@ struct DubbingProjectCard: View {
             ForEach(model.languages) { language in
                 DubbingLanguageRow(model: model, language: language)
             }
+            Text("Add a language").font(.subheadline.weight(.medium))
+            LabeledContent("Dub into") {
+                TextField("BCP-47, e.g. fr or es-MX", text: $model.newLanguage)
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+            }
             HStack(spacing: 8) {
-                TextField("Dub into (BCP-47, e.g. fr or es-MX)", text: $model.newLanguage).textFieldStyle(.roundedBorder)
                 Toggle("Cloning strength", isOn: $model.setsCloningStrength)
                 if model.setsCloningStrength {
-                    Slider(value: $model.cloningStrength, in: DubbingSectionModel.cloningRange, step: 1).frame(width: 100)
+                    Slider(value: $model.cloningStrength, in: DubbingSectionModel.cloningRange, step: 1).frame(maxWidth: 160)
                     Text("\(Int(model.cloningStrength))").monospacedDigit()
                 }
-                if let runner = model.actions.runner("dubbing_language_create") {
-                    VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Add",
-                                        disabled: model.newLanguage.trimmingCharacters(in: .whitespaces).isEmpty) {
-                        Task { await model.addLanguage() }
-                    }
+            }
+            if let runner = model.actions.runner("dubbing_language_create") {
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Add language",
+                                      disabled: model.newLanguage.trimmingCharacters(in: .whitespaces).isEmpty,
+                                      costNote: DubbingSectionModel.CostNote.language) {
+                    Task { await model.addLanguage() }
                 }
             }
-            Text("Adding a language dubs it, billed per generation; the project's first language was paid for when it was created.")
-                .font(.caption).foregroundStyle(.secondary)
             Divider()
             DubbingTranscriptEditor(model: model)
             HStack {
@@ -452,11 +454,14 @@ struct DubbingTranscriptEditor: View {
                         Button("Save \(model.targetEdits.count) edits") { Task { await model.saveTargetEdits() } }
                             .controlSize(.small).buttonStyle(.borderedProminent)
                     }
-                    if let runner = model.actions.runner("dubbing_target_transcript_regenerate") {
-                        VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Regenerate") { Task { await model.regenerate() } }
-                            .help("Re-dubs only the edited parts, charged like a generation less the free regeneration allowance")
-                            .controlSize(.small)
-                    }
+                }
+                if let runner = model.actions.runner("dubbing_target_transcript_regenerate") {
+                    VoicesStudioRunButton(
+                        actions: model.actions, runner: runner, title: "Regenerate",
+                        disabled: model.regenerateHold != nil, disabledReason: model.regenerateHold,
+                        costNote: DubbingSectionModel.CostNote.regenerate
+                    ) { Task { await model.regenerate() } }
+                    .controlSize(.small)
                 }
                 if let charge = model.lastRegeneration {
                     Text("The last regeneration charged \(VoicesStudioFormat.duration(charge.charged) ?? "0:00"); "

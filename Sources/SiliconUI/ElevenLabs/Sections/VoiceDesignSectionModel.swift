@@ -130,7 +130,13 @@ final class VoiceDesignSectionModel {
     // MARK: Arguments
 
     /// The arguments for a design or remix, and every problem with the inputs.
-    func arguments() -> (arguments: [String: JSONValue], problems: [String]) {
+    /// The largest reference recording this screen reads: it goes base64 in the JSON body,
+    /// held in memory, so a long file (or a video picked by mistake) is refused before it is read.
+    static let referenceLimit = 10 * 1024 * 1024
+
+    /// - Parameter reference: The reference recording, base64, read off the main actor by
+    ///   `generate()`; the design leaves it out when nil.
+    func arguments(reference: String? = nil) -> (arguments: [String: JSONValue], problems: [String]) {
         var arguments: [String: JSONValue] = [:]
         var problems: [String] = []
         let description = voiceDescription.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -163,11 +169,13 @@ final class VoiceDesignSectionModel {
             if supportsReference {
                 if setsPromptStrength { arguments["prompt_strength"] = .number(promptStrength) }
                 if let file = referenceAudio.first {
-                    guard let data = try? Data(contentsOf: file) else {
-                        problems.append("\(file.lastPathComponent) could not be read.")
-                        return (arguments, problems)
+                    let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if size > Self.referenceLimit {
+                        problems.append("\(file.lastPathComponent) is \(VoicesStudioFormat.bytes(size) ?? "too big"); "
+                            + "a reference recording can be at most \(VoicesStudioFormat.bytes(Self.referenceLimit) ?? "10 MB") here.")
+                    } else if let reference {
+                        arguments["reference_audio_base64"] = .string(reference)
                     }
-                    arguments["reference_audio_base64"] = .string(data.base64EncodedString())
                 }
             }
         case .remix:
@@ -193,8 +201,12 @@ final class VoiceDesignSectionModel {
         return arguments
     }
 
+    /// Previews already saved as voices: saving the same one again would make a second voice.
+    private(set) var savedPreviews: Set<String> = []
+
     var canSave: Bool {
-        guard chosenPreview != nil, !saveName.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        guard let chosen = chosenPreview, !savedPreviews.contains(chosen),
+              !saveName.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         let count = saveDescription.trimmingCharacters(in: .whitespacesAndNewlines).count
         if let minimum = VoicesStudioSchema.minLength("create_voice", "voice_description"), count < minimum { return false }
         return true
@@ -203,7 +215,17 @@ final class VoiceDesignSectionModel {
     // MARK: Running
 
     func generate() async {
-        let built = arguments()
+        var reference: String?
+        if supportsReference, let file = referenceAudio.first,
+           ((try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) <= Self.referenceLimit {
+            // Read and encoded off the main actor, so a large file never stalls the window.
+            reference = await Task.detached { (try? Data(contentsOf: file))?.base64EncodedString() }.value
+            if reference == nil {
+                problems = ["\(file.lastPathComponent) could not be read."]
+                return
+            }
+        }
+        let built = arguments(reference: reference)
         problems = built.problems
         guard problems.isEmpty else { return }
         let subject = mode == .design ? "Design a voice" : "Remix \(directory.voice(id: remixVoiceID)?.name ?? "a voice")"
@@ -258,6 +280,7 @@ final class VoiceDesignSectionModel {
               let json = await actions.perform("create_voice", arguments, title: "Save \(saveName)")?.voicesStudioJSON
         else { return }
         savedVoiceID = json["voice_id"].stringValue
+        if let chosen = chosenPreview { savedPreviews.insert(chosen) }
         await directory.refresh()
     }
 

@@ -263,10 +263,15 @@ struct VoicesEditForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Name, description and labels").font(.headline)
-            TextField("Name", text: $model.editDraft.name).textFieldStyle(.roundedBorder)
-            TextField("Description", text: $model.editDraft.description, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...3)
+            LabeledContent("Name") {
+                TextField("Name", text: $model.editDraft.name).textFieldStyle(.roundedBorder).labelsHidden()
+            }
+            LabeledContent("Description") {
+                TextField("Description", text: $model.editDraft.description, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .labelsHidden()
+                    .lineLimit(1...3)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Labels, one “key: value” per line (accent, age, gender, use case…)")
                     .font(.caption).foregroundStyle(.secondary)

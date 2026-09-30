@@ -109,23 +109,18 @@ struct VoicesStudioProductionsTests {
     }
 
     @Test func submittingIsARealWorldChargeThatStatesTheAmount() async throws {
-        let fixture = VoicesStudioFixture()
+        let fixture = VoicesStudioFixture(["public_get_order": [.json(Self.order("o1", items: [Self.dubItem]))]])
         defer { fixture.clean() }
         let model = ProductionsSectionModel(environment: fixture.environment)
         model.load(orders: [], selected: try #require(ProductionsOrder(json: Self.order("o1", items: [Self.dubItem]))))
         let runner = try #require(model.actions.runner("public_submit_order"))
         #expect(runner.operation.billable)
-        let asked = try await voicesStudioConfirm(model.actions.runner("public_submit_order"), answer: false) {
-            await model.submit()
-        }
+        let asked = try await voicesStudioAsk(model.actions, answer: false) { await model.submit() }
         #expect(asked?.risk == .realWorld)
-        #expect(asked?.title.contains("“Launch video”") == true)
-        #expect(asked?.consequence.contains("$240.00") == true)
-        #expect(asked?.consequence.contains("1 item goes") == true)
-        #expect(fixture.transport.recorded.isEmpty)
-
-        model.load(orders: [], selected: try #require(ProductionsOrder(json: Self.order("o2", sandbox: true, items: [Self.dubItem]))))
-        #expect(model.submitConsequence.hasPrefix("This is a sandbox order: nothing is charged."))
+        #expect(asked?.title == "Submit “Launch video” and charge the workspace $240.00?")
+        #expect(asked?.confirmLabel == "Submit and pay $240.00")
+        #expect(asked?.consequence.contains("its 1 item") == true)
+        #expect(fixture.sent("public_submit_order").isEmpty)
     }
 
     @Test func theOrderListSendsEachStatusAndPagesByOffset() async throws {

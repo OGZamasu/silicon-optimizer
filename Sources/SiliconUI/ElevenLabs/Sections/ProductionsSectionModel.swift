@@ -140,6 +140,9 @@ final class ProductionsSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.onUnknownOutcome = { [weak self] _ in
+            if let id = self?.selected?.id { await self?.select(id) }
+        }
     }
 
     // MARK: Spec
@@ -421,22 +424,58 @@ final class ProductionsSectionModel {
 
     // MARK: Submit and deliver
 
-    /// What submitting will charge, in words, for the question.
-    var submitConsequence: String {
-        guard let order = selected else { return "" }
-        let amount = order.total.map { $0.formatted(.currency(code: "USD")) } ?? "the quoted amount"
-        let count = order.items.count
-        return (order.sandbox ? "This is a sandbox order: nothing is charged. " : "Your workspace is charged \(amount). ")
-            + (count == 1 ? "1 item goes" : "\(count) items go")
-            + " to ElevenLabs' producers, and the order can no longer be changed."
+    /// The spec's own words for a sandbox order — nothing about what it costs.
+    static let sandboxWords = "A sandbox order auto-progresses without producer intervention."
+
+    /// The quote to charge, as the order last fetched says; nil until ElevenLabs has quoted it
+    /// (the spec leaves `total_amount_usd` out "until quotes are available").
+    var quotedTotal: String? {
+        selected?.total.map { $0.formatted(.currency(code: "USD")) }
     }
 
+    /// Why Submit is held, when it is.
+    var submitHold: String? {
+        guard let order = selected else { return nil }
+        if order.items.isEmpty { return "Add an item first." }
+        if order.total == nil { return "Waiting for ElevenLabs' quote — check the order's status again in a moment." }
+        return nil
+    }
+
+    /// The money question, from the order as fetched just before asking.
+    func submitQuestion() -> VoicesStudioQuestion? {
+        guard let order = selected, let amount = quotedTotal else { return nil }
+        let count = order.items.count
+        return VoicesStudioQuestion(
+            "Submit “\(order.name)” and charge the workspace \(amount)?",
+            button: "Submit and pay \(amount)",
+            consequence: "The workspace is charged \(amount), the total ElevenLabs quoted for "
+                + (count == 1 ? "its 1 item." : "its \(count) items.")
+                + (order.sandbox ? " " + Self.sandboxWords : "")
+        )
+    }
+
+    private(set) var submitProblem: String?
+
+    /// Fetches the order again, then asks with the amount it states now — never with a stale
+    /// total, never without one.
     func submit() async {
-        guard let order = selected,
-              await actions.perform(
-                "public_submit_order", ["order_id": .string(order.id)], subject: "the order “\(order.name)”",
-                consequence: submitConsequence, title: "Submit \(order.name)"
-              ) != nil else { return }
+        guard let id = selected?.id else { return }
+        submitProblem = nil
+        guard let json = await actions.perform("public_get_order", ["order_id": .string(id)], quietly: true)?
+            .voicesStudioJSON, let fresh = ProductionsOrder(json: json), fresh.id == id else {
+            submitProblem = "The order could not be fetched again, so nothing was submitted."
+            return
+        }
+        selected = fresh
+        if let index = orders.firstIndex(where: { $0.id == id }) { orders[index] = fresh }
+        guard let order = selected, let question = submitQuestion() else {
+            submitProblem = submitHold ?? "The order has no quote yet, so nothing was submitted."
+            return
+        }
+        guard await actions.perform(
+            "public_submit_order", ["order_id": .string(order.id)], subject: "the order “\(order.name)”",
+            title: "Submit \(order.name)", question: question
+        ) != nil else { return }
         await select(order.id)
     }
 

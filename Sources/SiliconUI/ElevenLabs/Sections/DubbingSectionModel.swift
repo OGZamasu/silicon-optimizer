@@ -213,6 +213,27 @@ final class DubbingSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         cloningStrength = VoicesStudioSchema.defaultNumber("dubbing_language_create", "voice_settings.cloning_strength") ?? 7
+        // A dub, project, language or regeneration whose answer was lost: fetch the lists
+        // again, so the owner can see whether it was started.
+        actions.onUnknownOutcome = { [weak self] operationID in
+            guard let self else { return }
+            if operationID == "create_dubbing" {
+                await refreshDubs()
+            } else {
+                await refreshProjects()
+                if let id = selectedProject?.id { await selectProject(id) }
+            }
+        }
+    }
+
+    /// What the dubbing buttons say they cost — the spec's own words, nothing about length.
+    enum CostNote {
+        static let dub = "Uses credits from your ElevenLabs balance."
+        static let project = "Charges for one language up front, before any output exists; "
+            + "each further language is charged separately."
+        static let language = "Billed per generation; the project's first language was paid for when it was created."
+        static let regenerate = "Enterprise only. Re-synthesizes only the edited regions, charged like a "
+            + "generation, less the free-regeneration allowance."
     }
 
     // MARK: Spec
@@ -688,6 +709,12 @@ final class DubbingSectionModel {
     /// What the last regeneration charged, as its answer says: seconds charged and the free
     /// regeneration seconds left.
     private(set) var lastRegeneration: (charged: Double, freeLeft: Double)?
+
+    /// Why Regenerate is held: it re-dubs from the translation ElevenLabs holds, and "returns a
+    /// conflict when the target has no edits to apply".
+    var regenerateHold: String? {
+        targetEdits.isEmpty ? nil : "Save the edits first: regenerating re-dubs the translation ElevenLabs holds."
+    }
 
     func regenerate() async {
         guard let project = selectedProject, let languageID = selectedLanguageID,

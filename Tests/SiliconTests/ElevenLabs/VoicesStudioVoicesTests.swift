@@ -61,7 +61,7 @@ struct VoicesStudioVoicesTests {
         let model = VoicesSectionModel(environment: fixture.environment)
         await model.select("v1")
         #expect(model.selected?.name == "Ada")
-        #expect(fixture.query("get_voice_by_id").contains { $0 == ("with_settings", "true") })
+        #expect(!fixture.query("get_voice_by_id").contains { $0.0 == "with_settings" }, "deprecated and ignored")
         #expect(model.settingsDraft?.stability == 0.4)
 
         model.settingsDraft?.stability = 0.65
@@ -249,11 +249,10 @@ struct VoicesStudioVoicesTests {
         let ada = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v1", "Ada")))
         model.load(rows: [ada], selected: ada)
         model.replicateWorkspaceID = "ws-eu"
-        let asked = try await voicesStudioConfirm(
-            model.actions.runner("replicate_voice_to_isolated_environment"), answer: false
-        ) { await model.replicate() }
+        let asked = try await voicesStudioAsk(model.actions, answer: false) { await model.replicate() }
         #expect(asked?.risk == .realWorld)
-        #expect(asked?.title.contains("“Ada” to the workspace ws-eu") == true)
+        #expect(asked?.title == "Copy “Ada” to the workspace ws-eu?")
+        #expect(asked?.confirmLabel == "Copy voice")
         #expect(fixture.sent("replicate_voice_to_isolated_environment").isEmpty)
     }
 

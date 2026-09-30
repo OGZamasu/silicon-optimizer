@@ -101,6 +101,8 @@ struct VoiceDesignPromptCard: View {
                         }
                     }
                     if model.supportsReference {
+                        Text("A reference recording can be at most 10 MB here.")
+                            .font(.caption).foregroundStyle(.secondary)
                         VoicesStudioFilePicker(title: "Reference audio", files: $model.referenceAudio,
                                                help: VoicesStudioSchema.description("text_to_voice_design", "reference_audio_base64"))
                     }
