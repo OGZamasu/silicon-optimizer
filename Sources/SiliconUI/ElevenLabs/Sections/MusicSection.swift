@@ -59,6 +59,51 @@ struct MusicFinetune: Identifiable, Hashable, Sendable {
     var isOwn: Bool { createdBy == nil || createdBy == "self" }
 }
 
+/// What an answer said about one song besides its audio: lyrics timings, waveform, the plan
+/// and metadata the model used, and the song's id.
+struct MusicDetails: Hashable, Sendable {
+    var words: [CreativeTimedWord] = []
+    var waveform: [Double] = []
+    /// The plan and metadata, as the answer gave them.
+    var metadata: JSONValue?
+    var songID: String?
+
+    init(words: [CreativeTimedWord] = [], waveform: [Double] = [], metadata: JSONValue? = nil, songID: String? = nil) {
+        self.words = words
+        self.waveform = waveform
+        self.metadata = metadata
+        self.songID = songID
+    }
+
+    /// From a detailed, streamed or upload answer: its JSON parts and events, and the
+    /// `song-id` header.
+    init(result: ElevenLabsResult) {
+        let values = CreativeResults.jsonValues(in: result)
+        words = values.flatMap { value -> [CreativeTimedWord] in
+            let timestamps = value["words_timestamps"].arrayValue ?? value["song_metadata"]["words_timestamps"].arrayValue ?? []
+            return timestamps.compactMap { word in
+                guard let text = word["word"].stringValue ?? word["text"].stringValue else { return nil }
+                return CreativeTimedWord(
+                    text: text,
+                    start: (word["start_ms"].doubleValue ?? 0) / 1000,
+                    end: (word["end_ms"].doubleValue ?? 0) / 1000
+                )
+            }
+        }
+        waveform = values.flatMap { ($0["waveform_visual"].arrayValue ?? []).compactMap(\.doubleValue) }
+        metadata = values.first { $0["composition_plan"] != .null || $0["song_metadata"] != .null }
+        songID = result.meta.headers["song-id"] ?? values.lazy.compactMap { $0["song_id"].stringValue }.first
+    }
+
+    /// The plan the answer carried, if any.
+    var plan: JSONValue? {
+        guard let value = metadata?["composition_plan"], value != .null else { return nil }
+        return value
+    }
+
+    var isEmpty: Bool { words.isEmpty && waveform.isEmpty && metadata == nil && songID == nil }
+}
+
 @MainActor
 @Observable
 final class MusicScreenModel: CreativeScreenModel {
@@ -244,12 +289,16 @@ final class MusicScreenModel: CreativeScreenModel {
     var newModelID: String
 
     // MARK: Results
+    /// Composed songs, newest first.
     private(set) var takes: [CreativeTake] = []
-    /// Lyrics timings and waveform of the newest detailed song.
-    private(set) var songWords: [CreativeTimedWord] = []
-    private(set) var songWaveform: [Double] = []
-    /// The plan and metadata a detailed answer carried.
-    private(set) var songDetails: JSONValue?
+    /// Scores made for video, newest first: their own list, so neither tab shows the other's.
+    private(set) var videoTakes: [CreativeTake] = []
+    /// What each take's answer said about it — lyrics timings, waveform, the plan used, the
+    /// song id — so a take is only ever drawn with its own.
+    private(set) var takeDetails: [CreativeTake.ID: MusicDetails] = [:]
+    /// What the last upload's answer said about the uploaded song.
+    private(set) var uploadDetails: MusicDetails?
+    /// The compose runner that ran last: its errors, result and "Show API call" are on screen.
     private(set) var lastRunner: ElevenLabsRunner
     private(set) var lastOtherResult: ElevenLabsResult?
 
@@ -423,32 +472,21 @@ final class MusicScreenModel: CreativeScreenModel {
         runner.streamMode = delivery == .stream || delivery == .detailedStream ? .play : .collect
         lastRunner = runner
         guard let result = await runner.perform(arguments: composeArguments()) else { return }
-        readDetails(result)
         let title = usesPlan ? "Song from a plan (\(plan?.sections.count ?? 0) sections)" : Self.excerpt(prompt)
-        if let take = CreativeTake(result: result, title: title, runner: runner) { takes.insert(take, at: 0) }
-    }
-
-    /// Lyrics timings, waveform and the plan the model used, from a detailed answer.
-    func readDetails(_ result: ElevenLabsResult) {
-        let values = CreativeResults.jsonValues(in: result)
-        songWords = values.flatMap { value -> [CreativeTimedWord] in
-            let timestamps = value["words_timestamps"].arrayValue ?? value["song_metadata"]["words_timestamps"].arrayValue ?? []
-            return timestamps.compactMap { word in
-                guard let text = word["word"].stringValue ?? word["text"].stringValue else { return nil }
-                return CreativeTimedWord(
-                    text: text,
-                    start: (word["start_ms"].doubleValue ?? 0) / 1000,
-                    end: (word["end_ms"].doubleValue ?? 0) / 1000
-                )
-            }
+        if let take = CreativeTake(result: result, title: title, runner: runner) {
+            takes.insert(take, at: 0)
+            takeDetails[take.id] = MusicDetails(result: result)
         }
-        songWaveform = values.flatMap { ($0["waveform_visual"].arrayValue ?? []).compactMap(\.doubleValue) }
-        songDetails = values.first { $0["composition_plan"] != .null || $0["song_metadata"] != .null }
     }
 
-    /// Opens the plan a detailed answer carried under Plan, to edit and compose again.
-    func editReturnedPlan() {
-        guard let value = songDetails?["composition_plan"], value != .null else { return }
+    /// What the answer said about `take`, when it said anything.
+    func details(of take: CreativeTake) -> MusicDetails? {
+        takeDetails[take.id].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Opens the plan `take`'s answer carried under Plan, to edit and compose again.
+    func editReturnedPlan(of take: CreativeTake) {
+        guard let value = takeDetails[take.id]?.plan else { return }
         load(plan: value)
         tab = .plan
     }
@@ -544,12 +582,12 @@ final class MusicScreenModel: CreativeScreenModel {
 
     func scoreVideo() async {
         guard videoProblems.isEmpty, CreativeRunGate.isKnown(videoRunner) else { return }
-        lastRunner = videoRunner
         guard let result = await videoRunner.perform(
             arguments: videoArguments(), files: ["videos": videos.map { ElevenLabsFile(url: $0) }]
         ) else { return }
         if let take = CreativeTake(result: result, title: "Score for \(videos.map(\.lastPathComponent).joined(separator: ", "))", runner: videoRunner) {
-            takes.insert(take, at: 0)
+            videoTakes.insert(take, at: 0)
+            takeDetails[take.id] = MusicDetails(result: result)
         }
     }
 
@@ -584,7 +622,7 @@ final class MusicScreenModel: CreativeScreenModel {
             arguments: uploadArguments(), files: ["file": [ElevenLabsFile(url: uploadSource)]]
         ), let value = CreativeResults.json(in: result) else { return }
         uploadedSongID = value["song_id"].stringValue
-        readDetails(result)
+        uploadDetails = MusicDetails(result: result)
         let plan = value["composition_plan"]
         if plan != .null { load(plan: plan) }
     }
@@ -751,6 +789,8 @@ final class MusicScreenModel: CreativeScreenModel {
 
     func removeTake(_ take: CreativeTake) {
         takes.removeAll { $0.id == take.id }
+        videoTakes.removeAll { $0.id == take.id }
+        takeDetails[take.id] = nil
     }
 
     static func excerpt(_ text: String) -> String {
@@ -872,7 +912,7 @@ private struct MusicComposeTab: View {
         CreativeRunRow(runner: screen.activeComposeRunner, title: "Compose", problems: screen.composeProblems) {
             Task { await screen.composeSong() }
         }
-        MusicResultCard(screen: screen, runner: screen.lastRunner)
+        MusicResultCard(screen: screen, runner: screen.busyRunner ?? screen.lastRunner, takes: screen.takes)
         CreativeTakesList(takes: Array(screen.takes.dropFirst())) { screen.removeTake($0) }
     }
 }
@@ -880,9 +920,11 @@ private struct MusicComposeTab: View {
 private struct MusicResultCard: View {
     let screen: MusicScreenModel
     let runner: ElevenLabsRunner
+    /// This tab's takes, newest first; the first is the one drawn.
+    let takes: [CreativeTake]
 
     var body: some View {
-        if runner.phase != .idle || screen.takes.first != nil {
+        if runner.phase != .idle || takes.first != nil {
             CreativeCard("Result", systemImage: "play.circle") {
                 if runner.isRunning, let player = runner.streamPlayer {
                     Label(player.receivedBytes > 0 ? "Streaming…" : "Waiting for the first audio…",
@@ -893,24 +935,25 @@ private struct MusicResultCard: View {
                 if let problem = runner.streamPlayer?.problem {
                     Text(problem).font(.caption).foregroundStyle(.secondary)
                 }
-                if let take = screen.takes.first {
-                    if screen.songWords.isEmpty {
-                        CreativeAudioResult(take: take)
-                    } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.songWords, title: take.title, showsSpeakers: false, contentType: take.contentType, outputFormat: take.outputFormat)
+                if let take = takes.first {
+                    let details = screen.details(of: take)
+                    if let words = details?.words, !words.isEmpty {
+                        CreativeTimedPlayer(url: take.file, words: words, title: take.title, showsSpeakers: false, contentType: take.contentType, outputFormat: take.outputFormat)
                             .id(take.file)
+                    } else {
+                        CreativeAudioResult(take: take)
                     }
-                    if !screen.songWaveform.isEmpty { MusicWaveform(samples: screen.songWaveform) }
-                    if let songID = runner.result?.meta.headers["song-id"] {
-                        Text("Song \(songID)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    if let waveform = details?.waveform, !waveform.isEmpty { MusicWaveform(samples: waveform) }
+                    if let songID = details?.songID {
+                        Text("Song id \(songID)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    if let details = screen.songDetails {
+                    if let metadata = details?.metadata {
                         DisclosureGroup("What the model used") {
-                            ElevenLabsJSONTree(details, expandedDepth: 1)
+                            ElevenLabsJSONTree(metadata, expandedDepth: 1)
                         }
                         .font(.callout)
-                        if details["composition_plan"] != .null {
-                            Button("Edit this plan") { screen.editReturnedPlan() }.controlSize(.small)
+                        if details?.plan != nil {
+                            Button("Edit this plan") { screen.editReturnedPlan(of: take) }.controlSize(.small)
                         }
                     }
                     if let meta = runner.result?.meta { ElevenLabsMetaLine(meta: meta) }
@@ -1002,7 +1045,8 @@ private struct MusicVideoTab: View {
         CreativeRunRow(runner: screen.videoRunner, title: "Score it", problems: screen.videoProblems) {
             Task { await screen.scoreVideo() }
         }
-        MusicResultCard(screen: screen, runner: screen.videoRunner)
+        MusicResultCard(screen: screen, runner: screen.videoRunner, takes: screen.videoTakes)
+        CreativeTakesList(takes: Array(screen.videoTakes.dropFirst())) { screen.removeTake($0) }
     }
 }
 
@@ -1032,7 +1076,10 @@ private struct MusicUploadTab: View {
         if let songID = screen.uploadedSongID {
             CreativeCard("Uploaded", systemImage: "checkmark.circle") {
                 LabeledContent("Song id") { Text(songID).textSelection(.enabled) }
-                if !screen.songWaveform.isEmpty { MusicWaveform(samples: screen.songWaveform) }
+                if let waveform = screen.uploadDetails?.waveform, !waveform.isEmpty { MusicWaveform(samples: waveform) }
+                if let words = screen.uploadDetails?.words, !words.isEmpty {
+                    Text(CreativeTimeline.join(words.map(\.text))).font(.callout).textSelection(.enabled).lineLimit(6)
+                }
                 if screen.plan != nil || !screen.planJSON.isEmpty {
                     Button("Open its plan") { screen.tab = .plan }.controlSize(.small)
                 }

@@ -426,22 +426,65 @@ struct CreativeScreenTests {
         #expect(rig.lastBody(MusicScreenModel.plan)?["source_composition_plan"]["sections"] != .null)
     }
 
-    @Test func aDetailedSongShowsItsLyricsTimings() {
-        let rig = CreativeRig()
-        defer { rig.clean() }
-        let music = rig.session.music
-        music.readDetails(.parts([
+    @Test func aDetailedSongShowsItsLyricsTimings() throws {
+        let details = MusicDetails(result: .parts([
             .json(["composition_plan": Self.planJSON, "song_metadata": ["title": "T"],
                    "words_timestamps": [["word": "la", "start_ms": 500, "end_ms": 900]],
                    "waveform_visual": [1, 3, 2]]),
             .file(URL(fileURLWithPath: "/dev/null"), contentType: "audio/mpeg", bytes: 0),
-        ], ElevenLabsMeta(status: 200)))
-        #expect(music.songWords.map(\.text) == ["la"])
-        #expect(music.songWords.first?.start == 0.5)
-        #expect(music.songWaveform == [1, 3, 2])
-        music.editReturnedPlan()
+        ], ElevenLabsMeta(status: 200, headers: ["song-id": "song-1"])))
+        #expect(details.words.map(\.text) == ["la"])
+        #expect(details.words.first?.start == 0.5)
+        #expect(details.waveform == [1, 3, 2])
+        #expect(details.songID == "song-1")
+        #expect(details.plan?["sections"].arrayValue?.count == 2)
+        #expect(MusicDetails(result: .file(URL(fileURLWithPath: "/dev/null"), contentType: "audio/mpeg", bytes: 0,
+                                           ElevenLabsMeta(status: 200))).isEmpty)
+    }
+
+    /// A take is drawn only with its own details: a video score made after a detailed song
+    /// carries none of the song's lyrics, waveform or plan, keeps to its own tab, and an upload
+    /// changes neither.
+    @Test func eachSongKeepsItsOwnDetails() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let audio = CreativeRig.wavData(seconds: 0.3)
+        var mixed = Data("--b\r\nContent-Type: application/json\r\n\r\n".utf8)
+        mixed += (["composition_plan": Self.planJSON, "song_metadata": ["title": "Song"],
+                   "words_timestamps": [["word": "la", "start_ms": 0, "end_ms": 400]],
+                   "waveform_visual": [1, 2, 3]] as JSONValue).encoded()
+        mixed += Data("\r\n--b\r\nContent-Type: audio/mpeg\r\nContent-Disposition: attachment; filename=\"song.mp3\"\r\n\r\n".utf8)
+        mixed += audio + Data("\r\n--b--\r\n".utf8)
+        rig.always(MusicScreenModel.composeDetailed, .init(
+            status: 200, headers: ["content-type": "multipart/mixed; boundary=b", "song-id": "song-7"], body: mixed
+        ))
+        rig.always(MusicScreenModel.videoToMusic, .audio(audio, contentType: "audio/wav"))
+        rig.always(MusicScreenModel.upload, .json(["song_id": "up-1", "waveform_visual": [9, 9],
+                                                   "words_timestamps": [["word": "hey", "start_ms": 0, "end_ms": 100]]]))
+        let music = rig.session.music
+        music.prompt = "Lo-fi"
+        music.delivery = .detailed
+        await music.composeSong()
+        let song = try #require(music.takes.first, "\(music.lastRunner.errorMessage ?? "")")
+        #expect(music.details(of: song)?.words.map(\.text) == ["la"])
+        #expect(music.details(of: song)?.songID == "song-7")
+
+        music.videos = [rig.wav(named: "clip.mov")]
+        await music.scoreVideo()
+        let score = try #require(music.videoTakes.first)
+        #expect(music.details(of: score) == nil, "the score has no lyrics, waveform or plan of its own")
+        #expect(music.takes.map(\.id) == [song.id], "the score stays in its own list")
+
+        music.uploadSource = rig.wav(named: "mine.wav")
+        await music.uploadSong()
+        #expect(music.uploadDetails?.waveform == [9, 9])
+        #expect(music.details(of: song)?.waveform == [1, 2, 3], "an upload does not replace a song's details")
+
+        music.editReturnedPlan(of: song)
         #expect(music.tab == .plan)
         #expect(music.plan?.sections.count == 2)
+        music.removeTake(song)
+        #expect(music.details(of: song) == nil)
     }
 
     @Test func stemsVideoAndUploadSendTheirFiles() async throws {
