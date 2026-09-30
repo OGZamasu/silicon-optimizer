@@ -50,7 +50,7 @@ struct PreparedCall: Sendable {
             )
         }
         return ElevenLabsCallDescription(
-            operationID: operation.id, method: operation.method, url: url.absoluteString,
+            operationID: operation.id, method: operation.method, url: ElevenLabsRedaction.maskingQuerySecrets(in: url),
             headers: shown, body: bodyDescription
         )
     }
@@ -86,8 +86,8 @@ enum ElevenLabsRequestBuilder {
         for name in arguments.keys.sorted() where containsRedactionPlaceholder(arguments[name] ?? .null) {
             problems.append(
                 "\"\(name)\" contains \"\(ElevenLabsRedaction.placeholder)\", the mask an earlier answer put "
-                + "over a secret. Sending it would overwrite the real value: leave the field out to keep "
-                + "what is stored, or send the real value."
+                + "over a secret. Sending it would overwrite the real value: send the real value, or leave "
+                + "the field out if this operation accepts a partial update."
             )
         }
 
@@ -114,6 +114,18 @@ enum ElevenLabsRequestBuilder {
                 // voice. They are never a real id.
                 guard text != ".", text != ".." else {
                     problems.append("path parameter \"\(parameter.name)\" may not be \".\" or \"..\"")
+                    continue
+                }
+                // A slash, even percent-encoded, is a segment boundary once the server has
+                // decoded it (ElevenLabs' spec is FastAPI's, and uvicorn decodes %2F before
+                // routing): `edit_project` with "P/convert" would reach the billing
+                // `convert_project_endpoint` while this client treats the call as a free edit.
+                // No real id contains one. NUL and absurd lengths are never an id either.
+                guard !text.contains(where: { $0 == "/" || $0 == "\\" || $0 == "\0" }), text.count <= 512 else {
+                    problems.append(
+                        "path parameter \"\(parameter.name)\" may not contain \"/\", \"\\\", or a NUL "
+                        + "character, and may not be longer than 512 characters"
+                    )
                     continue
                 }
                 path = path.replacingOccurrences(
