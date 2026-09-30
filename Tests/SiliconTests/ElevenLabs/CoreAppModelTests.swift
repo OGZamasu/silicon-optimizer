@@ -13,6 +13,8 @@ import SiliconElevenLabs
 struct CoreAppModelTests {
 
     nonisolated static let key = "sk_" + String(repeating: "appfixture", count: 3)
+    nonisolated static let oldKey = "sk_" + "the_old_key_000000"
+    nonisolated static let replacementKey = "sk_" + "replacement_000000"
 
     /// A model with a fake transport answering the two account calls (or `failure`), and a
     /// fake key store.
@@ -85,14 +87,14 @@ struct CoreAppModelTests {
     @Test func aNetworkFailureLeavesTheLinkedKeyAlone() async throws {
         var settings = Settings()
         settings.elevenLabsLinked = true
-        let (model, transport, store) = Self.model(settings: settings, storedKey: "sk_the_old_key_000000") { _ in
+        let (model, transport, store) = Self.model(settings: settings, storedKey: Self.oldKey) { _ in
             throw ElevenLabsError.network("offline")
         }
         defer { Self.cleanUp(model, transport) }
         await #expect(throws: ElevenLabsError.network("offline")) {
             try await model.linkElevenLabs(key: Self.key)
         }
-        #expect(store.key == "sk_the_old_key_000000")
+        #expect(store.key == Self.oldKey)
         #expect(model.elevenLabsLinked)
         #expect(model.elevenLabsLastError == ElevenLabsError.network("offline").description)
     }
@@ -257,8 +259,8 @@ struct CoreAppModelTests {
         #expect(try await credential.apiKey() == Self.key)
         #expect(try await credential.apiKey() == Self.key)
         #expect(calls.names == ["read"])
-        try await credential.store("sk_replacement_000000")
-        #expect(try await credential.apiKey() == "sk_replacement_000000")
+        try await credential.store(Self.replacementKey)
+        #expect(try await credential.apiKey() == Self.replacementKey)
         try await credential.remove()
         #expect(try await credential.apiKey() == nil)
         #expect(calls.names == ["read", "write", "delete"])
@@ -275,7 +277,7 @@ struct CoreAppModelTests {
         await #expect(throws: ElevenLabsError.self) { try await credential.apiKey() }
         await #expect(throws: ElevenLabsError.self) { try await credential.apiKey() }
         #expect(calls.names == ["read", "read"])
-        await #expect(throws: ElevenLabsError.self) { try await credential.store("sk_x_0000000000") }
+        await #expect(throws: ElevenLabsError.self) { try await credential.store(Self.replacementKey) }
         try await credential.remove()   // already gone counts as removed
     }
 

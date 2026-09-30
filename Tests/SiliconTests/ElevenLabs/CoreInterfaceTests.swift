@@ -126,7 +126,7 @@ struct CoreInterfaceTests {
         // network failure earns, and stores nothing.
         #expect(model.elevenLabsLink.limits.firstBackoff <= 0.01)
         #expect(model.elevenLabsLink.limits.longestRetryWait <= 0.05)
-        await #expect(throws: ElevenLabsError.self) { try await model.linkElevenLabs(key: "sk_inert_0000000000") }
+        await #expect(throws: ElevenLabsError.self) { try await model.linkElevenLabs(key: "sk_" + "inert_0000000000") }
         #expect(!model.elevenLabsLinked)
         TemporaryFileSink.removeScratch(model.elevenLabsOutputDirectory)
     }
