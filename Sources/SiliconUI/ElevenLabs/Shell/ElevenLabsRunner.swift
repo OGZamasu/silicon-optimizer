@@ -102,6 +102,17 @@ final class ElevenLabsRunner: Identifiable {
     private(set) var finishedAt: Date?
     /// Bytes of body received so far, while a stream plays.
     private(set) var receivedBytes = 0
+    /// Why the last `perform` sent nothing although the arguments were fine: a run that is
+    /// not a read was already in flight. Cleared when a run starts.
+    private(set) var refusal: String?
+    /// What a Cancel left behind: for anything but a read cancelled after it was handed to
+    /// the client, that it may already have been billed or performed.
+    private(set) var cancellationNote: String?
+
+    /// What a second run is refused with while one that is not a read is in flight.
+    static let busyMessage = "A run is already in progress — cancel it first, and note it may already have been billed."
+    /// What a Cancel says once a request that is not a read may have gone out.
+    static let cancelledAfterSendingMessage = "Cancelled. The request may already have been billed or performed."
     /// Plays a stream as it arrives; nil when not playing one.
     private(set) var streamPlayer: ElevenLabsStreamPlayer?
 
@@ -153,9 +164,16 @@ final class ElevenLabsRunner: Identifiable {
     /// runs, and returns the answer — nil when it was refused, declined, cancelled, failed or
     /// replaced by a newer run (see `phase`, `problems` and `failure`).
     ///
-    /// A run started while another is in flight replaces it: the old request is cancelled (or
-    /// its question withdrawn), its `perform` returns nil, and nothing it does afterwards — not
-    /// even a request that completes after the cancel — reaches this runner's state.
+    /// A run started while another is in flight (or waiting for its answer to a question):
+    /// - for a **read**, replaces it: restarting is free, so the old request is cancelled, its
+    ///   `perform` returns nil, and nothing it does afterwards reaches this runner's state;
+    /// - for **anything else** — generate, modify, destructive, real world — is refused and sends
+    ///   nothing: the run in flight may already have been billed or acted on, and a second one
+    ///   would do it again. `refusal` says so; the run in flight carries on untouched.
+    ///
+    /// Cancel, then run again, is allowed for everything (the owner chose it); `cancellationNote`
+    /// then says the cancelled request may already have been billed or performed. Either way a
+    /// cancelled or replaced run's late completion never touches the next run.
     ///
     /// - Parameters:
     ///   - subject: What the operation acts on, in words ("the voice “Rachel”", "12 phone
@@ -167,9 +185,17 @@ final class ElevenLabsRunner: Identifiable {
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
         subject: String? = nil, consequence: String? = nil
     ) async -> ElevenLabsResult? {
-        if phase == .running || phase == .awaitingConfirmation { abandonCurrentRun() }
+        if phase == .running || phase == .awaitingConfirmation {
+            guard operation.risk == .read else {
+                refusal = Self.busyMessage
+                return nil
+            }
+            abandonCurrentRun()
+        }
         generation += 1
         let run = generation
+        refusal = nil
+        cancellationNote = nil
         self.arguments = arguments
         self.files = files
         problems = []
@@ -266,6 +292,8 @@ final class ElevenLabsRunner: Identifiable {
         }
         guard phase == .running else { return }
         generation += 1
+        cancellationNote = operation.risk == .read ? "Cancelled." : Self.cancelledAfterSendingMessage
+        refusal = nil
         phase = .cancelled
         finishedAt = Date()
         task?.cancel()
@@ -289,6 +317,8 @@ final class ElevenLabsRunner: Identifiable {
         result = nil
         apiCall = nil
         credential = nil
+        refusal = nil
+        cancellationNote = nil
         startedAt = nil
         finishedAt = nil
         receivedBytes = 0
@@ -343,6 +373,7 @@ final class ElevenLabsRunner: Identifiable {
             shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         }
         result = shown
+        refusal = nil
         phase = .succeeded
         finishedAt = Date()
         streamPlayer?.finish()
@@ -357,6 +388,7 @@ final class ElevenLabsRunner: Identifiable {
     private func fail(_ failure: ElevenLabsRunnerFailure, error: (any Error)? = nil) -> ElevenLabsResult? {
         if case .invalidArguments(let found) = failure { problems = found }
         self.failure = failure
+        refusal = nil
         phase = .failed
         finishedAt = Date()
         stopStreamPlayer()

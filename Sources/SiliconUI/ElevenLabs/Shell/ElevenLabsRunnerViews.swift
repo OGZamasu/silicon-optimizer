@@ -139,8 +139,14 @@ struct ElevenLabsRunnerOutput: View {
             if let failure = runner.failure {
                 failureView(failure)
             }
-            if runner.phase == .cancelled {
-                Text("Cancelled. Anything already generated may still have been charged.")
+            if let refusal = runner.refusal {
+                Label(refusal, systemImage: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if runner.phase == .cancelled, let note = runner.cancellationNote {
+                Text(note)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
