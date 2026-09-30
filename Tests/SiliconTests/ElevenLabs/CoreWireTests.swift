@@ -121,10 +121,14 @@ struct CoreWireTests {
         defer { server.stop() }
         let production = URLSessionTransport()
         let testing = URLSessionTransport.loopbackForTesting(port: Int(server.port))
+        // Loopback addresses only: were the allowlist ever wrong, this test would connect to
+        // 127.0.0.1, never to a real host. The look-alike hosts (suffixes, other ports, uppercase,
+        // trailing dot, schemes) are covered without a socket by `isAllowed`'s own test.
         let refused = [
-            "https://example.com/v1/user", "http://api.elevenlabs.io/v1/user",
-            "https://api.elevenlabs.io:8443/v1/user", "https://api.elevenlabs.io.example.com/v1/user",
-            "http://127.0.0.1:\(Int(server.port) + 1)/v1/user",
+            "http://127.0.0.1:\(Int(server.port) + 1)/v1/user",   // another port on loopback
+            "https://127.0.0.1:\(Int(server.port))/v1/user",      // https to the loopback port
+            "http://localhost:\(Int(server.port))/v1/user",       // another name for loopback
+            "http://[::1]:\(Int(server.port))/v1/user",           // IPv6 loopback
         ]
         for address in refused {
             var request = Self.request(server, "/v1/user")
