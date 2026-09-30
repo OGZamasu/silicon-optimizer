@@ -276,6 +276,33 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("audio-native", height: 1500) { AudioNativeScreen(model: model) }
     }
 
+    // MARK: Workspace
+
+    @Test func workspaceMembersInvitesAndConnections() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        let members = try [
+            ["user_id": "u1", "email": "owner@example.com", "first_name": "Alex", "seat_type": "workspace_admin",
+             "is_owner": true, "is_locked": false],
+            VoicesStudioWorkspaceTests.member,
+            ["user_id": "u3", "email": "kim@example.com", "first_name": "Kim", "seat_type": "workspace_lite_member",
+             "is_owner": false, "is_locked": true],
+        ].map { try #require(WorkspaceMember(json: $0)) }
+        let groups = try [["id": "g1", "name": "Editors", "members_emails": ["kim@example.com", "sam@example.com"]]]
+            .map { try #require(WorkspaceGroup(json: $0)) }
+        let connections = try [["id": "ac1", "name": "Search API", "auth_type": "bearer_auth", "status": "active",
+                                "used_by": ["agent1"]]].map { try #require(WorkspaceAuthConnection(json: $0)) }
+        model.load(members: members, groups: groups, connections: connections)
+        try VoicesStudioSnapshots.render("workspace-members", height: 700) { WorkspaceScreen(model: model) }
+        model.tab = .invites
+        model.inviteEmails = "lee@example.com, pat@example.com"
+        try VoicesStudioSnapshots.render("workspace-invites", height: 800) { WorkspaceScreen(model: model) }
+        model.tab = .connections
+        model.newConnectionType = "bearer_auth"
+        try VoicesStudioSnapshots.render("workspace-connections", height: 1200) { WorkspaceScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {

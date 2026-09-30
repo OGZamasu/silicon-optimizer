@@ -39,6 +39,9 @@ enum VoicesStudioCoverage {
         Entry(section: .audioNative, controls: AudioNativeSectionModel.controls,
               callsWithoutControls: AudioNativeSectionModel.callsWithoutControls,
               explorerOnly: AudioNativeSectionModel.explorerOnly),
+        Entry(section: .workspace, controls: WorkspaceSectionModel.controls,
+              callsWithoutControls: WorkspaceSectionModel.callsWithoutControls,
+              explorerOnly: WorkspaceSectionModel.explorerOnly),
     ]
 
     @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }
