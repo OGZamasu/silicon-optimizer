@@ -558,7 +558,7 @@ enum Tools {
             description: "What is loaded right now, at what settings, and its last measured speed.",
             properties: [:], required: []
         ),
-    ]
+    ] + ElevenLabsTools.all
 
     // MARK: - Dispatch
 
@@ -976,7 +976,8 @@ enum Tools {
             return describe(result)
 
         default:
-            throw ToolError.unknown(name)
+            guard ElevenLabsTools.names.contains(name) else { throw ToolError.unknown(name) }
+            return try await ElevenLabsTools.invoke(name, arguments: arguments, channel: client)
         }
     }
 

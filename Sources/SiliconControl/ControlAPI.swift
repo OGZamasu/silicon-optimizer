@@ -1429,6 +1429,14 @@ public protocol ControlHost: AnyObject, Sendable {
     func calibrateDecisionLane(_ lane: String?) async throws -> ControlAPI.JevCalibration
     /// `GET /jev/calibration?lane=…` — one lane's last run.
     func decisionCalibration(lane: String?) async -> ControlAPI.JevCalibration?
+
+    // MARK: ElevenLabs
+
+    /// `/elevenlabs/*`, answered by the app that holds the key. The server has already made
+    /// sure the caller is this Mac's own control token on the loopback listener; the risk
+    /// gate, redaction and uploads are the host's. A requirement for the reason the agent
+    /// routes give; the default, in `ElevenLabsAPI.swift`, is a 501.
+    func elevenLabs(_ request: ElevenLabsControlRequest) async -> ElevenLabsControlResponse
 }
 
 /// Defaults for the hosts that are not the Mac app — the MCP bridge's doubles and the
