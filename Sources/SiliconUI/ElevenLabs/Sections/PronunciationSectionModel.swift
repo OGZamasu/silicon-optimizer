@@ -128,6 +128,7 @@ final class PronunciationSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_pronunciation_dictionaries_metadata"]
     }
 
     // MARK: Spec
@@ -210,7 +211,11 @@ final class PronunciationSectionModel {
         await refresh()
     }
 
+    /// The dictionary last chosen: an answer that arrives after another was chosen is dropped.
+    @ObservationIgnored private var wantedDictionary: String?
+
     func select(_ id: String?) async {
+        wantedDictionary = id
         guard let id else {
             selected = nil
             return
@@ -220,12 +225,19 @@ final class PronunciationSectionModel {
             marked = []
             download = nil
         }
+        await fetch(id)
+    }
+
+    /// Fetches one dictionary into the list, and onto the screen only while it is still the
+    /// chosen one — so a change that finishes after another was chosen does not take it back.
+    private func fetch(_ id: String) async {
         guard let json = await actions.perform(
             "get_pronunciation_dictionary_metadata", ["pronunciation_dictionary_id": .string(id)], quietly: true
         )?.voicesStudioJSON, let dictionary = PronunciationDictionary(json: json) else { return }
+        if let index = dictionaries.firstIndex(where: { $0.id == id }) { dictionaries[index] = dictionary }
+        guard wantedDictionary == id else { return }
         selected = dictionary
         rename = dictionary.name
-        if let index = dictionaries.firstIndex(where: { $0.id == id }) { dictionaries[index] = dictionary }
     }
 
     // MARK: Rules
@@ -288,7 +300,7 @@ final class PronunciationSectionModel {
                 title: "Rules for \(dictionary.name)"
               ) != nil else { return }
         rules = [PronunciationRule()]
-        await select(dictionary.id)
+        await fetch(dictionary.id)
     }
 
     /// Replaces every rule with the editor's — the rules on screen are what the new version
@@ -306,7 +318,7 @@ final class PronunciationSectionModel {
                 title: "Replace rules of \(dictionary.name)"
               ) != nil else { return }
         rules = [PronunciationRule()]
-        await select(dictionary.id)
+        await fetch(dictionary.id)
     }
 
     /// Puts the dictionary's current rules in the editor, to change and replace them.
@@ -323,7 +335,7 @@ final class PronunciationSectionModel {
             title: "Remove rules from \(dictionary.name)"
         ) != nil else { return }
         marked = []
-        await select(dictionary.id)
+        await fetch(dictionary.id)
     }
 
     func saveName() async {
@@ -332,7 +344,7 @@ final class PronunciationSectionModel {
             "patch_pronunciation_dictionary",
             ["pronunciation_dictionary_id": .string(dictionary.id), "name": .string(rename)], title: "Rename dictionary"
         ) != nil else { return }
-        await select(dictionary.id)
+        await fetch(dictionary.id)
     }
 
     func setArchived(_ archived: Bool) async {
@@ -342,7 +354,7 @@ final class PronunciationSectionModel {
             ["pronunciation_dictionary_id": .string(dictionary.id), "archived": .bool(archived)],
             title: archived ? "Archive \(dictionary.name)" : "Restore \(dictionary.name)"
         ) != nil else { return }
-        await select(dictionary.id)
+        await fetch(dictionary.id)
     }
 
     func downloadPLS() async {
@@ -360,6 +372,7 @@ final class PronunciationSectionModel {
     func load(dictionaries: [PronunciationDictionary], selected: PronunciationDictionary? = nil) {
         self.dictionaries = dictionaries
         self.selected = selected
+        wantedDictionary = selected?.id
         rename = selected?.name ?? ""
         loadedOnce = true
     }

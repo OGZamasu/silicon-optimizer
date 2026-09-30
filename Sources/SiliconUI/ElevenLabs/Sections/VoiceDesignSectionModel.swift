@@ -276,11 +276,13 @@ final class VoiceDesignSectionModel {
     }
 
     func save() async {
-        guard let arguments = saveArguments(),
+        // The preview saved is the one chosen when Save was pressed — another may be chosen by
+        // the time the answer comes, and must not be marked saved in its place.
+        guard let arguments = saveArguments(), let chosen = arguments["generated_voice_id"]?.stringValue,
               let json = await actions.perform("create_voice", arguments, title: "Save \(saveName)")?.voicesStudioJSON
         else { return }
         savedVoiceID = json["voice_id"].stringValue
-        if let chosen = chosenPreview { savedPreviews.insert(chosen) }
+        savedPreviews.insert(chosen)
         await directory.refresh()
     }
 

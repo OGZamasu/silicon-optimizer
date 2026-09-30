@@ -90,6 +90,7 @@ final class ServiceAccountsSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_workspace_service_accounts"]
     }
 
     // MARK: Spec
@@ -180,14 +181,17 @@ final class ServiceAccountsSectionModel {
 
     // MARK: Keys
 
-    func refreshKeys() async {
-        guard let account = selected,
+    /// Fetches the keys of `accountID` (the selected account when nil) — after a change, the
+    /// keys of the account the change was made to, whichever is selected by then.
+    func refreshKeys(_ accountID: String? = nil) async {
+        guard let accountID = accountID ?? selected?.id,
               let json = await actions.perform(
-                "get_service_account_api_keys_route", ["service_account_user_id": .string(account.id)], quietly: true
+                "get_service_account_api_keys_route", ["service_account_user_id": .string(accountID)], quietly: true
               )?.voicesStudioJSON else { return }
         let keys = (json["api-keys"].arrayValue ?? []).compactMap(ServiceAccountKey.init(json:))
-        selected?.keys = keys
-        if let index = accounts.firstIndex(where: { $0.id == account.id }) { accounts[index].keys = keys }
+        if let index = accounts.firstIndex(where: { $0.id == accountID }) { accounts[index].keys = keys }
+        // Another account may have been chosen meanwhile: these are this account's keys only.
+        if selected?.id == accountID { selected?.keys = keys }
     }
 
     /// The new key's arguments, and every problem with the form.
@@ -232,8 +236,8 @@ final class ServiceAccountsSectionModel {
                         + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
                 )
               ) != nil else { return }
-        keyDraft = ServiceAccountKeyDraft()
-        await refreshKeys()
+        if selected?.id == account.id { keyDraft = ServiceAccountKeyDraft() }
+        await refreshKeys(account.id)
     }
 
     func edit(_ key: ServiceAccountKey?) {
@@ -273,7 +277,9 @@ final class ServiceAccountsSectionModel {
     }
 
     func saveKey() async {
-        guard let key = editingKey, let arguments = editKeyArguments() else { return }
+        // The key and its changes are taken now: the answer acts on these, whatever is open by then.
+        guard let key = editingKey, let arguments = editKeyArguments(),
+              let accountID = arguments["service_account_user_id"]?.stringValue else { return }
         guard await actions.perform(
             "edit_service_account_api_key", arguments, subject: "the API key “\(key.name)”",
             question: VoicesStudioQuestion(
@@ -281,8 +287,8 @@ final class ServiceAccountsSectionModel {
                 consequence: "Whatever uses this key gets the new permissions and limits at once."
             )
         ) != nil else { return }
-        edit(nil)
-        await refreshKeys()
+        if editingKey?.id == key.id { edit(nil) }
+        await refreshKeys(accountID)
     }
 
     func setEnabled(_ key: ServiceAccountKey, _ enabled: Bool) async {
@@ -297,7 +303,7 @@ final class ServiceAccountsSectionModel {
                     : VoicesStudioQuestion("Turn off the API key “\(key.name)” of “\(account.name)”?", button: "Turn off key",
                                            consequence: "Whatever uses this key stops working until it is turned back on.")
               ) != nil else { return }
-        await refreshKeys()
+        await refreshKeys(account.id)
     }
 
     func delete(_ key: ServiceAccountKey) async {
@@ -308,7 +314,7 @@ final class ServiceAccountsSectionModel {
                 subject: "the API key “\(key.name)” of “\(account.name)”",
                 consequence: "Whatever uses this key stops working, for good."
               ) != nil else { return }
-        await refreshKeys()
+        await refreshKeys(account.id)
     }
 
     // MARK: Workspace rules

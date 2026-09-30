@@ -189,7 +189,7 @@ struct DubbingDubCard: View {
                     .disabled(!dub.isFinished || model.downloadLanguage.isEmpty || model.actions.isRunning("get_dubbed_file"))
                     .help(dub.isFinished ? "Fetch the dubbed audio or video" : "Available once the dub is finished")
             }
-            if let file = model.downloads[model.downloadLanguage] {
+            if let file = model.downloaded(dub.id, model.downloadLanguage) {
                 ElevenLabsFileResult(url: file.url, contentType: file.contentType, bytes: file.bytes)
             }
             Divider()

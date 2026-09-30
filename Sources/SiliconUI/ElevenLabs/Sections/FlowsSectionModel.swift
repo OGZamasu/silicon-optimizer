@@ -198,6 +198,7 @@ final class FlowsSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = Set(FlowsKind.allCases.map(\.listID)).union(["list_public_templates"])
         directory = environment.voices
         // A generation or run whose answer was lost: list them again, so the owner can see
         // whether it was started.
@@ -359,9 +360,13 @@ final class FlowsSectionModel {
         templatesCursor = json["has_more"].boolValue == true ? json["next_cursor"].stringValue : nil
     }
 
+    /// The template last opened: an answer that arrives after another was opened is dropped.
+    @ObservationIgnored private var wantedTemplate: String?
+
     func open(_ templateID: String) async {
+        wantedTemplate = templateID
         guard let json = await actions.perform("get_public_template", ["template_id": .string(templateID)], quietly: true)?
-            .voicesStudioJSON, let fresh = FlowsTemplate(json: json) else { return }
+            .voicesStudioJSON, let fresh = FlowsTemplate(json: json), wantedTemplate == templateID else { return }
         template = fresh
         versionID = "latest"
         inputs = [:]
@@ -412,7 +417,7 @@ final class FlowsSectionModel {
         guard let template,
               let json = await actions.perform(
                 "list_public_template_runs", ["template_id": .string(template.id), "page_size": 30], quietly: true
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, self.template?.id == template.id else { return }
         runs = (json["runs"].arrayValue ?? []).compactMap(FlowsRun.init(json:))
     }
 

@@ -140,6 +140,7 @@ final class ProductionsSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["public_list_orders"]
         actions.onUnknownOutcome = { [weak self] _ in
             if let id = self?.selected?.id { await self?.select(id) }
         }
@@ -234,7 +235,11 @@ final class ProductionsSectionModel {
         await refresh()
     }
 
+    /// The order last chosen: an answer that arrives after another was chosen is dropped.
+    @ObservationIgnored private var wantedOrder: String?
+
     func select(_ orderID: String?) async {
+        wantedOrder = orderID
         guard let orderID else {
             selected = nil
             return
@@ -244,11 +249,18 @@ final class ProductionsSectionModel {
             item = ProductionsItemDraft()
             itemProblems = []
         }
+        await fetch(orderID)
+    }
+
+    /// Fetches one order into the list, and onto the screen only while it is still the chosen
+    /// one — so a save that finishes after another order was chosen does not take the screen back.
+    private func fetch(_ orderID: String) async {
         guard let json = await actions.perform("public_get_order", ["order_id": .string(orderID)], quietly: true)?
             .voicesStudioJSON, let order = ProductionsOrder(json: json) else { return }
+        if let index = orders.firstIndex(where: { $0.id == order.id }) { orders[index] = order } else { orders.insert(order, at: 0) }
+        guard wantedOrder == orderID else { return }
         selected = order
         rename = order.name
-        if let index = orders.firstIndex(where: { $0.id == order.id }) { orders[index] = order } else { orders.insert(order, at: 0) }
         await loadLanguages(for: item.kind)
     }
 
@@ -258,7 +270,7 @@ final class ProductionsSectionModel {
             "public_update_order", ["order_id": .string(order.id), "request": ["name": .string(rename)]],
             title: "Rename order"
         ) != nil else { return }
-        await select(order.id)
+        await fetch(order.id)
     }
 
     // MARK: Media
@@ -402,7 +414,7 @@ final class ProductionsSectionModel {
               await actions.perform("public_upsert_order_item", arguments, title: "Item for \(order.name)") != nil
         else { return }
         item = ProductionsItemDraft(kind: item.kind)
-        await select(order.id)
+        await fetch(order.id)
     }
 
     func edit(_ existing: ProductionsItem) {
@@ -419,7 +431,7 @@ final class ProductionsSectionModel {
                 "public_remove_order_item", ["order_id": .string(order.id), "item_id": .string(existing.id)],
                 subject: "the \(VoicesStudioFormat.words(existing.kind).lowercased()) item from “\(order.name)”"
               ) != nil else { return }
-        await select(order.id)
+        await fetch(order.id)
     }
 
     // MARK: Submit and deliver
@@ -442,8 +454,9 @@ final class ProductionsSectionModel {
     }
 
     /// The money question, from the order as fetched just before asking.
-    func submitQuestion() -> VoicesStudioQuestion? {
-        guard let order = selected, let amount = quotedTotal else { return nil }
+    func submitQuestion(for order: ProductionsOrder? = nil) -> VoicesStudioQuestion? {
+        guard let order = order ?? selected, let amount = order.total.map({ $0.formatted(.currency(code: "USD")) })
+        else { return nil }
         let count = order.items.count
         return VoicesStudioQuestion(
             "Submit “\(order.name)” and charge the workspace \(amount)?",
@@ -467,24 +480,28 @@ final class ProductionsSectionModel {
             submitProblem = "The order could not be fetched again, so nothing was submitted."
             return
         }
-        selected = fresh
+        // The question and the call are about this order as just fetched — whatever is on
+        // screen by the time the answer comes.
         if let index = orders.firstIndex(where: { $0.id == id }) { orders[index] = fresh }
-        guard let order = selected, let question = submitQuestion() else {
-            submitProblem = submitHold ?? "The order has no quote yet, so nothing was submitted."
+        if selected?.id == id { selected = fresh }
+        let order = fresh
+        guard let question = submitQuestion(for: order) else {
+            submitProblem = fresh.items.isEmpty ? "Add an item first."
+                : "Waiting for ElevenLabs' quote — check the order's status again in a moment."
             return
         }
         guard await actions.perform(
             "public_submit_order", ["order_id": .string(order.id)], subject: "the order “\(order.name)”",
             title: "Submit \(order.name)", question: question
         ) != nil else { return }
-        await select(order.id)
+        await fetch(order.id)
     }
 
     func loadDeliverables() async {
         guard let order = selected,
               let json = await actions.perform(
                 "public_get_order_deliverables", ["order_id": .string(order.id)], quietly: true
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, selected?.id == order.id else { return }
         deliverables = (json["deliverables"].arrayValue ?? []).map { entry in
             ProductionsDeliverable(
                 name: entry["name"].stringValue ?? "file", contentType: entry["content_type"].stringValue ?? "",
@@ -500,6 +517,7 @@ final class ProductionsSectionModel {
               languages: JSONValue? = nil, deliverables: [ProductionsDeliverable] = []) {
         self.orders = orders
         self.selected = selected
+        wantedOrder = selected?.id
         rename = selected?.name ?? ""
         if let selected { self.media[selected.id] = media }
         if let languages { take(languagesJSON: languages, for: item.kind) }

@@ -249,6 +249,10 @@ struct VoicesSettingsEditor: View {
                                    help: VoicesStudioSchema.description("edit_voice_settings", "speed"))
                 Toggle("Speaker boost", isOn: draft.useSpeakerBoost)
                     .help(VoicesStudioSchema.description("edit_voice_settings", "use_speaker_boost"))
+            } else if let problem = model.detailProblem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Button("Try again") { Task { await model.reloadSelected() } }.controlSize(.small)
             } else {
                 Text("Loading this voice's settings…").font(.caption).foregroundStyle(.secondary)
             }

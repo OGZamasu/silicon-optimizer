@@ -48,10 +48,17 @@ struct VoicesStudioFixture {
     let client: ElevenLabsClient
     let voices: ElevenLabsVoiceDirectory
 
-    init(_ replies: [String: [FakeElevenLabsTransport.Reply]] = [:]) {
+    /// - Parameter late: Ids whose requests are answered late: a request whose address holds
+    ///   one of them waits that long for its scripted reply — the stale answer of a race.
+    init(_ replies: [String: [FakeElevenLabsTransport.Reply]] = [:], late: [String: Duration] = [:]) {
         let routes = VoicesStudioRoutes(replies)
         self.routes = routes
-        transport = FakeElevenLabsTransport { request in routes.next(request.operationID) }
+        transport = FakeElevenLabsTransport { request in
+            var reply = routes.next(request.operationID)
+            let address = request.url.absoluteString
+            if let delay = late.first(where: { address.contains($0.key) })?.value { reply.delay = delay }
+            return reply
+        }
         var limits = ElevenLabsClient.Limits()
         limits.retries = 0
         limits.firstBackoff = 0.01

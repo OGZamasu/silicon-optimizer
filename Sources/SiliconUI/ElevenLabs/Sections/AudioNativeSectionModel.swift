@@ -56,7 +56,13 @@ final class AudioNativeSectionModel {
 
     /// The project whose player is on screen.
     var projectID = ""
-    private(set) var settings: AudioNativeSettings?
+    /// The settings last read, with the project they are of.
+    private var loadedSettings: (projectID: String, settings: AudioNativeSettings)?
+    /// The settings of the project now chosen — never another project's, shown under this one
+    /// while its own are still being read.
+    var settings: AudioNativeSettings? {
+        loadedSettings.flatMap { $0.projectID == projectID.trimmingCharacters(in: .whitespaces) ? $0.settings : nil }
+    }
     /// Studio projects, as candidates for the project id.
     private(set) var projects: [StudioProject] = []
     private(set) var speechModels: [VoicesStudioSpeechModel] = []
@@ -72,6 +78,7 @@ final class AudioNativeSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_audio_native_project_settings_endpoint"]
         directory = environment.voices
         // A player made or updated whose answer was lost: list the projects again and read the
         // player's settings, so the owner can see whether it happened.
@@ -178,7 +185,7 @@ final class AudioNativeSectionModel {
               let json = await actions.perform(
                 "get_audio_native_project_settings_endpoint", ["project_id": .string(id)], quietly: true
               )?.voicesStudioJSON else { return }
-        settings = AudioNativeSettings(json: json)
+        loadedSettings = (id, AudioNativeSettings(json: json))
     }
 
     func updateContent() async {
@@ -214,7 +221,7 @@ final class AudioNativeSectionModel {
     func load(snippet: String?, projectID: String, settings: AudioNativeSettings?, projects: [StudioProject] = []) {
         self.snippet = snippet
         self.projectID = projectID
-        self.settings = settings
+        loadedSettings = settings.map { (projectID, $0) }
         self.projects = projects
     }
 }

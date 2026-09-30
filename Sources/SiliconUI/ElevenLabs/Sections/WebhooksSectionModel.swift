@@ -58,6 +58,7 @@ final class WebhooksSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_workspace_webhooks_route"]
     }
 
     // MARK: Spec
@@ -224,7 +225,9 @@ final class WebhooksSectionModel {
             "edit_workspace_webhook_route", arguments, subject: "the webhook “\(webhook.name)”",
             consequence: consequence.joined(separator: " ")
         ) != nil else { return }
-        edit(nil)
+        // Close the editor only if it is still this webhook's, and no other webhook's editor
+        // has been asked for meanwhile (closing would drop that request).
+        if editing?.id == webhook.id, wantedEdit == webhook.id { edit(nil) }
         await refresh()
     }
 
@@ -234,6 +237,7 @@ final class WebhooksSectionModel {
             consequence: webhook.usages.isEmpty ? "\(webhook.url) stops receiving events."
                 : "\(webhook.url) stops receiving events, and \(webhook.usages.count) things using it lose their notifications."
         ) != nil else { return }
+        if editing?.id == webhook.id, wantedEdit == webhook.id { edit(nil) }
         await refresh()
     }
 

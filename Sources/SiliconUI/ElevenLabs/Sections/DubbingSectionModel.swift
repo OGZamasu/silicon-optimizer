@@ -212,6 +212,7 @@ final class DubbingSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["list_dubs", "dubbing_project_list"]
         cloningStrength = VoicesStudioSchema.defaultNumber("dubbing_language_create", "voice_settings.cloning_strength") ?? 7
         // A dub, project, language or regeneration whose answer was lost: fetch the lists
         // again, so the owner can see whether it was started.
@@ -417,7 +418,13 @@ final class DubbingSectionModel {
         dubsHaveMore = json["has_more"].boolValue == true && dubsCursor != nil
     }
 
+    /// The dub and project last asked for: an answer that arrives after another was chosen is
+    /// dropped, so a slow fetch never puts an old choice back on screen.
+    @ObservationIgnored private var wantedDub: String?
+    @ObservationIgnored private var wantedProject: String?
+
     func selectDub(_ id: String?) async {
+        wantedDub = id
         guard let id else {
             selectedDub = nil
             return
@@ -431,18 +438,26 @@ final class DubbingSectionModel {
         }
         guard let json = await actions.perform("get_dubbed_metadata", ["dubbing_id": .string(id)], quietly: true)?
             .voicesStudioJSON, let dub = DubbingDub(json: json) else { return }
+        if let index = dubs.firstIndex(where: { $0.id == id }) { dubs[index] = dub } else { dubs.insert(dub, at: 0) }
+        guard wantedDub == id else { return }
         selectedDub = dub
         if downloadLanguage.isEmpty { downloadLanguage = dub.targetLanguages.first ?? "" }
-        if let index = dubs.firstIndex(where: { $0.id == id }) { dubs[index] = dub } else { dubs.insert(dub, at: 0) }
+    }
+
+    /// Downloaded files, by dub and language — a download that finishes after another dub was
+    /// chosen stays with its own dub.
+    func downloaded(_ dubID: String?, _ language: String) -> VoicesStudioFile? {
+        dubID.flatMap { downloads["\($0)|\(language)"] }
     }
 
     func download() async {
-        guard let dub = selectedDub, !downloadLanguage.isEmpty,
+        let language = downloadLanguage
+        guard let dub = selectedDub, !language.isEmpty,
               let file = await actions.perform(
-                "get_dubbed_file", ["dubbing_id": .string(dub.id), "language_code": .string(downloadLanguage)],
-                title: "\(dub.name) in \(downloadLanguage)"
+                "get_dubbed_file", ["dubbing_id": .string(dub.id), "language_code": .string(language)],
+                title: "\(dub.name) in \(language)"
               )?.voicesStudioFiles.first else { return }
-        downloads[downloadLanguage] = file
+        downloads["\(dub.id)|\(language)"] = file
     }
 
     func loadTranscript() async {
@@ -453,6 +468,7 @@ final class DubbingSectionModel {
                  "format_type": .string(transcriptFormat)],
                 title: "Transcript of \(dub.name) (\(transcriptLanguage), \(transcriptFormat))"
               ) else { return }
+        guard selectedDub?.id == dub.id else { return }
         if let json = result.voicesStudioJSON {
             transcript = json["srt"].stringValue ?? json["webvtt"].stringValue
             transcriptUtterances = json["json"]["utterances"].arrayValue ?? []
@@ -468,7 +484,11 @@ final class DubbingSectionModel {
             "delete_dubbing", ["dubbing_id": .string(dub.id)], subject: "the dub “\(dub.name)”"
         ) != nil else { return }
         dubs.removeAll { $0.id == dub.id }
-        selectedDub = nil
+        // Clear the screen only if it still shows the deleted dub.
+        if selectedDub?.id == dub.id {
+            selectedDub = nil
+            wantedDub = nil
+        }
     }
 
     // MARK: Projects
@@ -538,6 +558,7 @@ final class DubbingSectionModel {
     }
 
     func selectProject(_ id: String?) async {
+        wantedProject = id
         guard let id else {
             selectedProject = nil
             return
@@ -553,9 +574,11 @@ final class DubbingSectionModel {
         }
         if let json = await actions.perform("dubbing_project_get", ["project_id": .string(id)], quietly: true)?
             .voicesStudioJSON, let project = DubbingProject(json: json) {
-            selectedProject = project
             if let index = projects.firstIndex(where: { $0.id == id }) { projects[index] = project }
+            guard wantedProject == id else { return }
+            selectedProject = project
         }
+        guard wantedProject == id else { return }
         await loadLanguages()
     }
 
@@ -563,7 +586,7 @@ final class DubbingSectionModel {
         guard let project = selectedProject,
               let json = await actions.perform(
                 "dubbing_language_list", ["project_id": .string(project.id), "page_size": 100], quietly: true
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, selectedProject?.id == project.id else { return }
         languages = (json["languages"].arrayValue ?? []).compactMap(DubbingLanguage.init(json:))
     }
 
@@ -572,7 +595,7 @@ final class DubbingSectionModel {
               let json = await actions.perform(
                 "dubbing_language_get", ["project_id": .string(project.id), "language_id": .string(language.id)],
                 quietly: true
-              )?.voicesStudioJSON, let fresh = DubbingLanguage(json: json),
+              )?.voicesStudioJSON, let fresh = DubbingLanguage(json: json), selectedProject?.id == project.id,
               let index = languages.firstIndex(where: { $0.id == language.id })
         else { return }
         languages[index] = fresh
@@ -619,7 +642,10 @@ final class DubbingSectionModel {
                 consequence: "The project, every language dubbed from it and their transcripts are deleted."
               ) != nil else { return }
         projects.removeAll { $0.id == project.id }
-        selectedProject = nil
+        if selectedProject?.id == project.id {
+            selectedProject = nil
+            wantedProject = nil
+        }
     }
 
     // MARK: Transcripts
@@ -627,7 +653,7 @@ final class DubbingSectionModel {
     func loadSourceTranscript() async {
         guard let project = selectedProject,
               let json = await actions.perform("dubbing_transcript_get", ["project_id": .string(project.id)], quietly: true)?
-                .voicesStudioJSON else { return }
+                .voicesStudioJSON, selectedProject?.id == project.id else { return }
         sourceSegments = (json["segments"].arrayValue ?? []).compactMap(DubbingSegment.init(json:))
         sourceEdits = [:]
     }
@@ -637,7 +663,7 @@ final class DubbingSectionModel {
               let json = await actions.perform(
                 "dubbing_target_transcript_get",
                 ["project_id": .string(project.id), "language_id": .string(languageID)], quietly: true
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, selectedProject?.id == project.id else { return }
         selectedLanguageID = languageID
         targetSegments = (json["segments"].arrayValue ?? []).compactMap(DubbingSegment.init(json:))
         targetEdits = [:]
@@ -673,8 +699,10 @@ final class DubbingSectionModel {
     }
 
     func saveTargetEdits() async {
-        guard let call = targetSaveCall(), let languageID = selectedLanguageID,
+        guard let call = targetSaveCall(), let languageID = selectedLanguageID, let projectID = selectedProject?.id,
               await actions.perform(call.operationID, call.arguments, title: "Translation edits") != nil else { return }
+        // Reload only while the same project and language are open.
+        guard selectedProject?.id == projectID, selectedLanguageID == languageID else { return }
         await loadTargetTranscript(languageID)
     }
 
@@ -727,6 +755,7 @@ final class DubbingSectionModel {
         if let charged = json["charged_seconds"].doubleValue {
             lastRegeneration = (charged, json["free_regeneration_seconds_remaining"].doubleValue ?? 0)
         }
+        guard selectedProject?.id == project.id else { return }
         await refreshLanguage(language)
     }
 
@@ -735,6 +764,7 @@ final class DubbingSectionModel {
     func load(dubs: [DubbingDub], selected: DubbingDub? = nil) {
         self.dubs = dubs
         selectedDub = selected
+        wantedDub = selected?.id
         loadedDubs = true
     }
 
@@ -742,6 +772,7 @@ final class DubbingSectionModel {
               source: [DubbingSegment] = [], target: [DubbingSegment] = [], languageID: String? = nil) {
         self.projects = projects
         selectedProject = selected
+        wantedProject = selected?.id
         self.languages = languages
         sourceSegments = source
         targetSegments = target

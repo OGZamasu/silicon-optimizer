@@ -78,7 +78,7 @@ struct VoicesStudioDubbingTests {
         #expect(model.downloadLanguage == "es")
         await model.download()
         #expect(fixture.path("get_dubbed_file") == "/v1/dubbing/d1/audio/es")
-        #expect(model.downloads["es"]?.isVideo == true)
+        #expect(model.downloaded("d1", "es")?.isVideo == true)
 
         model.transcriptLanguage = "source"
         model.transcriptFormat = "srt"

@@ -284,6 +284,7 @@ final class StudioSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_projects"]
         directory = environment.voices
         // A conversion, podcast or project whose answer was lost: fetch the projects (and the
         // open one) again, so the owner can see whether it was made.
@@ -465,7 +466,13 @@ final class StudioSectionModel {
         await select(project.id)
     }
 
+    /// The project and chapter last chosen: an answer that arrives after another was chosen is
+    /// dropped.
+    @ObservationIgnored private var wantedProject: String?
+    @ObservationIgnored private var wantedChapter: String?
+
     func select(_ projectID: String?) async {
+        wantedProject = projectID
         guard let projectID else {
             selected = nil
             return
@@ -480,6 +487,7 @@ final class StudioSectionModel {
             mutedChapters = []
         }
         await reloadSelected(projectID)
+        guard wantedProject == projectID else { return }
         await loadSnapshots()
         await loadMutedTracks()
     }
@@ -489,16 +497,17 @@ final class StudioSectionModel {
               let json = await actions.perform("get_project_by_id", ["project_id": .string(projectID)], quietly: true)?
                 .voicesStudioJSON, let project = StudioProject(json: json)
         else { return }
+        if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
+        guard wantedProject == projectID else { return }
         selected = project
         editDraft = StudioEditDraft(project: project)
-        if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
     }
 
     /// Reloads just the chapter list, as `GET …/chapters` gives it.
     func reloadChapters() async {
         guard let project = selected,
               let json = await actions.perform("get_chapters", ["project_id": .string(project.id)], quietly: true)?
-                .voicesStudioJSON else { return }
+                .voicesStudioJSON, selected?.id == project.id else { return }
         selected?.chapters = (json["chapters"].arrayValue ?? []).compactMap(StudioChapter.init(json:))
     }
 
@@ -506,7 +515,7 @@ final class StudioSectionModel {
         guard let project = selected,
               let json = await actions.perform(
                 "get_project_muted_tracks_endpoint", ["project_id": .string(project.id)], quietly: true
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, selected?.id == project.id else { return }
         mutedChapters = json["chapter_ids"].arrayValue?.compactMap(\.stringValue) ?? []
     }
 
@@ -574,7 +583,11 @@ final class StudioSectionModel {
                 consequence: "“\(project.name)”, its chapters, snapshots and converted audio are deleted."
               ) != nil else { return }
         projects.removeAll { $0.id == project.id }
-        selected = nil
+        // Clear the screen only if it still shows the deleted project.
+        if selected?.id == project.id {
+            selected = nil
+            wantedProject = nil
+        }
     }
 
     // MARK: Dictionaries
@@ -601,7 +614,7 @@ final class StudioSectionModel {
     func loadSnapshots() async {
         guard let project = selected,
               let json = await actions.perform("get_project_snapshots", ["project_id": .string(project.id)], quietly: true)?
-                .voicesStudioJSON else { return }
+                .voicesStudioJSON, selected?.id == project.id else { return }
         projectSnapshots = (json["snapshots"].arrayValue ?? []).compactMap(StudioSnapshot.init(json:))
     }
 
@@ -651,11 +664,13 @@ final class StudioSectionModel {
     // MARK: Chapters
 
     func openChapter(_ chapterID: String) async {
+        wantedChapter = chapterID
         guard let project = selected,
               let json = await actions.perform(
                 "get_chapter_by_id_endpoint", ["project_id": .string(project.id), "chapter_id": .string(chapterID)],
                 quietly: true
-              )?.voicesStudioJSON, let chapter = StudioChapter(json: json)
+              )?.voicesStudioJSON, let chapter = StudioChapter(json: json),
+              selected?.id == project.id, wantedChapter == chapterID
         else { return }
         self.chapter = chapter
         chapterName = chapter.name
@@ -668,7 +683,7 @@ final class StudioSectionModel {
               let json = await actions.perform(
                 "get_chapter_snapshots", ["project_id": .string(project.id), "chapter_id": .string(chapter.id)],
                 quietly: true
-              )?.voicesStudioJSON else { return }
+              )?.voicesStudioJSON, selected?.id == project.id, self.chapter?.id == chapter.id else { return }
         chapterSnapshots = (json["snapshots"].arrayValue ?? []).compactMap(StudioSnapshot.init(json:))
     }
 
@@ -698,9 +713,11 @@ final class StudioSectionModel {
     }
 
     func saveChapter() async {
-        guard let arguments = chapterArguments(), let chapter,
+        guard let arguments = chapterArguments(), let chapter, let projectID = selected?.id,
               await actions.perform("edit_chapter", arguments, title: "Edit \(chapter.name)") != nil else { return }
-        await openChapter(chapter.id)
+        // Another project or chapter may be open by now: reopen this one only if it still is.
+        guard selected?.id == projectID else { return }
+        if self.chapter?.id == chapter.id { await openChapter(chapter.id) }
         await reloadChapters()
     }
 
@@ -803,6 +820,7 @@ final class StudioSectionModel {
               models: [VoicesStudioSpeechModel] = []) {
         self.projects = projects
         self.selected = selected
+        wantedProject = selected?.id
         if let selected { editDraft = StudioEditDraft(project: selected) }
         projectSnapshots = snapshots
         self.chapter = chapter

@@ -172,6 +172,7 @@ final class UsageSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_user_subscription_info", "usage_by_product_over_time", "requests_list"]
     }
 
     // MARK: Spec

@@ -120,6 +120,7 @@ final class VoiceLibrarySectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_library_voices"]
         directory = environment.voices
     }
 

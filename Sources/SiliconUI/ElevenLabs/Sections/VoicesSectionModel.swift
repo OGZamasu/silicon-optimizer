@@ -341,6 +341,7 @@ final class VoicesSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_user_voices_v2", "get_voice_by_id", "get_voice_settings"]
         directory = environment.voices
     }
 
@@ -563,7 +564,15 @@ final class VoicesSectionModel {
 
     // MARK: One voice
 
+    /// The voice last chosen: a fetch that answers after another was chosen is dropped, so a
+    /// slow answer never puts an old voice (and its drafts) back on screen.
+    @ObservationIgnored private var wantedVoice: String?
+
+    /// Why the selected voice's details or settings could not be read, if they could not.
+    var detailProblem: String? { actions.problem("get_voice_by_id") ?? actions.problem("get_voice_settings") }
+
     func select(_ voiceID: String?) async {
+        wantedVoice = voiceID
         guard let voiceID else {
             selected = nil
             return
@@ -589,6 +598,8 @@ final class VoicesSectionModel {
               )?.voicesStudioJSON,
               let voice = VoicesVoice(json: json)
         else { return }
+        if let index = rows.firstIndex(where: { $0.id == voice.id }) { rows[index] = voice }
+        guard wantedVoice == voiceID else { return }
         selected = voice
         // The answer's `settings` may be null (and `with_settings` is deprecated and ignored):
         // then the settings route says them.
@@ -599,9 +610,9 @@ final class VoicesSectionModel {
         )?.voicesStudioJSON, selected?.id == voice.id {
             settingsDraft = VoicesSettings(json: json)
         }
+        guard selected?.id == voice.id else { return }
         editDraft = VoicesEditDraft(voice: voice)
         if voice.isProfessional { professional = VoicesProfessionalDraft(voice: voice) }
-        if let index = rows.firstIndex(where: { $0.id == voice.id }) { rows[index] = voice }
         for sample in voice.samples where sampleDrafts[sample.id] == nil {
             sampleDrafts[sample.id] = VoicesSampleDraft(sample: sample)
         }
@@ -638,7 +649,11 @@ final class VoicesSectionModel {
             consequence: "“\(voice.name)” and its samples are removed from your account. Anything "
                 + "that uses it — Studio projects, agents, saved settings — will need another voice."
         ) != nil else { return }
-        selected = nil
+        // Clear the screen only if it still shows the deleted voice.
+        if selected?.id == voice.id {
+            selected = nil
+            wantedVoice = nil
+        }
         rows.removeAll { $0.id == voice.id }
         await directory.refresh()
     }
@@ -864,6 +879,7 @@ final class VoicesSectionModel {
     func load(rows: [VoicesVoice], selected: VoicesVoice? = nil, hasMore: Bool = false, total: Int? = nil) {
         self.rows = rows
         self.selected = selected
+        wantedVoice = selected?.id
         settingsDraft = selected?.settings
         if let selected {
             editDraft = VoicesEditDraft(voice: selected)

@@ -181,7 +181,15 @@ final class WorkspaceSectionModel {
     // Sharing
     var resourceID = ""
     var resourceType = ""
-    private(set) var resource: WorkspaceResource?
+    /// The resource last looked up, with the id and kind it was asked by.
+    private var loadedResource: (id: String, type: String, resource: WorkspaceResource)?
+    /// The resource named by the id and kind in the fields now — never another one's, shown
+    /// under these while they are still being looked up.
+    var resource: WorkspaceResource? {
+        guard let loadedResource, loadedResource.id == resourceID.trimmingCharacters(in: .whitespaces),
+              loadedResource.type == resourceType else { return nil }
+        return loadedResource.resource
+    }
     var shareRole = ""
     var shareTarget = ""
     var shareEmail = ""
@@ -202,6 +210,7 @@ final class WorkspaceSectionModel {
 
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
+        actions.readsShownInPlace = ["get_workspace_members", "get_groups_endpoint", "search_groups", "list_auth_connections", "get_workspace_audit_logs"]
     }
 
     // MARK: Spec
@@ -407,11 +416,12 @@ final class WorkspaceSectionModel {
 
     func loadResource() async {
         let id = resourceID.trimmingCharacters(in: .whitespaces)
+        let type = resourceType
         guard !id.isEmpty, !resourceType.isEmpty,
               let json = await actions.perform(
-                "get_resource_metadata", ["resource_id": .string(id), "resource_type": .string(resourceType)], quietly: true
+                "get_resource_metadata", ["resource_id": .string(id), "resource_type": .string(type)], quietly: true
               )?.voicesStudioJSON else { return }
-        resource = WorkspaceResource(json: json)
+        loadedResource = WorkspaceResource(json: json).map { (id, type, $0) }
     }
 
     /// Who a share names: a user or service account by email, a group (or `default`, every
@@ -625,7 +635,13 @@ final class WorkspaceSectionModel {
         self.members = members
         loadedMembers = true
         self.groups = groups
-        self.resource = resource
+        if let resource {
+            resourceID = resource.id
+            resourceType = resource.type
+            loadedResource = (resource.id, resource.type, resource)
+        } else {
+            loadedResource = nil
+        }
         self.connections = connections
         self.audit = audit
     }
