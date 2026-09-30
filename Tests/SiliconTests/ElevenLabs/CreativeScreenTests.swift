@@ -123,6 +123,43 @@ struct CreativeScreenTests {
         #expect(speech.arguments()["previous_request_ids"] == ["req-1"])
     }
 
+    /// A streamed take with word timings is kept as audio: those streams are collected (the
+    /// client names the audio from `output_format`) rather than played live, whose collector
+    /// would keep the stream's JSON type.
+    @Test func aStreamedTakeWithTimingsIsKeptAsAudio() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let clip = CreativeRig.wavData(seconds: 0.3).base64EncodedString()
+        let line1: JSONValue = ["audio_base64": .string(clip), "alignment": CreativeRig.alignment(for: "Hi ")]
+        let line2: JSONValue = ["audio_base64": .string(clip), "alignment": CreativeRig.alignment(for: "there.")]
+        let chunks = [Data((line1.jsonString() + "\n").utf8), Data((line2.jsonString() + "\n").utf8)]
+        rig.always(SpeechScreenModel.streamWithTimestamps,
+                   .init(status: 200, headers: ["content-type": "application/json"], body: chunks.reduce(Data(), +), chunks: chunks))
+        let speech = rig.session.speech
+        speech.voiceID = "voice-rachel"
+        speech.text = "Hi there."
+        speech.delivery = .stream
+        #expect(speech.streamMode == .play)
+        speech.timestamps = true
+        #expect(speech.streamMode == .collect)
+        await speech.generate()
+        #expect(speech.lastRunner.phase == .succeeded, "\(speech.lastRunner.errorMessage ?? "")")
+        let take = try #require(speech.takes.first)
+        #expect(take.contentType.hasPrefix("audio/"), "kept as \(take.contentType)")
+        #expect(take.file.pathExtension != "json")
+        #expect(speech.words.map(\.text) == ["Hi", "there."])
+        let dialogue = rig.session.dialogue
+        dialogue.delivery = .stream
+        #expect(dialogue.streamMode == .play)
+        dialogue.timestamps = true
+        #expect(dialogue.streamMode == .collect)
+        let music = rig.session.music
+        music.delivery = .stream
+        #expect(music.streamMode == .play)
+        music.delivery = .detailedStream
+        #expect(music.streamMode == .collect)
+    }
+
     @Test func speechCanBeLoadedFromTheVoicesSavedSettings() async {
         let rig = CreativeRig()
         defer { rig.clean() }

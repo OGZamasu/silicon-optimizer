@@ -38,6 +38,13 @@ struct CreativeTimelineTests {
             .file(URL(fileURLWithPath: "/dev/null"), contentType: "audio/mpeg", bytes: 0),
         ], meta)
         #expect(CreativeTimeline.characterAlignments(in: result).count == 2)
+        // A collected stream: the audio as a file, the chunks as one JSON array.
+        let collected = ElevenLabsResult.parts([
+            .file(URL(fileURLWithPath: "/dev/null"), contentType: "audio/mpeg", bytes: 0),
+            .json([["alignment": CreativeRigTimings.alignment("A ")], ["alignment": CreativeRigTimings.alignment("B")]]),
+        ], meta)
+        #expect(CreativeTimeline.words(fromCharacterAlignments: CreativeTimeline.characterAlignments(in: collected))
+                    .map(\.text) == ["A", "B"])
     }
 
     @Test func aTranscriptLeavesOutSpacingAndKeepsSpeakersAndSounds() {

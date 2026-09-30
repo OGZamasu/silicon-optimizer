@@ -112,6 +112,9 @@ final class DialogueScreenModel: CreativeScreenModel {
 
     var runner: ElevenLabsRunner { runners[operationID]! }
 
+    /// Play a stream as it arrives, except with timings (collected; see Speech's `streamMode`).
+    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream && !timestamps ? .play : .collect }
+
     /// The run in flight, or waiting for its confirmation, whichever operation it is: the
     /// pickers that choose the operation can change while it runs, and must not hand the Run
     /// row an idle runner (a second paid run, and a Cancel that no longer reaches the first).
@@ -256,7 +259,7 @@ final class DialogueScreenModel: CreativeScreenModel {
         guard busyRunner == nil, problems.isEmpty else { return }
         let runner = runner
         guard CreativeRunGate.isKnown(runner) else { return }
-        runner.streamMode = delivery == .stream ? .play : .collect
+        runner.streamMode = streamMode
         lastRunner = runner
         guard let result = await runner.perform(arguments: arguments()) else { return }
         words = CreativeTimeline.words(fromCharacterAlignments: CreativeTimeline.characterAlignments(in: result))

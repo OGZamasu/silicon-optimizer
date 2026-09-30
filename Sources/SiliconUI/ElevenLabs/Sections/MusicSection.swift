@@ -374,6 +374,11 @@ final class MusicScreenModel: CreativeScreenModel {
     var isDetailed: Bool { delivery == .detailed || delivery == .detailedStream }
     var isStreamed: Bool { delivery == .stream || delivery == .detailedStream }
 
+    /// A plain streamed song plays as it arrives; a detailed one is collected, because the
+    /// shell's live collector keeps an event stream's audio under the stream's own type until
+    /// its fix lands (the client names it from `output_format`).
+    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream ? .play : .collect }
+
     /// The chosen format, or the operation's default when it does not take the chosen one.
     var effectiveOutputFormat: String? {
         outputFormats.contains(outputFormat) ? outputFormat : CreativeSpec.defaultString(composeOperationID, "output_format")
@@ -469,7 +474,7 @@ final class MusicScreenModel: CreativeScreenModel {
         guard busyRunner == nil, composeProblems.isEmpty else { return }
         let runner = composeRunner
         guard CreativeRunGate.isKnown(runner) else { return }
-        runner.streamMode = delivery == .stream || delivery == .detailedStream ? .play : .collect
+        runner.streamMode = streamMode
         lastRunner = runner
         guard let result = await runner.perform(arguments: composeArguments()) else { return }
         let title = usesPlan ? "Song from a plan (\(plan?.sections.count ?? 0) sections)" : Self.excerpt(prompt)
@@ -882,7 +887,10 @@ private struct MusicComposeTab: View {
             }
             .pickerStyle(.segmented)
             .disabled(screen.busyRunner != nil)
-            if screen.isStreamed, !screen.streamsLive {
+            if screen.delivery == .detailedStream {
+                Text("With details the stream is collected, then played when it is done.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if screen.isStreamed, !screen.streamsLive {
                 Text("\(CreativeOutputFormat.title(screen.effectiveOutputFormat ?? "")) is not played as it arrives; the whole song is kept and plays when it is done.")
                     .font(.caption).foregroundStyle(.secondary)
             }

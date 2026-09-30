@@ -241,12 +241,17 @@ enum CreativeTimeline {
 
 /// Reading the pieces of an `ElevenLabsResult` the creative screens care about.
 enum CreativeResults {
-    /// Every JSON value in the answer: the body, each event, each JSON part.
+    /// Every JSON value in the answer: the body, each event, each JSON part — and each chunk
+    /// of a collected stream, which the client hands over as one JSON part holding them all.
     static func jsonValues(in result: ElevenLabsResult) -> [JSONValue] {
         switch result {
         case .json(let value, _): [value]
         case .events(let events, _): events
-        case .parts(let parts, _): parts.compactMap { if case .json(let value) = $0 { value } else { nil } }
+        case .parts(let parts, _):
+            parts.flatMap { part -> [JSONValue] in
+                guard case .json(let value) = part else { return [] }
+                return value.arrayValue ?? [value]
+            }
         case .file, .text: []
         }
     }
