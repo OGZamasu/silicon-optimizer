@@ -82,9 +82,18 @@ final class ElevenLabsPaneState {
 
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
-    /// Each section's state for the session, and the client it was made for.
+    /// Each section's state for the session, and the client it was made for — held weakly and
+    /// compared by identity: an address can be reused by the next client once the old one is
+    /// freed, which would make another account look like the same one.
     @ObservationIgnored private var states: [String: AnyObject] = [:]
-    @ObservationIgnored private var statesClient: ObjectIdentifier?
+    @ObservationIgnored private weak var statesClient: ElevenLabsClient?
+    @ObservationIgnored private var statesBound = false
+
+    /// Said in the pane after an account change cut off a request that may cost money or
+    /// act — its answer will never be shown, so the owner has to look for themselves.
+    var previousAccountNotice: String?
+    static let previousAccountMessage =
+        "A request to the previous account may already have gone out — check it on elevenlabs.io."
 
     /// - Parameters:
     ///   - defaults: Where the section is remembered; nil under a test, which must not write
@@ -121,17 +130,52 @@ final class ElevenLabsPaneState {
         return made
     }
 
-    /// Forgets every section's state now.
+    /// Forgets every section's state now — and, since that state belonged to the account,
+    /// declines its questions and cancels its runs too.
     func dropSectionStates() {
+        endAccountWork()
         states.removeAll()
         statesClient = nil
+        statesBound = false
     }
 
     private func dropStatesIfTheAccountChanged() {
-        let current = client().map(ObjectIdentifier.init)
-        guard current != statesClient else { return }
-        states.removeAll()
-        statesClient = current
+        let current = client()
+        if statesBound {
+            // Same account only while it is the very client the states were made for.
+            guard let current, current === statesClient else {
+                dropSectionStates()
+                bindStates(to: current)
+                return
+            }
+        } else {
+            // First use, or after a disconnect: nothing made yet belongs to another account.
+            bindStates(to: current)
+        }
+    }
+
+    private func bindStates(to client: ElevenLabsClient?) {
+        statesClient = client
+        statesBound = client != nil
+    }
+
+    /// Ends what the old account left going. Every question asked or waiting is declined —
+    /// confirmed later it would run against the next account, with its key or its host — and
+    /// every run is cancelled. A request that is not a read cut off this way leaves a notice
+    /// in the pane, because its answer will never be shown. Late reports from before are
+    /// dropped by the new epoch.
+    private func endAccountWork() {
+        epoch += 1
+        let asking = [confirming].compactMap { $0 } + waiting
+        confirming = nil
+        waiting = []
+        for runner in asking { runner.decline() }
+        var cutOff = billableRunsInFlight > 0
+        for runner in runners.compactMap(\.runner) {
+            if runner.isRunning, runner.operation.risk != .read { cutOff = true }
+            runner.cancel()
+        }
+        if cutOff { previousAccountNotice = Self.previousAccountMessage }
     }
 
     // MARK: - Confirmation
@@ -235,12 +279,7 @@ final class ElevenLabsPaneState {
     /// already have been billed and refuses nothing it should not. Late answers from before
     /// are dropped by the epoch.
     func reset() {
-        epoch += 1
-        let asking = [confirming].compactMap { $0 } + waiting
-        confirming = nil
-        waiting = []
-        for runner in asking { runner.decline() }
-        for runner in runners.compactMap(\.runner) { runner.cancel() }
+        endAccountWork()
         showsRecents = false
         recents.removeAll()
         connectionProblem = nil

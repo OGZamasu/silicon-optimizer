@@ -62,9 +62,11 @@ final class ElevenLabsVoiceDirectory {
     static let pageLimit = 10
 
     @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
-    /// The client the list was fetched with: another one (a new key, another region) means
-    /// another account's voices.
-    @ObservationIgnored private var loadedFor: ObjectIdentifier?
+    /// The client the list was fetched with, weakly and by identity: another one (a new key,
+    /// another region) means another account's voices, even if it reuses the old address.
+    @ObservationIgnored private weak var loadedFor: ElevenLabsClient?
+    /// Whether the list came from a client at all (a list set by hand, with none, stays).
+    @ObservationIgnored private var loadedWithClient = false
     @ObservationIgnored private var previewPlayer: AVPlayer?
     @ObservationIgnored private var previewEnd: (any NSObjectProtocol)?
 
@@ -77,7 +79,7 @@ final class ElevenLabsVoiceDirectory {
     }
 
     func loadIfNeeded() async {
-        if loaded, loadedFor != client().map(ObjectIdentifier.init) { reset() }
+        if loaded, loadedWithClient, loadedFor == nil || loadedFor !== client() { reset() }
         guard !loaded, !loading else { return }
         await refresh()
     }
@@ -94,7 +96,8 @@ final class ElevenLabsVoiceDirectory {
         do {
             voices = try await Self.fetch(with: client)
             loaded = true
-            loadedFor = ObjectIdentifier(client)
+            loadedFor = client
+            loadedWithClient = true
             error = nil
         } catch {
             self.error = ElevenLabsRunnerFailure(error).message
@@ -105,7 +108,8 @@ final class ElevenLabsVoiceDirectory {
     func set(_ voices: [ElevenLabsVoice]) {
         self.voices = voices
         loaded = true
-        loadedFor = client().map(ObjectIdentifier.init)
+        loadedFor = client()
+        loadedWithClient = loadedFor != nil
         error = nil
     }
 
@@ -114,6 +118,7 @@ final class ElevenLabsVoiceDirectory {
         voices = []
         loaded = false
         loadedFor = nil
+        loadedWithClient = false
         error = nil
     }
 

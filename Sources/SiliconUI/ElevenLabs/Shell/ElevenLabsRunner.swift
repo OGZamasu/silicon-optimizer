@@ -113,6 +113,9 @@ final class ElevenLabsRunner: Identifiable {
     static let busyMessage = "A run is already in progress — cancel it first, and note it may already have been billed."
     /// What a Cancel says once a request that is not a read may have gone out.
     static let cancelledAfterSendingMessage = "Cancelled. The request may already have been billed or performed."
+    /// What a confirmed question says when the account or region changed while it was open.
+    static let accountChangedMessage =
+        "The ElevenLabs account or region changed while this question was open, so nothing was sent. Run it again to be asked anew."
     /// Plays a stream as it arrives; nil when not playing one.
     private(set) var streamPlayer: ElevenLabsStreamPlayer?
 
@@ -232,6 +235,13 @@ final class ElevenLabsRunner: Identifiable {
             guard answer else {
                 phase = .idle
                 return nil
+            }
+            // The answer was given for the account and host the question was asked on. If the
+            // session ended, the link went, or the region moved meanwhile, the same click would
+            // act on another account or host: send nothing.
+            let sessionEnded = context.pane.map { $0.epoch != runEpoch } ?? false
+            guard !sessionEnded, let now = context.client(), now.region == client.region else {
+                return fail(.other(Self.accountChangedMessage))
             }
         }
 

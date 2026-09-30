@@ -138,3 +138,133 @@ struct ShellAccountChangeTests {
         _ = await running.value
     }
 }
+
+/// The same guarantees wherever the account change is noticed — in the section store, not
+/// only in `reset()` — and by the runner itself when a question is answered after the account
+/// or region moved. Probe shapes from the agents critic and the creative critic (C1).
+@Suite("ElevenLabs account changes, wherever they are noticed")
+@MainActor
+struct ShellAccountChangeDetectionTests {
+
+    typealias Box = ShellSharedPartsTests.ClientBox
+
+    @Test func theSectionStoreNoticingAnotherAccountDeclinesItsQuestions() async throws {
+        let box = Box()
+        let transport = FakeElevenLabsTransport(replies: [.json(["status": "ok"])])
+        let sink = TemporaryFileSink()
+        defer { transport.removeTemporaryFiles(); sink.removeAll() }
+        box.client = ShellSharedPartsTests.client(transport: transport, sink: sink)
+        let pane = ElevenLabsPaneState(defaults: nil, client: { box.client })
+        _ = pane.state(for: .agentBatchCalls) { ShellSharedPartsTests.Marker() }
+        let runner = try #require(ElevenLabsRunner(
+            operationID: "delete_voice", context: .init(client: { box.client }, sink: { sink }, pane: pane)
+        ))
+        let running = Task { await runner.perform(arguments: ["voice_id": "v1"]) }
+        try await ShellExplorerTests.waitUntil { runner.phase == .awaitingConfirmation }
+
+        box.client = ShellSharedPartsTests.client(region: .us, transport: transport, sink: sink)
+        _ = pane.state(for: .agentBatchCalls) { ShellSharedPartsTests.Marker() }
+        #expect(pane.confirming == nil)
+        #expect(await running.value == nil)
+        runner.confirm()
+        #expect(transport.requests.isEmpty)
+    }
+
+    /// With no pane to notice anything, the runner checks for itself when the answer comes.
+    @Test func anAnswerGivenAfterTheRegionMovedSendsNothing() async throws {
+        let box = Box()
+        let transport = FakeElevenLabsTransport(replies: [.json(["status": "ok"])])
+        let sink = TemporaryFileSink()
+        defer { transport.removeTemporaryFiles(); sink.removeAll() }
+        box.client = ShellSharedPartsTests.client(transport: transport, sink: sink)
+        let runner = try #require(ElevenLabsRunner(operationID: "delete_voice", context: .init(client: { box.client }, sink: { sink })))
+        let running = Task { await runner.perform(arguments: ["voice_id": "v1"]) }
+        try await ShellExplorerTests.waitUntil { runner.phase == .awaitingConfirmation }
+        box.client = ShellSharedPartsTests.client(region: .us, transport: transport, sink: sink)
+        runner.confirm()
+        #expect(await running.value == nil)
+        #expect(runner.failure == .other(ElevenLabsRunner.accountChangedMessage))
+        #expect(transport.requests.isEmpty)
+    }
+
+    /// The agents critic's probe: a batch-call question on screen, Global → US in Settings,
+    /// then the old question confirmed — it must not place calls through the old client.
+    @Test func aBatchQuestionDoesNotSurviveARegionSwitch() async throws {
+        let (model, transport, _) = ShellSettingsTests.model(linkedKey: "fixture-key-batch-0001") { request in
+            if request.url.path.hasPrefix("/v1/user") { return ShellSettingsTests.accountAnswer(request) }
+            return .json(["id": "batch-1"])
+        }
+        defer { ShellSettingsTests.clean(model, transport) }
+        let runner = try #require(ElevenLabsRunner(operationID: "create_batch_call", model: model))
+        #expect(runner.operation.risk == .realWorld)
+        let arguments: [String: JSONValue] = [
+            "call_name": "Monday", "agent_id": "agent-1",
+            "recipients": [["phone_number": "+15555550100"], ["phone_number": "+15555550101"]],
+        ]
+        let running = Task { await runner.perform(arguments: arguments, subject: "2 phone calls with “Front desk”") }
+        try await ShellExplorerTests.waitUntil { runner.phase == .awaitingConfirmation || runner.phase == .failed }
+        if runner.phase == .failed {
+            // The client refused the empty arguments before asking; give it what it needs.
+            Issue.record("create_batch_call needs arguments for this test: \(runner.problems)")
+            return
+        }
+        let connection = ElevenLabsConnectionModel()
+        connection.requestRegion(.us, model: model)
+        await connection.switchRegionKeepingKey(model: model)
+        #expect(model.elevenLabsRegion == .us)
+        runner.confirm()
+        _ = await running.value
+        #expect(transport.requests.filter { $0.url.path.contains("batch-calling") }.isEmpty)
+    }
+
+    @Test func aBillableRequestCutOffByAnAccountChangeLeavesANotice() async throws {
+        let gate = ShellRunnerGenerationTests.Gate()
+        let (model, transport, _) = ShellSettingsTests.model(linkedKey: "fixture-key-account-a-0001") { _ in
+            await gate.wait()
+            return .audio(Data([1]))
+        }
+        defer { ShellSettingsTests.clean(model, transport) }
+        let runner = try #require(ElevenLabsRunner(operationID: "text_to_speech_full", model: model))
+        let running = Task { await runner.perform(arguments: ["voice_id": "v1", "text": "Hi"]) }
+        try await ShellExplorerTests.waitUntil { runner.phase == .running }
+        #expect(model.elevenLabsPane.previousAccountNotice == nil)
+        model.disconnectElevenLabs()
+        #expect(model.elevenLabsPane.previousAccountNotice == ElevenLabsPaneState.previousAccountMessage)
+        gate.open()
+        _ = await running.value
+    }
+
+    @Test func aReadCutOffLeavesNoNotice() async throws {
+        let gate = ShellRunnerGenerationTests.Gate()
+        let (model, transport, _) = ShellSettingsTests.model(linkedKey: "fixture-key-account-a-0001") { _ in
+            await gate.wait()
+            return .json(["models": []])
+        }
+        defer { ShellSettingsTests.clean(model, transport) }
+        let runner = try #require(ElevenLabsRunner(operationID: "get_models", model: model))
+        let running = Task { await runner.perform(arguments: [:]) }
+        try await ShellExplorerTests.waitUntil { runner.phase == .running }
+        model.disconnectElevenLabs()
+        #expect(model.elevenLabsPane.previousAccountNotice == nil)
+        gate.open()
+        _ = await running.value
+    }
+
+    /// C1: an account is its client object, not its address — a freed client's address can be
+    /// handed to the next one. Every replacement must read as another account.
+    @Test func everyNewClientIsAnotherAccountEvenAtARecycledAddress() {
+        let box = Box()
+        let pane = ElevenLabsPaneState(defaults: nil, client: { box.client })
+        box.client = ShellSharedPartsTests.client()
+        var previous = pane.state(for: .speech) { ShellSharedPartsTests.Marker() }
+        var kept = 0
+        for _ in 0..<200 {
+            box.client = nil
+            box.client = ShellSharedPartsTests.client()
+            let now = pane.state(for: .speech) { ShellSharedPartsTests.Marker() }
+            if now === previous { kept += 1 }
+            previous = now
+        }
+        #expect(kept == 0, "\(kept) of 200 new clients were taken for the old account")
+    }
+}
