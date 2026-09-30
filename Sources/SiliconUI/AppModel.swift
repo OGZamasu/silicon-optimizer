@@ -321,6 +321,14 @@ public final class AppModel {
         return token.isEmpty ? nil : token
     }
 
+    // MARK: - ElevenLabs
+
+    /// Key store, transport, client and account (see AppModel+ElevenLabs). The Keychain and
+    /// the network only in the running app; under injected settings, memory and a transport
+    /// that refuses everything, so no test can reach either.
+    @ObservationIgnored lazy var elevenLabsLink: ElevenLabsLink =
+        readsCredentialsFromKeychain ? .live() : .inert()
+
     // MARK: - UI state
 
     /// The tab on screen, restored from last launch so reopening the window lands

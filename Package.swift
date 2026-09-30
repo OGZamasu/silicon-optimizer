@@ -29,9 +29,13 @@ let package = Package(
         // Deliberately depends on nothing but Foundation and Network: the MCP bridge links it,
         // and that binary must stay small and independent of the app's domain layer.
         .target(name: "SiliconControl"),
+        // ElevenLabs over its REST API: the catalog, the client, nothing else. Foundation
+        // only, and neither SiliconControl nor the MCP bridge links it — the control routes
+        // carry raw JSON between HTTP and the app, so the MCP process never holds the key.
+        .target(name: "SiliconElevenLabs"),
         .target(name: "SiliconUI", dependencies: [
             "SiliconCore", "SiliconHardware", "SiliconRuntime", "SiliconCatalog", "SiliconPlanner",
-            "SiliconControl",
+            "SiliconControl", "SiliconElevenLabs",
             .product(name: "Sparkle", package: "Sparkle"),
         ]),
         .executableTarget(name: "SiliconMCP", dependencies: ["SiliconControl"]),
@@ -47,7 +51,7 @@ let package = Package(
             // roster from the real `Tools.all`, so a description rewritten to something a
             // roster line cannot be built from fails a test instead of quietly degrading a
             // suggestion nobody is looking at.
-            "SiliconControl", "SiliconUI", "SiliconMCP", "CArtifactHTTP",
+            "SiliconControl", "SiliconUI", "SiliconMCP", "CArtifactHTTP", "SiliconElevenLabs",
         ]),
         // SiliconControl for the wire types the tools print; the MCP target already
         // links it, and naming it here keeps the import from relying on that.
