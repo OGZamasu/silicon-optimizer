@@ -76,7 +76,7 @@ struct AudioNativeCreateCard: View {
                 .help(VoicesStudioSchema.description("create_audio_native_project", "auto_convert"))
             if !model.problems.isEmpty { ElevenLabsProblemList(problems: model.problems) }
             if let runner = model.actions.runner("create_audio_native_project") {
-                ElevenLabsRunButton(runner: runner, title: "Create player") {
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Create player") {
                     Task { await model.create() }
                 }
             }
@@ -148,7 +148,7 @@ struct AudioNativeProjectCard: View {
                     .help(VoicesStudioSchema.description("audio_native_project_update_content_endpoint", "auto_publish"))
                 Spacer()
                 if let runner = model.actions.runner("audio_native_project_update_content_endpoint") {
-                    ElevenLabsRunButton(runner: runner, title: "Update",
+                    VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Update",
                                         disabled: model.projectID.isEmpty || model.contentFile.isEmpty) {
                         Task { await model.updateContent() }
                     }
@@ -165,7 +165,7 @@ struct AudioNativeProjectCard: View {
             }
             .textFieldStyle(.roundedBorder)
             if let runner = model.actions.runner("audio_native_update_content_from_url") {
-                ElevenLabsRunButton(runner: runner, title: "Update from page", disabled: model.pageURL.isEmpty) {
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Update from page", disabled: model.pageURL.isEmpty) {
                     Task { await model.updateFromPage() }
                 }
             }

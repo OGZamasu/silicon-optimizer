@@ -126,8 +126,6 @@ final class VoiceDesignSectionModel {
     /// spec's descriptions say; the remix follows the voice it starts from.
     var supportsReference: Bool { mode == .design && modelID.contains("v3") }
 
-    /// About what the previews cost: their text, when the owner wrote it.
-    var estimatedCharacters: Int? { autoGenerateText || text.isEmpty ? nil : text.count }
 
     // MARK: Arguments
 

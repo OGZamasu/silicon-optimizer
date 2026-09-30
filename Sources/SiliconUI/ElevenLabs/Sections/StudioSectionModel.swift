@@ -758,8 +758,6 @@ final class StudioSectionModel {
         return (arguments, problems)
     }
 
-    /// Roughly what the podcast's source costs to read: its text, when that is what it is.
-    var podcastCharacters: Int? { podcast.fromURL || podcast.text.isEmpty ? nil : podcast.text.count }
 
     func createPodcast() async {
         let (arguments, problems) = Self.podcastArguments(podcast)

@@ -347,7 +347,7 @@ struct VoicesCloneCard: View {
                 .help(VoicesStudioSchema.description("add_voice", "remove_background_noise"))
             HStack {
                 if let runner = model.actions.runner("add_voice") {
-                    ElevenLabsRunButton(runner: runner, title: "Clone voice", disabled: !model.canClone) {
+                    VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Clone voice", disabled: !model.canClone) {
                         Task { await model.runClone() }
                     }
                 }

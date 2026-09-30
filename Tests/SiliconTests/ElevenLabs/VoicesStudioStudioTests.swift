@@ -142,14 +142,19 @@ struct VoicesStudioStudioTests {
         #expect(fixture.transport.recorded.isEmpty)
     }
 
-    @Test func convertingSaysItUsesCreditsWithTheEstimateElevenLabsGives() throws {
+    /// Converting spends credits; the estimate shown is ElevenLabs' own, summed over the
+    /// chapters, and is not passed off as a character count.
+    @Test func convertingUsesCreditsAndShowsElevenLabsOwnEstimate() throws {
         let fixture = VoicesStudioFixture()
         defer { fixture.clean() }
         let model = StudioSectionModel(environment: fixture.environment)
-        let runner = try #require(model.actions.runner("convert_project_endpoint"))
-        #expect(runner.operation.billable)
-        let project = try #require(StudioProject(json: Self.project("p1", chapters: [Self.chapter("c1", name: "One")])))
-        #expect(ElevenLabsCostNote.text(for: runner.operation, characters: project.creditsToConvert)?.contains("1,200") == true)
+        for id in ["convert_project_endpoint", "convert_chapter_endpoint", "create_podcast"] {
+            #expect(try #require(model.actions.runner(id)).operation.billable, "\(id)")
+        }
+        let project = try #require(StudioProject(json: Self.project("p1", chapters: [
+            Self.chapter("c1", name: "One"), Self.chapter("c2", name: "Two", credits: 300),
+        ])))
+        #expect(project.creditsToConvert == 1_500)
     }
 
     @Test func aPodcastIsAConversationOrABulletinFromTextOrAPage() throws {

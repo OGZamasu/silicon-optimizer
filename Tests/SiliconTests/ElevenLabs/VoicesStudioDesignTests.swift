@@ -71,17 +71,17 @@ struct VoicesStudioDesignTests {
         #expect(model.savedVoiceID == "saved1")
     }
 
-    @Test func designingSaysItUsesCreditsAndEstimatesFromTheText() throws {
+    /// The spec gives no billing rule for voice design, so the button says it uses credits and
+    /// guesses no amount.
+    @Test func designingSaysItUsesCreditsWithoutGuessingHowMany() throws {
         let fixture = VoicesStudioFixture()
         defer { fixture.clean() }
         let model = VoiceDesignSectionModel(environment: fixture.environment)
-        let runner = try #require(model.actions.runner("text_to_voice_design"))
-        #expect(runner.operation.billable)
-        #expect(runner.costNote != nil)
-        #expect(model.estimatedCharacters == nil)
-        model.autoGenerateText = false
-        model.text = String(repeating: "a", count: 150)
-        #expect(model.estimatedCharacters == 150)
+        for id in ["text_to_voice_design", "text_to_voice_remix"] {
+            let runner = try #require(model.actions.runner(id))
+            #expect(runner.operation.billable)
+            #expect(runner.costNote == "Uses credits from your ElevenLabs balance.")
+        }
     }
 
     @Test func aRemixStartsFromTheChosenVoiceAndTheDesignOnlySettingsStayOut() throws {
@@ -113,5 +113,57 @@ struct VoicesStudioDesignTests {
         await model.fetchAudio(for: model.previews[0])
         #expect(fixture.path("text_to_voice_preview_stream") == "/v1/text-to-voice/g9/stream")
         #expect(model.previews[0].file != nil)
+    }
+}
+
+/// One screen, several runners: a second call that spends credits cannot start while the
+/// first is under way, even through another runner (a switched mode), and the one under way
+/// can be cancelled from the section's foot.
+@Suite("ElevenLabs voices and studio screens run one billable call at a time")
+@MainActor
+struct VoicesStudioConcurrencyTests {
+
+    @Test func switchingTheModeDoesNotLetASecondBillableCallStart() async throws {
+        let fixture = VoicesStudioFixture([
+            "text_to_voice_design": [.init(status: 200, headers: ["content-type": "application/json"],
+                                           body: Data(#"{"previews":[],"text":""}"#.utf8), delay: .seconds(5))],
+        ])
+        defer { fixture.clean() }
+        let model = VoiceDesignSectionModel(environment: fixture.environment)
+        model.voiceDescription = "A calm, low narrator with a warm Scottish accent."
+        let design = Task { await model.generate() }
+        try await voicesStudioWait { model.actions.isRunning("text_to_voice_design") }
+
+        model.mode = .remix
+        model.remixVoiceID = "v1"
+        model.voiceDescription = "Brighter, please."
+        let remixRunner = try #require(model.actions.runner("text_to_voice_remix"))
+        #expect(model.actions.isBlocked(remixRunner))
+        await model.generate()
+        #expect(fixture.sent("text_to_voice_remix").isEmpty)
+        #expect(model.actions.refusal?.contains("still running") == true)
+
+        // The call under way is the one the foot offers to cancel.
+        #expect(model.actions.active.map(\.operation.id) == ["text_to_voice_design"])
+        model.actions.active.first?.cancel()
+        await design.value
+        #expect(model.actions.runner("text_to_voice_design")?.phase == .cancelled)
+        #expect(!model.actions.isBlocked(remixRunner))
+    }
+
+    @Test func freeCallsAreNotHeldBackByABillableOne() async throws {
+        let fixture = VoicesStudioFixture([
+            "text_to_voice_design": [.init(status: 200, headers: ["content-type": "application/json"],
+                                           body: Data(#"{"previews":[],"text":""}"#.utf8), delay: .seconds(5))],
+        ])
+        defer { fixture.clean() }
+        let model = VoiceDesignSectionModel(environment: fixture.environment)
+        model.voiceDescription = "A calm, low narrator with a warm Scottish accent."
+        let design = Task { await model.generate() }
+        try await voicesStudioWait { model.actions.isRunning("text_to_voice_design") }
+        let read = try #require(model.actions.runner("get_user_voices_v2"))
+        #expect(!model.actions.isBlocked(read))
+        model.actions.active.first?.cancel()
+        await design.value
     }
 }

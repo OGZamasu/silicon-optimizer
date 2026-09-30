@@ -685,14 +685,21 @@ final class DubbingSectionModel {
         await loadSourceTranscript()
     }
 
+    /// What the last regeneration charged, as its answer says: seconds charged and the free
+    /// regeneration seconds left.
+    private(set) var lastRegeneration: (charged: Double, freeLeft: Double)?
+
     func regenerate() async {
         guard let project = selectedProject, let languageID = selectedLanguageID,
               let language = languages.first(where: { $0.id == languageID }),
-              await actions.perform(
+              let json = await actions.perform(
                 "dubbing_target_transcript_regenerate",
                 ["project_id": .string(project.id), "language_id": .string(languageID)],
                 title: "Regenerate \(language.targetLanguage)"
-              ) != nil else { return }
+              )?.voicesStudioJSON else { return }
+        if let charged = json["charged_seconds"].doubleValue {
+            lastRegeneration = (charged, json["free_regeneration_seconds_remaining"].doubleValue ?? 0)
+        }
         await refreshLanguage(language)
     }
 

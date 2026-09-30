@@ -143,7 +143,19 @@ struct ProductionsOrderCard: View {
                 }
             }
             if order.isOpen, !order.items.isEmpty, let runner = model.actions.runner("public_submit_order") {
-                ElevenLabsRunButton(runner: runner, title: "Submit order…") { Task { await model.submit() } }
+                // Not the shell's Run button: its note speaks of credits, and submitting charges
+                // the workspace money for the quote.
+                HStack(spacing: 10) {
+                    Button("Submit order…") { Task { await model.submit() } }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .disabled(runner.isRunning || model.actions.billableInFlight != nil)
+                    ElevenLabsRiskBadge(risk: .realWorld)
+                    Text(order.sandbox ? "A sandbox order: nothing is charged."
+                         : "Submitting charges the workspace \(order.total.map { $0.formatted(.currency(code: "USD")) } ?? "the quoted amount").")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if runner.isRunning { ProgressView().controlSize(.small) }
+                }
             }
             Divider()
             HStack {

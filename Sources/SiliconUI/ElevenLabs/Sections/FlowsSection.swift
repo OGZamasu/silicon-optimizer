@@ -73,7 +73,7 @@ struct FlowsCreateCard: View {
                     .id("\(kind.rawValue)/\(model.model(kind))")
             }
             if let runner = model.actions.runner(kind.createID) {
-                ElevenLabsRunButton(runner: runner, title: "Generate", estimatedCharacters: model.estimatedCharacters(kind)) {
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Generate", estimatedCharacters: model.estimatedCharacters(kind)) {
                     Task { await model.create(kind) }
                 }
             }
@@ -197,7 +197,7 @@ struct FlowsTemplateCard: View {
                 .help(VoicesStudioSchema.description("create_public_template_run", "webhook"))
             if !model.inputProblems.isEmpty { ElevenLabsProblemList(problems: model.inputProblems) }
             if let runner = model.actions.runner("create_public_template_run") {
-                ElevenLabsRunButton(runner: runner, title: "Run template") { Task { await model.run() } }
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Run template") { Task { await model.run() } }
             }
             Divider()
             HStack {

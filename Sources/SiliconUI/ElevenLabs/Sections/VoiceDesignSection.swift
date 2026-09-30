@@ -119,9 +119,8 @@ struct VoiceDesignPromptCard: View {
                 ElevenLabsProblemList(problems: model.problems)
             }
             if let runner = model.actions.runner(model.operationID) {
-                ElevenLabsRunButton(
-                    runner: runner, title: model.mode == .design ? "Design voices" : "Remix",
-                    estimatedCharacters: model.estimatedCharacters,
+                VoicesStudioRunButton(
+                    actions: model.actions, runner: runner, title: model.mode == .design ? "Design voices" : "Remix",
                     disabled: model.voiceDescription.trimmingCharacters(in: .whitespaces).isEmpty
                 ) {
                     Task { await model.generate() }

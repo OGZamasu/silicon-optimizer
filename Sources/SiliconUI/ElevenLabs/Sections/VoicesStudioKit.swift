@@ -103,6 +103,29 @@ final class VoicesStudioActions {
         runners[operationID]?.isRunning ?? false
     }
 
+    /// Every runner of this screen that is running or waiting for its question to be answered.
+    var active: [ElevenLabsRunner] {
+        runners.values.filter { $0.isRunning || $0.isAwaitingConfirmation }
+            .sorted { ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast) }
+    }
+
+    /// The call that spends credits and is under way on this screen, if one is. A screen holds
+    /// several runners — one per operation, and switching a mode or a model swaps the one its
+    /// Run button watches — so a second billable call is refused here rather than by the
+    /// button alone, which would only know its own runner.
+    var billableInFlight: ElevenLabsRunner? {
+        runners.values.first { ($0.isRunning || $0.isAwaitingConfirmation) && $0.operation.billable }
+    }
+
+    /// Whether `runner` may not start now because another billable call is under way.
+    func isBlocked(_ runner: ElevenLabsRunner) -> Bool {
+        guard runner.operation.billable, let busy = billableInFlight else { return false }
+        return busy !== runner
+    }
+
+    /// Why the last attempt was refused without sending anything.
+    private(set) var refusal: String?
+
     /// Runs an operation through its runner. See `ElevenLabsRunner.perform`.
     ///
     /// - Parameter quietly: For lists and lookups: not shown at the foot, not recorded in the
@@ -117,6 +140,12 @@ final class VoicesStudioActions {
             missingOperation = operationID
             return nil
         }
+        if isBlocked(runner), let busy = billableInFlight {
+            refusal = "“\(busy.title ?? busy.operation.summary)” is still running and spending credits; "
+                + "wait for it or cancel it before starting another."
+            return nil
+        }
+        refusal = nil
         runner.title = title
         runner.recordsResults = !quietly
         if !quietly { last = runner }
@@ -608,9 +637,53 @@ struct VoicesStudioActivity: View {
                 .font(.callout)
                 .foregroundStyle(.orange)
             }
+            ForEach(actions.active.filter(\.isRunning), id: \.id) { runner in
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Working: \(runner.title ?? runner.operation.summary)")
+                        .font(.callout)
+                        .lineLimit(1)
+                    if runner.operation.billable { ElevenLabsRiskBadge(risk: .generate) }
+                    Spacer()
+                    Button("Cancel") { runner.cancel() }
+                        .controlSize(.small)
+                }
+            }
+            if let refusal = actions.refusal {
+                Label(refusal, systemImage: "hourglass")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let runner = actions.last ?? fallback {
                 ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult && actions.last != nil)
                     .id(runner.id)
+            }
+        }
+    }
+}
+
+/// The shell's Run button, disabled while another call on the same screen is spending
+/// credits — the button alone watches only its own runner, and a screen swaps runners when a
+/// mode or model changes. The call under way is named, with Cancel, in the section's foot.
+struct VoicesStudioRunButton: View {
+    let actions: VoicesStudioActions
+    let runner: ElevenLabsRunner
+    var title = "Run"
+    var estimatedCharacters: Int?
+    var disabled = false
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ElevenLabsRunButton(
+                runner: runner, title: title, estimatedCharacters: estimatedCharacters,
+                disabled: disabled || actions.isBlocked(runner), action: action
+            )
+            if actions.isBlocked(runner), let busy = actions.billableInFlight {
+                Text("Waiting for “\(busy.title ?? busy.operation.summary)” to finish — cancel it below to start this.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

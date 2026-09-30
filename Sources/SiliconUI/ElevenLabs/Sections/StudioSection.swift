@@ -151,7 +151,7 @@ struct StudioNewProjectCard: View {
                 .help(VoicesStudioSchema.description("add_project", "auto_convert"))
             if !model.problems.isEmpty { ElevenLabsProblemList(problems: model.problems) }
             if let runner = model.actions.runner("add_project") {
-                ElevenLabsRunButton(runner: runner, title: "Create project") { Task { await model.createProject() } }
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Create project") { Task { await model.createProject() } }
             }
         }
     }
@@ -207,12 +207,15 @@ struct StudioProjectCard: View {
             VoicesStudioFact("Model", project.defaultModelID)
             VoicesStudioFact("Quality", project.qualityPreset.map(VoicesStudioFormat.words))
             VoicesStudioFact("Last converted", VoicesStudioFormat.date(unixSeconds: project.lastConversion))
+            if let credits = project.creditsToConvert, credits > 0 {
+                VoicesStudioFact("To convert", "about \(credits.formatted()) credits, as ElevenLabs estimates for what is left")
+            }
             if !model.mutedChapters.isEmpty {
                 VoicesStudioFact("Muted chapters", "\(model.mutedChapters.count)")
             }
             HStack {
                 if let runner = model.actions.runner("convert_project_endpoint") {
-                    ElevenLabsRunButton(runner: runner, title: "Convert project", estimatedCharacters: project.creditsToConvert) {
+                    VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Convert project") {
                         Task { await model.convert() }
                     }
                 }
@@ -304,9 +307,8 @@ struct StudioChaptersCard: View {
                     Button("Open") { Task { await model.openChapter(chapter.id) } }.controlSize(.small)
                     Button("Convert") { Task { await model.convertChapter(chapter) } }
                         .controlSize(.small)
-                        .help(ElevenLabsCatalog.operation("convert_chapter_endpoint").flatMap {
-                            ElevenLabsCostNote.text(for: $0, characters: chapter.creditsToConvert)
-                        } ?? "")
+                        .help("Uses credits from your ElevenLabs balance")
+                        .disabled(model.actions.billableInFlight != nil)
                     Button(role: .destructive) { Task { await model.deleteChapter(chapter) } } label: {
                         Image(systemName: "trash")
                     }
@@ -481,7 +483,9 @@ struct StudioPodcastCard: View {
             .font(.callout)
             if !model.problems.isEmpty { ElevenLabsProblemList(problems: model.problems) }
             if let runner = model.actions.runner("create_podcast") {
-                ElevenLabsRunButton(runner: runner, title: "Make podcast", estimatedCharacters: model.podcastCharacters) {
+                Text("The spec says the audio a podcast generates is charged; writing its script is not, for now.")
+                    .font(.caption).foregroundStyle(.secondary)
+                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Make podcast") {
                     Task { await model.createPodcast() }
                 }
             }
