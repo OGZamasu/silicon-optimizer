@@ -273,7 +273,7 @@ struct CoreReviewFixesTests {
         let spec = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         let schemas = try #require((spec["components"] as? [String: Any])?["schemas"] as? [String: Any])
         let paths = try #require(spec["paths"] as? [String: Any])
-        let looksSecret = try NSRegularExpression(pattern: "secret|token|password|api[_-]?key|credential|authorization|bearer|private[_-]?key")
+        let looksSecret = try NSRegularExpression(pattern: "secret|token|password|passphrase|api[_-]?key|credential|authorization|bearer|private|client_key|signature")
         let looksLikeHeaders = try NSRegularExpression(pattern: "headers")
 
         var found: Set<String> = []
@@ -309,6 +309,24 @@ struct CoreReviewFixesTests {
             }
         }
 
+        // Query parameters too: they are shown in the URL.
+        var queryFound: Set<String> = []
+        for (_, item) in paths {
+            for (method, operation) in item as? [String: Any] ?? [:] where ["get", "post", "put", "patch", "delete"].contains(method) {
+                for parameter in (operation as? [String: Any])?["parameters"] as? [[String: Any]] ?? []
+                where parameter["in"] as? String == "query" {
+                    let name = (parameter["name"] as? String ?? "").lowercased()
+                    if looksSecret.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil {
+                        queryFound.insert(name)
+                    }
+                }
+            }
+        }
+        let queryNotSecrets: Set<String> = ["next_page_token", "api_key_name"]
+        let unclassifiedQuery = queryFound.subtracting(ElevenLabsRedaction.secretQueryParameters).subtracting(queryNotSecrets)
+        #expect(unclassifiedQuery.isEmpty, "query parameters that look like credentials and are not classified: \(unclassifiedQuery.sorted())")
+        #expect(queryFound.contains("token") && queryFound.contains("conversation_signature"), "the walk found the parameters it should")
+
         let masked = ElevenLabsRedaction.requestSecretFields.union(ElevenLabsRedaction.headerMapFields)
         let notSecrets: Set<String> = [
             "secret_id",               // a reference to a secret, not its value
@@ -317,6 +335,7 @@ struct CoreReviewFixesTests {
             "token_url", "token_response_field",   // where and what to read, not a token
             "credential_id", "workspace_api_key_id",   // ids
             "attributes_to_headers",   // SIP attribute to header *name*
+            "next_page_token",         // a pagination cursor
         ]
         let unclassified = found.subtracting(masked).subtracting(notSecrets)
         #expect(unclassified.isEmpty, "request fields that look like secrets and are not classified: \(unclassified.sorted())")
@@ -382,5 +401,35 @@ struct CoreReviewFixesTests {
         let text = try ElevenLabsRedaction.redactCredentials(in: answer, for: operation).jsonString()
         #expect(!text.contains("sip-secret-value"))
         #expect(text.contains("X-Auth"))
+    }
+
+    // MARK: - Credential query parameters
+
+    @Test func aTokenInTheQueryIsMaskedInWhatIsShownButSentToElevenLabs() async throws {
+        let rig = CoreClientTests.Rig(replies: [.json([:])])
+        defer { rig.cleanUp() }
+        let token = "single-use-token-value-1234"
+        let signature = "conversation-signature-value-5678"
+
+        let shown = try rig.client.describe("get_agent_widget_route", arguments: [
+            "agent_id": "agent-1", "conversation_signature": .string(signature),
+        ])
+        #expect(!shown.url.contains(signature), "Show API call and Copy as curl must not carry it")
+        #expect(shown.url.contains("conversation_signature="))
+
+        _ = try await rig.client.call("get_agent_widget_route", arguments: [
+            "agent_id": "agent-1", "conversation_signature": .string(signature),
+        ])
+        let sent = try #require(rig.transport.requests.first)
+        #expect(sent.url.absoluteString.contains(signature), "ElevenLabs still receives the real value")
+        #expect(!"\(sent)".contains(signature) && !String(reflecting: sent).contains(signature))
+        var dumped = ""
+        dump(sent, to: &dumped)
+        #expect(!dumped.contains(signature))
+
+        let masked = ElevenLabsRedaction.maskingQuerySecrets(
+            in: try #require(URL(string: "https://api.elevenlabs.io/v1/speech-to-text?token=\(token)&next_page_token=cursor-1")))
+        #expect(!masked.contains(token))
+        #expect(masked.contains("next_page_token=cursor-1"), "a pagination cursor is not a secret")
     }
 }

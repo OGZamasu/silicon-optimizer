@@ -50,7 +50,7 @@ struct PreparedCall: Sendable {
             )
         }
         return ElevenLabsCallDescription(
-            operationID: operation.id, method: operation.method, url: url.absoluteString,
+            operationID: operation.id, method: operation.method, url: ElevenLabsRedaction.maskingQuerySecrets(in: url),
             headers: shown, body: bodyDescription
         )
     }

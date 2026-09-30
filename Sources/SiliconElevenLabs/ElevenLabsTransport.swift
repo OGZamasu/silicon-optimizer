@@ -163,7 +163,7 @@ public struct ElevenLabsRequest: Sendable, Hashable, CustomStringConvertible, Cu
     }
 
     /// Method and URL only; the key lives in a header and headers are never described.
-    public var description: String { "\(method) \(url.absoluteString)" }
+    public var description: String { "\(method) \(ElevenLabsRedaction.maskingQuerySecrets(in: url))" }
 
     /// The same: `String(reflecting:)` and `dump` must not reach the headers either.
     public var debugDescription: String { description }
@@ -181,7 +181,8 @@ extension ElevenLabsRequest: CustomReflectable {
         Mirror(
             self,
             children: [
-                "operationID": operationID, "method": method, "url": url.absoluteString,
+                "operationID": operationID, "method": method,
+                "url": ElevenLabsRedaction.maskingQuerySecrets(in: url),
             ],
             displayStyle: .struct
         )

@@ -86,7 +86,27 @@ public enum ElevenLabsRedaction {
         "api_key", "api_token", "token", "password", "client_secret", "secret_key", "secret_token",
         "account_auth_token", "auth_token", "authorization", "xi-api-key", "webhook_secret",
         "hmac_secret", "access_token", "refresh_token", "shareable_token",
+        // An mTLS auth connection's private key (PEM) and its passphrase.
+        "client_key", "key_passphrase", "passphrase", "private_key",
     ]
+
+    /// Query parameters that carry a credential: a single-use token for realtime transcription
+    /// and the signature that starts a widget conversation. They must reach ElevenLabs, and must
+    /// not appear in anything shown or logged, so URLs are masked through `maskingQuerySecrets`.
+    static let secretQueryParameters: Set<String> = ["token", "conversation_signature"]
+
+    /// `url` as text with the values of `secretQueryParameters` replaced. What "Show API call",
+    /// "Copy as curl" and a request's `description` use; the request itself keeps the real URL.
+    public static func maskingQuerySecrets(in url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.percentEncodedQueryItems, !items.isEmpty
+        else { return url.absoluteString }
+        components.percentEncodedQueryItems = items.map { item in
+            secretQueryParameters.contains(item.name.lowercased())
+                ? URLQueryItem(name: item.name, value: "%E2%80%B9redacted%E2%80%BA") : item
+        }
+        return components.string ?? url.absoluteString
+    }
 
     /// Request fields that are secrets only in one operation, because their name alone says
     /// nothing: a secret's `value`, and an environment variable's `values` (plain strings feed
