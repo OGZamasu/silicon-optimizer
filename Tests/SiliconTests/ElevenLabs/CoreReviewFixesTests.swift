@@ -27,4 +27,32 @@ struct CoreReviewFixesTests {
         #expect(dumped.contains("get_user_info"))
         #expect(dumped.contains("https://api.elevenlabs.io/v1/user"))
     }
+
+    // MARK: - Dot segments
+
+    @Test func aPathValueOfDotsIsRefusedBeforeAnythingIsSent() async throws {
+        for dots in [".", ".."] {
+            let rig = CoreClientTests.Rig(replies: [.json([:])])
+            defer { rig.cleanUp() }
+            do {
+                _ = try await rig.client.call("delete_sample", arguments: [
+                    "voice_id": "voice-1", "sample_id": .string(dots),
+                ])
+                Issue.record("a path value of \(dots) was accepted")
+            } catch ElevenLabsError.invalidArguments(let problems) {
+                #expect(problems.contains { $0.contains("sample_id") && $0.contains("\"..\"") })
+            }
+            #expect(rig.transport.requests.isEmpty)
+        }
+    }
+
+    @Test func ordinaryPathValuesContainingDotsStillGoThrough() async throws {
+        let rig = CoreClientTests.Rig(replies: [.json([:])])
+        defer { rig.cleanUp() }
+        _ = try await rig.client.call("delete_sample", arguments: [
+            "voice_id": "voice.1", "sample_id": "..hidden",
+        ])
+        let url = try #require(rig.transport.requests.first?.url)
+        #expect(url.absoluteString == "https://api.elevenlabs.io/v1/voices/voice.1/samples/..hidden")
+    }
 }

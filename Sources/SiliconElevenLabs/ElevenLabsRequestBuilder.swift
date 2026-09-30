@@ -95,6 +95,14 @@ enum ElevenLabsRequestBuilder {
                     problems.append("path parameter \"\(parameter.name)\" must be a non-empty string or number")
                     continue
                 }
+                // "." and ".." are unreserved, so they survive percent-encoding and travel as
+                // dot segments, which a server or proxy may resolve into a different operation
+                // than the one named (and confirmed) — `delete_sample` with `..` deleting the
+                // voice. They are never a real id.
+                guard text != ".", text != ".." else {
+                    problems.append("path parameter \"\(parameter.name)\" may not be \".\" or \"..\"")
+                    continue
+                }
                 path = path.replacingOccurrences(
                     of: "{\(parameter.name)}", with: percentEncode(text, allowed: segmentAllowed)
                 )
