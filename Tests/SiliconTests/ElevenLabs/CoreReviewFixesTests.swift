@@ -139,4 +139,47 @@ struct CoreReviewFixesTests {
         for waiter in waiters { #expect(try await waiter.value == Self.oldKey) }
         #expect(keychain.reads == 1, "one consent dialog, not one per caller")
     }
+
+    // MARK: - Which URLs the key may be sent to
+
+    @Test func onlyTheFiveHostsOverHTTPSOnPort443AreAllowed() throws {
+        let hosts = ElevenLabsRegion.allowedHosts
+        #expect(hosts.count == 5)
+        func allowed(_ text: String, loopback: Int? = nil) -> Bool {
+            URLSessionTransport.isAllowed(URL(string: text)!, allowedHosts: hosts, loopbackPort: loopback)
+        }
+        for host in hosts {
+            #expect(allowed("https://\(host)/v1/user"))
+            #expect(allowed("https://\(host):443/v1/user"))
+        }
+        let refused = [
+            "http://api.elevenlabs.io/v1/user",                 // not https
+            "https://api.elevenlabs.io:8443/v1/user",           // another port
+            "https://api.elevenlabs.io:80/v1/user",
+            "https://api.elevenlabs.io.example.com/v1/user",    // a suffix of a look-alike
+            "https://example.com/v1/user",
+            "https://API.ELEVENLABS.IO/v1/user",                // compared exactly
+            "https://api.elevenlabs.io./v1/user",               // trailing dot
+            "https://xapi.elevenlabs.io/v1/user",
+            "https://elevenlabs.io/v1/user",
+            "https://api.eu.elevenlabs.io/v1/user",             // not one of the five
+            "https://127.0.0.1/v1/user",
+            "wss://api.elevenlabs.io/v1/user",
+            "ftp://api.elevenlabs.io/v1/user",
+            "file:///etc/passwd",
+        ]
+        for text in refused { #expect(!allowed(text), "\(text) must not be allowed") }
+    }
+
+    @Test func theLoopbackAllowanceIsExactlyOnePortOverHTTP() throws {
+        let hosts = ElevenLabsRegion.allowedHosts
+        func allowed(_ text: String, loopback: Int?) -> Bool {
+            URLSessionTransport.isAllowed(URL(string: text)!, allowedHosts: hosts, loopbackPort: loopback)
+        }
+        #expect(allowed("http://127.0.0.1:5000/x", loopback: 5000))
+        #expect(!allowed("http://127.0.0.1:5001/x", loopback: 5000))
+        #expect(!allowed("https://127.0.0.1:5000/x", loopback: 5000))
+        #expect(!allowed("http://localhost:5000/x", loopback: 5000))
+        #expect(!allowed("http://127.0.0.1:5000/x", loopback: nil), "production has no loopback allowance")
+    }
 }
