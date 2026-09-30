@@ -36,6 +36,9 @@ enum VoicesStudioCoverage {
         Entry(section: .pronunciation, controls: PronunciationSectionModel.controls,
               callsWithoutControls: PronunciationSectionModel.callsWithoutControls,
               explorerOnly: PronunciationSectionModel.explorerOnly),
+        Entry(section: .audioNative, controls: AudioNativeSectionModel.controls,
+              callsWithoutControls: AudioNativeSectionModel.callsWithoutControls,
+              explorerOnly: AudioNativeSectionModel.explorerOnly),
     ]
 
     @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }

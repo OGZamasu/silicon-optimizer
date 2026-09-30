@@ -260,6 +260,22 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("pronunciation", height: 1200) { PronunciationScreen(model: model) }
     }
 
+    // MARK: Audio Native
+
+    @Test func anAudioNativePlayer() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = AudioNativeSectionModel(environment: fixture.environment)
+        model.draft.name = "Why roads are long"
+        model.load(
+            snippet: "<div id=\"elevenlabs-audionative-widget\" data-height=\"90\" data-width=\"100%\" data-projectid=\"an1\"></div>\n<script src=\"https://elevenlabs.io/player/audioNativeHelper.js\"></script>",
+            projectID: "an1",
+            settings: AudioNativeSettings(json: VoicesStudioAudioNativeTests.settings),
+            projects: [try #require(StudioProject(json: VoicesStudioStudioTests.project("an1", name: "Why roads are long")))]
+        )
+        try VoicesStudioSnapshots.render("audio-native", height: 1500) { AudioNativeScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {
