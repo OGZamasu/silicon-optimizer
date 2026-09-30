@@ -151,6 +151,27 @@ func voicesStudioConfirm(
     return asked
 }
 
+/// Runs an action that asks, answers the question the section puts on screen (worded as the
+/// section words it), and returns what was asked.
+@MainActor
+func voicesStudioAsk(
+    _ actions: VoicesStudioActions, answer: Bool, during action: @escaping @MainActor () async -> Void
+) async throws -> ElevenLabsConfirmationRequest? {
+    let task = Task { await action() }
+    try await voicesStudioWait { actions.presentedQuestion != nil }
+    let asked = actions.presentedQuestion
+    actions.answer(answer)
+    await task.value
+    return asked
+}
+
+/// A client the test can swap, as the app's link does on a new key or region.
+@MainActor
+final class VoicesStudioSwitchableClient {
+    var client: ElevenLabsClient?
+    init(_ client: ElevenLabsClient?) { self.client = client }
+}
+
 // MARK: - Snapshots
 
 /// Draws screens to PNG for a look: light and dark, narrow and wide. Written to

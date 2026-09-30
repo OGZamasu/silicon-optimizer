@@ -44,33 +44,88 @@ enum VoicesStudioModels {
 
 // MARK: - Runners
 
+/// A question the section words itself — for money, keys and access, where the generic
+/// "<Summary>: …?" with a "Run" button says too little.
+struct VoicesStudioQuestion: Equatable, Sendable {
+    var title: String
+    var confirmLabel: String
+    var consequence: String
+
+    init(_ title: String, button confirmLabel: String, consequence: String) {
+        self.title = title
+        self.confirmLabel = confirmLabel
+        self.consequence = consequence
+    }
+}
+
 /// One runner per operation a section uses, made when first needed, and the action whose
 /// outcome the section shows at its foot.
 ///
 /// Lists and lookups run "quietly": their failures show where the list is, and they stay out
 /// of the pane's recent results. Everything the owner asked for — create, edit, delete,
 /// generate, download — becomes `last`, so its errors, a credential shown once, and "Show API
-/// call" appear in one predictable place, which is also where a risky operation's
-/// confirmation sheet hangs.
+/// call" appear in one predictable place.
+///
+/// Money: a screen runs one spending call at a time (`billableInFlight`), and a spending call
+/// that was cancelled or lost after it was sent leaves an *unknown outcome* — it may have
+/// started and been billed — which holds every further spending call on the screen until the
+/// owner has checked (`acknowledgeUnknownOutcomes`). The screen's list is fetched again at once
+/// (`onUnknownOutcome`) so there is something to check.
 @MainActor
 @Observable
 final class VoicesStudioActions {
+    /// Operations whose question the section words itself: their runners ask here rather than
+    /// through the pane, so the section's title, button and consequence are what is shown.
+    static let ownQuestions: Set<String> = [
+        "disable", "public_submit_order", "edit_service_account_api_key", "create_service_account",
+        "create_service_account_api_key", "set_third_party_disabling_policy", "update_workspace_member",
+        "add_member", "remove_member", "share_resource_endpoint", "unshare_resource_endpoint",
+        "create_auth_connection", "update_auth_connection", "replicate_voice_to_isolated_environment",
+    ]
+
+    /// Spending calls that leave nothing lasting behind when their answer is lost (voice design
+    /// previews), so a repeat after a cancel needs no check.
+    static let passingSpends: Set<String> = [
+        "text_to_voice_design", "text_to_voice_remix", "text_to_voice_preview_stream",
+    ]
+
     @ObservationIgnored let context: ElevenLabsRunner.Context
     @ObservationIgnored private var runners: [String: ElevenLabsRunner] = [:]
+    /// Operations performing now with a spending override (`perform(…, spends: true)`).
+    private var spendingOverrides: Set<String> = []
     /// The last action the owner started.
     private(set) var last: ElevenLabsRunner?
     /// An operation this build's catalog does not have — a spec refresh renamed it. The
     /// section says so rather than failing silently.
     private(set) var missingOperation: String?
+    /// Why the last attempt was refused without sending anything.
+    private(set) var refusal: String?
+    /// The section's wording for the questions its runners are asking, by operation.
+    private(set) var questions: [String: VoicesStudioQuestion] = [:]
+    /// A question for an operation that does not ask by itself (an edit that replaces a
+    /// project's content), waiting for its answer.
+    private(set) var pendingQuestion: ElevenLabsConfirmationRequest?
+    @ObservationIgnored private var pendingAnswer: CheckedContinuation<Bool, Never>?
+    /// The account a question was asked under: an answer given after the account changed
+    /// sends nothing.
+    @ObservationIgnored private var askedUnder: [String: ObjectIdentifier] = [:]
+    /// Spending calls whose outcome is unknown — cancelled or lost after they were sent — by
+    /// operation, with what they were.
+    private(set) var unknownOutcomes: [String: String] = [:]
+    /// Fetches the section's list again after an unknown outcome, so the owner can see whether
+    /// the thing was made.
+    @ObservationIgnored var onUnknownOutcome: (@MainActor (String) async -> Void)?
 
     init(context: ElevenLabsRunner.Context) {
         self.context = context
     }
 
     /// The runner for `operationID`, made on first use; nil when the catalog has no such
-    /// operation.
+    /// operation. Runners of `ownQuestions` ask through this screen, not the pane.
     func runner(_ operationID: String) -> ElevenLabsRunner? {
         if let existing = runners[operationID] { return existing }
+        var context = context
+        if Self.ownQuestions.contains(operationID) { context.pane = nil }
         guard let made = ElevenLabsRunner(operationID: operationID, context: context) else { return nil }
         runners[operationID] = made
         return made
@@ -87,51 +142,171 @@ final class VoicesStudioActions {
             .sorted { ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast) }
     }
 
-    /// The call that spends credits and is under way on this screen, if one is. A screen holds
-    /// several runners — one per operation, and switching a mode or a model swaps the one its
-    /// Run button watches — so a second billable call is refused here rather than by the
-    /// button alone, which would only know its own runner.
+    /// Whether a run of `runner` spends credits or money: its operation is billable, or the
+    /// section said so for this run (a Studio project created with "convert now").
+    func spends(_ runner: ElevenLabsRunner) -> Bool {
+        runner.operation.billable || spendingOverrides.contains(runner.operation.id)
+    }
+
+    /// The spending call under way on this screen, if one is. A screen holds several runners —
+    /// one per operation, and switching a mode or a model swaps the one its Run button watches
+    /// — so a second spending call is refused here rather than by the button alone.
     var billableInFlight: ElevenLabsRunner? {
-        runners.values.first { ($0.isRunning || $0.isAwaitingConfirmation) && $0.operation.billable }
+        runners.values.first { ($0.isRunning || $0.isAwaitingConfirmation) && spends($0) }
     }
 
-    /// Whether `runner` may not start now because another billable call is under way.
-    ///
-    /// The runner itself counts too: the shell's runner abandons a run in flight when it is
-    /// started again, and a billable request already sent would still be billed.
-    func isBlocked(_ runner: ElevenLabsRunner) -> Bool {
-        runner.operation.billable && billableInFlight != nil
+    /// Why a spending run of `runner` may not start now; nil when it may. Free runs are never
+    /// held.
+    func blockReason(_ runner: ElevenLabsRunner, spends override: Bool? = nil) -> String? {
+        guard override ?? runner.operation.billable else { return nil }
+        if let busy = billableInFlight {
+            return "“\(busy.title ?? busy.operation.summary)” is still running and spending credits; "
+                + "wait for it or cancel it before starting another."
+        }
+        if let title = unknownOutcomes.values.sorted().first {
+            return "“\(title)” was stopped after it was sent and may already have been started and billed. "
+                + "Check the list above, then press “I have checked” before starting another."
+        }
+        return nil
     }
 
-    /// Why the last attempt was refused without sending anything.
-    private(set) var refusal: String?
+    /// Whether a spending run of `runner` may not start now.
+    func isBlocked(_ runner: ElevenLabsRunner, spends override: Bool? = nil) -> Bool {
+        blockReason(runner, spends: override) != nil
+    }
+
+    /// The owner has looked: spending calls may start again.
+    func acknowledgeUnknownOutcomes() {
+        unknownOutcomes = [:]
+        refusal = nil
+    }
 
     /// Runs an operation through its runner. See `ElevenLabsRunner.perform`.
     ///
-    /// - Parameter quietly: For lists and lookups: not shown at the foot, not recorded in the
-    ///   pane's recent results.
+    /// - Parameters:
+    ///   - quietly: For lists and lookups: not shown at the foot, not recorded in the pane's
+    ///     recent results.
+    ///   - spends: Overrides whether this run spends (nil: the operation's `billable`).
+    ///   - question: The section's own question. For an operation that asks by itself it
+    ///     replaces the generic wording; for one that does not, it is asked first and nothing
+    ///     is sent on a no.
     @discardableResult
     func perform(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], subject: String? = nil,
-        consequence: String? = nil, title: String? = nil, quietly: Bool = false
+        consequence: String? = nil, title: String? = nil, quietly: Bool = false,
+        spends: Bool? = nil, question: VoicesStudioQuestion? = nil
     ) async -> ElevenLabsResult? {
         guard let runner = runner(operationID) else {
             missingOperation = operationID
             return nil
         }
-        if isBlocked(runner), let busy = billableInFlight {
-            refusal = "“\(busy.title ?? busy.operation.summary)” is still running and spending credits; "
-                + "wait for it or cancel it before starting another."
+        let spendsNow = spends ?? runner.operation.billable
+        if let reason = blockReason(runner, spends: spendsNow) {
+            refusal = reason
             return nil
         }
         refusal = nil
         runner.title = title
         runner.recordsResults = !quietly
         if !quietly { last = runner }
-        return await runner.perform(
+        if let question {
+            if runner.operation.requiresConfirmation {
+                questions[operationID] = question
+            } else {
+                guard await ask(question, for: runner.operation) else { return nil }
+            }
+        }
+        askedUnder[operationID] = context.client().map(ObjectIdentifier.init)
+        if spendsNow { spendingOverrides.insert(operationID) }
+        let result = await runner.perform(
             arguments: arguments, files: files, subject: subject, consequence: consequence
         )
+        spendingOverrides.remove(operationID)
+        questions[operationID] = nil
+        if spendsNow, result == nil, !Self.passingSpends.contains(operationID), Self.outcomeIsUnknown(runner) {
+            unknownOutcomes[operationID] = title ?? runner.operation.summary
+            await onUnknownOutcome?(operationID)
+        }
+        return result
+    }
+
+    /// Whether a failed or stopped run may still have been carried out: cancelled after it
+    /// started, or lost on the way back (no connection, a timeout, a server error). A refusal
+    /// ElevenLabs gave (4xx) or arguments refused before sending are known outcomes.
+    static func outcomeIsUnknown(_ runner: ElevenLabsRunner) -> Bool {
+        switch runner.phase {
+        case .cancelled:
+            return true
+        case .failed:
+            switch runner.failure {
+            case .offline?:
+                return true
+            case .other(let message)?:
+                return message.range(of: #"answered 4\d\d"#, options: .regularExpression) == nil
+            default:
+                return false
+            }
+        default:
+            return false
+        }
+    }
+
+    // MARK: Questions
+
+    /// The question on screen for this section, if one is waiting: a runner that asks here
+    /// (worded as the section asked), or a question for an operation that does not ask.
+    var presentedQuestion: ElevenLabsConfirmationRequest? {
+        if let pendingQuestion { return pendingQuestion }
+        guard let runner = runners.values.first(where: { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation }),
+              var request = runner.confirmation else { return nil }
+        if let question = questions[runner.operation.id] {
+            request.title = question.title
+            request.confirmLabel = question.confirmLabel
+            request.consequence = question.consequence
+        }
+        return request
+    }
+
+    /// Answers the question on screen. A yes given after the account changed sends nothing.
+    func answer(_ yes: Bool) {
+        if let continuation = pendingAnswer {
+            pendingAnswer = nil
+            pendingQuestion = nil
+            continuation.resume(returning: yes)
+            return
+        }
+        guard let runner = runners.values.first(where: { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation })
+        else { return }
+        guard yes else {
+            runner.decline()
+            return
+        }
+        let now = context.client().map(ObjectIdentifier.init)
+        if let asked = askedUnder[runner.operation.id], asked != now {
+            runner.decline()
+            refusal = "The ElevenLabs account changed while this was being asked, so nothing was sent."
+            return
+        }
+        runner.confirm()
+    }
+
+    private func ask(_ question: VoicesStudioQuestion, for operation: ElevenLabsOperation) async -> Bool {
+        pendingAnswer?.resume(returning: false)
+        pendingQuestion = ElevenLabsConfirmationRequest(
+            operationID: operation.id, risk: .destructive, title: question.title,
+            consequence: question.consequence, call: "\(operation.method) \(operation.path)",
+            confirmLabel: question.confirmLabel
+        )
+        return await withCheckedContinuation { pendingAnswer = $0 }
+    }
+
+    // MARK: Credentials
+
+    /// Forgets every credential shown once on this screen: when the owner selects something
+    /// else, or leaves the section.
+    func dismissCredentials() {
+        for runner in runners.values where runner.credential != nil { runner.dismissCredential() }
     }
 
     /// The failure of a quiet run, in words, for the place its list is drawn.
@@ -597,8 +772,10 @@ struct VoicesStudioFact: View {
     }
 }
 
-/// The foot of every section: the last action's errors, a credential shown once, its result
-/// when asked, and "Show API call" — or, before any action, the list's API call.
+/// The foot of every section: calls under way with Cancel, spending calls whose outcome is
+/// unknown with "I have checked", the last action's errors, a credential shown once, its result
+/// when asked, and "Show API call" — or, before any action, the list's API call. The questions
+/// this section words itself are asked from here.
 struct VoicesStudioActivity: View {
     let actions: VoicesStudioActions
     /// The runner to describe before any action runs — usually the section's main list.
@@ -626,11 +803,33 @@ struct VoicesStudioActivity: View {
                     Text("Working: \(runner.title ?? runner.operation.summary)")
                         .font(.callout)
                         .lineLimit(1)
-                    if runner.operation.billable { ElevenLabsRiskBadge(risk: .generate) }
+                    if actions.spends(runner) { ElevenLabsRiskBadge(risk: .generate) }
                     Spacer()
                     Button("Cancel") { runner.cancel() }
                         .controlSize(.small)
                 }
+            }
+            if !actions.unknownOutcomes.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(actions.unknownOutcomes.values.sorted(), id: \.self) { title in
+                        Label("“\(title)” was stopped after it was sent. It may already have been started and billed.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Text("The list above has been fetched again. Check it before starting anything else that costs credits.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("I have checked") { actions.acknowledgeUnknownOutcomes() }
+                            .controlSize(.small)
+                    }
+                }
+                .padding(10)
+                .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
             }
             if let refusal = actions.refusal {
                 Label(refusal, systemImage: "hourglass")
@@ -639,42 +838,97 @@ struct VoicesStudioActivity: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let runner = actions.last ?? fallback {
-                if credentialsInline, runner.credential != nil {
-                    ElevenLabsAPICallDisclosure(runner: runner)
-                        .elevenLabsConfirmation(for: runner, when: runner.presentsOwnConfirmation)
-                        .id(runner.id)
-                } else {
-                    ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult && actions.last != nil)
-                        .id(runner.id)
+                VoicesStudioRunnerOutput(
+                    runner: runner, showsResult: showsResult && actions.last != nil,
+                    showsCredential: !credentialsInline
+                )
+                .id(runner.id)
+            }
+        }
+        .sheet(item: Binding(
+            get: { actions.presentedQuestion },
+            set: { if $0 == nil { actions.answer(false) } }
+        )) { request in
+            ElevenLabsRiskConfirmation(
+                request: request, onConfirm: { actions.answer(true) }, onCancel: { actions.answer(false) }
+            )
+        }
+    }
+}
+
+/// What a run leaves on screen — the shell's `ElevenLabsRunnerOutput` without its own question
+/// sheet, which the foot asks instead (worded by the section where it chose to).
+struct VoicesStudioRunnerOutput: View {
+    let runner: ElevenLabsRunner
+    var showsResult = true
+    var showsCredential = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let failure = runner.failure {
+                switch failure {
+                case .invalidArguments(let problems):
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Nothing was sent:").font(.caption.weight(.medium))
+                        ElevenLabsProblemList(problems: problems)
+                    }
+                default:
+                    Label(failure.message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            if let refusal = runner.refusal {
+                Label(refusal, systemImage: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if runner.phase == .cancelled, let note = runner.cancellationNote {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
+            if showsCredential, let credential = runner.credential {
+                ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
+            }
+            if showsResult, let result = runner.result {
+                ElevenLabsResultView(
+                    result: result, operation: runner.operation,
+                    outputFormat: runner.arguments["output_format"]?.stringValue
+                )
+            }
+            if runner.apiCall != nil || runner.phase != .idle {
+                ElevenLabsAPICallDisclosure(runner: runner)
             }
         }
     }
 }
 
-/// The shell's Run button, disabled while another call on the same screen is spending
-/// credits — the button alone watches only its own runner, and a screen swaps runners when a
-/// mode or model changes. The call under way is named, with Cancel, in the section's foot.
+/// The shell's Run button, held while another spending call on the same screen is under way
+/// or one's outcome is unknown — the button alone watches only its own runner, and a screen
+/// swaps runners when a mode or model changes. The call under way is named, with Cancel, in the
+/// section's foot.
 struct VoicesStudioRunButton: View {
     let actions: VoicesStudioActions
     let runner: ElevenLabsRunner
     var title = "Run"
     var estimatedCharacters: Int?
     var disabled = false
+    var disabledReason: String?
+    /// The section's words for what it costs, from the spec, in place of the generated note.
+    var costNote: String?
+    /// Overrides whether this run spends (a Studio create with "convert now").
+    var spends: Bool?
     let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ElevenLabsRunButton(
-                runner: runner, title: title, estimatedCharacters: estimatedCharacters,
-                disabled: disabled || actions.isBlocked(runner), action: action
-            )
-            if actions.isBlocked(runner), let busy = actions.billableInFlight, busy !== runner {
-                Text("Waiting for “\(busy.title ?? busy.operation.summary)” to finish — cancel it below to start this.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
+        let blocked = runner.isRunning ? nil : actions.blockReason(runner, spends: spends)
+        ElevenLabsRunButton(
+            runner: runner, title: title, estimatedCharacters: estimatedCharacters,
+            disabled: disabled || blocked != nil, disabledReason: blocked ?? disabledReason,
+            costNote: costNote, action: action
+        )
     }
 }
 
