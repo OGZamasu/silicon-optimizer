@@ -10,6 +10,43 @@ import Testing
 @MainActor
 struct CreativeSpecTests {
 
+    /// The screen model built for each creative section.
+    static func model(for section: ElevenLabsSection) -> (any CreativeScreenModel.Type)? {
+        switch section {
+        case .speech: SpeechScreenModel.self
+        case .dialogue: DialogueScreenModel.self
+        case .voiceChanger: VoiceChangerScreenModel.self
+        default: nil
+        }
+    }
+
+    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger])
+    func everyControlSetsARealArgumentOfARealOperation(section: ElevenLabsSection) throws {
+        let model = try #require(Self.model(for: section))
+        for control in model.controls {
+            #expect(!control.operations.isEmpty, "\(section): “\(control.label)” names no operation")
+            for operation in control.operations {
+                #expect(ElevenLabsCatalog.operation(operation) != nil,
+                        "\(section): “\(control.label)” is sent to \(operation), which the catalog does not have")
+                #expect(CreativeSpec.has(operation, control.argument),
+                        "\(section): “\(control.label)” sets \(control.argument), which \(operation) does not take")
+            }
+        }
+    }
+
+    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger])
+    func everyOperationOfTheSectionIsReachableFromItsScreen(section: ElevenLabsSection) throws {
+        let model = try #require(Self.model(for: section))
+        let claimed = Set(section.operations.map(\.id))
+        #expect(!claimed.isEmpty, "\(section) has no operations in the catalog")
+        let reached = Set(model.operationIDs)
+        #expect(claimed.subtracting(reached).isEmpty,
+                "\(section) does not reach \(claimed.subtracting(reached).sorted())")
+        for id in model.operationIDs {
+            #expect(ElevenLabsCatalog.operation(id) != nil, "\(section) runs \(id), which the catalog does not have")
+        }
+    }
+
     /// The operations a screen reaches outside its own section are reads it needs (voice
     /// settings, pronunciation dictionaries) — never something that spends or changes.
     @Test func operationsBorrowedFromOtherSectionsAreFreeReads() throws {
@@ -68,6 +105,14 @@ struct CreativeSpecTests {
         for (value, evidence) in CreativeSpec.documentedValues[key] ?? [] {
             #expect(text.contains(evidence), "\(key): the description no longer lists \(value)")
         }
+    }
+
+    /// Dialogue's two limits come from the `inputs` description.
+    @Test func dialogueLimitsAreTheOnesTheSpecStates() throws {
+        let schema = try #require(CreativeSpec.schema(DialogueScreenModel.full, "inputs"))
+        let text = schema["description"].stringValue ?? ""
+        #expect(text.contains("maximum number of unique voice IDs is \(DialogueScreenModel.maxVoices)"))
+        #expect(text.contains(DialogueScreenModel.recommendedCharacters.formatted(.number.locale(Locale(identifier: "en_US")))))
     }
 
     // MARK: - The lookups themselves

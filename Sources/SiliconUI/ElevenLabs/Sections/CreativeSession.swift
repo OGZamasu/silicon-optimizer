@@ -27,6 +27,9 @@ final class CreativeSession {
         models = CreativeModelsDirectory(runner: Self.runner("get_models", context: context, records: false))
     }
 
+    lazy var speech = SpeechScreenModel(session: self)
+    lazy var dialogue = DialogueScreenModel(session: self)
+    lazy var voiceChanger = VoiceChangerScreenModel(session: self)
     /// Pronunciation dictionaries, for Speech and Dialogue to attach.
     lazy var dictionaries = CreativeDictionaryDirectory(
         runner: Self.runner("get_pronunciation_dictionaries_metadata", context: context, records: false)
