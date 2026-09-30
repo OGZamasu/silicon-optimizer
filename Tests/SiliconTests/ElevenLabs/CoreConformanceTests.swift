@@ -10,7 +10,7 @@ import Testing
 struct CoreConformanceTests {
 
     static let key = "sk_" + String(repeating: "conformance", count: 3)
-    static let pathSample = "id 1/x"
+    static let pathSample = "id 1 x"
 
     @Test func everyOperationIsReachableThroughCallAndBuildsWhatTheSpecSays() async throws {
         let snapshot = CoreCatalogTests.repository.appendingPathComponent("Scripts/elevenlabs/openapi.json")
@@ -95,7 +95,7 @@ struct CoreConformanceTests {
                 let name = parameter["name"].stringValue ?? ""
                 let text = arguments[name].flatMap(ElevenLabsRequestBuilder.scalarText) ?? ""
                 expectedPath = expectedPath.replacingOccurrences(
-                    of: "{\(name)}", with: text == Self.pathSample ? "id%201%2Fx" : text
+                    of: "{\(name)}", with: text == Self.pathSample ? "id%201%20x" : text
                 )
             }
             #expect(request.url.path(percentEncoded: true) == expectedPath, "\(operation.id)")

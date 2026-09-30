@@ -411,8 +411,6 @@ enum ElevenLabsRiskTable {
         "submit_merge_proposal_review_route",  // POST /v1/convai/agents/{agent_id}/merge-proposals/{merge_proposal_id}/reviews
         "add_merge_proposal_comment_route",  // POST /v1/convai/agents/{agent_id}/merge-proposals/{merge_proposal_id}/comments
         "accept_merge_proposal_route",  // POST /v1/convai/agents/{agent_id}/merge-proposals/{merge_proposal_id}/merge
-        "create_speech_engine",  // POST /v1/speech-engine
-        "update_speech_engine",  // PATCH /v1/speech-engine/{speech_engine_id}
         "create_procedure_route",  // POST /v1/convai/agents/{agent_id}/branches/{branch_id}/procedures
         "compile_procedures_route",  // POST /v1/convai/agents/{agent_id}/branches/{branch_id}/procedures/compile
         "update_procedure_draft_route",  // PATCH /v1/convai/agents/{agent_id}/branches/{branch_id}/procedures/{procedure_id}/draft
@@ -476,7 +474,8 @@ enum ElevenLabsRiskTable {
     /// accounts, secrets, MCP servers, Agents Platform workspace settings, workspace invites,
     /// members, groups, webhooks, auth connections and resource sharing, service accounts and API
     /// keys (including disabling the key in use), agent tools and environment variables (a webhook
-    /// tool points an agent at an outside URL with headers, exactly as an MCP server does),
+    /// tool points an agent at an outside URL with headers, exactly as an MCP server does), speech
+    /// engines (they send ElevenLabs to an outside WebSocket URL with the owner's headers),
     /// single-use tokens, replicating a voice to another
     /// data-residency workspace, and submitting a Productions order (which charges the workspace).
     static let realWorld: [String] = [
@@ -532,6 +531,8 @@ enum ElevenLabsRiskTable {
         "update_whatsapp_account",  // PATCH /v1/convai/whatsapp-accounts/{phone_number_id}
         "delete_whatsapp_account",  // DELETE /v1/convai/whatsapp-accounts/{phone_number_id}
         "public_submit_order",  // POST /v1/productions/orders/{order_id}/submit
+        "create_speech_engine",  // POST /v1/speech-engine
+        "update_speech_engine",  // PATCH /v1/speech-engine/{speech_engine_id}
         "add_tool_route",  // POST /v1/convai/tools
         "update_tool_route",  // PATCH /v1/convai/tools/{tool_id}
         "create_environment_variable",  // POST /v1/convai/environment-variables
