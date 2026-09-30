@@ -111,6 +111,19 @@ final class DialogueScreenModel: CreativeScreenModel {
     }
 
     var runner: ElevenLabsRunner { runners[operationID]! }
+
+    /// The run in flight, or waiting for its confirmation, whichever operation it is: the
+    /// pickers that choose the operation can change while it runs, and must not hand the Run
+    /// row an idle runner (a second paid run, and a Cancel that no longer reaches the first).
+    var busyRunner: ElevenLabsRunner? {
+        Self.operationIDs.compactMap { runners[$0] }.first { $0.isRunning || $0.isAwaitingConfirmation }
+    }
+
+    /// What the Run row shows: the run in flight, so Cancel reaches it, else the chosen one.
+    var activeRunner: ElevenLabsRunner { busyRunner ?? runner }
+
+    /// Said while a run is in flight.
+    static let busyProblem = "Wait for the current take to finish, or cancel it."
     var outputFormats: [String] { CreativeSpec.choices(operationID, "output_format") }
     var effectiveOutputFormat: String {
         outputFormats.contains(outputFormat)
@@ -132,7 +145,7 @@ final class DialogueScreenModel: CreativeScreenModel {
     static let recommendedCharacters = 2000
 
     var problems: [String] {
-        var problems: [String] = []
+        var problems: [String] = busyRunner == nil ? [] : [Self.busyProblem]
         let spoken = lines.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         if spoken.isEmpty { problems.append("Write at least one line.") }
         if spoken.contains(where: { $0.voiceID.isEmpty }) { problems.append("Choose a voice for every line.") }
@@ -240,7 +253,7 @@ final class DialogueScreenModel: CreativeScreenModel {
     // MARK: - Running
 
     func generate() async {
-        guard problems.isEmpty else { return }
+        guard busyRunner == nil, problems.isEmpty else { return }
         let runner = runner
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = delivery == .stream ? .play : .collect
@@ -294,12 +307,14 @@ struct DialogueScreen: View {
                     ForEach(SpeechScreenModel.Delivery.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                .disabled(screen.busyRunner != nil)
                 Toggle("Word timings and who speaks when", isOn: $screen.timestamps)
+                    .disabled(screen.busyRunner != nil)
             }
             settingsCard
             advanced
             CreativeRunRow(
-                runner: screen.runner, title: "Perform dialogue",
+                runner: screen.activeRunner, title: "Perform dialogue",
                 estimatedCharacters: screen.estimatedCharacters, problems: screen.problems,
                 note: screen.totalCharacters > DialogueScreenModel.recommendedCharacters
                     ? "Over \(DialogueScreenModel.recommendedCharacters.formatted()) characters in all; ElevenLabs recommends splitting longer scripts."

@@ -131,6 +131,19 @@ final class SpeechScreenModel: CreativeScreenModel {
 
     var runner: ElevenLabsRunner { runners[operationID]! }
 
+    /// The run in flight, or waiting for its confirmation, whichever operation it is: the
+    /// pickers that choose the operation can change while it runs, and must not hand the Run
+    /// row an idle runner (a second paid run, and a Cancel that no longer reaches the first).
+    var busyRunner: ElevenLabsRunner? {
+        Self.operationIDs.compactMap { runners[$0] }.first { $0.isRunning || $0.isAwaitingConfirmation }
+    }
+
+    /// What the Run row shows: the run in flight, so Cancel reaches it, else the chosen one.
+    var activeRunner: ElevenLabsRunner { busyRunner ?? runner }
+
+    /// Said while a run is in flight.
+    static let busyProblem = "Wait for the current take to finish, or cancel it."
+
     /// The formats the current operation takes: the streamed ones take no WAV.
     var outputFormats: [String] { CreativeSpec.choices(operationID, "output_format") }
 
@@ -159,7 +172,7 @@ final class SpeechScreenModel: CreativeScreenModel {
 
     /// Why Generate is not ready, in the order to fix them.
     var problems: [String] {
-        var problems: [String] = []
+        var problems: [String] = busyRunner == nil ? [] : [Self.busyProblem]
         if voiceID.isEmpty { problems.append("Choose a voice.") }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { problems.append("Write something to say.") }
         if let limit = characterLimit, text.count > limit {
@@ -206,7 +219,7 @@ final class SpeechScreenModel: CreativeScreenModel {
     // MARK: - Running
 
     func generate() async {
-        guard problems.isEmpty else { return }
+        guard busyRunner == nil, problems.isEmpty else { return }
         let runner = runner
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = delivery == .stream ? .play : .collect
@@ -245,7 +258,7 @@ struct SpeechScreen: View {
             outputCard
             advanced
             CreativeRunRow(
-                runner: screen.runner, title: "Generate speech",
+                runner: screen.activeRunner, title: "Generate speech",
                 estimatedCharacters: screen.estimatedCharacters, problems: screen.problems,
                 note: screen.delivery == .stream && !CreativeOutputFormat.playsLive(screen.effectiveOutputFormat)
                     ? "\(CreativeOutputFormat.title(screen.effectiveOutputFormat)) is not played as it arrives; the whole answer is kept and plays when it is done."
@@ -302,8 +315,10 @@ struct SpeechScreen: View {
                 ForEach(SpeechScreenModel.Delivery.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
+            .disabled(screen.busyRunner != nil)
             Toggle("Word timings", isOn: $screen.timestamps)
                 .help("Also get when each character is spoken, to follow along and export subtitles")
+                .disabled(screen.busyRunner != nil)
         }
     }
 

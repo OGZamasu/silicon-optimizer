@@ -757,6 +757,90 @@ struct CreativeScreenTests {
         #expect(rig.session.speech.modelID == "eleven_flash_v2_5")
     }
 
+    // MARK: - One paid run at a time
+
+    /// Changing how a take is delivered while one runs used to hand the Run row an idle runner:
+    /// Generate came back, a second paid request went out, and Cancel no longer reached the
+    /// first. Now the row keeps the run in flight, a second start is refused, and Cancel stops it.
+    @Test func switchingWhatRunsMidRunNeitherBillsTwiceNorLosesCancel() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        var slow = FakeElevenLabsTransport.Reply.audio(CreativeRig.wavData(seconds: 0.2), contentType: "audio/wav")
+        slow.delay = .seconds(5)
+        for id in [SpeechScreenModel.full, DialogueScreenModel.full, VoiceChangerScreenModel.full,
+                   IsolationScreenModel.full, MusicScreenModel.compose] {
+            rig.always(id, slow)
+        }
+
+        let speech = rig.session.speech
+        speech.voiceID = "voice-rachel"
+        speech.text = "Hi."
+        try await Self.oneRunAtATime(
+            rig: rig, operations: SpeechScreenModel.operationIDs, start: { await speech.generate() },
+            busy: { speech.busyRunner }, active: { speech.activeRunner },
+            flip: { speech.timestamps = true; speech.delivery = .stream },
+            refused: { speech.problems.contains(SpeechScreenModel.busyProblem) }
+        )
+
+        let dialogue = rig.session.dialogue
+        dialogue.lines = [DialogueLine(voiceID: "voice-rachel", text: "Hi."), DialogueLine(voiceID: "voice-adam", text: "Hello.")]
+        try await Self.oneRunAtATime(
+            rig: rig, operations: DialogueScreenModel.operationIDs, start: { await dialogue.generate() },
+            busy: { dialogue.busyRunner }, active: { dialogue.activeRunner },
+            flip: { dialogue.timestamps = true },
+            refused: { dialogue.problems.contains(DialogueScreenModel.busyProblem) }
+        )
+
+        let changer = rig.session.voiceChanger
+        changer.source = rig.wav(named: "me.wav")
+        changer.voiceID = "voice-adam"
+        try await Self.oneRunAtATime(
+            rig: rig, operations: VoiceChangerScreenModel.operationIDs, start: { await changer.generate() },
+            busy: { changer.busyRunner }, active: { changer.activeRunner },
+            flip: { changer.delivery = .stream },
+            refused: { changer.problems.contains(VoiceChangerScreenModel.busyProblem) }
+        )
+
+        let isolation = rig.session.isolation
+        isolation.source = rig.wav(named: "noisy.wav")
+        try await Self.oneRunAtATime(
+            rig: rig, operations: [IsolationScreenModel.full, IsolationScreenModel.stream], start: { await isolation.isolate() },
+            busy: { isolation.busyRunner }, active: { isolation.activeRunner },
+            flip: { isolation.delivery = .stream },
+            refused: { isolation.problems.contains(IsolationScreenModel.busyProblem) }
+        )
+
+        let music = rig.session.music
+        music.prompt = "Lo-fi"
+        try await Self.oneRunAtATime(
+            rig: rig, operations: MusicScreenModel.composeIDs, start: { await music.composeSong() },
+            busy: { music.busyRunner }, active: { music.activeComposeRunner },
+            flip: { music.delivery = .detailed },
+            refused: { music.composeProblems.contains(MusicScreenModel.busyProblem) }
+        )
+    }
+
+    /// Starts a run, flips what would run, tries again, and cancels from what the Run row shows.
+    static func oneRunAtATime(
+        rig: CreativeRig, operations: [String], start: @escaping @MainActor () async -> Void,
+        busy: @MainActor () -> ElevenLabsRunner?, active: @MainActor () -> ElevenLabsRunner,
+        flip: @MainActor () -> Void, refused: @MainActor () -> Bool
+    ) async throws {
+        func sent() -> Int { operations.reduce(0) { $0 + rig.requests($1).count } }
+        let first = Task { await start() }
+        try await CreativeRig.waitUntil { busy() != nil && sent() == 1 }
+        let running = try #require(busy())
+        flip()
+        #expect(active() === running, "the Run row must keep showing the run in flight")
+        #expect(refused(), "the screen must say why it cannot start another")
+        await start()
+        #expect(sent() == 1, "\(operations[0]): a second paid request went out while the first ran")
+        active().cancel()
+        await first.value
+        #expect(running.phase == .cancelled, "\(operations[0]): Cancel did not reach the run in flight")
+        #expect(busy() == nil)
+    }
+
     // MARK: - Controls
 
     @Test func finelySteppedSlidersRoundInsteadOfDrawingTicks() {

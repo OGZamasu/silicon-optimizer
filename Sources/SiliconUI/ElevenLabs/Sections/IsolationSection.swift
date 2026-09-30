@@ -97,9 +97,24 @@ final class IsolationScreenModel: CreativeScreenModel {
 
     var operationID: String { delivery == .stream ? Self.stream : Self.full }
     var runner: ElevenLabsRunner { runners[operationID]! }
+
+    /// The run in flight, or waiting for its confirmation, whichever operation it is: the
+    /// pickers that choose the operation can change while it runs, and must not hand the Run
+    /// row an idle runner (a second paid run, and a Cancel that no longer reaches the first).
+    var busyRunner: ElevenLabsRunner? {
+        Self.operationIDs.compactMap { runners[$0] }.first { $0.isRunning || $0.isAwaitingConfirmation }
+    }
+
+    /// What the Run row shows: the run in flight, so Cancel reaches it, else the chosen one.
+    var activeRunner: ElevenLabsRunner { busyRunner ?? runner }
+
+    /// Said while a run is in flight.
+    static let busyProblem = "Wait for the current take to finish, or cancel it."
     var pcmFormatValue: String? { CreativeSpec.choices(operationID, "file_format").first { $0.hasPrefix("pcm") } }
 
-    var problems: [String] { source == nil ? ["Choose a recording."] : [] }
+    var problems: [String] {
+        (busyRunner == nil ? [] : [Self.busyProblem]) + (source == nil ? ["Choose a recording."] : [])
+    }
 
     func arguments() -> [String: JSONValue] {
         var arguments: [String: JSONValue] = [:]
@@ -112,7 +127,7 @@ final class IsolationScreenModel: CreativeScreenModel {
     }
 
     func isolate() async {
-        guard problems.isEmpty else { return }
+        guard busyRunner == nil, problems.isEmpty else { return }
         let runner = runner
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = delivery == .stream ? .play : .collect
@@ -191,11 +206,12 @@ struct IsolationScreen: View {
                     ForEach(SpeechScreenModel.Delivery.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                .disabled(screen.busyRunner != nil)
                 Toggle("The recording is raw 16-bit, 16 kHz mono PCM (lower latency)", isOn: $screen.rawPCMInput)
                     .disabled(screen.pcmFormatValue == nil)
             }
             CreativeRunRow(
-                runner: screen.runner, title: "Isolate the voice",
+                runner: screen.activeRunner, title: "Isolate the voice",
                 estimatedSeconds: screen.source.flatMap(CreativeMedia.duration(of:)), problems: screen.problems
             ) {
                 Task { await screen.isolate() }

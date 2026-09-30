@@ -297,6 +297,19 @@ final class MusicScreenModel: CreativeScreenModel {
     }
 
     var composeRunner: ElevenLabsRunner { runner(composeOperationID) }
+
+    /// The run in flight, or waiting for its confirmation, whichever operation it is: the
+    /// pickers that choose the operation can change while it runs, and must not hand the Run
+    /// row an idle runner (a second paid run, and a Cancel that no longer reaches the first).
+    var busyRunner: ElevenLabsRunner? {
+        Self.composeIDs.compactMap { runners[$0] }.first { $0.isRunning || $0.isAwaitingConfirmation }
+    }
+
+    /// What the Run row shows: the run in flight, so Cancel reaches it, else the chosen one.
+    var activeComposeRunner: ElevenLabsRunner { busyRunner ?? composeRunner }
+
+    /// Said while a run is in flight.
+    static let busyProblem = "Wait for the current take to finish, or cancel it."
     var models: [String] { CreativeSpec.choices(Self.compose, "model_id") }
     var generationModes: [String] { CreativeSpec.choices(Self.compose, "generation_mode") }
     var outputFormats: [String] { CreativeSpec.choices(composeOperationID, "output_format") }
@@ -312,7 +325,7 @@ final class MusicScreenModel: CreativeScreenModel {
     var isDetailed: Bool { delivery == .detailed || delivery == .detailedStream }
 
     var composeProblems: [String] {
-        var problems: [String] = []
+        var problems: [String] = busyRunner == nil ? [] : [Self.busyProblem]
         if usesPlan {
             if let plan { problems += plan.problems() } else if planJSONValue == nil { problems.append("Make or load a plan under Plan first.") }
         } else if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -387,7 +400,7 @@ final class MusicScreenModel: CreativeScreenModel {
     }
 
     func composeSong() async {
-        guard composeProblems.isEmpty else { return }
+        guard busyRunner == nil, composeProblems.isEmpty else { return }
         let runner = composeRunner
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = delivery == .stream || delivery == .detailedStream ? .play : .collect
@@ -800,6 +813,7 @@ private struct MusicComposeTab: View {
                 ForEach(MusicScreenModel.Delivery.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
+            .disabled(screen.busyRunner != nil)
             if screen.isDetailed {
                 Toggle("Lyrics timings", isOn: $screen.withTimestamps)
                 Toggle("Waveform", isOn: $screen.withWaveform)
@@ -823,7 +837,7 @@ private struct MusicComposeTab: View {
                 .padding(.top, 8)
             }
         }
-        CreativeRunRow(runner: screen.composeRunner, title: "Compose", problems: screen.composeProblems) {
+        CreativeRunRow(runner: screen.activeComposeRunner, title: "Compose", problems: screen.composeProblems) {
             Task { await screen.composeSong() }
         }
         MusicResultCard(screen: screen, runner: screen.lastRunner)
