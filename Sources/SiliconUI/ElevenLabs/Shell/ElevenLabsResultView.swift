@@ -250,7 +250,12 @@ struct ElevenLabsFileResult: View {
     var body: some View {
         let type = contentType.lowercased()
         VStack(alignment: .leading, spacing: 6) {
-            if type.hasPrefix("audio/") {
+            if type.hasPrefix("audio/"), Self.isRawAudio(url: url, contentType: type) {
+                fileRow
+                Text("Raw audio with no header: it cannot play here. Save it, or open it in an editor with the sample rate you chose.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if type.hasPrefix("audio/") {
                 ElevenLabsAudioPlayerView(url: url, title: url.lastPathComponent).id(url)
             } else if type.hasPrefix("image/"), let image = NSImage(contentsOf: url) {
                 Image(nsImage: image)
@@ -269,6 +274,14 @@ struct ElevenLabsFileResult: View {
                 fileRow
             }
         }
+    }
+
+    /// PCM, μ-law and A-law as ElevenLabs sends them: samples with no header, which no player
+    /// can open without being told the rate.
+    static func isRawAudio(url: URL, contentType: String) -> Bool {
+        ["pcm", "ulaw", "alaw"].contains(url.pathExtension.lowercased())
+            || ["audio/pcm", "audio/l16", "audio/basic", "audio/x-mulaw", "audio/ulaw", "audio/alaw", "audio/x-alaw"]
+                .contains(contentType.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? "")
     }
 
     private var fileRow: some View {

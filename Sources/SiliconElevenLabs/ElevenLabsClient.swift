@@ -194,6 +194,12 @@ public actor ElevenLabsClient {
     /// How many requests may run at once right now.
     public var concurrencyLimit: Int { get async { await gate.limit } }
 
+    /// Sets how many requests may run at once — from an account read by another client, as
+    /// Connect does when it verifies a key before this client exists.
+    public func setConcurrencyLimit(_ limit: Int) async {
+        await gate.setLimit(limit)
+    }
+
     // MARK: - Preparing
 
     nonisolated func prepare(

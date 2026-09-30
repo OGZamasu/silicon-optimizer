@@ -1,27 +1,18 @@
 import Foundation
 import SiliconElevenLabs
 
-/// The pane's end of the app model: the balance check, disconnecting, and where runners put
-/// streamed audio. The key, the client and linking itself are the core's
-/// (`AppModel+ElevenLabs`).
+/// The pane's end of the app model: disconnecting and leaving the pane's place. The key, the
+/// client, the account check and linking itself are the core's (`AppModel+ElevenLabs`).
 extension AppModel {
 
-    /// Where a stream played as it arrives is kept: the app's ElevenLabs output folder. Nil
-    /// until the core's sink is in place, which makes `.play` collect instead.
-    var elevenLabsRunnerSink: (any ElevenLabsFileSink)? {
-        nil
-    }
-
-    /// Checks the plan and balance again with the free account call, and remembers the
-    /// answer for the header and Settings.
-    func refreshElevenLabsBalance() async {
-        guard let client = elevenLabsClient else { return }
+    /// Checks the plan and balance with the core's free account call, and tells the pane
+    /// whether the account was reachable — the header's refresh, the pane's first look, and
+    /// Settings' Check all go through here.
+    func checkElevenLabsAccount() async {
         do {
-            elevenLabsLink.account = try await client.account()
-            elevenLabsLink.lastError = nil
+            try await refreshElevenLabsAccount()
             elevenLabsPane.noteSuccess()
         } catch {
-            elevenLabsLink.lastError = ElevenLabsRunnerFailure(error).message
             elevenLabsPane.noteFailure(error)
         }
     }
