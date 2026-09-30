@@ -132,7 +132,8 @@ struct VoicesStudioConcurrencyTests {
         let model = VoiceDesignSectionModel(environment: fixture.environment)
         model.voiceDescription = "A calm, low narrator with a warm Scottish accent."
         let design = Task { await model.generate() }
-        try await voicesStudioWait { model.actions.isRunning("text_to_voice_design") }
+        // Running, and the request on the wire — the fake answers it only after a delay.
+        try await voicesStudioWait { fixture.sent("text_to_voice_design").count == 1 }
 
         // Starting the same design again would abandon the one already sent (and billed).
         await model.generate()
