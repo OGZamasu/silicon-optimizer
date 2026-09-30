@@ -694,26 +694,51 @@ struct AgentsOutsideAddress: Equatable, Sendable {
         case loopback, linkLocal, privateNetwork, `public`
     }
 
-    /// What a host is, whatever way it is written: a name (`localhost`, `localhost.`, `.local`),
-    /// dotted, decimal, hex or octal IPv4 (`127.1`, `2130706433`, `0x7f000001`, `0177.0.0.1`),
-    /// or IPv6 including IPv4-mapped (`::1`, `::ffff:127.0.0.1`, `fe80::…`, `fd00::…`).
+    /// What a host is, whatever way it is written: a name (`localhost`, `localhost.`,
+    /// `localhost.localdomain`, `.local`), dotted, decimal, hex or octal IPv4 (`127.1`,
+    /// `2130706433`, `0x7f000001`, `0177.0.0.1`), or IPv6 in any form `inet_pton` reads —
+    /// compressed or full, with an IPv4 tail, mapped or compatible (`0::1`,
+    /// `0:0:0:0:0:ffff:7f00:1`, `::127.0.0.1`, `fe80::1%en0`).
     static func kind(of rawHost: String) -> Kind {
         var host = rawHost.lowercased()
         if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
         while host.hasSuffix(".") { host.removeLast() }
-        if host == "localhost" || host.hasSuffix(".localhost") { return .loopback }
-        if host.hasSuffix(".local") || host.hasSuffix(".internal") || host.hasSuffix(".lan") || host.hasSuffix(".home.arpa") {
+        if host == "localhost" || host.hasSuffix(".localhost") || host == "localhost.localdomain" { return .loopback }
+        if host.hasSuffix(".local") || host.hasSuffix(".internal") || host.hasSuffix(".lan") || host.hasSuffix(".home.arpa")
+            || host.hasSuffix(".localdomain") {
             return .privateNetwork
         }
         if host.contains(":") {
-            if let mapped = ipv4Mapped(host) { return kind(ofIPv4: mapped) }
-            if host == "::1" || host == "0:0:0:0:0:0:0:1" { return .loopback }
-            if host == "::" { return .loopback }
-            if host.hasPrefix("fe8") || host.hasPrefix("fe9") || host.hasPrefix("fea") || host.hasPrefix("feb") { return .linkLocal }
-            if host.hasPrefix("fc") || host.hasPrefix("fd") { return .privateNetwork }
-            return .public
+            guard let bytes = ipv6(host) else { return .public }
+            return kind(ofIPv6: bytes)
         }
         if let address = ipv4(host) { return kind(ofIPv4: address) }
+        return .public
+    }
+
+    /// The sixteen bytes of an IPv6 address as the system reads it (`inet_pton`), a zone
+    /// (`%en0`) left off; nil when it is not one.
+    static func ipv6(_ host: String) -> [UInt8]? {
+        let text = host.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? host
+        var address = in6_addr()
+        guard text.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else { return nil }
+        return withUnsafeBytes(of: &address) { Array($0) }
+    }
+
+    static func kind(ofIPv6 bytes: [UInt8]) -> Kind {
+        guard bytes.count == 16 else { return .public }
+        let tail = bytes[12..<16].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        let firstTen = bytes[0..<10].allSatisfy { $0 == 0 }
+        // ::ffff:a.b.c.d — IPv4-mapped.
+        if firstTen, bytes[10] == 0xFF, bytes[11] == 0xFF { return kind(ofIPv4: tail) }
+        // ::, ::1, and ::a.b.c.d — IPv4-compatible.
+        if firstTen, bytes[10] == 0, bytes[11] == 0 { return tail <= 1 ? .loopback : kind(ofIPv4: tail) }
+        // 64:ff9b::a.b.c.d — NAT64, which reaches the IPv4 address inside.
+        if bytes[0..<4] == [0x00, 0x64, 0xFF, 0x9B], bytes[4..<12].allSatisfy({ $0 == 0 }) { return kind(ofIPv4: tail) }
+        if bytes[0] == 0xFE, bytes[1] & 0xC0 == 0x80 { return .linkLocal }
+        // fec0::/10 (old site-local) and fc00::/7 (unique local).
+        if bytes[0] == 0xFE, bytes[1] & 0xC0 == 0xC0 { return .privateNetwork }
+        if bytes[0] & 0xFE == 0xFC { return .privateNetwork }
         return .public
     }
 
@@ -758,16 +783,6 @@ struct AgentsOutsideAddress: Equatable, Sendable {
             }
         }
         return UInt32(truncatingIfNeeded: address)
-    }
-
-    /// The IPv4 address inside an IPv4-mapped IPv6 host (`::ffff:127.0.0.1`, `::ffff:7f00:1`).
-    static func ipv4Mapped(_ host: String) -> UInt32? {
-        guard host.hasPrefix("::ffff:") else { return nil }
-        let rest = String(host.dropFirst("::ffff:".count))
-        if rest.contains(".") { return ipv4(rest) }
-        let groups = rest.split(separator: ":").compactMap { UInt32($0, radix: 16) }
-        guard groups.count == 2, groups.allSatisfy({ $0 <= 0xFFFF }) else { return nil }
-        return (groups[0] << 16) | groups[1]
     }
 }
 

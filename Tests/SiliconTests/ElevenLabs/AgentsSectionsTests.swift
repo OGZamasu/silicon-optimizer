@@ -1064,6 +1064,13 @@ struct AgentsSectionsTests {
             ("https://[fe80::1]/sse", "link-local"), ("https://2852039166/latest", "link-local"),
             ("https://[fd12:3456::1]/sse", "private"), ("https://[::ffff:10.0.0.5]/sse", "private"),
             ("https://10.1/sse", "private"), ("https://0xc0a80001/sse", "private"),
+            // Round 3: IPv6 read the way the system reads it.
+            ("https://[0:0:0:0:0:ffff:7f00:1]/sse", "loopback"), ("https://[::127.0.0.1]/sse", "loopback"),
+            ("https://[0::1]/sse", "loopback"), ("https://[0000:0000:0000:0000:0000:0000:0000:0001]/sse", "loopback"),
+            ("https://[::]/sse", "loopback"), ("https://[FE80:0:0:0:0:0:0:1]/sse", "link-local"),
+            ("https://[febf::1]/sse", "link-local"), ("https://[fc00::5]/sse", "private"),
+            ("https://[::ffff:a9fe:a9fe]/latest", "link-local"), ("https://[64:ff9b::7f00:1]/sse", "loopback"),
+            ("https://localhost.localdomain/sse", "loopback"), ("https://LOCALHOST.LOCALDOMAIN./sse", "loopback"),
         ]
         for (address, word) in cases {
             let found = AgentsOutsideAddress(address)
@@ -1071,7 +1078,8 @@ struct AgentsSectionsTests {
             #expect(found.warnings.contains { $0.contains(word) }, "\(address): \(found.warnings)")
             #expect(!found.warnings.contains { $0.contains("plain http") }, "\(address) is https")
         }
-        for address in ["https://8.8.8.8/sse", "https://mcp.example.com/sse", "https://[2001:db8::1]/sse", "https://1000.example.com/x"] {
+        for address in ["https://8.8.8.8/sse", "https://mcp.example.com/sse", "https://[2001:db8::1]/sse", "https://1000.example.com/x",
+                        "https://[::ffff:8.8.8.8]/sse", "https://[fec::1]/sse", "https://[ff02::1]/sse"] {
             #expect(AgentsOutsideAddress(address).warnings.isEmpty, "\(address)")
         }
     }
