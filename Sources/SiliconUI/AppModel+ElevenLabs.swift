@@ -301,23 +301,58 @@ final class ElevenLabsCredential: ElevenLabsKeyStore, @unchecked Sendable {
     private let lock = NSLock()
     /// nil: never asked. `.some(nil)`: asked, and there is none.
     private var cached: String??
+    /// Bumped whenever `store` or `remove` finishes. A read that started before that is older
+    /// than what they left in `cached`, and must neither overwrite it nor be handed out.
+    private var generation = 0
+    /// The Keychain read now in flight, shared by everyone who asks meanwhile. A freshly built
+    /// app's first read waits on the consent dialog, and the pane asks for the account and the
+    /// voices at the same moment — one dialog each would be one too many.
+    private var inFlight: Task<String?, any Error>?
+
+    private enum Step {
+        case answer(String?)
+        case join(Task<String?, any Error>)
+    }
 
     init(access: Access = .keychain) { self.access = access }
 
     func apiKey() async throws -> String? {
-        if let cached = lock.withLock({ cached }) { return cached }
-        let access = access
-        switch await Self.offActor({ access.read() }) {
-        case .found(let key):
-            lock.withLock { cached = .some(key) }
-            return key
-        case .absent:
-            lock.withLock { cached = .some(nil) }
-            return nil
-        case .unavailable(let status):
-            // Nothing is remembered: the next request asks again, and a locked Keychain or a
-            // dismissed dialog costs one call, not the session.
-            throw ElevenLabsError.credentialUnavailable(Self.describe(status))
+        let step: Step = lock.withLock {
+            if let cached { return .answer(cached) }
+            if let running = inFlight { return .join(running) }
+            let started = generation
+            let access = access
+            let task = Task<String?, any Error> {
+                let answer = await Self.offActor { access.read() }
+                return try self.finishRead(answer, startedAt: started)
+            }
+            inFlight = task
+            return .join(task)
+        }
+        switch step {
+        case .answer(let key): return key
+        case .join(let task): return try await task.value
+        }
+    }
+
+    private func finishRead(_ answer: KeychainReadResult, startedAt started: Int) throws -> String? {
+        try lock.withLock {
+            inFlight = nil
+            // A `store` or `remove` finished while this read was out: what it left is the truth
+            // now, and this read's answer is older.
+            guard started == generation else { return cached ?? nil }
+            switch answer {
+            case .found(let key):
+                cached = .some(key)
+                return key
+            case .absent:
+                cached = .some(nil)
+                return nil
+            case .unavailable(let status):
+                // Nothing is remembered: the next request asks again, and a locked Keychain or a
+                // dismissed dialog costs one call, not the session.
+                throw ElevenLabsError.credentialUnavailable(Self.describe(status))
+            }
         }
     }
 
@@ -327,7 +362,10 @@ final class ElevenLabsCredential: ElevenLabsKeyStore, @unchecked Sendable {
         guard status == errSecSuccess else {
             throw ElevenLabsError.credentialUnavailable(Self.describe(status))
         }
-        lock.withLock { cached = .some(key) }
+        lock.withLock {
+            generation += 1
+            cached = .some(key)
+        }
     }
 
     func remove() async throws {
@@ -336,7 +374,10 @@ final class ElevenLabsCredential: ElevenLabsKeyStore, @unchecked Sendable {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw ElevenLabsError.credentialUnavailable(Self.describe(status))
         }
-        lock.withLock { cached = .some(nil) }
+        lock.withLock {
+            generation += 1
+            cached = .some(nil)
+        }
     }
 
     /// Runs a Keychain call on a GCD thread: it can sit behind the consent dialog for as long

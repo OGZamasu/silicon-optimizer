@@ -265,6 +265,7 @@ struct CoreAppModelTests {
         #expect(try await credential.apiKey() == nil)
         #expect(calls.names == ["read", "write", "delete"])
         #expect(!calls.anyOnMain)
+        #expect(!calls.anyOnSwiftTask, "the Keychain must be asked on a GCD thread, not the cooperative pool")
     }
 
     @Test func aLockedKeychainIsReportedAndAskedAgainNextTime() async throws {
@@ -285,8 +286,20 @@ struct CoreAppModelTests {
         private let lock = NSLock()
         private var _names: [String] = []
         private var _anyOnMain = false
-        func note(_ name: String, main: Bool) { lock.withLock { _names.append(name); _anyOnMain = _anyOnMain || main } }
+        private var _anyOnSwiftTask = false
+        /// `main` is true on the main thread. A Swift-concurrency thread — the cooperative pool —
+        /// has a current task; a GCD thread has none. Only a GCD thread may sit behind the
+        /// Keychain's consent dialog, so the second is the property that matters.
+        func note(_ name: String, main: Bool) {
+            let onSwiftTask = withUnsafeCurrentTask { $0 != nil }
+            lock.withLock {
+                _names.append(name)
+                _anyOnMain = _anyOnMain || main
+                _anyOnSwiftTask = _anyOnSwiftTask || onSwiftTask
+            }
+        }
         var names: [String] { lock.withLock { _names } }
         var anyOnMain: Bool { lock.withLock { _anyOnMain } }
+        var anyOnSwiftTask: Bool { lock.withLock { _anyOnSwiftTask } }
     }
 }
