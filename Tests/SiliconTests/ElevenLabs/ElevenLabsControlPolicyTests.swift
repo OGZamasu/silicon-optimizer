@@ -85,10 +85,9 @@ struct ElevenLabsControlPolicyTests {
     @MainActor
     @Test func everyCallerOnEveryListenerOnEveryRoute() async throws {
         let swarmSecret = "swarm-fixture-secret"
-        try await withServer(
-            host: BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false),
-            swarmToken: swarmSecret
-        ) { fixture in
+        let host = BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false)
+        await ElevenLabsControlHostLog.shared.clear(host)
+        try await withServer(host: host, swarmToken: swarmSecret) { fixture in
             let full = try await fixture.pair(name: "Full phone", scope: .full).token
             let chat = try await fixture.pair(name: "Chat phone", scope: .chat).token
             // The owner has also let the swarm reach this Mac: the same socket, with the
@@ -127,12 +126,15 @@ struct ElevenLabsControlPolicyTests {
                     }
                 }
             }
+            // Before any client call: of the forty requests, the host saw this Mac's four.
+            let reached = await ElevenLabsControlHostLog.shared.requests(for: host)
+            #expect(reached.count == Self.routes.count)
         }
     }
 
-    /// What this Mac's own token gets on loopback before the routes exist: the router's 404,
-    /// which is the proof that it got past every gate.
-    static let controlAnswer = 404
+    /// What this Mac's own token gets on loopback: the host's answer, which is the proof that
+    /// it got past every gate.
+    static let controlAnswer = 200
 
     /// Refused on the headers. A phone declares three megabytes — inside what it may send
     /// anywhere else — and then sends nothing: the 403 must already be on its way, because
@@ -140,10 +142,9 @@ struct ElevenLabsControlPolicyTests {
     @MainActor
     @Test func aPhoneOrAPeerIsRefusedBeforeItsBodyIsRead() async throws {
         let swarmSecret = "swarm-fixture-secret"
-        try await withServer(
-            host: BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false),
-            swarmToken: swarmSecret
-        ) { fixture in
+        let host = BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false)
+        await ElevenLabsControlHostLog.shared.clear(host)
+        try await withServer(host: host, swarmToken: swarmSecret) { fixture in
             let full = try await fixture.pair(name: "Full phone", scope: .full).token
             let chat = try await fixture.pair(name: "Chat phone", scope: .chat).token
             try await fixture.server.setTailnetAccess(
@@ -174,6 +175,7 @@ struct ElevenLabsControlPolicyTests {
                     #expect(answer.contains(ElevenLabsControl.onlyThisMac), "\(refusal.who)")
                 }
             }
+            #expect(await ElevenLabsControlHostLog.shared.requests(for: host).isEmpty)
         }
     }
 

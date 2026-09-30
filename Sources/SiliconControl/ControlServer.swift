@@ -1569,6 +1569,12 @@ public actor ControlServer {
         guard let caller else { return unauthorized }
 
         let segments = request.path.split(separator: "/").map(String.init)
+        // The owner's ElevenLabs account. Only this Mac's own token gets this far.
+        if ElevenLabsControl.isElevenLabsPath(request.path) {
+            return await Self.routeElevenLabs(
+                request, segments: segments, as: caller, on: origin, host: host
+            )
+        }
         // The results themselves. Before everything else because it is the only route that
         // answers bytes rather than JSON, and the only one whose path is an id.
         if request.method == "GET", let id = Self.parameter(segments, matching: ["media", "*"]) {
