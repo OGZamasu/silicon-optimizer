@@ -167,11 +167,15 @@ struct ElevenLabsAudioPlayerView: View {
 /// Reads a stream to its end: audio and other bytes to one file from the sink (fed to the
 /// player as they arrive), events kept as JSON. What `ElevenLabsRunner` uses for `.play`.
 enum ElevenLabsStreamCollector {
+    /// - Parameter outputFormat: The run's `output_format`. Audio is saved as that format:
+    ///   the `…/with-timestamps` streams are JSON carrying base64 audio, so the stream's own
+    ///   content type (`application/json`) says nothing about the audio in it.
     static func collect(
         _ stream: AsyncThrowingStream<ElevenLabsChunk, any Error>,
         operation: ElevenLabsOperation,
         sink: any ElevenLabsFileSink,
         player: ElevenLabsStreamPlayer?,
+        outputFormat: String? = nil,
         progress: @escaping @Sendable (Int) async -> Void
     ) async throws -> ElevenLabsResult {
         var meta = ElevenLabsMeta(status: 200)
@@ -179,9 +183,12 @@ enum ElevenLabsStreamCollector {
         var file: (url: URL, handle: FileHandle, contentType: String)?
         var bytes = 0
 
-        func write(_ data: Data) throws {
+        func write(_ data: Data, isAudio: Bool) throws {
             if file == nil {
-                let contentType = meta.contentType ?? "audio/mpeg"
+                let streamed = meta.contentType?.lowercased() ?? ""
+                let contentType = isAudio && !streamed.hasPrefix("audio/")
+                    ? audioContentType(outputFormat: outputFormat)
+                    : (meta.contentType ?? audioContentType(outputFormat: outputFormat))
                 let url = try sink.destination(
                     for: operation,
                     suggestedName: "\(operation.id).\(fileExtension(for: contentType))",
@@ -201,11 +208,11 @@ enum ElevenLabsStreamCollector {
                 case .started(let started):
                     meta = started
                 case .audio(let data):
-                    try write(data)
+                    try write(data, isAudio: true)
                     if let player { await player.append(data) }
                     await progress(bytes)
                 case .bytes(let data):
-                    try write(data)
+                    try write(data, isAudio: false)
                     await progress(bytes)
                 case .event(let event):
                     events.append(event)
@@ -229,17 +236,32 @@ enum ElevenLabsStreamCollector {
         return .parts(events.map(ElevenLabsResultPart.json) + [written], meta)
     }
 
+    /// The content type of audio in `outputFormat` (`mp3_44100_128`, `pcm_24000`,
+    /// `ulaw_8000`…), named as the client names the files it collects; MP3 when not given.
+    static func audioContentType(outputFormat: String?) -> String {
+        let format = outputFormat?.lowercased() ?? "mp3"
+        for (prefix, type) in [("mp3", "audio/mpeg"), ("pcm", "audio/pcm"), ("opus", "audio/opus"),
+                               ("wav", "audio/wav"), ("ulaw", "audio/ulaw"), ("alaw", "audio/alaw"),
+                               ("flac", "audio/flac")] where format.hasPrefix(prefix) {
+            return type
+        }
+        return "audio/mpeg"
+    }
+
     /// A file extension for a content type, for names the sink makes unique.
     static func fileExtension(for contentType: String) -> String {
         let type = contentType.lowercased().split(separator: ";").first.map(String.init) ?? ""
         switch type {
         case "audio/mpeg", "audio/mp3": return "mp3"
         case "audio/wav", "audio/x-wav", "audio/wave": return "wav"
-        case "audio/ogg", "audio/opus": return "ogg"
+        case "audio/ogg": return "ogg"
+        case "audio/opus": return "opus"
+        case "audio/ulaw": return "ulaw"
+        case "audio/alaw", "audio/x-alaw": return "alaw"
         case "audio/flac": return "flac"
         case "audio/mp4", "audio/aac": return "m4a"
-        case "audio/pcm", "audio/basic", "audio/l16": return "pcm"
-        case "audio/mulaw", "audio/x-mulaw": return "ulaw"
+        case "audio/pcm", "audio/l16": return "pcm"
+        case "audio/basic", "audio/mulaw", "audio/x-mulaw": return "ulaw"
         case "video/mp4": return "mp4"
         case "application/zip", "application/x-zip-compressed", "application/x-zip": return "zip"
         case "text/csv": return "csv"
@@ -384,6 +406,7 @@ struct ElevenLabsRawAudioPlayerView: View {
                             Text("\(Int(rate)) Hz").tag(rate)
                         }
                     }
+                    .controlSize(.small)
                     .fixedSize()
                 } else {
                     Text("\(Int(rate)) Hz")

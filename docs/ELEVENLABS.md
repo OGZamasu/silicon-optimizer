@@ -339,6 +339,20 @@ play as they arrive or be collected. **Copy as curl** leaves the key to `$ELEVEN
   (naming what the section says it acts on). It runs or streams with Cancel, and keeps the result
   and the call it sent, without the key, for "Show API call". A secret in the answer is shown once
   and never kept. Every result except a secret goes to the session's recent list.
+- **A runner does one run at a time.** A section's own busy guard is a second layer.
+  - **Reads** are replaced: a run started while a read is in flight cancels the old one and
+    starts clean, because restarting costs nothing.
+  - **Anything else** (generate, modify, destructive, real world) is refused while a run is in
+    flight or waiting for its confirmation. Nothing is sent, and `refusal` reads "A run is
+    already in progress — cancel it first, and note it may already have been billed." The
+    request in flight may already have been billed or acted on, and a second one would do it
+    again.
+  - **Cancel, then run again** is allowed for everything. Once a request that is not a read has
+    gone to the client, `cancellationNote` says it "may already have been billed or
+    performed".
+  - A cancelled or replaced run never touches the next run's state, even when its request
+    completes late. Each run and each Cancel takes a generation number, and only the current
+    one may change what the runner shows.
 - **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
   `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
   `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.

@@ -77,6 +77,10 @@ struct ShellAudioTests {
         #expect(ElevenLabsStreamCollector.fileExtension(for: "audio/pcm") == "pcm")
         #expect(ElevenLabsStreamCollector.fileExtension(for: "application/zip") == "zip")
         #expect(ElevenLabsStreamCollector.fileExtension(for: "audio/x-something") == "audio")
+        #expect(ElevenLabsStreamCollector.fileExtension(for: "audio/basic") == "ulaw")
+        #expect(ElevenLabsStreamCollector.audioContentType(outputFormat: "pcm_16000") == "audio/pcm")
+        #expect(ElevenLabsStreamCollector.audioContentType(outputFormat: "ulaw_8000") == "audio/ulaw")
+        #expect(ElevenLabsStreamCollector.audioContentType(outputFormat: nil) == "audio/mpeg")
         #expect(ElevenLabsStreamCollector.fileExtension(for: "application/x-unknown") == "bin")
     }
 

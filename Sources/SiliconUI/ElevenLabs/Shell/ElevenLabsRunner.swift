@@ -102,12 +102,28 @@ final class ElevenLabsRunner: Identifiable {
     private(set) var finishedAt: Date?
     /// Bytes of body received so far, while a stream plays.
     private(set) var receivedBytes = 0
+    /// Why the last `perform` sent nothing although the arguments were fine: a run that is
+    /// not a read was already in flight. Cleared when a run starts.
+    private(set) var refusal: String?
+    /// What a Cancel left behind: for anything but a read cancelled after it was handed to
+    /// the client, that it may already have been billed or performed.
+    private(set) var cancellationNote: String?
+
+    /// What a second run is refused with while one that is not a read is in flight.
+    static let busyMessage = "A run is already in progress — cancel it first, and note it may already have been billed."
+    /// What a Cancel says once a request that is not a read may have gone out.
+    static let cancelledAfterSendingMessage = "Cancelled. The request may already have been billed or performed."
     /// Plays a stream as it arrives; nil when not playing one.
     private(set) var streamPlayer: ElevenLabsStreamPlayer?
 
     @ObservationIgnored private let context: Context
     @ObservationIgnored private var task: Task<ElevenLabsResult, any Error>?
     @ObservationIgnored private var pendingConfirmation: CheckedContinuation<Bool, Never>?
+    /// Which run owns the runner's state. Every run takes a new one, and so does Cancel; a
+    /// run's frame that wakes up — from its answer, a late completion, a withdrawn question —
+    /// under another number touches nothing, so it can never mark a newer run cancelled,
+    /// failed or done.
+    @ObservationIgnored private var generation = 0
 
     init(operation: ElevenLabsOperation, context: Context) {
         self.operation = operation
@@ -135,7 +151,8 @@ final class ElevenLabsRunner: Identifiable {
     /// What running it costs, for the Run button's caption. Nil for free operations.
     var costNote: String? { ElevenLabsCostNote.text(for: operation) }
 
-    /// Starts a run and returns at once; watch `phase`. See `perform`.
+    /// Starts a run and returns at once; watch `phase`. See `perform`, including what happens
+    /// to a run already in flight.
     func run(
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
         subject: String? = nil, consequence: String? = nil
@@ -144,8 +161,19 @@ final class ElevenLabsRunner: Identifiable {
     }
 
     /// Checks `arguments`, asks for confirmation when the operation's risk calls for it,
-    /// runs, and returns the answer — nil when it was refused, declined, cancelled or failed
-    /// (see `phase`, `problems` and `failure`).
+    /// runs, and returns the answer — nil when it was refused, declined, cancelled, failed or
+    /// replaced by a newer run (see `phase`, `problems` and `failure`).
+    ///
+    /// A run started while another is in flight (or waiting for its answer to a question):
+    /// - for a **read**, replaces it: restarting is free, so the old request is cancelled, its
+    ///   `perform` returns nil, and nothing it does afterwards reaches this runner's state;
+    /// - for **anything else** — generate, modify, destructive, real world — is refused and sends
+    ///   nothing: the run in flight may already have been billed or acted on, and a second one
+    ///   would do it again. `refusal` says so; the run in flight carries on untouched.
+    ///
+    /// Cancel, then run again, is allowed for everything (the owner chose it); `cancellationNote`
+    /// then says the cancelled request may already have been billed or performed. Either way a
+    /// cancelled or replaced run's late completion never touches the next run.
     ///
     /// - Parameters:
     ///   - subject: What the operation acts on, in words ("the voice “Rachel”", "12 phone
@@ -157,7 +185,17 @@ final class ElevenLabsRunner: Identifiable {
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
         subject: String? = nil, consequence: String? = nil
     ) async -> ElevenLabsResult? {
-        guard phase != .running, phase != .awaitingConfirmation else { return nil }
+        if phase == .running || phase == .awaitingConfirmation {
+            guard operation.risk == .read else {
+                refusal = Self.busyMessage
+                return nil
+            }
+            abandonCurrentRun()
+        }
+        generation += 1
+        let run = generation
+        refusal = nil
+        cancellationNote = nil
         self.arguments = arguments
         self.files = files
         problems = []
@@ -184,7 +222,9 @@ final class ElevenLabsRunner: Identifiable {
             let request = ElevenLabsConfirmationRequest.make(
                 for: operation, subject: subject, consequence: consequence, call: apiCall
             )
-            guard await askForConfirmation(request) else {
+            let answer = await askForConfirmation(request, run: run)
+            guard run == generation else { return nil }
+            guard answer else {
                 phase = .idle
                 return nil
             }
@@ -203,7 +243,13 @@ final class ElevenLabsRunner: Identifiable {
                 try await ElevenLabsStreamCollector.collect(
                     client.stream(operation.id, arguments: arguments, files: files),
                     operation: operation, sink: sink, player: player,
-                    progress: { bytes in await MainActor.run { self?.receivedBytes = bytes } }
+                    outputFormat: arguments["output_format"]?.stringValue,
+                    progress: { bytes in
+                        await MainActor.run {
+                            guard let self, self.generation == run else { return }
+                            self.receivedBytes = bytes
+                        }
+                    }
                 )
             }
         } else {
@@ -213,12 +259,13 @@ final class ElevenLabsRunner: Identifiable {
 
         do {
             let answer = try await task.value
+            guard run == generation else { return nil }
             self.task = nil
             return succeed(answer)
         } catch {
+            guard run == generation else { return nil }
             self.task = nil
-            if Task.isCancelled || phase == .cancelled || (error as? ElevenLabsError) == .cancelled
-                || error is CancellationError {
+            if Task.isCancelled || (error as? ElevenLabsError) == .cancelled || error is CancellationError {
                 phase = .cancelled
                 finishedAt = Date()
                 return nil
@@ -244,9 +291,13 @@ final class ElevenLabsRunner: Identifiable {
             return
         }
         guard phase == .running else { return }
+        generation += 1
+        cancellationNote = operation.risk == .read ? "Cancelled." : Self.cancelledAfterSendingMessage
+        refusal = nil
         phase = .cancelled
         finishedAt = Date()
         task?.cancel()
+        task = nil
         stopStreamPlayer()
     }
 
@@ -266,6 +317,8 @@ final class ElevenLabsRunner: Identifiable {
         result = nil
         apiCall = nil
         credential = nil
+        refusal = nil
+        cancellationNote = nil
         startedAt = nil
         finishedAt = nil
         receivedBytes = 0
@@ -274,14 +327,32 @@ final class ElevenLabsRunner: Identifiable {
 
     // MARK: - Steps
 
-    private func askForConfirmation(_ request: ElevenLabsConfirmationRequest) async -> Bool {
+    private func askForConfirmation(_ request: ElevenLabsConfirmationRequest, run: Int) async -> Bool {
         confirmation = request
         phase = .awaitingConfirmation
         context.pane?.present(self)
         let answer = await withCheckedContinuation { pendingConfirmation = $0 }
-        confirmation = nil
-        context.pane?.dismissConfirmation(of: self)
+        // A newer run may already be asking its own question; leave that one on screen.
+        if run == generation {
+            confirmation = nil
+            context.pane?.dismissConfirmation(of: self)
+        }
         return answer
+    }
+
+    /// Lets go of the run in flight so a new one can start clean: its request is cancelled,
+    /// or its question withdrawn, and its frame — whenever it wakes — finds another
+    /// generation and leaves everything alone.
+    private func abandonCurrentRun() {
+        generation += 1
+        task?.cancel()
+        task = nil
+        stopStreamPlayer()
+        if confirmation != nil {
+            confirmation = nil
+            context.pane?.dismissConfirmation(of: self)
+        }
+        resolveConfirmation(false)
     }
 
     /// Whether this runner's host must show its confirmation itself: only when there is no
@@ -302,6 +373,7 @@ final class ElevenLabsRunner: Identifiable {
             shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         }
         result = shown
+        refusal = nil
         phase = .succeeded
         finishedAt = Date()
         streamPlayer?.finish()
@@ -316,6 +388,7 @@ final class ElevenLabsRunner: Identifiable {
     private func fail(_ failure: ElevenLabsRunnerFailure, error: (any Error)? = nil) -> ElevenLabsResult? {
         if case .invalidArguments(let found) = failure { problems = found }
         self.failure = failure
+        refusal = nil
         phase = .failed
         finishedAt = Date()
         stopStreamPlayer()
