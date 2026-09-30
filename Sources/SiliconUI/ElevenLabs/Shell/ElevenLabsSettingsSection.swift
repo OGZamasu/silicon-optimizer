@@ -135,7 +135,7 @@ struct ElevenLabsSettingsSection: View {
             }
         } else {
             LabeledContent("Plan") {
-                Button("Check") { Task { await model.refreshElevenLabsBalance() } }
+                Button("Check") { Task { await model.checkElevenLabsAccount() } }
             }
         }
         HStack {

@@ -66,7 +66,8 @@ final class ElevenLabsRunner: Identifiable {
         @MainActor static func app(_ model: AppModel) -> Context {
             Context(
                 client: { [weak model] in model?.elevenLabsClient },
-                sink: { [weak model] in model?.elevenLabsRunnerSink },
+                // The core's dated output folder, registered with the media table.
+                sink: { [weak model] in model.flatMap { $0.elevenLabsLinked ? $0.elevenLabsSink() : nil } },
                 pane: model.elevenLabsPane
             )
         }

@@ -79,7 +79,7 @@ struct ElevenLabsCreditsHeader: View {
             Button {
                 refreshing = true
                 Task {
-                    await model.refreshElevenLabsBalance()
+                    await model.checkElevenLabsAccount()
                     refreshing = false
                 }
             } label: {
