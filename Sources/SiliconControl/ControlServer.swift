@@ -737,6 +737,9 @@ public actor ControlServer {
             } catch HTTPRequest.ParseError.unauthorized {
                 await refuse(unauthorized, on: connection)
                 return
+            } catch HTTPRequest.ParseError.refused(let status, let message) {
+                await refuse(.error(status, message), on: connection)
+                return
             } catch HTTPRequest.ParseError.bodyTooLarge(let limit) {
                 await refuse(.error(
                     413, "That request body is larger than this device may send (\(limit) bytes)."
@@ -850,6 +853,10 @@ public actor ControlServer {
         /// may read what the Mac is and talk to its loaded model, but may not spend the
         /// machine or administer it.
         func mayReach(method: String, path: String) -> Bool {
+            // Above the scopes, because full control is exactly the scope that would
+            // otherwise let a phone spend the owner's ElevenLabs credits. This Mac's own
+            // token or nobody; `bodyLimit` has usually refused the rest already, unread.
+            if ElevenLabsControl.isElevenLabsPath(path) { return self == .control }
             switch self {
             case .control, .device(_, .full):
                 return true
@@ -950,6 +957,9 @@ public actor ControlServer {
         guard let caller else { return nil }
         guard !(request.method == "POST" && request.path == "/buddy/pair") else { return nil }
         guard !caller.mayReach(method: request.method, path: request.path) else { return nil }
+        if ElevenLabsControl.isElevenLabsPath(request.path) {
+            return .error(403, ElevenLabsControl.onlyThisMac)
+        }
         if caller == .swarm { return .error(403, swarmRouteRefusal) }
         return .error(403, chatOnlyRefusal)
     }
@@ -1128,6 +1138,9 @@ public actor ControlServer {
     private func bodyLimit(
         forMethod method: String, path: String, headers: [String: String], from origin: Origin
     ) async throws -> Int {
+        if ElevenLabsControl.isElevenLabsPath(path) {
+            return try await elevenLabsBodyLimit(headers: headers, from: origin)
+        }
         guard origin == .tailnet else { return HTTPRequest.maximumBody }
         guard let bearer = HTTPRequest.bearerToken(in: headers) else {
             // No bearer on the tailnet means `/buddy/pair`, the one route with nothing to
@@ -1163,6 +1176,27 @@ public actor ControlServer {
             return BuddyUploads.maximumBytes
         }
         return BuddyLimits.requestBodyBytes
+    }
+
+    /// `/elevenlabs/*` is this Mac's own token on this Mac's own listener, and that is settled
+    /// here, on the headers, before a byte of body is read. A paired phone of any scope, or a
+    /// peer, is refused by name; anyone else is told what a missing token is told. Nobody
+    /// but the owner's own tools gets to hold a connection open uploading to these routes.
+    private func elevenLabsBodyLimit(
+        headers: [String: String], from origin: Origin
+    ) async throws -> Int {
+        let bearer = HTTPRequest.bearerToken(in: headers)
+        if origin == .primary, bearer == token { return HTTPRequest.maximumBody }
+        if let bearer {
+            let isSwarm = swarmToken.map { !$0.isEmpty && bearer == $0 } ?? false
+            if isSwarm, honoursSwarmToken(from: origin) {
+                throw HTTPRequest.ParseError.refused(403, ElevenLabsControl.onlyThisMac)
+            }
+            if origin == .tailnet, await buddy.authorize(bearer: bearer) != nil {
+                throw HTTPRequest.ParseError.refused(403, ElevenLabsControl.onlyThisMac)
+            }
+        }
+        throw HTTPRequest.ParseError.unauthorized
     }
 
     /// The peer's address, for rate-limiting pairing attempts. Shapes we cannot read collapse
@@ -2722,6 +2756,9 @@ struct HTTPRequest {
         /// The headers already say the caller is nobody, and the body is more than nobody
         /// may send. See `ControlServer.bodyLimit`.
         case unauthorized
+        /// The headers already say this caller may not use the route at all, so its body is
+        /// never read. See `ControlServer.elevenLabsBodyLimit`.
+        case refused(Int, String)
 
         var errorDescription: String? {
             switch self {
@@ -2730,6 +2767,7 @@ struct HTTPRequest {
             case .bodyTooLarge(let limit): "Request body over \(limit) bytes."
             case .lengthRequired: "A Content-Length is required."
             case .unauthorized: "Invalid or missing control token."
+            case .refused(_, let message): message
             }
         }
     }
