@@ -175,8 +175,26 @@ struct ShellInterfaceTests {
                                 summary: "Handle an outbound call via Twilio", risk: .realWorld)
         )
         #expect(request.consequence.contains("outside your"))
-        #expect(request.confirmLabel == "Place the call")
+        #expect(request.confirmLabel == "Call now")
         #expect(request.call == "POST /v1/convai/twilio/outbound-call")
+        #expect(request.title == "Handle an outbound call via Twilio?")
+    }
+
+    @Test func aTitleReadsAsASentenceWithOrWithoutASubject() {
+        let calls = Self.operation(id: "create_batch_call", method: "POST", path: "/v1/convai/batch-calling/submit",
+                                   summary: "Submit A Batch Call Request.", risk: .realWorld)
+        #expect(ElevenLabsConfirmationRequest.make(for: calls, subject: "12 phone calls with “Front desk”").title
+                == "Place 12 phone calls with “Front desk”?")
+        let cancel = Self.operation(id: "cancel_batch_call", method: "POST", path: "/v1/convai/batch-calling/{batch_id}/cancel",
+                                    summary: "Cancel A Batch Call.", risk: .realWorld)
+        #expect(ElevenLabsConfirmationRequest.make(for: cancel, subject: "the batch “Monday”").title
+                == "Cancel a batch call: the batch “Monday”?")
+        #expect(ElevenLabsConfirmationRequest.make(for: cancel).confirmLabel == "Run")
+        let invite = Self.operation(id: "invite_user", method: "POST", path: "/v1/workspace/invites/add",
+                                    summary: "Invite User", risk: .realWorld)
+        #expect(ElevenLabsConfirmationRequest.make(for: invite, subject: "an invite to a teammate").title
+                == "Send an invite to a teammate?")
+        #expect(ElevenLabsConfirmationRequest.sentenceCase("Add MCP Server To Agent") == "Add MCP server to agent")
     }
 
     // MARK: - Credentials
