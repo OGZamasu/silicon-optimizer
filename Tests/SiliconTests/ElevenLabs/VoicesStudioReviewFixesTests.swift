@@ -5,12 +5,34 @@ import Testing
 
 /// The review of the voices-and-studio sections: each test pins one finding (named in its
 /// comment) and failed before its fix.
-@Suite("ElevenLabs voices and studio sections: review fixes")
+@Suite("ElevenLabs voices and studio sections: review fixes", .timeLimit(.minutes(1)))
 @MainActor
 struct VoicesStudioReviewFixesTests {
 
     static func delayed(_ json: String, seconds: Int = 5) -> FakeElevenLabsTransport.Reply {
         .init(status: 200, headers: ["content-type": "application/json"], body: Data(json.utf8), delay: .seconds(seconds))
+    }
+
+    final class Flag { var done = false }
+
+    /// Runs an action and declines any question it asks — so a screen that asks when it must
+    /// not fails the test instead of waiting for an answer forever. Returns what was asked.
+    func runDeclining(
+        _ actions: VoicesStudioActions, _ action: @escaping @MainActor () async -> Void
+    ) async throws -> ElevenLabsConfirmationRequest? {
+        let flag = Flag()
+        let task = Task { await action(); flag.done = true }
+        var asked: ElevenLabsConfirmationRequest?
+        for _ in 0..<500 where !flag.done {
+            if let question = actions.presentedQuestion {
+                asked = question
+                actions.answer(false)
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await task.value
+        return asked
     }
 
     /// The pinned spec's text, for checking the screens' money sentences against it.
@@ -53,8 +75,8 @@ struct VoicesStudioReviewFixesTests {
         // Selected with a stale $240.00; ElevenLabs no longer has a quote.
         model.load(orders: [], selected: try #require(ProductionsOrder(json: VoicesStudioProductionsTests.order(
             "o1", total: 240, items: [VoicesStudioProductionsTests.dubItem]))))
-        await model.submit()
-        #expect(model.actions.presentedQuestion == nil)
+        let askedUnquoted = try await runDeclining(model.actions) { await model.submit() }
+        #expect(askedUnquoted == nil, "asked to charge with no quote: “\(askedUnquoted?.consequence ?? "")”")
         #expect(fixture.sent("public_submit_order").isEmpty)
         #expect(model.submitHold?.contains("Waiting for ElevenLabs' quote") == true)
 
@@ -176,7 +198,7 @@ struct VoicesStudioReviewFixesTests {
         model.load(projects: [project], selected: project)
         model.contentDocument = [try scratch.file("second-draft.epub")]
         model.contentAutoConvert = true
-        let asked = try await voicesStudioAsk(model.actions, answer: false) { await model.updateContent() }
+        let asked = try await runDeclining(model.actions) { await model.updateContent() }
         #expect(asked?.title == "Replace everything in “The Long Road” with “second-draft.epub”?")
         #expect(asked?.confirmLabel == "Replace content")
         #expect(asked?.consequence.contains("Its 2 chapters and your edits in them are replaced") == true)
