@@ -410,6 +410,7 @@ final class AgentKnowledgeModel {
                 : "ElevenLabs will delete it. If an agent still uses it, the deletion is refused."
         ) != nil else { return }
         list.remove(selectedID)
+        guard self.selectedID == selectedID else { return }
         self.selectedID = nil
         detail = .null
     }

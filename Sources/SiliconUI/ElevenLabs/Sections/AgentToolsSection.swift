@@ -212,7 +212,9 @@ final class AgentToolsModel {
         dependents = []
         executions = []
         editsJSON = false
-        if let known = list.item(id) { show(known) }
+        // The editor only ever holds the selected tool: an unknown one shows nothing until it arrives,
+        // so Save and Delete cannot pair one tool's id with another's configuration or name.
+        if let known = list.item(id) { show(known) } else { tool = nil }
         guard let json = await calls.json(AgentsOp.getTool, ["tool_id": .string(id)], slot: id, quiet: true),
               selectedID == id, let tool = AgentsTool(json: json) else { return }
         show(tool)
@@ -265,16 +267,17 @@ final class AgentToolsModel {
         return (subject, consequence + " Every agent using it gets the change from its next conversation.")
     }
 
+    /// Saves the configuration in the editor to the tool it was opened from.
     func save() async {
-        guard let selectedID, case .success(let config) = configToSave() else { return }
+        guard let id = tool?.id, id == selectedID, case .success(let config) = configToSave() else { return }
         let wording = Self.describe(config)
-        guard let json = await calls.json(AgentsOp.updateTool, ["tool_id": .string(selectedID), "tool_config": config],
-                                          slot: selectedID, title: "Saved tool “\(config["name"].stringValue ?? "")”",
+        guard let json = await calls.json(AgentsOp.updateTool, ["tool_id": .string(id), "tool_config": config],
+                                          slot: id, title: "Saved tool “\(config["name"].stringValue ?? "")”",
                                           subject: wording.subject, consequence: wording.consequence),
-              let tool = AgentsTool(json: json) else { return }
-        list.upsert(tool)
-        store.directory.tools.upsert(tool)
-        show(tool)
+              let saved = AgentsTool(json: json) else { return }
+        list.upsert(saved)
+        store.directory.tools.upsert(saved)
+        if selectedID == id { show(saved) }
     }
 
     func startCreating() {
@@ -297,7 +300,8 @@ final class AgentToolsModel {
 
     func loadDependents() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.toolDependents, ["tool_id": .string(selectedID)], slot: selectedID, quiet: true)
+        guard let json = await calls.json(AgentsOp.toolDependents, ["tool_id": .string(selectedID)], slot: selectedID, quiet: true),
+              self.selectedID == selectedID
         else { return }
         dependents = (json["agents"].arrayValue ?? []).map { $0["name"].stringValue ?? $0["id"].stringValue ?? "An agent" }
     }
@@ -306,24 +310,28 @@ final class AgentToolsModel {
         guard let selectedID else { return }
         var arguments: [String: JSONValue] = ["tool_id": .string(selectedID), "page_size": 30]
         if errorsOnly { arguments["is_error"] = true }
-        guard let json = await calls.json(AgentsOp.toolExecutions, arguments, slot: selectedID, quiet: true) else { return }
+        guard let json = await calls.json(AgentsOp.toolExecutions, arguments, slot: selectedID, quiet: true),
+              self.selectedID == selectedID else { return }
         executions = (json["executions"].arrayValue ?? []).compactMap(AgentsToolExecution.init(json:))
         await store.directory.resolveAgentNames(executions.map(\.agentID))
     }
 
+    /// Deletes the tool on screen: its id and the name in the question come from the same place.
     func delete() async {
-        guard let selectedID, let tool else { return }
-        var arguments: [String: JSONValue] = ["tool_id": .string(selectedID)]
+        guard let tool, tool.id == selectedID else { return }
+        let id = tool.id
+        var arguments: [String: JSONValue] = ["tool_id": .string(id)]
         if forceDelete { arguments["force"] = true }
         guard await calls.json(
-            AgentsOp.deleteTool, arguments, slot: selectedID, subject: "the tool “\(tool.name)”",
+            AgentsOp.deleteTool, arguments, slot: id, subject: "the tool “\(tool.name)”",
             consequence: forceDelete
                 ? "ElevenLabs deletes it and takes it out of every agent that uses it; those agents can no longer call it."
                 : "ElevenLabs deletes it. If an agent still uses it, the deletion is refused."
         ) != nil else { return }
-        list.remove(selectedID)
-        store.directory.tools.remove(selectedID)
-        self.selectedID = nil
+        list.remove(id)
+        store.directory.tools.remove(id)
+        guard selectedID == id else { return }
+        selectedID = nil
         self.tool = nil
     }
 

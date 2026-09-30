@@ -82,6 +82,8 @@ final class AgentAnalyticsModel {
     var newTagTitle = ""
     var newTagDescription = ""
     private(set) var selectedTagID: String?
+    /// The tag whose title and description the fields hold; nil while the selected one's are on their way.
+    private(set) var loadedTagID: String?
     var editTagTitle = ""
     var editTagDescription = ""
 
@@ -161,9 +163,13 @@ final class AgentAnalyticsModel {
         return AgentsPage(items: tickets, cursor: json["next_cursor"].stringValue, hasMore: json["has_more"].boolValue)
     }
 
+    /// The ticket last asked for: a slower answer for an earlier one never replaces it.
+    private(set) var openingTicketID: String?
+
     func openTicket(_ id: String) async {
+        openingTicketID = id
         guard let json = await calls.json(AgentsOp.getTicket, ["agentqa_ticket_id": .string(id)], slot: id, quiet: true),
-              let ticket = AgentsTicket(json: json) else { return }
+              openingTicketID == id, let ticket = AgentsTicket(json: json) else { return }
         self.ticket = ticket
         tickets.upsert(ticket)
         await loadAssignableUsers(agentID: ticket.agentID)
@@ -196,6 +202,7 @@ final class AgentAnalyticsModel {
         newTicketConversationID = ""
         if let ticket = AgentsTicket(json: json) {
             tickets.upsert(ticket)
+            openingTicketID = ticket.id
             self.ticket = ticket
         } else {
             await tickets.refresh()
@@ -208,7 +215,7 @@ final class AgentAnalyticsModel {
         if let status { arguments["status"] = .string(status) }
         if let assignee { arguments["assignee_user_id"] = assignee.isEmpty ? .null : .string(assignee) }
         guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticket.id) != nil else { return }
-        await openTicket(ticket.id)
+        if openingTicketID == ticket.id { await openTicket(ticket.id) }
     }
 
     func comment() async {
@@ -217,7 +224,7 @@ final class AgentAnalyticsModel {
             "agentqa_ticket_id": .string(ticket.id), "comment": .string(ticketComment),
         ], slot: ticket.id) != nil else { return }
         ticketComment = ""
-        await openTicket(ticket.id)
+        if openingTicketID == ticket.id { await openTicket(ticket.id) }
     }
 
     func commentOnTurn() async {
@@ -226,7 +233,7 @@ final class AgentAnalyticsModel {
             "agentqa_ticket_id": .string(ticket.id), "turn_index": .number(Double(turnIndex)), "comment": .string(turnComment),
         ], slot: ticket.id) != nil else { return }
         turnComment = ""
-        await openTicket(ticket.id)
+        if openingTicketID == ticket.id { await openTicket(ticket.id) }
     }
 
     func deleteTicket() async {
@@ -237,6 +244,7 @@ final class AgentAnalyticsModel {
             consequence: "ElevenLabs deletes the ticket and its comments."
         ) != nil else { return }
         tickets.remove(ticket.id)
+        guard self.ticket?.id == ticket.id else { return }
         self.ticket = nil
     }
 
@@ -270,19 +278,21 @@ final class AgentAnalyticsModel {
 
     func selectTag(_ id: String) async {
         selectedTagID = id
-        if let known = tags.item(id) {
-            editTagTitle = known.title
-            editTagDescription = known.description
-        }
+        // The previous tag's title never stands in for this one's.
+        let known = tags.item(id)
+        editTagTitle = known?.title ?? ""
+        editTagDescription = known?.description ?? ""
+        loadedTagID = known == nil ? nil : id
         guard let json = await calls.json(AgentsOp.getTag, ["tag_id": .string(id)], slot: id, quiet: true),
               let tag = AgentsTag(json: json), selectedTagID == id else { return }
         editTagTitle = tag.title
         editTagDescription = tag.description
+        loadedTagID = id
         tags.upsert(tag)
     }
 
     func saveTag() async {
-        guard let selectedTagID else { return }
+        guard let selectedTagID, loadedTagID == selectedTagID else { return }
         guard let json = await calls.json(AgentsOp.updateTag, [
             "tag_id": .string(selectedTagID), "title": .string(editTagTitle), "description": .string(editTagDescription),
         ], slot: selectedTagID) else { return }
@@ -300,7 +310,9 @@ final class AgentAnalyticsModel {
         ) != nil else { return }
         tags.remove(selectedTagID)
         store.directory.tags.remove(selectedTagID)
+        guard self.selectedTagID == selectedTagID else { return }
         self.selectedTagID = nil
+        loadedTagID = nil
     }
 
     static let arguments: [AgentsArgument] = [
@@ -595,6 +607,7 @@ private struct AgentTagsCard: View {
                     TextField("Title", text: $model.editTagTitle).textFieldStyle(.roundedBorder)
                     TextField("Description", text: $model.editTagDescription).textFieldStyle(.roundedBorder)
                     Button("Save") { Task { await model.saveTag() } }
+                        .disabled(model.loadedTagID != model.selectedTagID)
                     AgentsRunButton(runner: calls.runner(AgentsOp.deleteTag, slot: model.selectedTagID ?? ""), title: "Delete…") {
                         Task { await model.deleteTag() }
                     }

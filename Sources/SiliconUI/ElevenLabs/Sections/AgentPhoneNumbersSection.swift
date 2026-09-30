@@ -167,10 +167,10 @@ final class AgentPhoneNumbersModel {
         selectedID = id
         detail = .null
         sipMessages = []
-        if let known = list.item(id) {
-            assignAgentID = known.agentID ?? ""
-            labelText = known.label
-        }
+        // The previous number's agent and name never stand in for this one's.
+        let known = list.item(id)
+        assignAgentID = known?.agentID ?? ""
+        labelText = known?.label ?? ""
         guard let json = await calls.json(AgentsOp.getPhoneNumber, ["phone_number_id": .string(id)], slot: id, quiet: true),
               selectedID == id else { return }
         detail = json
@@ -226,6 +226,7 @@ final class AgentPhoneNumbersModel {
         ) != nil else { return }
         list.remove(number.id)
         store.directory.phoneNumbers.remove(number.id)
+        guard selectedID == number.id else { return }
         selectedID = nil
         detail = .null
     }

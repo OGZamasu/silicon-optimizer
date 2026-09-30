@@ -49,6 +49,10 @@ struct AgentMCPServersScreen: View {
             } detail: {
                 if let server = model.server {
                     AgentMCPServerDetail(model: model, server: server)
+                } else if let id = model.selectedID {
+                    AgentsCard("Loading the server…") {
+                        AgentsRunnerError(runner: model.calls.runner(AgentsOp.getMCPServer, slot: id))
+                    }
                 } else {
                     AgentsCard("No server selected") {
                         AgentsEmptyState(title: "Choose a server",
@@ -148,7 +152,8 @@ final class AgentMCPServersModel {
         tools = []
         toolsError = nil
         overrides = [:]
-        if let known = list.item(id) { show(known) }
+        // Never the previous server standing in for this one: its tools and actions would mix.
+        if let known = list.item(id) { show(known) } else { server = nil }
         guard let json = await calls.json(AgentsOp.getMCPServer, ["mcp_server_id": .string(id)], slot: id, quiet: true),
               selectedID == id, let server = AgentsMCPServer(json: json) else { return }
         show(server)
@@ -164,7 +169,9 @@ final class AgentMCPServersModel {
     func loadTools() async {
         guard let selectedID else { return }
         guard let json = await calls.json(AgentsOp.listMCPTools, ["mcp_server_id": .string(selectedID)], slot: selectedID,
-                                          quiet: true) else { return }
+                                          quiet: true),
+              // Tools only ever show under the server they were listed for.
+              self.selectedID == selectedID else { return }
         // The spec names a tool in the statuses as `mcp:<server id>:<tool name>`.
         let prefix = "mcp:\(selectedID):"
         let statuses = Dictionary(
@@ -303,6 +310,7 @@ final class AgentMCPServersModel {
         ) != nil else { return }
         list.remove(server.id)
         store.directory.mcpServers.remove(server.id)
+        guard selectedID == server.id else { return }
         selectedID = nil
         self.server = nil
     }

@@ -292,18 +292,30 @@ final class AgentTestingModel {
     func startCreating() {
         editing = true
         selectedID = nil
+        loadedTestID = nil
         draft = AgentsTestDraft()
         draft.parentFolderID = folderID
         original = draft
     }
 
+    /// The test whose fields the editor holds; nil for a new test or while the selected one loads.
+    private(set) var loadedTestID: String?
+
+    /// Whether the selected test's details are still on their way: Save and Delete wait for them.
+    var isLoadingTest: Bool { selectedID != nil && loadedTestID != selectedID }
+
     func select(_ id: String) async {
         editing = true
         selectedID = id
+        // The previous test's fields never stand in for this one's.
+        loadedTestID = nil
+        draft = AgentsTestDraft()
+        original = draft
         guard let json = await calls.json(AgentsOp.getTest, ["test_id": .string(id)], slot: id, quiet: true),
               selectedID == id else { return }
         draft = AgentsTestDraft(json: json)
         original = draft
+        loadedTestID = id
     }
 
     var isDirty: Bool { draft != original }
@@ -311,10 +323,12 @@ final class AgentTestingModel {
     func save() async {
         guard draft.problems.isEmpty else { return }
         if let selectedID {
-            let body = draft.body(operationID: AgentsOp.updateTest)
+            guard loadedTestID == selectedID else { return }
+            let saved = draft
+            let body = saved.body(operationID: AgentsOp.updateTest)
             guard await calls.json(AgentsOp.updateTest, ["test_id": .string(selectedID), "body": body], slot: selectedID,
-                                   title: "Saved test “\(draft.name)”") != nil else { return }
-            original = draft
+                                   title: "Saved test “\(saved.name)”") != nil else { return }
+            if loadedTestID == selectedID { original = saved }
             await list.refresh()
         } else {
             let body = draft.body(operationID: AgentsOp.createTest)
@@ -326,14 +340,18 @@ final class AgentTestingModel {
         }
     }
 
+    /// Deletes the test on screen: only once its details are in, so the name asked about is its own.
     func delete() async {
-        guard let selectedID else { return }
+        guard let id = selectedID, loadedTestID == id else { return }
+        let name = original.name
         guard await calls.json(
-            AgentsOp.deleteTest, ["test_id": .string(selectedID)], slot: selectedID, subject: "the test “\(draft.name)”",
+            AgentsOp.deleteTest, ["test_id": .string(id)], slot: id, subject: "the test “\(name)”",
             consequence: "ElevenLabs deletes the test. Past runs keep their results."
         ) != nil else { return }
-        list.remove(selectedID)
-        self.selectedID = nil
+        list.remove(id)
+        guard selectedID == id else { return }
+        selectedID = nil
+        loadedTestID = nil
         editing = false
     }
 
@@ -532,7 +550,7 @@ private struct AgentTestEditor: View {
         let runner = model.selectedID.map { model.calls.runner(AgentsOp.updateTest, slot: $0) }
             ?? model.calls.runner(AgentsOp.createTest)
         VStack(alignment: .leading, spacing: 14) {
-            AgentsCard(model.selectedID == nil ? "New test" : model.draft.name) {
+            AgentsCard(model.selectedID == nil ? "New test" : model.isLoadingTest ? "Loading the test…" : model.draft.name) {
                 if let id = model.selectedID {
                     AgentsFact(label: "ID", value: id, monospaced: true)
                     AgentsRunnerError(runner: model.calls.runner(AgentsOp.getTest, slot: id))
@@ -608,11 +626,13 @@ private struct AgentTestEditor: View {
                 ElevenLabsProblemList(problems: model.draft.problems)
                 HStack {
                     AgentsRunButton(runner: runner, title: model.selectedID == nil ? "Create test" : "Save test",
-                                        disabled: !model.draft.problems.isEmpty || (model.selectedID != nil && !model.isDirty)) {
+                                        disabled: model.isLoadingTest || !model.draft.problems.isEmpty
+                                            || (model.selectedID != nil && !model.isDirty)) {
                         Task { await model.save() }
                     }
                     if model.selectedID != nil {
-                        AgentsRunButton(runner: model.calls.runner(AgentsOp.deleteTest, slot: model.selectedID ?? ""), title: "Delete…") {
+                        AgentsRunButton(runner: model.calls.runner(AgentsOp.deleteTest, slot: model.selectedID ?? ""), title: "Delete…",
+                                        disabled: model.isLoadingTest) {
                             Task { await model.delete() }
                         }
                     }

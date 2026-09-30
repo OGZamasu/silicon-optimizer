@@ -79,6 +79,21 @@ enum AgentsFixtures {
         case AgentsOp.getMergeProposal:
             // The proposal asked for, by the last path component.
             return .json(mergeProposal(request.url.lastPathComponent))
+        case AgentsOp.getTest where request.url.lastPathComponent == "test_sim02":
+            var value = answer(for: AgentsOp.getTest).objectValue ?? [:]
+            value["id"] = "test_sim02"
+            value["name"] = "Impatient caller reschedules"
+            value["success_condition"] = "The agent offers two new times."
+            return .json(.object(value))
+        case AgentsOp.getBatch where request.url.lastPathComponent == "btcal_sep02":
+            var value = batch("btcal_sep02", "September survey", status: "completed").objectValue ?? [:]
+            value["recipients"] = [recipient("s1", "+15550121", "completed", conversation: "conv_s1"),
+                                   recipient("s2", "+15550122", "failed", conversation: nil)]
+            return .json(.object(value))
+        case AgentsOp.getEnvironmentVariable where request.url.lastPathComponent == "env_2":
+            return .json(["label": "SUPPORT_EMAIL", "created_at_unix_secs": 1_780_000_000, "updated_at_unix_secs": 1_789_000_000,
+                          "type": "string", "id": "env_2", "workspace_id": "ws",
+                          "values": ["production": "help@example.com"]])
         default:
             return .json(answer(for: request.operationID))
         }
@@ -256,7 +271,10 @@ enum AgentsFixtures {
             return ["environment_variables": [["label": "CRM_BASE_URL", "created_at_unix_secs": 1_780_000_000,
                                                "updated_at_unix_secs": 1_789_000_000, "type": "string", "id": "env_1",
                                                "workspace_id": "ws", "values": ["production": "https://crm.example.com",
-                                                                                "staging": "https://staging.crm.example.com"]]],
+                                                                                "staging": "https://staging.crm.example.com"]],
+                                              ["label": "SUPPORT_EMAIL", "created_at_unix_secs": 1_780_000_000,
+                                               "updated_at_unix_secs": 1_789_000_000, "type": "string", "id": "env_2",
+                                               "workspace_id": "ws", "values": ["production": "help@example.com"]]],
                     "has_more": false]
         case AgentsOp.getEnvironmentVariable:
             return ["label": "CRM_BASE_URL", "created_at_unix_secs": 1_780_000_000, "updated_at_unix_secs": 1_789_000_000,

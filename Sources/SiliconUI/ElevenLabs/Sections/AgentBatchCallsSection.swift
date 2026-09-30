@@ -59,6 +59,10 @@ struct AgentBatchCallsScreen: View {
             } detail: {
                 if let batch = model.batch {
                     AgentBatchDetail(model: model, batch: batch)
+                } else if model.selectedID != nil {
+                    AgentsCard("Loading the batch…") {
+                        AgentsRunnerError(runner: model.calls.runner(AgentsOp.getBatch, slot: model.selectedID ?? ""))
+                    }
                 } else {
                     AgentsCard("No batch selected") {
                         AgentsEmptyState(title: "Choose a batch",
@@ -263,6 +267,15 @@ final class AgentBatchCallsModel {
     private(set) var selectedID: String?
     private(set) var batch: AgentsBatchCall?
     private(set) var recipients: [AgentsBatchRecipient] = []
+    /// The batch whose recipients `recipients` holds; nil while the selected one's are on their way.
+    private(set) var loadedBatchID: String?
+
+    /// Whether the batch on screen is the selected one with its recipients in: stopping,
+    /// retrying and deleting wait for that, so the counts they state are that batch's.
+    var detailsLoaded: Bool {
+        guard let selectedID else { return false }
+        return batch?.id == selectedID && loadedBatchID == selectedID
+    }
 
     // Composer
     var composing = false
@@ -451,18 +464,21 @@ final class AgentBatchCallsModel {
 
     func select(_ id: String) async {
         selectedID = id
-        if let known = list.item(id) { batch = known }
+        // Never the previous batch standing in for this one.
+        batch = list.item(id)
         recipients = []
+        loadedBatchID = nil
         await reload()
     }
 
     func reload() async {
         guard let selectedID else { return }
         guard let json = await calls.json(AgentsOp.getBatch, ["batch_id": .string(selectedID)], slot: selectedID, quiet: true),
-              self.selectedID == selectedID else { return }
-        batch = AgentsBatchCall(json: json)
+              self.selectedID == selectedID, let fetched = AgentsBatchCall(json: json) else { return }
+        batch = fetched
         recipients = (json["recipients"].arrayValue ?? []).compactMap(AgentsBatchRecipient.init(json:))
-        if let batch { list.upsert(batch) }
+        loadedBatchID = selectedID
+        list.upsert(fetched)
     }
 
     /// The recipients a retry would call again, by the last statuses fetched.
@@ -482,7 +498,7 @@ final class AgentBatchCallsModel {
     }
 
     func retryConfirmation() -> (subject: String, consequence: String)? {
-        guard let batch else { return nil }
+        guard detailsLoaded, let batch else { return nil }
         let count = retryCount
         let from = store.directory.phoneNumber(batch.phoneNumberID)?.displayName ?? "the batch's number"
         return (
@@ -494,7 +510,7 @@ final class AgentBatchCallsModel {
     }
 
     func retry() async {
-        guard let batch, let wording = retryConfirmation() else { return }
+        guard detailsLoaded, let batch, let wording = retryConfirmation() else { return }
         let guardian = retryGuard(for: batch.id)
         let runner = calls.runner(AgentsOp.retryBatch, slot: batch.id)
         let answer = await guardian.send(runner: runner, what: "The retry of “\(batch.name)”",
@@ -502,11 +518,11 @@ final class AgentBatchCallsModel {
             await calls.json(AgentsOp.retryBatch, ["batch_id": .string(batch.id)], slot: batch.id,
                              title: "Retried “\(batch.name)”", subject: wording.subject, consequence: wording.consequence)
         }
-        if answer != nil || guardian.warning != nil { await reload() }
+        if answer != nil || guardian.warning != nil, selectedID == batch.id { await reload() }
     }
 
     func cancel() async {
-        guard let batch else { return }
+        guard detailsLoaded, let batch else { return }
         let pending = pendingCount
         guard await calls.json(
             AgentsOp.cancelBatch, ["batch_id": .string(batch.id)], slot: batch.id,
@@ -514,7 +530,7 @@ final class AgentBatchCallsModel {
             consequence: "ElevenLabs stops the batch: calls not yet placed (\(pending) by the statuses on screen) are not "
                 + "placed, and every recipient is marked cancelled. Calls already in progress may finish."
         ) != nil else { return }
-        await reload()
+        if selectedID == batch.id { await reload() }
     }
 
     func export() async {
@@ -524,7 +540,7 @@ final class AgentBatchCallsModel {
     }
 
     func delete() async {
-        guard let batch else { return }
+        guard detailsLoaded, let batch else { return }
         guard await calls.json(
             AgentsOp.deleteBatch, ["batch_id": .string(batch.id)], slot: batch.id,
             subject: "the batch “\(batch.name)”",
@@ -532,9 +548,11 @@ final class AgentBatchCallsModel {
                 + "The conversations stay in history." + (batch.isActive ? " Calls still to be placed will not be." : "")
         ) != nil else { return }
         list.remove(batch.id)
+        guard selectedID == batch.id else { return }
         selectedID = nil
         self.batch = nil
         recipients = []
+        loadedBatchID = nil
     }
 
     static let arguments: [AgentsArgument] = [
@@ -680,7 +698,8 @@ private struct AgentBatchDetail: View {
             AgentsCard("Actions") {
                 VStack(alignment: .leading, spacing: 10) {
                     if batch.isActive {
-                        AgentsRunButton(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id), title: "Stop the batch…") {
+                        AgentsRunButton(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id), title: "Stop the batch…",
+                                        disabled: !model.detailsLoaded, disabledReason: "Waiting for the batch's recipients.") {
                             Task { await model.cancel() }
                         }
                         AgentsRunnerOutput(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id))
@@ -688,8 +707,9 @@ private struct AgentBatchDetail: View {
                     AgentsSendButton(runner: calls.runner(AgentsOp.retryBatch, slot: batch.id),
                                      guardian: model.retryGuard(for: batch.id),
                                      title: "Call \(AgentsFormat.count(model.retryCount, "recipient")) again…",
-                                     disabled: model.retryCount == 0 || batch.isActive,
-                                     disabledReason: batch.isActive ? "The batch is still running." : nil) {
+                                     disabled: !model.detailsLoaded || model.retryCount == 0 || batch.isActive,
+                                     disabledReason: batch.isActive ? "The batch is still running."
+                                         : model.detailsLoaded ? nil : "Waiting for the batch's recipients.") {
                         Task { await model.retry() }
                     }
                     Text("Retry calls the recipients whose calls failed or went unanswered.")
@@ -731,7 +751,8 @@ private struct AgentBatchDetail: View {
                 }
             }
             AgentsCard("Delete") {
-                AgentsRunButton(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id), title: "Delete the batch…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id), title: "Delete the batch…",
+                                disabled: !model.detailsLoaded, disabledReason: "Waiting for the batch's recipients.") {
                     Task { await model.delete() }
                 }
                 AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id))

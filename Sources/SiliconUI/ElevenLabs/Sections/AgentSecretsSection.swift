@@ -89,6 +89,11 @@ final class AgentSecretsModel {
     var editedValues: [(environment: String, value: String)] = []
     /// The environments the selected variable had when fetched.
     private(set) var originalEnvironments: Set<String> = []
+    /// The variable whose values `editedValues` holds; nil while the selected one's are on their way.
+    private(set) var loadedVariableID: String?
+
+    /// Whether the values on screen are the selected variable's: saving waits for them.
+    var variableIsLoaded: Bool { selectedVariableID != nil && loadedVariableID == selectedVariableID }
 
     init(store: AgentsPlatformStore) {
         self.store = store
@@ -193,6 +198,7 @@ final class AgentSecretsModel {
         ) != nil else { return }
         list.remove(secret.id)
         store.directory.secrets.remove(secret.id)
+        guard selectedID == secret.id else { return }
         selectedID = nil
         detail = nil
     }
@@ -212,11 +218,16 @@ final class AgentSecretsModel {
 
     func selectVariable(_ id: String) async {
         selectedVariableID = id
+        // The previous variable's values never stand in for this one's.
+        loadedVariableID = nil
+        editedValues = []
+        originalEnvironments = []
         guard let json = await calls.json(AgentsOp.getEnvironmentVariable, ["env_var_id": .string(id)], slot: id, quiet: true),
-              let variable = AgentsEnvironmentVariable(json: json) else { return }
+              selectedVariableID == id, let variable = AgentsEnvironmentVariable(json: json) else { return }
         variables.upsert(variable)
         editedValues = Self.editable(json["values"], type: variable.type)
         originalEnvironments = Set(editedValues.map(\.environment))
+        loadedVariableID = id
     }
 
     var selectedVariable: AgentsEnvironmentVariable? {
@@ -287,7 +298,7 @@ final class AgentSecretsModel {
     }
 
     func saveVariable() async {
-        guard let variable = selectedVariable else { return }
+        guard variableIsLoaded, let variable = selectedVariable else { return }
         let removed = originalEnvironments.filter { environment in
             environment != "production" && !editedValues.contains { $0.environment == environment && !$0.value.isEmpty }
         }.sorted()
@@ -298,7 +309,7 @@ final class AgentSecretsModel {
            consequence: "What refers to {{\(variable.label)}} uses the new values from its next conversation."
             + (removed.isEmpty ? "" : " Removed: " + ListFormatter.localizedString(byJoining: removed) + ".")
         ) != nil else { return }
-        await selectVariable(variable.id)
+        if selectedVariableID == variable.id { await selectVariable(variable.id) }
     }
 
     static let arguments: [AgentsArgument] = [
@@ -418,7 +429,8 @@ private struct AgentEnvironmentVariablesCard: View {
                         Divider()
                         Text("“\(variable.label)” by environment").font(.subheadline.weight(.medium))
                         valuesEditor($model.editedValues, type: variable.type)
-                        AgentsRunButton(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id), title: "Save values…") {
+                        AgentsRunButton(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id), title: "Save values…",
+                                        disabled: !model.variableIsLoaded, disabledReason: "Waiting for the variable's values.") {
                             Task { await model.saveVariable() }
                         }
                         AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id))

@@ -365,6 +365,129 @@ struct AgentsSectionsTests {
         #expect(shares.map(\.1) == [80, 20])
     }
 
+    /// Round 3: while another test loads, Delete and Save wait; once it is in, Delete names that
+    /// test and deletes it, and Save never sends one test's fields to another.
+    @Test func aTestIsNeverDeletedOrSavedUnderAnotherTestsName() async throws {
+        let rig = rigWithSlowDetails(AgentsOp.getTest, ["test_sim02"])
+        defer { rig.clean() }
+        let model = rig.store.testing
+        await model.select(AgentsFixtures.testID)
+        #expect(!model.isLoadingTest)
+        model.draft.successCondition = "Edited for the refund test."
+
+        let opening = Task { await model.select("test_sim02") }
+        try await waitUntil { model.selectedID == "test_sim02" }
+        #expect(model.isLoadingTest)
+        #expect(model.draft.name.isEmpty, "the refund test's fields leave the editor")
+        await model.save()
+        #expect(rig.requests(AgentsOp.updateTest).isEmpty)
+        let deleteRunner = rig.store.calls.runner(AgentsOp.deleteTest, slot: "test_sim02")
+        let early = Task { await model.delete() }
+        try await Task.sleep(for: .milliseconds(50))
+        let askedEarly = deleteRunner.isAwaitingConfirmation
+        if askedEarly { deleteRunner.decline() }
+        await early.value
+        #expect(!askedEarly, "nothing is asked while the test loads")
+        #expect(rig.requests(AgentsOp.deleteTest).isEmpty)
+
+        await opening.value
+        #expect(!model.isLoadingTest)
+        let deleting = Task { await model.delete() }
+        try await waitUntil { deleteRunner.isAwaitingConfirmation }
+        #expect(deleteRunner.confirmation?.title.contains("“Impatient caller reschedules”") == true)
+        deleteRunner.confirm()
+        await deleting.value
+        let deleted = try #require(rig.requests(AgentsOp.deleteTest).last)
+        #expect(deleted.request.url.lastPathComponent == "test_sim02")
+    }
+
+    /// Round 3: an environment variable's values are never saved to another variable while its
+    /// own are on their way.
+    @Test func oneVariablesValuesAreNeverSavedToAnother() async throws {
+        let rig = rigWithSlowDetails(AgentsOp.getEnvironmentVariable, ["env_2"])
+        defer { rig.clean() }
+        let model = rig.store.secrets
+        await model.variables.refresh()
+        await model.selectVariable("env_1")
+        #expect(model.variableIsLoaded)
+        let opening = Task { await model.selectVariable("env_2") }
+        try await waitUntil { model.selectedVariableID == "env_2" }
+        #expect(!model.variableIsLoaded)
+        #expect(model.editedValues.isEmpty, "CRM_BASE_URL's values leave the editor")
+        let saveRunner = rig.store.calls.runner(AgentsOp.updateEnvironmentVariable, slot: "env_2")
+        let early = Task { await model.saveVariable() }
+        try await Task.sleep(for: .milliseconds(50))
+        let askedEarly = saveRunner.isAwaitingConfirmation
+        if askedEarly { saveRunner.decline() }
+        await early.value
+        #expect(!askedEarly, "nothing is asked while the variable loads")
+        #expect(rig.requests(AgentsOp.updateEnvironmentVariable).isEmpty)
+        await opening.value
+        #expect(model.variableIsLoaded)
+        #expect(model.editedValues.map(\.value) == ["help@example.com"])
+    }
+
+    /// Round 3: a tool not yet in the list shows nothing until it arrives, so Save and Delete
+    /// cannot pair its id with the previous tool's configuration or name.
+    @Test func aToolStillLoadingCannotBeSavedWithAnothersConfiguration() async throws {
+        let rig = rigWithSlowDetails(AgentsOp.getTool, ["tool_other02"])
+        defer { rig.clean() }
+        let model = rig.store.tools
+        await model.list.refresh()
+        await model.select(AgentsFixtures.toolID)
+        #expect(model.tool?.id == AgentsFixtures.toolID)
+        let opening = Task { await model.select("tool_other02") }
+        try await waitUntil { model.selectedID == "tool_other02" }
+        #expect(model.tool == nil)
+        let saving = Task { await model.save() }
+        let deleting = Task { await model.delete() }
+        try await Task.sleep(for: .milliseconds(50))
+        let saveRunner = rig.store.calls.runner(AgentsOp.updateTool, slot: "tool_other02")
+        let deleteRunner = rig.store.calls.runner(AgentsOp.deleteTool, slot: "tool_other02")
+        let asked = (saveRunner.isAwaitingConfirmation, deleteRunner.isAwaitingConfirmation)
+        if asked.0 { saveRunner.decline() }
+        if asked.1 { deleteRunner.decline() }
+        await saving.value
+        await deleting.value
+        #expect(!asked.0 && !asked.1, "nothing is asked while the tool loads")
+        #expect(rig.requests(AgentsOp.updateTool).isEmpty)
+        await opening.value
+    }
+
+    /// Round 3: Stop, Retry and Delete wait for the selected batch's own recipients, so the
+    /// counts they state and the batch they name are that batch's; the previous batch never
+    /// stands in for it.
+    @Test func stopRetryAndDeleteWaitForTheBatchOnScreen() async throws {
+        let rig = rigWithSlowDetails(AgentsOp.getBatch, ["btcal_sep02"])
+        defer { rig.clean() }
+        await rig.store.directory.agents.refresh()
+        await rig.store.directory.phoneNumbers.refresh()
+        let model = rig.store.batchCalls
+        await model.list.refresh()
+        await model.select(AgentsFixtures.batchID)
+        #expect(model.detailsLoaded)
+
+        let opening = Task { await model.select("btcal_sep02") }
+        try await waitUntil { model.selectedID == "btcal_sep02" }
+        #expect(!model.detailsLoaded)
+        #expect(model.batch?.name == "September survey", "the list's own entry, never October's")
+        #expect(model.recipients.isEmpty)
+        #expect(model.retryConfirmation() == nil)
+        let runners = [AgentsOp.cancelBatch, AgentsOp.retryBatch, AgentsOp.deleteBatch]
+            .map { rig.store.calls.runner($0, slot: "btcal_sep02") }
+        let early = [Task { await model.cancel() }, Task { await model.retry() }, Task { await model.delete() }]
+        try await Task.sleep(for: .milliseconds(50))
+        let asked = runners.filter(\.isAwaitingConfirmation)
+        asked.forEach { $0.decline() }
+        for task in early { await task.value }
+        #expect(asked.isEmpty, "nothing is asked while the batch loads")
+
+        await opening.value
+        #expect(model.detailsLoaded)
+        let wording = try #require(model.retryConfirmation())
+        #expect(wording.subject == "1 call again to recipients of “September survey” with “Support”")
+    }
+
     /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
     /// out, so Save asks first, naming where.
     @Test func savingAnAgentWithANewMCPServerOrWebhookToolAsksFirst() async throws {

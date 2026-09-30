@@ -336,6 +336,7 @@ final class AgentConversationsModel {
         ) != nil else { return }
         list.remove(detail.id)
         hits.removeAll { $0.conversationID == detail.id }
+        guard selectedID == detail.id else { return }
         selectedID = nil
         self.detail = nil
     }
