@@ -103,6 +103,45 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("voice-library", height: 900) { VoiceLibraryScreen(model: model) }
     }
 
+    // MARK: Dubbing
+
+    @Test func dubsAndOneDub() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = DubbingSectionModel(environment: fixture.environment)
+        let dubs = try [
+            VoicesStudioDubbingTests.dub("d1"), VoicesStudioDubbingTests.dub("d2", status: "dubbing"),
+            VoicesStudioDubbingTests.dub("d3", status: "failed"),
+        ].map { try #require(DubbingDub(json: $0)) }
+        model.load(dubs: dubs, selected: dubs[0])
+        model.downloadLanguage = "es"
+        model.load(transcript: "1\n00:00:00,000 --> 00:00:02,400\nBienvenidos a la presentación.\n\n2\n00:00:02,400 --> 00:00:05,100\nHoy os enseñamos algo nuevo.")
+        try VoicesStudioSnapshots.render("dubbing-dubs", height: 1900) { DubbingScreen(model: model) }
+    }
+
+    @Test func aDubbingProjectWithItsTranscript() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = DubbingSectionModel(environment: fixture.environment)
+        model.mode = .projects
+        let project = try #require(DubbingProject(json: VoicesStudioDubbingTests.project("p1")))
+        let language = try #require(DubbingLanguage(json: [
+            "language_id": "lang-es", "target_language": "es", "status": "completed",
+            "voice_settings": ["cloning_strength": 7], "outputs": ["lossless_audio": "https://files.example/es.flac"],
+        ]))
+        let segments = try [("s1", "Welcome to the launch.", "Bienvenidos al lanzamiento."),
+                            ("s2", "Today we show you something new.", "Hoy os enseñamos algo nuevo.")]
+            .enumerated().map { index, entry in
+                try #require(DubbingSegment(json: ["id": .string(entry.0), "speaker_id": "speaker_1",
+                                                   "start_s": .number(Double(index) * 2.5), "end_s": .number(Double(index) * 2.5 + 2.4),
+                                                   "text": .string(entry.1), "source_text": .string(entry.1),
+                                                   "translation": .string(entry.2)]))
+            }
+        model.load(projects: [project], selected: project, languages: [language], source: segments,
+                   target: segments, languageID: "lang-es")
+        try VoicesStudioSnapshots.render("dubbing-project", height: 1700) { DubbingScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {
