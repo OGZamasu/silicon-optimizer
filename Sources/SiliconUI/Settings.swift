@@ -3,6 +3,7 @@ import Security
 import ServiceManagement
 import os
 import SiliconCore
+import SiliconElevenLabs
 import SiliconPlanner
 import SiliconRuntime
 
@@ -573,6 +574,14 @@ public struct Settings: Codable, Sendable, Equatable {
     /// A PrismML fork build of your own; empty means the app fetches one when needed.
     public var prismServerPath: String = ""
 
+    // ElevenLabs (see AppModel+ElevenLabs). The key is in the Keychain, never here.
+    /// Whether a key is linked, kept in step by Connect and Remove so nothing that draws has
+    /// to ask the Keychain.
+    public var elevenLabsLinked = false
+    public var elevenLabsRegion: ElevenLabsRegion = .global
+    /// "Let agents run destructive and real-world ElevenLabs actions". Off by default.
+    public var elevenLabsAllowRiskyForAgents = false
+
     public var customRuntimePaths: [RuntimeKind: URL] {
         var paths: [RuntimeKind: URL] = [:]
         if !llamaServerPath.isEmpty {
@@ -685,6 +694,11 @@ public struct Settings: Codable, Sendable, Equatable {
         )
         codexSandbox = try? container.decodeIfPresent(String.self, forKey: .codexSandbox)
         configurationPresets = value(.configurationPresets, fallback.configurationPresets)
+        elevenLabsLinked = value(.elevenLabsLinked, fallback.elevenLabsLinked)
+        elevenLabsRegion = value(.elevenLabsRegion, fallback.elevenLabsRegion)
+        elevenLabsAllowRiskyForAgents = value(
+            .elevenLabsAllowRiskyForAgents, fallback.elevenLabsAllowRiskyForAgents
+        )
     }
 
     // MARK: - Persistence
