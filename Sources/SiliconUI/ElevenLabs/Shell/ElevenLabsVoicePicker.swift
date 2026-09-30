@@ -62,6 +62,9 @@ final class ElevenLabsVoiceDirectory {
     static let pageLimit = 10
 
     @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
+    /// The client the list was fetched with: another one (a new key, another region) means
+    /// another account's voices.
+    @ObservationIgnored private var loadedFor: ObjectIdentifier?
     @ObservationIgnored private var previewPlayer: AVPlayer?
     @ObservationIgnored private var previewEnd: (any NSObjectProtocol)?
 
@@ -74,6 +77,7 @@ final class ElevenLabsVoiceDirectory {
     }
 
     func loadIfNeeded() async {
+        if loaded, loadedFor != client().map(ObjectIdentifier.init) { reset() }
         guard !loaded, !loading else { return }
         await refresh()
     }
@@ -90,6 +94,7 @@ final class ElevenLabsVoiceDirectory {
         do {
             voices = try await Self.fetch(with: client)
             loaded = true
+            loadedFor = ObjectIdentifier(client)
             error = nil
         } catch {
             self.error = ElevenLabsRunnerFailure(error).message
@@ -100,6 +105,7 @@ final class ElevenLabsVoiceDirectory {
     func set(_ voices: [ElevenLabsVoice]) {
         self.voices = voices
         loaded = true
+        loadedFor = client().map(ObjectIdentifier.init)
         error = nil
     }
 
@@ -107,6 +113,7 @@ final class ElevenLabsVoiceDirectory {
         stopPreview()
         voices = []
         loaded = false
+        loadedFor = nil
         error = nil
     }
 
@@ -167,18 +174,23 @@ struct ElevenLabsVoicePicker: View {
     var include: ((ElevenLabsVoice) -> Bool)?
     /// A directory other than the pane's — for previews and tests.
     var directory: ElevenLabsVoiceDirectory?
+    /// When given, the first choice in the list, meaning "no particular voice" — it sets the
+    /// selection to "" (a filter's "Any voice", say).
+    var noneTitle: String?
 
     @State private var choosing = false
     @State private var search = ""
 
     init(
         selection: Binding<String>, title: String = "Voice",
-        include: ((ElevenLabsVoice) -> Bool)? = nil, directory: ElevenLabsVoiceDirectory? = nil
+        include: ((ElevenLabsVoice) -> Bool)? = nil, directory: ElevenLabsVoiceDirectory? = nil,
+        noneTitle: String? = nil
     ) {
         _selection = selection
         self.title = title
         self.include = include
         self.directory = directory
+        self.noneTitle = noneTitle
     }
 
     private var voices: ElevenLabsVoiceDirectory { directory ?? model.elevenLabsPane.voices }
@@ -191,7 +203,8 @@ struct ElevenLabsVoicePicker: View {
                     choosing = true
                 } label: {
                     HStack(spacing: 4) {
-                        Text(voices.voice(id: selection)?.name ?? (selection.isEmpty ? "Choose a voice" : selection))
+                        Text(voices.voice(id: selection)?.name
+                             ?? (selection.isEmpty ? (noneTitle ?? "Choose a voice") : selection))
                             .lineLimit(1)
                         Image(systemName: "chevron.up.chevron.down").font(.caption2)
                     }
@@ -223,6 +236,19 @@ struct ElevenLabsVoicePicker: View {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
             List {
+                if let noneTitle {
+                    HStack(spacing: 8) {
+                        Image(systemName: selection.isEmpty ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selection.isEmpty ? Color.accentColor : .secondary)
+                        Text(noneTitle)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selection = ""
+                        choosing = false
+                    }
+                }
                 ForEach(grouped(voices), id: \.0) { category, members in
                     Section(category) {
                         ForEach(members) { voice in

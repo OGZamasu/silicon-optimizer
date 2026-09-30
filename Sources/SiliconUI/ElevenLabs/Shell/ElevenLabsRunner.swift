@@ -277,10 +277,16 @@ final class ElevenLabsRunner: Identifiable {
     private func askForConfirmation(_ request: ElevenLabsConfirmationRequest) async -> Bool {
         confirmation = request
         phase = .awaitingConfirmation
+        context.pane?.present(self)
         let answer = await withCheckedContinuation { pendingConfirmation = $0 }
         confirmation = nil
+        context.pane?.dismissConfirmation(of: self)
         return answer
     }
+
+    /// Whether this runner's host must show its confirmation itself: only when there is no
+    /// pane to do it (a runner built for a test, or outside the ElevenLabs pane).
+    var presentsOwnConfirmation: Bool { context.pane == nil }
 
     private func resolveConfirmation(_ answer: Bool) {
         guard let continuation = pendingConfirmation else { return }
@@ -377,12 +383,62 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
 
 /// The note under a Run button about what running the operation spends.
 enum ElevenLabsCostNote {
-    /// Nil for operations that spend nothing.
-    static func text(for operation: ElevenLabsOperation, characters: Int? = nil) -> String? {
-        guard operation.billable else { return nil }
-        if let characters, characters > 0 {
-            return "Uses credits — about \(characters.formatted()) characters' worth."
+
+    /// What an operation is billed by, as far as the note is concerned.
+    enum Measure: Equatable, Sendable {
+        /// The characters of text sent: speech, dialogue.
+        case characters
+        /// The length of the audio sent or made, in the words for it ("audio", "song"…).
+        case length(of: String)
+        /// Something else, or not known.
+        case other
+    }
+
+    static func measure(of operation: ElevenLabsOperation) -> Measure {
+        let path = operation.path
+        func under(_ prefix: String) -> Bool { ElevenLabsSection.matches(path, prefix: prefix) }
+        if under("/v1/text-to-speech") || under("/v1/text-to-dialogue") { return .characters }
+        if under("/v1/speech-to-speech") || under("/v1/audio-isolation") || under("/v1/speech-to-text")
+            || under("/v1/forced-alignment") {
+            return .length(of: "audio")
         }
-        return "Uses credits from your ElevenLabs balance."
+        if under("/v1/dubbing") { return .length(of: "source") }
+        if under("/v1/music") { return .length(of: "music") }
+        if under("/v1/sound-generation") { return .length(of: "sound") }
+        return .other
+    }
+
+    /// Nil for operations that spend nothing.
+    ///
+    /// - Parameters:
+    ///   - characters: The text's length, when the section knows it.
+    ///   - seconds: The audio's length — sent or asked for — when the section knows it.
+    static func text(for operation: ElevenLabsOperation, characters: Int? = nil, seconds: Double? = nil) -> String? {
+        guard operation.billable else { return nil }
+        switch measure(of: operation) {
+        case .characters:
+            if let characters, characters > 0 {
+                return "Uses credits — about \(characters.formatted()) characters' worth."
+            }
+            return "Uses credits by the characters sent."
+        case .length(let what):
+            if let seconds, seconds > 0 {
+                return "Uses credits by the length of the \(what) — about \(duration(seconds)) of it."
+            }
+            return "Uses credits by the length of the \(what)."
+        case .other:
+            if let characters, characters > 0 {
+                return "Uses credits — about \(characters.formatted()) characters' worth."
+            }
+            return "Uses credits from your ElevenLabs balance."
+        }
+    }
+
+    /// "45 s", "3 min 20 s".
+    static func duration(_ seconds: Double) -> String {
+        let whole = Int(seconds.rounded())
+        if whole < 60 { return "\(max(whole, 1)) s" }
+        let rest = whole % 60
+        return rest == 0 ? "\(whole / 60) min" : "\(whole / 60) min \(rest) s"
     }
 }

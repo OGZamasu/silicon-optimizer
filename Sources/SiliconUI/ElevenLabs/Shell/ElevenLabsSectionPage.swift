@@ -140,7 +140,17 @@ struct ElevenLabsOperationRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 6)
-            if operation.risk != .read { ElevenLabsRiskBadge(risk: operation.risk) }
+            // Only what asks first gets a capsule; a long list of "Uses credits" capsules
+            // would crowd out the names, so spending is a small icon.
+            if operation.requiresConfirmation {
+                ElevenLabsRiskBadge(risk: operation.risk)
+            } else if operation.billable {
+                Image(systemName: "creditcard")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+                    .help("Uses credits")
+                    .accessibilityLabel("Uses credits")
+            }
         }
         .contentShape(Rectangle())
         if let action {
