@@ -36,6 +36,19 @@ struct CoreInterfaceTests {
         #expect(third.status == 599)
     }
 
+    @Test func theKeyGoesToExactlyTheFiveElevenLabsHosts() {
+        #expect(ElevenLabsRegion.allowedHosts == [
+            "api.elevenlabs.io", "api.us.elevenlabs.io", "api.eu.residency.elevenlabs.io",
+            "api.in.residency.elevenlabs.io", "api.sg.residency.elevenlabs.io",
+        ])
+        for region in ElevenLabsRegion.allCases {
+            #expect(region.baseURL.scheme == "https")
+            #expect(region.baseURL.host == region.host)
+            #expect(region.webSocketBaseURL.absoluteString == "wss://\(region.host)")
+        }
+        #expect(ElevenLabsRegion.allCases.filter(\.isResidency) == [.eu, .india, .singapore])
+    }
+
     @Test func theFakeTransportRefusesAnyOtherHostAndPlainHTTP() async {
         let transport = FakeElevenLabsTransport(replies: [.json(["ok": true])])
         for url in ["https://example.com/v1/user", "http://api.elevenlabs.io/v1/user"] {
