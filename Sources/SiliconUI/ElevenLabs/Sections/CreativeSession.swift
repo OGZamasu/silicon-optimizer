@@ -30,6 +30,8 @@ final class CreativeSession {
     lazy var speech = SpeechScreenModel(session: self)
     lazy var dialogue = DialogueScreenModel(session: self)
     lazy var voiceChanger = VoiceChangerScreenModel(session: self)
+    lazy var soundEffects = SoundEffectsScreenModel(session: self)
+    lazy var music = MusicScreenModel(session: self)
     /// Pronunciation dictionaries, for Speech and Dialogue to attach.
     lazy var dictionaries = CreativeDictionaryDirectory(
         runner: Self.runner("get_pronunciation_dictionaries_metadata", context: context, records: false)

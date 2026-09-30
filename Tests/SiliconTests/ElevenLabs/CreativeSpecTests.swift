@@ -16,11 +16,13 @@ struct CreativeSpecTests {
         case .speech: SpeechScreenModel.self
         case .dialogue: DialogueScreenModel.self
         case .voiceChanger: VoiceChangerScreenModel.self
+        case .soundEffects: SoundEffectsScreenModel.self
+        case .music: MusicScreenModel.self
         default: nil
         }
     }
 
-    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger])
+    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger, .soundEffects, .music])
     func everyControlSetsARealArgumentOfARealOperation(section: ElevenLabsSection) throws {
         let model = try #require(Self.model(for: section))
         for control in model.controls {
@@ -34,7 +36,7 @@ struct CreativeSpecTests {
         }
     }
 
-    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger])
+    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger, .soundEffects, .music])
     func everyOperationOfTheSectionIsReachableFromItsScreen(section: ElevenLabsSection) throws {
         let model = try #require(Self.model(for: section))
         let claimed = Set(section.operations.map(\.id))

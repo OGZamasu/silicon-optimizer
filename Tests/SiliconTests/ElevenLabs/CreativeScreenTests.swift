@@ -259,6 +259,188 @@ struct CreativeScreenTests {
         #expect(changer.sources[take.id]?.lastPathComponent == "me.wav")
     }
 
+    // MARK: - Sound effects
+
+    @Test func aSoundEffectLeavesTheLengthToTheModelUnlessSet() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(SoundEffectsScreenModel.generate, .audio(CreativeRig.wavData(seconds: 0.5), contentType: "audio/wav"))
+        let effects = rig.session.soundEffects
+        #expect(effects.promptInfluence == 0.3)
+        #expect(effects.durationRange == 0.5...30)
+        effects.text = "Door creak"
+        #expect(effects.arguments()["duration_seconds"] == nil)
+        effects.automaticDuration = false
+        effects.duration = 2.349
+        effects.loop = true
+        let arguments = effects.arguments()
+        #expect(arguments["duration_seconds"] == 2.3)
+        #expect(arguments["loop"] == true)
+        #expect(rig.client.validate(SoundEffectsScreenModel.generate, arguments: arguments).isEmpty)
+        await effects.generate()
+        await effects.generate()
+        #expect(effects.takes.count == 2, "each take is kept to compare")
+        #expect(rig.lastBody(SoundEffectsScreenModel.generate)?["text"] == "Door creak")
+    }
+
+    // MARK: - Music
+
+    @Test func composingFromAPlanLeavesOutWhatOnlyGoesWithAPrompt() throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let music = rig.session.music
+        music.prompt = "Lo-fi beat"
+        music.usesLength = true
+        music.lengthSeconds = 90
+        music.forceInstrumental = true
+        music.seed = 3
+        music.generationMode = "loop"
+        var arguments = music.composeArguments()
+        #expect(arguments["prompt"] == "Lo-fi beat")
+        #expect(arguments["music_length_ms"] == 90_000)
+        #expect(arguments["composition_plan"] == nil)
+
+        music.load(plan: Self.planJSON)
+        music.usesPlan = true
+        arguments = music.composeArguments()
+        #expect(arguments["prompt"] == nil)
+        #expect(arguments["seed"] == nil)
+        #expect(arguments["music_length_ms"] == nil)
+        #expect(arguments["force_instrumental"] == nil)
+        #expect(arguments["composition_plan"]?["sections"][0]["section_name"] == "Intro")
+        for delivery in MusicScreenModel.Delivery.allCases {
+            music.delivery = delivery
+            music.finetuneID = "ft"
+            music.withWaveform = true
+            let operation = try #require(ElevenLabsCatalog.operation(music.composeOperationID))
+            let arguments = music.composeArguments()
+            #expect(CreativeSpec.unknownArguments(arguments, for: operation).isEmpty, "\(operation.id)")
+            #expect(rig.client.validate(operation.id, arguments: arguments).isEmpty, "\(operation.id)")
+        }
+    }
+
+    @Test func aPlanRoundTripsAndKeepsWhatItDoesNotEdit() throws {
+        let plan = try #require(MusicPlan(json: Self.planJSON))
+        #expect(plan.sections.map(\.name) == ["Intro", "Chorus"])
+        #expect(plan.totalMs == 25_000)
+        #expect(plan.json["sections"][1]["source_from"] == ["song_id": "s1"])
+        #expect(MusicPlan(json: plan.json) == plan)
+        #expect(plan.problems().isEmpty)
+        var broken = plan
+        broken.sections[0].durationMs = 500
+        broken.sections[1].name = ""
+        #expect(broken.problems().contains { $0.contains("between 3 and 120 seconds") })
+        #expect(broken.problems().contains("Section 2 needs a name."))
+        #expect(MusicPlan(json: ["chunks": []]) == nil, "the chunks shape is edited as JSON")
+    }
+
+    @Test func aPlanIsMadeAndOpensInTheEditor() async {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.plan, .json(Self.planJSON))
+        let music = rig.session.music
+        music.planPrompt = "A short song"
+        await music.makePlan()
+        #expect(music.plan?.sections.count == 2)
+        music.composeFromPlan()
+        #expect(music.tab == .compose)
+        #expect(music.usesPlan)
+        #expect(music.composeProblems.isEmpty)
+
+        rig.always(MusicScreenModel.plan, .json(["chunks": [["type": "generation"]]]))
+        music.planFromCurrent = true
+        await music.makePlan()
+        #expect(music.plan == nil)
+        #expect(music.planJSON.contains("chunks"))
+        #expect(rig.lastBody(MusicScreenModel.plan)?["source_composition_plan"]["sections"] != .null)
+    }
+
+    @Test func aDetailedSongShowsItsLyricsTimings() {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let music = rig.session.music
+        music.readDetails(.parts([
+            .json(["composition_plan": Self.planJSON, "song_metadata": ["title": "T"],
+                   "words_timestamps": [["word": "la", "start_ms": 500, "end_ms": 900]],
+                   "waveform_visual": [1, 3, 2]]),
+            .file(URL(fileURLWithPath: "/dev/null"), contentType: "audio/mpeg", bytes: 0),
+        ], ElevenLabsMeta(status: 200)))
+        #expect(music.songWords.map(\.text) == ["la"])
+        #expect(music.songWords.first?.start == 0.5)
+        #expect(music.songWaveform == [1, 3, 2])
+        music.editReturnedPlan()
+        #expect(music.tab == .plan)
+        #expect(music.plan?.sections.count == 2)
+    }
+
+    @Test func stemsVideoAndUploadSendTheirFiles() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let music = rig.session.music
+        #expect(music.stemVariation == "six_stems_v1")
+        music.stemsSource = rig.wav(named: "song.wav")
+        #expect(rig.client.validate(MusicScreenModel.stems, arguments: music.stemsArguments(),
+                                    files: ["file": [ElevenLabsFile(url: music.stemsSource!)]]).isEmpty)
+        music.videos = [rig.scratch.appendingPathComponent("a.mp4")]
+        music.videoTags = ["upbeat"]
+        music.videoDescription = "Happy"
+        #expect(music.videoProblems.isEmpty)
+        #expect(CreativeSpec.unknownArguments(music.videoArguments(), for: try #require(ElevenLabsCatalog.operation(MusicScreenModel.videoToMusic))).isEmpty)
+
+        rig.always(MusicScreenModel.upload, .json(["song_id": "song-9", "composition_plan": Self.planJSON]))
+        music.uploadSource = rig.wav(named: "mine.wav")
+        music.extractPlan = "music_v1"
+        await music.uploadSong()
+        #expect(music.uploadedSongID == "song-9")
+        #expect(music.plan?.sections.first?.name == "Intro")
+        #expect(rig.lastMultipart(MusicScreenModel.upload)?.contains(#"name="extract_composition_plan""#) == true)
+    }
+
+    @Test func aFineTuneIsListedEditedByWhatChangedAndDeletedOnlyWhenConfirmed() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let finetune: JSONValue = ["id": "ft1", "name": "Synth dreams", "tags": ["synth"], "model_id": "music_v1",
+                                   "created_at": "2026-09-01T00:00:00Z", "visibility": "private", "created_by": "self",
+                                   "status": "completed", "training_progress": 1]
+        rig.always(MusicScreenModel.listFinetunes, .json(["finetunes": [finetune], "next_cursor": nil, "has_more": false]))
+        rig.always(MusicScreenModel.getFinetune, .json(finetune))
+        let music = rig.session.music
+        music.finetuneCreatorFilter = "self"
+        await music.refreshFinetunes()
+        #expect(music.finetunes.map(\.name) == ["Synth dreams"])
+        #expect(rig.requests(MusicScreenModel.listFinetunes).last?.request.url.query?.contains("created_by=self") == true)
+        await music.select(music.finetunes[0])
+        #expect(music.editProblems == ["Nothing has changed."])
+        music.editName = "Synth nights"
+        #expect(music.updateArguments() == ["finetune_id": "ft1", "name": "Synth nights"])
+        #expect(music.editProblems.isEmpty)
+
+        let deleting = Task { await music.deleteSelectedFinetune() }
+        let runner = music.runner(MusicScreenModel.deleteFinetune)
+        try await CreativeRig.waitUntil { runner.phase == .awaitingConfirmation }
+        #expect(runner.confirmation?.title == "Delete the fine-tune “Synth dreams”?")
+        runner.decline()
+        await deleting.value
+        #expect(rig.requests(MusicScreenModel.deleteFinetune).isEmpty)
+        #expect(music.selectedFinetune != nil)
+    }
+
+    @Test func aNewFineTuneNeedsANameAGenreAndTracks() throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let music = rig.session.music
+        music.newName = "abc"
+        #expect(music.createProblems.contains("The name needs at least 5 characters."))
+        #expect(music.createProblems.contains("Name the primary genre."))
+        #expect(music.createProblems.contains("Add the tracks to train on."))
+        music.newName = "My band"
+        music.newGenre = "rock"
+        music.newFiles = [rig.wav()]
+        #expect(music.createProblems.isEmpty)
+        #expect(rig.client.validate(MusicScreenModel.createFinetune, arguments: music.createArguments(),
+                                    files: ["files": music.newFiles.map { ElevenLabsFile(url: $0) }]).isEmpty)
+    }
+
     // MARK: - Controls
 
     @Test func finelySteppedSlidersRoundInsteadOfDrawingTicks() {
