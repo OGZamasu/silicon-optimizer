@@ -904,7 +904,9 @@ enum ElevenLabsTools {
     static func pretty(_ value: JSONValue, limit: Int = 200_000) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        let text = (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "null"
+        let text = escapingLineSeparators(
+            (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "null"
+        )
         guard text.count > limit else { return text }
         return String(text.prefix(limit)) + "\n… (\(text.count - limit) more characters)"
     }
@@ -912,8 +914,19 @@ enum ElevenLabsTools {
     static func compact(_ value: JSONValue) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let text = (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "null"
+        let text = escapingLineSeparators(
+            (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "null"
+        )
         return text.count > 600 ? String(text.prefix(600)) + "…" : text
+    }
+
+    /// JSON text with U+2028, U+2029 and NEL written as escapes. JSONEncoder leaves them raw —
+    /// they are legal in a JSON string — but a reader that takes them for line breaks would
+    /// see a string from the spec start a line of its own. Escaped, it is the same JSON.
+    static func escapingLineSeparators(_ json: String) -> String {
+        json.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+            .replacingOccurrences(of: "\u{0085}", with: "\\u0085")
     }
 
     static func size(_ bytes: JSONValue) -> String {
