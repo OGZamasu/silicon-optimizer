@@ -666,7 +666,7 @@ enum ElevenLabsTools {
         let total = list["total"].intValue ?? operations.count
         guard !operations.isEmpty else {
             let groups = (list["groups"].arrayValue ?? []).map {
-                "\($0["name"].text) (\($0["count"].intValue ?? 0))"
+                "\(oneLine($0["name"].text, limit: 80)) (\($0["count"].intValue ?? 0))"
             }
             return "No ElevenLabs operation matches. Try fewer words, or a group: "
                 + groups.joined(separator: ", ") + "."
@@ -730,7 +730,8 @@ enum ElevenLabsTools {
         } else {
             lines.append("No request body.")
         }
-        lines.append("Answers: \(detail["response"]["note"].text)")
+        // The note names the media type, which is the spec's word for binary answers.
+        lines.append("Answers: \(oneLine(detail["response"]["note"].text))")
         lines.append("")
         lines.append("A call to start from (elevenlabs_call):")
         lines.append(pretty(detail["example"], limit: 8_000))
