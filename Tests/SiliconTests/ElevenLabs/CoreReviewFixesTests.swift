@@ -432,4 +432,27 @@ struct CoreReviewFixesTests {
         #expect(!masked.contains(token))
         #expect(masked.contains("next_page_token=cursor-1"), "a pagination cursor is not a secret")
     }
+
+    @Test func aSlashBackslashOrNULInAPathValueIsRefusedBeforeAnythingIsSent() async throws {
+        // "P/convert" would reach a different (billing) route once the server decodes %2F.
+        for bad in ["P/convert", "a\\b", "a\0b", String(repeating: "x", count: 513)] {
+            let rig = CoreClientTests.Rig(replies: [.json([:])])
+            defer { rig.cleanUp() }
+            do {
+                _ = try await rig.client.call("get_voice_by_id", arguments: ["voice_id": .string(bad)])
+                Issue.record("a path value of \(bad.prefix(12)) was accepted")
+            } catch ElevenLabsError.invalidArguments(let problems) {
+                #expect(problems.contains { $0.contains("voice_id") })
+            }
+            #expect(rig.transport.requests.isEmpty)
+        }
+    }
+
+    @Test func aPercentSignInAPathValueIsEncodedAsALiteralPercentNeverAsASlash() async throws {
+        let rig = CoreClientTests.Rig(replies: [.json([:])])
+        defer { rig.cleanUp() }
+        _ = try await rig.client.call("get_voice_by_id", arguments: ["voice_id": "P%2Fconvert"])
+        let url = try #require(rig.transport.requests.first?.url).absoluteString
+        #expect(url.hasSuffix("/v1/voices/P%252Fconvert"))
+    }
 }

@@ -116,6 +116,18 @@ enum ElevenLabsRequestBuilder {
                     problems.append("path parameter \"\(parameter.name)\" may not be \".\" or \"..\"")
                     continue
                 }
+                // A slash, even percent-encoded, is a segment boundary once the server has
+                // decoded it (ElevenLabs' spec is FastAPI's, and uvicorn decodes %2F before
+                // routing): `edit_project` with "P/convert" would reach the billing
+                // `convert_project_endpoint` while this client treats the call as a free edit.
+                // No real id contains one. NUL and absurd lengths are never an id either.
+                guard !text.contains(where: { $0 == "/" || $0 == "\\" || $0 == "\0" }), text.count <= 512 else {
+                    problems.append(
+                        "path parameter \"\(parameter.name)\" may not contain \"/\", \"\\\", or a NUL "
+                        + "character, and may not be longer than 512 characters"
+                    )
+                    continue
+                }
                 path = path.replacingOccurrences(
                     of: "{\(parameter.name)}", with: percentEncode(text, allowed: segmentAllowed)
                 )
