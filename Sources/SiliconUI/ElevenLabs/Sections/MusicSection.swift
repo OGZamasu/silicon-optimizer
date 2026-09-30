@@ -374,6 +374,13 @@ final class MusicScreenModel: CreativeScreenModel {
     var isDetailed: Bool { delivery == .detailed || delivery == .detailedStream }
     var isStreamed: Bool { delivery == .stream || delivery == .detailedStream }
 
+    /// The song's length as set, for the cost note: the slider with a prompt, the plan's
+    /// sections with a plan; nil when the model chooses.
+    var estimatedSeconds: Double? {
+        if usesPlan { return plan.map { Double($0.totalMs) / 1000 } }
+        return usesLength ? lengthSeconds : nil
+    }
+
     /// A streamed song plays as it arrives, detailed or not: the shell keeps an event stream's
     /// audio as the format asked for.
     var streamMode: ElevenLabsRunner.StreamMode { isStreamed ? .play : .collect }
@@ -475,8 +482,9 @@ final class MusicScreenModel: CreativeScreenModel {
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = streamMode
         lastRunner = runner
-        guard let result = await runner.perform(arguments: composeArguments()) else { return }
+        // Named from what was sent: the prompt stays editable while it runs.
         let title = usesPlan ? "Song from a plan (\(plan?.sections.count ?? 0) sections)" : Self.excerpt(prompt)
+        guard let result = await runner.perform(arguments: composeArguments()) else { return }
         if let take = CreativeTake(result: result, title: title, runner: runner) {
             takes.insert(take, at: 0)
             takeDetails[take.id] = MusicDetails(result: result)
@@ -586,10 +594,11 @@ final class MusicScreenModel: CreativeScreenModel {
 
     func scoreVideo() async {
         guard videoProblems.isEmpty, CreativeRunGate.isKnown(videoRunner) else { return }
+        let title = "Score for \(videos.map(\.lastPathComponent).joined(separator: ", "))"
         guard let result = await videoRunner.perform(
             arguments: videoArguments(), files: ["videos": videos.map { ElevenLabsFile(url: $0) }]
         ) else { return }
-        if let take = CreativeTake(result: result, title: "Score for \(videos.map(\.lastPathComponent).joined(separator: ", "))", runner: videoRunner) {
+        if let take = CreativeTake(result: result, title: title, runner: videoRunner) {
             videoTakes.insert(take, at: 0)
             takeDetails[take.id] = MusicDetails(result: result)
         }
@@ -919,7 +928,7 @@ private struct MusicComposeTab: View {
                 .padding(.top, 8)
             }
         }
-        CreativeRunRow(runner: screen.activeComposeRunner, title: "Compose", problems: screen.composeProblems) {
+        CreativeRunRow(runner: screen.activeComposeRunner, title: "Compose", estimatedSeconds: screen.estimatedSeconds, problems: screen.composeProblems) {
             Task { await screen.composeSong() }
         }
         MusicResultCard(screen: screen, runner: screen.busyRunner ?? screen.lastRunner, takes: screen.takes)
@@ -954,8 +963,10 @@ private struct MusicResultCard: View {
                         CreativeAudioResult(take: take)
                     }
                     if let waveform = details?.waveform, !waveform.isEmpty { MusicWaveform(samples: waveform) }
-                    if let songID = details?.songID {
-                        Text("Song id \(songID)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    // The shell's meta line names the song of the run on screen; an older take's
+                    // id is said here.
+                    if let songID = details?.songID, runner.result?.meta.headers["song-id"] != songID {
+                        Text("Song \(songID)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     if let metadata = details?.metadata {
                         DisclosureGroup("What the model used") {

@@ -271,14 +271,16 @@ final class DialogueScreenModel: CreativeScreenModel {
         runner.streamMode = streamMode
         lastRunner = runner
         let sent = lines.indices.filter { !lines[$0].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        // Named from what was sent: the script stays editable while it runs.
+        let names = sent.compactMap { session.voices.voice(id: lines[$0].voiceID)?.name }
+        var seen = Set<String>()
+        let cast = names.filter { seen.insert($0).inserted }.joined(separator: ", ")
+        let title = "Dialogue — \(cast.isEmpty ? "\(sent.count) lines" : cast)"
         guard let result = await runner.perform(arguments: arguments()) else { return }
         sentLines = sent
         words = CreativeTimeline.words(fromCharacterAlignments: CreativeTimeline.characterAlignments(in: result))
         segments = Self.voiceSegments(in: result)
-        let names = lines.compactMap { session.voices.voice(id: $0.voiceID)?.name }
-        var seen = Set<String>()
-        let cast = names.filter { seen.insert($0).inserted }.joined(separator: ", ")
-        if let take = CreativeTake(result: result, title: "Dialogue — \(cast.isEmpty ? "\(lines.count) lines" : cast)", runner: runner) {
+        if let take = CreativeTake(result: result, title: title, runner: runner) {
             takes.insert(take, at: 0)
         }
     }

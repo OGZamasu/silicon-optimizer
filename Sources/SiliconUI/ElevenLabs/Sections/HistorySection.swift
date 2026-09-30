@@ -123,6 +123,8 @@ final class HistoryScreenModel: CreativeScreenModel {
     private(set) var detailJSON: JSONValue?
     /// Audio fetched this session, by item.
     private(set) var audioFiles: [HistoryItem.ID: URL] = [:]
+    /// The fetched audio's type, by item, so headerless audio plays at the item's own rate.
+    private(set) var audioTypes: [HistoryItem.ID: String] = [:]
     var downloadFormat: String
     /// The last bulk download.
     private(set) var download: URL?
@@ -204,6 +206,7 @@ final class HistoryScreenModel: CreativeScreenModel {
         audioRunner.title = "History — \(item.voiceName ?? "audio")"
         if let file = CreativeResults.audioFile(in: await audioRunner.perform(arguments: ["history_item_id": .string(item.id)])) {
             audioFiles[item.id] = file.url
+            audioTypes[item.id] = file.contentType
         }
     }
 
@@ -393,7 +396,8 @@ struct HistoryScreen: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 if let audio = screen.audioFiles[item.id] {
-                    ElevenLabsAudioPlayerView(url: audio).id(audio)
+                    CreativeAudioResult(url: audio, contentType: screen.audioTypes[item.id] ?? item.contentType ?? "audio/mpeg",
+                                        outputFormat: item.outputFormat)
                 }
             }
             Spacer(minLength: 6)

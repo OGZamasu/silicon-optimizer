@@ -132,10 +132,11 @@ final class IsolationScreenModel: CreativeScreenModel {
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = delivery == .stream ? .play : .collect
         lastRunner = runner
+        let sentSource = source
         guard let result = await runner.perform(arguments: arguments(), files: files()) else { return }
-        if let take = CreativeTake(result: result, title: "Isolated — \(source?.lastPathComponent ?? "recording")", runner: runner) {
+        if let take = CreativeTake(result: result, title: "Isolated — \(sentSource?.lastPathComponent ?? "recording")", runner: runner) {
             takes.insert(take, at: 0)
-            sources[take.id] = source
+            sources[take.id] = sentSource
         }
     }
 

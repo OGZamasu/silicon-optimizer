@@ -141,11 +141,14 @@ final class VoiceChangerScreenModel: CreativeScreenModel {
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = delivery == .stream ? .play : .collect
         lastRunner = runner
-        guard let result = await runner.perform(arguments: arguments(), files: files()) else { return }
+        // Named, and the recording kept, as sent: the fields stay editable while it runs.
+        let sentSource = source
         let voiceName = session.voices.voice(id: voiceID)?.name ?? voiceID
-        if let take = CreativeTake(result: result, title: "\(source?.lastPathComponent ?? "Recording") as \(voiceName)", runner: runner) {
+        let title = "\(sentSource?.lastPathComponent ?? "Recording") as \(voiceName)"
+        guard let result = await runner.perform(arguments: arguments(), files: files()) else { return }
+        if let take = CreativeTake(result: result, title: title, runner: runner) {
             takes.insert(take, at: 0)
-            sources[take.id] = source
+            sources[take.id] = sentSource
         }
     }
 

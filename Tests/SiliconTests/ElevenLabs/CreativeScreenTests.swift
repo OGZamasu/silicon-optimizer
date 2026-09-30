@@ -1049,6 +1049,82 @@ struct CreativeScreenTests {
         #expect(busy() == nil)
     }
 
+    // MARK: - Second review's nits
+
+    /// A take is named from what was sent, not from what the fields say when the answer
+    /// arrives — they stay editable while it runs.
+    @Test func aTakeIsNamedFromWhatWasSent() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        var slow = FakeElevenLabsTransport.Reply.audio(CreativeRig.wavData(seconds: 0.2), contentType: "audio/wav")
+        slow.delay = .milliseconds(300)
+        rig.always(SpeechScreenModel.full, slow)
+        rig.always(SoundEffectsScreenModel.generate, slow)
+        let speech = rig.session.speech
+        speech.voiceID = "voice-rachel"
+        speech.text = "What was sent."
+        let running = Task { await speech.generate() }
+        try await CreativeRig.waitUntil { !rig.requests(SpeechScreenModel.full).isEmpty }
+        speech.text = "Typed while it ran."
+        await running.value
+        #expect(speech.takes.first?.title.contains("What was sent.") == true)
+
+        let effects = rig.session.soundEffects
+        effects.text = "Rain"
+        let effect = Task { await effects.generate() }
+        try await CreativeRig.waitUntil { !rig.requests(SoundEffectsScreenModel.generate).isEmpty }
+        effects.text = "Thunder"
+        await effect.value
+        #expect(effects.takes.first?.title == "Rain")
+    }
+
+    @Test func costNotesGetTheLengthTheOwnerSet() {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let effects = rig.session.soundEffects
+        #expect(effects.estimatedSeconds == nil, "the model chooses the length")
+        effects.automaticDuration = false
+        effects.duration = 8
+        #expect(effects.estimatedSeconds == 8)
+        let music = rig.session.music
+        #expect(music.estimatedSeconds == nil)
+        music.usesLength = true
+        music.lengthSeconds = 95
+        #expect(music.estimatedSeconds == 95)
+        music.load(plan: Self.planJSON)
+        music.usesPlan = true
+        #expect(music.estimatedSeconds == 25, "a plan's length is its sections'")
+    }
+
+    @Test func historyPlaysEachItemAtItsOwnFormatAndTakesShowTheirTitleOnce() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        var item = Self.historyItem("h1")
+        if case .object(var object) = item { object["output_format"] = "pcm_16000"; item = .object(object) }
+        rig.always(HistoryScreenModel.list, .json(["history": [item], "has_more": false]))
+        rig.always(HistoryScreenModel.audio, .init(status: 200, headers: ["content-type": "audio/pcm"], body: Data(count: 3200)))
+        let history = rig.session.history
+        await history.refresh()
+        #expect(history.items.first?.outputFormat == "pcm_16000")
+        await history.fetchAudio(history.items[0])
+        #expect(history.audioTypes["h1"] == "audio/pcm")
+        let take = try #require(CreativeTake(
+            result: .file(rig.wav(), contentType: "audio/wav", bytes: 10, ElevenLabsMeta(status: 200)), title: "Take"
+        ))
+        #expect(CreativeAudioResult(take: take).title == "Take")
+        #expect(CreativeAudioResult(take: take, showsTitle: false).title == nil, "the takes list draws the title itself")
+    }
+
+    @Test func moreChannelsThanTheSpecSupportsAreSaidSo() {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let stt = rig.session.transcription
+        stt.source = rig.wav(named: "wide.wav", seconds: 0.5, channels: 6)
+        stt.useMultiChannel = true
+        #expect(stt.billedChannels == 6)
+        #expect(stt.costNote?.contains("more than 5 are not supported") == true)
+    }
+
     // MARK: - Controls
 
     @Test func finelySteppedSlidersRoundInsteadOfDrawingTicks() {

@@ -231,11 +231,13 @@ final class SpeechScreenModel: CreativeScreenModel {
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = streamMode
         let voiceName = session.voices.voice(id: voiceID)?.name ?? voiceID
+        // Named from what was sent: the text stays editable while it runs.
+        let title = Self.takeTitle(text, voice: voiceName)
         runner.title = "Speech — \(voiceName)"
         lastRunner = runner
         guard let result = await runner.perform(arguments: arguments()) else { return }
         words = CreativeTimeline.words(fromCharacterAlignments: CreativeTimeline.characterAlignments(in: result))
-        if let take = CreativeTake(result: result, title: Self.takeTitle(text, voice: voiceName), runner: runner) {
+        if let take = CreativeTake(result: result, title: title, runner: runner) {
             takes.insert(take, at: 0)
         }
     }

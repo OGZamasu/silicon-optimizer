@@ -307,7 +307,7 @@ final class TranscriptionScreenModel: CreativeScreenModel {
         ("keyterms", "When more than 100 keyterms are provided, a minimum billable duration of 20 seconds applies per request."),
     ]
 
-    /// The most channels billed, from the spec.
+    /// The most channels the spec supports with one speaker per channel.
     static let maxChannels = 5
     /// Past this many key terms, a request is billed for at least `keytermMinimumSeconds`.
     static let keytermMinimumAbove = 100
@@ -324,7 +324,7 @@ final class TranscriptionScreenModel: CreativeScreenModel {
     var billedChannels: Int? {
         guard useMultiChannel else { return 1 }
         guard sourceKind == .file, let channels = source.flatMap(CreativeMedia.channelCount(of:)) else { return nil }
-        return min(max(channels, 1), Self.maxChannels)
+        return max(channels, 1)
     }
 
     /// The audio length billed at the base rate: the file's length, times its channels with
@@ -338,7 +338,9 @@ final class TranscriptionScreenModel: CreativeScreenModel {
     var costNote: String? {
         var lines: [String] = []
         if useMultiChannel {
-            if let channels = billedChannels, let seconds = sourceSeconds {
+            if let channels = billedChannels, channels > Self.maxChannels {
+                lines.append("This file has \(channels) channels; files with more than \(Self.maxChannels) are not supported with one speaker per channel.")
+            } else if let channels = billedChannels, let seconds = sourceSeconds {
                 lines.append("One speaker per channel: each of the \(channels) channels is billed at the full length (\(ElevenLabsAudioPlayerView.clock(seconds)) × \(channels)).")
             } else {
                 lines.append("One speaker per channel: each channel (up to \(Self.maxChannels)) is billed at the full length.")

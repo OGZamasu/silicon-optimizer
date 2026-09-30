@@ -766,11 +766,12 @@ struct CreativeAudioResult: View {
     var title: String?
     var outputFormat: String?
 
-    init(take: CreativeTake, title: String? = nil) {
+    /// - Parameter showsTitle: Off where the take's title is already drawn above it.
+    init(take: CreativeTake, title: String? = nil, showsTitle: Bool = true) {
         url = take.file
         contentType = take.contentType
         bytes = take.bytes
-        self.title = title ?? take.title
+        self.title = showsTitle ? (title ?? take.title) : nil
         outputFormat = take.outputFormat
     }
 
@@ -861,7 +862,7 @@ struct CreativeTakesList: View {
                                     .accessibilityLabel("Remove \(take.title) from the list")
                                 }
                             }
-                            CreativeAudioResult(take: take, title: nil)
+                            CreativeAudioResult(take: take, showsTitle: false)
                         }
                     }
                 }

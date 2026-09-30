@@ -77,12 +77,22 @@ final class SoundEffectsScreenModel: CreativeScreenModel {
 
     func generate() async {
         guard problems.isEmpty, CreativeRunGate.isKnown(runner) else { return }
+        // Named from what was sent: the fields stay editable while it runs.
+        let title = takeTitle
         guard let result = await runner.perform(arguments: arguments()) else { return }
+        if let take = CreativeTake(result: result, title: title, runner: runner) { takes.insert(take, at: 0) }
+    }
+
+    /// The take's name, from the description, length and loop as they are now.
+    var takeTitle: String {
         var title = text.count > 60 ? String(text.prefix(59)) + "…" : text
         if !automaticDuration { title += String(format: " · %.1f s", duration) }
         if loop { title += " · loop" }
-        if let take = CreativeTake(result: result, title: title, runner: runner) { takes.insert(take, at: 0) }
+        return title
     }
+
+    /// The length the owner set, for the cost note; nil when the model chooses.
+    var estimatedSeconds: Double? { automaticDuration ? nil : duration }
 
     func removeTake(_ take: CreativeTake) {
         takes.removeAll { $0.id == take.id }
@@ -121,7 +131,7 @@ struct SoundEffectsScreen: View {
                 }
                 CreativeOutputFormatPicker(selection: $screen.outputFormat, choices: screen.outputFormats)
             }
-            CreativeRunRow(runner: screen.runner, title: "Generate sound", problems: screen.problems) {
+            CreativeRunRow(runner: screen.runner, title: "Generate sound", estimatedSeconds: screen.estimatedSeconds, problems: screen.problems) {
                 Task { await screen.generate() }
             }
             if screen.runner.phase != .idle || !screen.takes.isEmpty {
