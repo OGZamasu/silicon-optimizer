@@ -192,7 +192,10 @@ final class AgentPhoneNumbersModel {
             slot: "\(number.id)#agent",
             subject: agent.map { "\(number.number) answered by “\($0)”" } ?? "\(number.number) answered by no agent",
             consequence: agent.map { "From now on, calls to \(number.number) are answered by “\($0)”." }
-                ?? "Calls to \(number.number) will no longer be answered by an agent."
+                ?? "Calls to \(number.number) will no longer be answered by an agent.",
+            question: agent.map { "Answer calls to \(number.number) with “\($0)”?" }
+                ?? "Stop answering calls to \(number.number) with an agent?",
+            confirmLabel: agent == nil ? "Unassign" : "Assign"
         ) != nil else { return }
         await select(number.id)
     }
@@ -203,7 +206,8 @@ final class AgentPhoneNumbersModel {
         guard await calls.json(
             AgentsOp.updatePhoneNumber, ["phone_number_id": .string(number.id), "label": .string(label)],
             slot: "\(number.id)#label",
-            subject: "\(number.number) renamed “\(label)”", consequence: "Only its name in ElevenLabs changes."
+            subject: "\(number.number) renamed “\(label)”", consequence: "Only its name in ElevenLabs changes.",
+            question: "Rename \(number.number) “\(label)”?", confirmLabel: "Rename"
         ) != nil else { return }
         await select(number.id)
     }
@@ -343,7 +347,8 @@ final class AgentPhoneNumbersModel {
             subject: "\(number) from \(importProvider.rawValue)",
             consequence: "ElevenLabs will connect \(number) to your account using the \(importProvider.rawValue) credentials "
                 + "you entered, so agents can answer\(importOutbound ? " and place" : "") calls on it. "
-                + "The credentials are sent to ElevenLabs and not written to disk by this app."
+                + "The credentials are sent to ElevenLabs and not written to disk by this app.",
+            question: "Import \(number) from \(importProvider.rawValue)?", confirmLabel: "Import number"
         ) else { return }
         twilioToken = ""
         sipPassword = ""
@@ -376,7 +381,7 @@ final class AgentPhoneNumbersModel {
         arguments["phone_number_id"] = .string(account.id)
         guard await calls.json(
             AgentsOp.updateWhatsAppAccount, arguments, slot: account.id,
-            subject: "\(account.number)", consequence: what
+            subject: "\(account.number)", consequence: what, confirmLabel: "Save"
         ) != nil else { return }
         await refreshWhatsAppAccount(account.id)
     }

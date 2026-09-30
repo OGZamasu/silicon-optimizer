@@ -44,21 +44,26 @@ final class AgentsCalls {
     ///
     /// - Parameters:
     ///   - quiet: For reads that fill a list: kept out of the pane's recent results.
+    ///   - title: The result's title in the pane's recent results.
     ///   - subject/consequence: For the confirmation of a destructive or real-world operation.
     ///   The pane asks the question: its title is the shell's verb (or the operation's summary)
     ///   followed by `subject`, so a subject is a noun phrase ("3 real phone calls with “Support”").
+    ///   - question/confirmLabel: The whole question and its button's verb, where the shell's
+    ///   generic wording ("Run") would not say what happens ("Stop the batch “Monday”?", "Stop calls").
     @discardableResult
     func run(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], slot: String = "", quiet: Bool = false,
-        title: String? = nil, subject: String? = nil, consequence: String? = nil
+        title: String? = nil, subject: String? = nil, consequence: String? = nil,
+        question: String? = nil, confirmLabel: String? = nil
     ) async -> ElevenLabsResult? {
         guard Self.isAvailable(operationID) else { return nil }
         let runner = runner(operationID, slot: slot)
         runner.recordsResults = !quiet
         if let title { runner.title = title }
         return await runner.perform(
-            arguments: arguments, files: files, subject: subject, consequence: consequence
+            arguments: arguments, files: files, subject: subject, consequence: consequence,
+            title: question, confirmLabel: confirmLabel
         )
     }
 
@@ -67,11 +72,12 @@ final class AgentsCalls {
     func json(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], slot: String = "", quiet: Bool = false,
-        title: String? = nil, subject: String? = nil, consequence: String? = nil
+        title: String? = nil, subject: String? = nil, consequence: String? = nil,
+        question: String? = nil, confirmLabel: String? = nil
     ) async -> JSONValue? {
         guard let result = await run(
             operationID, arguments, files: files, slot: slot, quiet: quiet, title: title,
-            subject: subject, consequence: consequence
+            subject: subject, consequence: consequence, question: question, confirmLabel: confirmLabel
         ) else { return nil }
         return Self.json(of: result)
     }

@@ -534,7 +534,8 @@ final class AgentBatchCallsModel {
             AgentsOp.cancelBatch, ["batch_id": .string(batch.id)], slot: batch.id,
             subject: "“\(batch.name)” — stop placing its calls",
             consequence: "ElevenLabs stops the batch: calls not yet placed (\(pending) by the statuses on screen) are not "
-                + "placed, and every recipient is marked cancelled. Calls already in progress may finish."
+                + "placed, and every recipient is marked cancelled. Calls already in progress may finish.",
+            question: "Stop the batch “\(batch.name)”?", confirmLabel: "Stop calls"
         ) != nil else { return }
         if selectedID == batch.id { await reload() }
     }

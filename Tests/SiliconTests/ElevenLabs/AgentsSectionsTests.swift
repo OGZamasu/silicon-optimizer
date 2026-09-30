@@ -625,6 +625,36 @@ struct AgentsSectionsTests {
         #expect(asked.isEmpty)
     }
 
+    /// Round 4: the questions that read the shell's generic "Run" say what they do.
+    @Test func questionsNameTheirAction() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        await rig.store.directory.agents.refresh()
+        await rig.store.directory.phoneNumbers.refresh()
+        let batches = rig.store.batchCalls
+        await batches.list.refresh()
+        await batches.select(AgentsFixtures.batchID)
+        let stop = rig.store.calls.runner(AgentsOp.cancelBatch, slot: AgentsFixtures.batchID)
+        let stopping = Task { await batches.cancel() }
+        try await waitUntil { stop.isAwaitingConfirmation }
+        #expect(stop.confirmation?.title == "Stop the batch “October renewals”?")
+        #expect(stop.confirmation?.confirmLabel == "Stop calls")
+        stop.decline()
+        await stopping.value
+
+        let secrets = rig.store.secrets
+        secrets.newName = "crm_api_key_2"
+        secrets.newValue = "fixture-value"
+        let store = rig.store.calls.runner(AgentsOp.createSecret)
+        let storing = Task { await secrets.create() }
+        try await waitUntil { store.isAwaitingConfirmation }
+        #expect(store.confirmation?.title == "Store the secret “crm_api_key_2” in your workspace?")
+        #expect(store.confirmation?.confirmLabel == "Store secret")
+        store.decline()
+        await storing.value
+        #expect(rig.requests(AgentsOp.createSecret).isEmpty && rig.requests(AgentsOp.cancelBatch).isEmpty)
+    }
+
     /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
     /// out, so Save asks first, naming where.
     @Test func savingAnAgentWithANewMCPServerOrWebhookToolAsksFirst() async throws {

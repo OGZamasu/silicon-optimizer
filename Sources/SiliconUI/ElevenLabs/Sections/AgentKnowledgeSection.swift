@@ -425,7 +425,8 @@ final class AgentKnowledgeModel {
         guard await calls.json(
             AgentsOp.bulkDeleteDocuments, arguments, subject: AgentsFormat.count(ids.count, "document"),
             consequence: "ElevenLabs will delete \(AgentsFormat.count(ids.count, "document or folder", plural: "documents and folders")). "
-                + (forceDelete ? "Agents using them lose them." : "Any still used by an agent are refused; the rest are deleted.")
+                + (forceDelete ? "Agents using them lose them." : "Any still used by an agent are refused; the rest are deleted."),
+            question: "Delete \(AgentsFormat.count(ids.count, "document"))?", confirmLabel: "Delete"
         ) != nil else { return }
         checked = []
         await list.refresh()
@@ -489,7 +490,8 @@ final class AgentKnowledgeModel {
         guard await calls.json(
             AgentsOp.cancelCrawl, ["crawl_job_id": .string(job.id)], slot: job.id,
             subject: "the crawl of \(job.url) and everything it made",
-            consequence: "ElevenLabs stops crawling and deletes every document and folder it made."
+            consequence: "ElevenLabs stops crawling and deletes every document and folder it made.",
+            question: "Stop the crawl of \(job.url) and delete everything it made?", confirmLabel: "Stop and delete"
         ) != nil else { return }
         await refreshCrawl(job.id)
         await list.refresh()

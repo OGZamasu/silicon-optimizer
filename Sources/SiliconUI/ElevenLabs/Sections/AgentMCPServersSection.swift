@@ -209,7 +209,7 @@ final class AgentMCPServersModel {
             AgentsOp.updateMCPServer, arguments, slot: server.id,
             subject: settings.approvalPolicy != originalSettings.approvalPolicy
                 ? "“\(server.name)” — tools \(Self.policyWords(settings.approvalPolicy))" : "“\(server.name)”",
-            consequence: consequence
+            consequence: consequence, confirmLabel: "Save settings"
         ) else { return }
         if let updated = AgentsMCPServer(json: json) {
             show(updated)
@@ -251,7 +251,8 @@ final class AgentMCPServersModel {
            subject: autoApproved ? "“\(tool.name)” to run without asking" : "“\(tool.name)” to ask first",
            consequence: autoApproved
             ? "Agents may call “\(tool.name)” on \(server.url) without asking the caller first."
-            : "Agents must get the caller's approval before calling “\(tool.name)”."
+            : "Agents must get the caller's approval before calling “\(tool.name)”.",
+           confirmLabel: autoApproved ? "Run without asking" : "Ask first"
         ) != nil else { return }
         await loadTools()
     }
@@ -286,7 +287,8 @@ final class AgentMCPServersModel {
         let operation = exists ? AgentsOp.updateMCPToolOverride : AgentsOp.addMCPToolOverride
         guard await calls.json(
             operation, arguments, slot: "\(server.id)/\(tool.name)", subject: "“\(tool.name)” on “\(server.name)”",
-            consequence: "Agents calling “\(tool.name)” on “\(server.name)” use these settings instead of the server's."
+            consequence: "Agents calling “\(tool.name)” on “\(server.name)” use these settings instead of the server's.",
+            confirmLabel: "Save override"
         ) != nil else { return }
         await loadOverride(tool)
     }
@@ -347,7 +349,8 @@ final class AgentMCPServersModel {
             subject: "“\(newName)” at \(url)",
             consequence: (warnings.isEmpty ? "" : "Careful: " + warnings.joined(separator: " ") + " ")
                 + "Agents you give it to can call its tools during conversations and send it what callers say. "
-                + tools + " Only connect servers you trust."
+                + tools + " Only connect servers you trust.",
+            question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect"
         ), let server = AgentsMCPServer(json: json) else { return }
         list.upsert(server)
         store.directory.mcpServers.upsert(server)

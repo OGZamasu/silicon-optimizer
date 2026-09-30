@@ -164,7 +164,8 @@ final class AgentSecretsModel {
             AgentsOp.createSecret, ["type": "new", "name": .string(name), "value": .string(value)],
             title: "New secret “\(name)”", subject: "“\(name)”",
             consequence: "ElevenLabs stores the value in your workspace, where tools and MCP servers you point at it can use it. "
-                + "It cannot be read back, here or in ElevenLabs."
+                + "It cannot be read back, here or in ElevenLabs.",
+            question: "Store the secret “\(name)” in your workspace?", confirmLabel: "Store secret"
         ) else { return }
         newValue = ""
         newName = ""
@@ -186,7 +187,8 @@ final class AgentSecretsModel {
             ["secret_id": .string(secret.id), "type": "update", "name": .string(name), "value": .string(replaceValue)],
             slot: secret.id, subject: "“\(secret.name)” with a new value",
             consequence: "Everything using it — \(secret.usageSummary.lowercased()) — uses the new value from now on. "
-                + "The old value is gone."
+                + "The old value is gone.",
+            question: "Replace the value of “\(secret.name)”?", confirmLabel: "Replace value"
         ) != nil else { return }
         replaceValue = ""
         await list.refresh()
@@ -286,7 +288,8 @@ final class AgentSecretsModel {
             subject: "“\(label)” (\(AgentsFormat.words(newVariableType).lowercased()))",
             consequence: "Tools, MCP servers and agents that refer to {{\(label)}} use these values in "
                 + ListFormatter.localizedString(byJoining: newVariableValues.map(\.environment).filter { !$0.isEmpty })
-                + " from their next conversation. The values themselves are not shown here again."
+                + " from their next conversation. The values themselves are not shown here again.",
+            confirmLabel: "Create variable"
         ) else { return }
         newVariableLabel = ""
         newVariableValues = [("production", "")]
@@ -313,7 +316,8 @@ final class AgentSecretsModel {
         ], slot: variable.id, title: "Variable “\(variable.label)”",
            subject: "“\(variable.label)”",
            consequence: "What refers to {{\(variable.label)}} uses the new values from its next conversation."
-            + (removed.isEmpty ? "" : " Removed: " + ListFormatter.localizedString(byJoining: removed) + ".")
+            + (removed.isEmpty ? "" : " Removed: " + ListFormatter.localizedString(byJoining: removed) + "."),
+           confirmLabel: "Save values"
         ) != nil else { return }
         if selectedVariableID == variable.id { await selectVariable(variable.id) }
     }

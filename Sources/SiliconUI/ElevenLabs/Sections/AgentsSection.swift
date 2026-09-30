@@ -2126,7 +2126,8 @@ final class AgentsWorkspaceSettingsModel {
         guard let json = await calls.json(
             AgentsOp.updateSettings, body, subject: "the workspace's agent settings",
             consequence: "This changes \(ListFormatter.localizedString(byJoining: changed)) for every agent in the "
-                + "workspace. Post-call webhooks send conversation data to the webhook's address."
+                + "workspace. Post-call webhooks send conversation data to the webhook's address.",
+            confirmLabel: "Save settings"
         ) else { return }
         if json["can_use_mcp_servers"] != .null { settings = json } else { await load() }
     }
@@ -2138,7 +2139,8 @@ final class AgentsWorkspaceSettingsModel {
         charts.remove(at: index)
         guard let json = await calls.json(
             AgentsOp.updateDashboardSettings, ["charts": .array(charts)], subject: "the dashboard chart “\(name)”",
-            consequence: "Everyone in the workspace stops seeing the chart “\(name)” on the agents dashboard."
+            consequence: "Everyone in the workspace stops seeing the chart “\(name)” on the agents dashboard.",
+            question: "Remove the dashboard chart “\(name)”?", confirmLabel: "Remove chart"
         ) else { return }
         dashboard = json["charts"] != .null ? json : ["charts": .array(charts)]
     }
