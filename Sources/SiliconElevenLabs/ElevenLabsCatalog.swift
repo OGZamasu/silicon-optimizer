@@ -8,9 +8,9 @@ import Foundation
 /// the spec.
 public enum ElevenLabsCatalog {
     /// SHA-256 of the pinned `openapi.json` the catalog was generated from.
-    public static let specSHA256 = "b3fe16f8d37a3b735df8514737e045b8d190f8618eb5c93f7caa7523feed80a0"
+    public static var specSHA256: String { generatedSpecSHA256 }
 
-    /// Every operation, in spec order.
+    /// Every operation: group by group in display order, spec order within a group.
     public static var all: [ElevenLabsOperation] { storage.all }
 
     public static func operation(_ id: String) -> ElevenLabsOperation? { storage.byID[id] }
@@ -55,6 +55,61 @@ public enum ElevenLabsCatalog {
         }
     }
 
-    // Filled from the embedded catalog in a later commit; empty in the interface commit.
-    static let storage = Storage([])
+    /// Parsed once, on first use. `JSONSerialization` rather than `JSONDecoder`: the catalog is
+    /// 1.7 MB of schemas, and decoding that through `JSONValue`'s trial-and-error `Decodable`
+    /// is several times slower.
+    static let storage = Storage(loadGenerated())
+
+    static func loadGenerated() -> [ElevenLabsOperation] {
+        guard let parsed = try? JSONSerialization.jsonObject(with: Data(generatedJSON.utf8)),
+              case .array(let entries) = JSONValue(foundation: parsed)
+        else { return [] }
+        return entries.compactMap(operation(from:))
+    }
+
+    /// One generated entry, with the policy fields from the reviewed table.
+    static func operation(from entry: JSONValue) -> ElevenLabsOperation? {
+        guard let id = entry["id"].stringValue, let method = entry["method"].stringValue,
+              let path = entry["path"].stringValue
+        else { return nil }
+        let parameters: [ElevenLabsParameter] = (entry["parameters"].arrayValue ?? []).compactMap {
+            guard let name = $0["name"].stringValue,
+                  let location = $0["location"].stringValue.flatMap(ElevenLabsParameter.Location.init)
+            else { return nil }
+            let fallback = $0["defaultValue"]
+            return ElevenLabsParameter(
+                name: name, location: location, required: $0["required"].boolValue ?? false,
+                description: $0["description"].stringValue ?? "", schema: $0["schema"],
+                defaultValue: $0.objectValue?["defaultValue"] == nil ? nil : fallback
+            )
+        }
+        var body: ElevenLabsBody?
+        if case .object = entry["body"],
+           let contentType = entry["body"]["contentType"].stringValue.flatMap(ElevenLabsBody.ContentType.init) {
+            body = ElevenLabsBody(
+                contentType: contentType, required: entry["body"]["required"].boolValue ?? false,
+                schema: entry["body"]["schema"],
+                fileFields: entry["body"]["fileFields"].arrayValue?.compactMap(\.stringValue) ?? []
+            )
+        }
+        let response: ElevenLabsResponseKind
+        switch entry["response"]["kind"].stringValue {
+        case "audio": response = .audio
+        case "binary": response = .binary(entry["response"]["contentType"].stringValue ?? "application/octet-stream")
+        case "text": response = .text
+        case "events": response = .events
+        case "multipartMixed": response = .multipartMixed
+        default: response = .json
+        }
+        let risk = ElevenLabsRiskTable.risk(for: id, method: method, path: path)
+        return ElevenLabsOperation(
+            id: id, method: method, path: path, group: entry["group"].stringValue ?? "Other",
+            summary: entry["summary"].stringValue ?? "", details: entry["details"].stringValue ?? "",
+            deprecated: entry["deprecated"].boolValue ?? false, parameters: parameters, body: body,
+            response: response, risk: risk,
+            billable: ElevenLabsRiskTable.isBillable(id, risk: risk),
+            returnsCredential: ElevenLabsRiskTable.returnsCredential(id),
+            supportsStreaming: entry["supportsStreaming"].boolValue ?? false
+        )
+    }
 }
