@@ -151,46 +151,6 @@ struct ElevenLabsAudioPlayerView: View {
     }
 }
 
-/// Plays audio as it arrives from a `…/stream` operation, and stops when told.
-///
-/// Fed from the stream collector on the main actor; decoding happens off it.
-@MainActor
-@Observable
-final class ElevenLabsStreamPlayer {
-    private(set) var isPlaying = false
-    private(set) var receivedBytes = 0
-    @ObservationIgnored private var buffer = Data()
-    @ObservationIgnored private var player: AVAudioPlayer?
-    @ObservationIgnored private var finished = false
-
-    init() {}
-
-    /// The next piece of audio, in arrival order.
-    func append(_ data: Data) {
-        guard !finished else { return }
-        buffer.append(data)
-        receivedBytes += data.count
-    }
-
-    /// The stream ended: whatever has not played yet plays out.
-    func finish() {
-        guard !finished else { return }
-        finished = true
-        guard player == nil, !buffer.isEmpty, let player = try? AVAudioPlayer(data: buffer) else { return }
-        self.player = player
-        player.play()
-        isPlaying = true
-    }
-
-    /// Silence, at once.
-    func stop() {
-        finished = true
-        player?.stop()
-        player = nil
-        isPlaying = false
-    }
-}
-
 /// Reads a stream to its end: audio and other bytes to one file from the sink (fed to the
 /// player as they arrive), events kept as JSON. What `ElevenLabsRunner` uses for `.play`.
 enum ElevenLabsStreamCollector {

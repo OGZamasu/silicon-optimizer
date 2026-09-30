@@ -50,6 +50,9 @@ final class ElevenLabsPaneState {
     /// Every voice the account can use, fetched once and shared by every picker.
     let voices: ElevenLabsVoiceDirectory
 
+    /// The Explorer's filters and the operations opened in it, made when it is first shown.
+    @ObservationIgnored private var explorerModel: ElevenLabsExplorerModel?
+
     /// How many results the session keeps. Files stay on disk either way; this bounds the
     /// list, not the output folder.
     static let recentLimit = 50
@@ -82,6 +85,14 @@ final class ElevenLabsPaneState {
     /// Shows this session's results.
     func showRecents() {
         showsRecents = true
+    }
+
+    /// The Explorer's model, made on first use with `context`.
+    func explorer(context: @autoclosure () -> ElevenLabsRunner.Context) -> ElevenLabsExplorerModel {
+        if let explorerModel { return explorerModel }
+        let made = ElevenLabsExplorerModel(context: context())
+        explorerModel = made
+        return made
     }
 
     /// Adds a finished run to the session's list, unless its answer carried a credential:
@@ -129,6 +140,7 @@ final class ElevenLabsPaneState {
         recents.removeAll()
         connectionProblem = nil
         explorerSelection = nil
+        explorerModel = nil
         voices.reset()
     }
 }

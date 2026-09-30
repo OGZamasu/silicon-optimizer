@@ -66,7 +66,8 @@ final class ElevenLabsRunner: Identifiable {
         @MainActor static func app(_ model: AppModel) -> Context {
             Context(
                 client: { [weak model] in model?.elevenLabsClient },
-                sink: { [weak model] in model?.elevenLabsRunnerSink },
+                // The core's dated output folder, registered with the media table.
+                sink: { [weak model] in model.flatMap { $0.elevenLabsLinked ? $0.elevenLabsSink() : nil } },
                 pane: model.elevenLabsPane
             )
         }
@@ -196,7 +197,7 @@ final class ElevenLabsRunner: Identifiable {
         let operation = operation
         let task: Task<ElevenLabsResult, any Error>
         if playing, let sink = context.sink() {
-            let player = ElevenLabsStreamPlayer()
+            let player = ElevenLabsStreamPlayer(outputFormat: arguments["output_format"]?.stringValue)
             streamPlayer = player
             task = Task { [weak self] in
                 try await ElevenLabsStreamCollector.collect(
@@ -290,7 +291,8 @@ final class ElevenLabsRunner: Identifiable {
     private func succeed(_ answer: ElevenLabsResult) -> ElevenLabsResult {
         var shown = answer
         if operation.returnsCredential {
-            credential = ElevenLabsRevealedCredential(operation: operation, result: answer)
+            let revealed = ElevenLabsRevealedCredential(operation: operation, result: answer)
+            credential = revealed.fields.isEmpty ? nil : revealed
             shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         }
         result = shown
