@@ -31,5 +31,12 @@ extension AppModel {
     func disconnectElevenLabs() {
         unlinkElevenLabs()
         elevenLabsPane.reset()
+        leaveHiddenTab()
+    }
+
+    /// Moves the selection to Settings when it is on a place the sidebar no longer lists —
+    /// the ElevenLabs pane, once its key is gone.
+    func leaveHiddenTab() {
+        if !selectedTab.isOffered(elevenLabsLinked: elevenLabsLinked) { selectedTab = .settings }
     }
 }
