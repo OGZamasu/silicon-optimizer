@@ -344,9 +344,9 @@ final class ServiceAccountsSectionModel {
     static let killSwitchQuestion = VoicesStudioQuestion(
         "Disable the key this Mac uses?", button: "Disable key",
         consequence: "ElevenLabs turns off the key this Mac is connected with. This pane, and every agent or tool "
-            + "using that key, stops working. This app cannot turn it back on — with its key off it can reach "
-            + "nothing — so turning it on again, or making a new key, happens on elevenlabs.io; then connect the "
-            + "new key in Settings → ElevenLabs."
+            + "using that key, stops working.",
+        warning: "This app cannot turn it back on — with its key off it can reach nothing — so turning it on "
+            + "again, or making a new key, happens on elevenlabs.io; then connect the new key in Settings → ElevenLabs."
     )
 
     // MARK: Test support

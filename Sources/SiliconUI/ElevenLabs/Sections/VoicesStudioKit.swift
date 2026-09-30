@@ -50,11 +50,14 @@ struct VoicesStudioQuestion: Equatable, Sendable {
     var title: String
     var confirmLabel: String
     var consequence: String
+    /// One more line, set apart: money, what else stops working.
+    var warning: String?
 
-    init(_ title: String, button confirmLabel: String, consequence: String) {
+    init(_ title: String, button confirmLabel: String, consequence: String, warning: String? = nil) {
         self.title = title
         self.confirmLabel = confirmLabel
         self.consequence = consequence
+        self.warning = warning
     }
 }
 
@@ -74,15 +77,6 @@ struct VoicesStudioQuestion: Equatable, Sendable {
 @MainActor
 @Observable
 final class VoicesStudioActions {
-    /// Operations whose question the section words itself: their runners ask here rather than
-    /// through the pane, so the section's title, button and consequence are what is shown.
-    static let ownQuestions: Set<String> = [
-        "disable", "public_submit_order", "edit_service_account_api_key", "create_service_account",
-        "create_service_account_api_key", "set_third_party_disabling_policy", "update_workspace_member",
-        "add_member", "remove_member", "share_resource_endpoint", "unshare_resource_endpoint",
-        "create_auth_connection", "update_auth_connection", "replicate_voice_to_isolated_environment",
-    ]
-
     /// Spending calls that leave nothing lasting behind when their answer is lost (voice design
     /// previews), so a repeat after a cancel needs no check.
     static let passingSpends: Set<String> = [
@@ -100,8 +94,6 @@ final class VoicesStudioActions {
     private(set) var missingOperation: String?
     /// Why the last attempt was refused without sending anything.
     private(set) var refusal: String?
-    /// The section's wording for the questions its runners are asking, by operation.
-    private(set) var questions: [String: VoicesStudioQuestion] = [:]
     /// A question for an operation that does not ask by itself (an edit that replaces a
     /// project's content), waiting for its answer.
     private(set) var pendingQuestion: ElevenLabsConfirmationRequest?
@@ -121,11 +113,9 @@ final class VoicesStudioActions {
     }
 
     /// The runner for `operationID`, made on first use; nil when the catalog has no such
-    /// operation. Runners of `ownQuestions` ask through this screen, not the pane.
+    /// operation.
     func runner(_ operationID: String) -> ElevenLabsRunner? {
         if let existing = runners[operationID] { return existing }
-        var context = context
-        if Self.ownQuestions.contains(operationID) { context.pane = nil }
         guard let made = ElevenLabsRunner(operationID: operationID, context: context) else { return nil }
         runners[operationID] = made
         return made
@@ -187,9 +177,9 @@ final class VoicesStudioActions {
     ///   - quietly: For lists and lookups: not shown at the foot, not recorded in the pane's
     ///     recent results.
     ///   - spends: Overrides whether this run spends (nil: the operation's `billable`).
-    ///   - question: The section's own question. For an operation that asks by itself it
-    ///     replaces the generic wording; for one that does not, it is asked first and nothing
-    ///     is sent on a no.
+    ///   - question: The section's own question. For an operation that asks by itself it is
+    ///     the runner's question, whole (the shell's `title:`/`confirmLabel:`/`warning:`); for one
+    ///     that does not, it is asked first and nothing is sent on a no.
     @discardableResult
     func perform(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
@@ -210,20 +200,19 @@ final class VoicesStudioActions {
         runner.title = title
         runner.recordsResults = !quietly
         if !quietly { last = runner }
-        if let question {
-            if runner.operation.requiresConfirmation {
-                questions[operationID] = question
-            } else {
-                guard await ask(question, for: runner.operation) else { return nil }
-            }
+        if let question, !runner.operation.requiresConfirmation {
+            guard await ask(question, for: runner.operation) else { return nil }
         }
         askedUnder[operationID] = context.client().map(ObjectIdentifier.init)
         if spendsNow { spendingOverrides.insert(operationID) }
+        let asks = question != nil && runner.operation.requiresConfirmation
         let result = await runner.perform(
-            arguments: arguments, files: files, subject: subject, consequence: consequence
+            arguments: arguments, files: files, subject: subject,
+            consequence: asks ? question?.consequence : consequence,
+            title: asks ? question?.title : nil, confirmLabel: asks ? question?.confirmLabel : nil,
+            warning: asks ? question?.warning : nil
         )
         spendingOverrides.remove(operationID)
-        questions[operationID] = nil
         if spendsNow, result == nil, !Self.passingSpends.contains(operationID), Self.outcomeIsUnknown(runner) {
             unknownOutcomes[operationID] = title ?? runner.operation.summary
             await onUnknownOutcome?(operationID)
@@ -254,26 +243,25 @@ final class VoicesStudioActions {
 
     // MARK: Questions
 
-    /// The question on screen for this section, if one is waiting: a runner that asks here
-    /// (worded as the section asked), or a question for an operation that does not ask.
+    /// The question on screen for this section, if one is waiting: one for an operation that
+    /// does not ask by itself, or a runner's own when no pane asks for it (a test's, a preview's).
+    /// In the app the pane asks every runner's question.
     var presentedQuestion: ElevenLabsConfirmationRequest? {
         if let pendingQuestion { return pendingQuestion }
-        guard let runner = runners.values.first(where: { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation }),
-              var request = runner.confirmation else { return nil }
-        if let question = questions[runner.operation.id] {
-            request.title = question.title
-            request.confirmLabel = question.confirmLabel
-            request.consequence = question.consequence
-        }
-        return request
+        return runners.values.first { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation }?.confirmation
     }
 
     /// Answers the question on screen. A yes given after the account changed sends nothing.
     func answer(_ yes: Bool) {
+        let now = context.client().map(ObjectIdentifier.init)
         if let continuation = pendingAnswer {
+            let changed = pendingClient != now
             pendingAnswer = nil
             pendingQuestion = nil
-            continuation.resume(returning: yes)
+            if yes, changed {
+                refusal = "The ElevenLabs account changed while this was being asked, so nothing was sent."
+            }
+            continuation.resume(returning: yes && !changed)
             return
         }
         guard let runner = runners.values.first(where: { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation })
@@ -282,7 +270,6 @@ final class VoicesStudioActions {
             runner.decline()
             return
         }
-        let now = context.client().map(ObjectIdentifier.init)
         if let asked = askedUnder[runner.operation.id], asked != now {
             runner.decline()
             refusal = "The ElevenLabs account changed while this was being asked, so nothing was sent."
@@ -291,8 +278,11 @@ final class VoicesStudioActions {
         runner.confirm()
     }
 
+    @ObservationIgnored private var pendingClient: ObjectIdentifier?
+
     private func ask(_ question: VoicesStudioQuestion, for operation: ElevenLabsOperation) async -> Bool {
         pendingAnswer?.resume(returning: false)
+        pendingClient = context.client().map(ObjectIdentifier.init)
         pendingQuestion = ElevenLabsConfirmationRequest(
             operationID: operation.id, risk: .destructive, title: question.title,
             consequence: question.consequence, call: "\(operation.method) \(operation.path)",

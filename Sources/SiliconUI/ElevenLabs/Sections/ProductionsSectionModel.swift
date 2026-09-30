@@ -450,7 +450,8 @@ final class ProductionsSectionModel {
             button: "Submit and pay \(amount)",
             consequence: "The workspace is charged \(amount), the total ElevenLabs quoted for "
                 + (count == 1 ? "its 1 item." : "its \(count) items.")
-                + (order.sandbox ? " " + Self.sandboxWords : "")
+                + (order.sandbox ? " " + Self.sandboxWords : ""),
+            warning: "Money, not credits: \(amount) charged to the workspace."
         )
     }
 

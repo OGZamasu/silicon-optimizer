@@ -318,7 +318,7 @@ struct VoicesStudioReviewFixesTests {
         let asked = try await voicesStudioAsk(model.actions, answer: false) { await model.disableOwnKey() }
         #expect(asked?.title == "Disable the key this Mac uses?")
         #expect(asked?.confirmLabel == "Disable key")
-        #expect(asked?.consequence.contains("elevenlabs.io") == true)
+        #expect(asked?.warning?.contains("elevenlabs.io") == true)
         #expect(fixture.transport.recorded.isEmpty)
     }
 
