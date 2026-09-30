@@ -376,10 +376,10 @@ final class AgentsModel {
     /// what it has.
     static let credentialKeys: Set<String> = ["shareable_token"]
 
-    /// The draft body: the fetched configuration with the edits merged in, credential fields
-    /// left out — or, when the answer still holds a value ElevenLabs masked for this app (a
-    /// header of an inline tool, say), the reason it cannot be sent: re-sending the mask would
-    /// overwrite the real value.
+    /// The draft body: the fetched configuration with the edits merged in and credential fields
+    /// left out (ElevenLabs keeps what it has for them). Header values and everything else go
+    /// back as fetched — the app's runner shows them as they are. If the answer still holds a
+    /// masked value anywhere, the draft is refused rather than send the mask over the real one.
     func draftBody() -> Result<[String: JSONValue], AgentsDraftRefusal> {
         guard let loaded else { return .failure(AgentsDraftRefusal(message: "The agent has not been fetched yet.")) }
         let changes = draft.changes(from: loaded)
@@ -398,9 +398,9 @@ final class AgentsModel {
         let masked = AgentsJSON.paths(of: ElevenLabsRedaction.placeholder, in: .object(body))
         guard masked.isEmpty else {
             return .failure(AgentsDraftRefusal(message:
-                "This agent's configuration holds values ElevenLabs does not show this app ("
+                "The fetched configuration has masked values ("
                 + masked.prefix(3).joined(separator: ", ") + (masked.count > 3 ? ", …" : "")
-                + "), and a draft would overwrite them with the mask. Save the change instead."))
+                + "); a draft would send the mask back over the real values. Save the change instead."))
         }
         return .success(body)
     }

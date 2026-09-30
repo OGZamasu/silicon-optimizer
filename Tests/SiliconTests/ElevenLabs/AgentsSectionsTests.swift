@@ -182,10 +182,28 @@ struct AgentsSectionsTests {
         #expect(body["conversation_config"]["agent"]["prompt"]["llm"] == "gemini-2.5-flash")
     }
 
-    /// Review blocker 1, the other half: a masked value that is not a credential field (an
-    /// inline tool's header) cannot be left out, so the draft is refused and nothing is sent.
-    @Test func aDraftIsRefusedWhenTheAgentHoldsAMaskedHeader() async throws {
+    /// An agent whose inline tool carries a literal header keeps it in a draft: the app's
+    /// runner shows header values as they are, so they go back unchanged.
+    @Test func aDraftKeepsAnInlineToolsHeaders() async throws {
         let rig = AgentsFixtures.Rig(overriding: [AgentsOp.getAgent: .json(AgentsFixtures.agentWithInlineToolHeader)])
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        model.draft.firstMessage = "Hi there!"
+        await model.saveAsDraft()
+        #expect(model.draftProblem == nil)
+        let body = try #require(rig.body(AgentsOp.createDraft))
+        #expect(body["conversation_config"]["agent"]["prompt"]["tools"][0]["api_schema"]["request_headers"]
+                == ["Authorization": "Bearer crm-fixture-token"])
+        #expect(body["platform_settings"]["auth"].objectValue?["shareable_token"] == nil)
+    }
+
+    /// Should a masked value ever reach the editor, the draft is refused, naming where, and
+    /// nothing is sent.
+    @Test func aDraftIsRefusedWhenTheFetchedConfigurationHoldsAMask() async throws {
+        let masked = AgentsJSON.setting(.string(ElevenLabsRedaction.placeholder),
+                                        at: "conversation_config.agent.prompt.custom_llm.api_key", in: AgentsFixtures.agent)
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.getAgent: .json(masked)])
         defer { rig.clean() }
         let model = rig.store.agents
         await model.select(AgentsFixtures.agentID)
@@ -193,8 +211,7 @@ struct AgentsSectionsTests {
         await model.saveAsDraft()
         #expect(rig.requests(AgentsOp.createDraft).isEmpty)
         let problem = try #require(model.draftProblem)
-        #expect(problem.contains("request_headers"))
-        #expect(!problem.contains("crm-fixture-token"))
+        #expect(problem.hasPrefix("The fetched configuration has masked values (conversation_config.agent.prompt.custom_llm.api_key)"))
     }
 
     /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
