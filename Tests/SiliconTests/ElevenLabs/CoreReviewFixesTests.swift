@@ -322,4 +322,26 @@ struct CoreReviewFixesTests {
         #expect(unclassified.isEmpty, "request fields that look like secrets and are not classified: \(unclassified.sorted())")
         #expect(found.contains("account_auth_token") && found.contains("request_headers"), "the walk found the fields it should")
     }
+
+    // MARK: - A masked value is never sent back
+
+    @Test func aMaskedValueFromAnEarlierAnswerIsRefusedInsteadOfOverwritingTheRealOne() async throws {
+        let rig = CoreClientTests.Rig(replies: [.json([:])])
+        defer { rig.cleanUp() }
+        let masked: JSONValue = ["api_schema": ["url": "https://hooks.example.com/run",
+                                                "request_headers": ["Authorization": .string(ElevenLabsRedaction.placeholder)]]]
+        do {
+            _ = try await rig.client.call("update_tool_route", arguments: [
+                "tool_id": "tool-1", "tool_config": masked,
+            ])
+            Issue.record("a masked header was sent")
+        } catch ElevenLabsError.invalidArguments(let problems) {
+            #expect(problems.contains { $0.contains("tool_config") && $0.contains("overwrite") })
+        }
+        #expect(rig.transport.requests.isEmpty)
+        // Ordinary text is untouched.
+        #expect(rig.client.validate("text_to_speech_full", arguments: [
+            "voice_id": "voice-1", "text": "Nothing is redacted here.",
+        ]).isEmpty)
+    }
 }

@@ -80,6 +80,17 @@ enum ElevenLabsRequestBuilder {
     ) -> Result<PreparedCall, ElevenLabsError> {
         var problems: [String] = []
 
+        // A value that came back masked from an earlier answer (a header, a secret) and is being
+        // sent again would overwrite the real one with the mask. Read, edit, write back is
+        // exactly what an agent does with a tool or an MCP server.
+        for name in arguments.keys.sorted() where containsRedactionPlaceholder(arguments[name] ?? .null) {
+            problems.append(
+                "\"\(name)\" contains \"\(ElevenLabsRedaction.placeholder)\", the mask an earlier answer put "
+                + "over a secret. Sending it would overwrite the real value: leave the field out to keep "
+                + "what is stored, or send the real value."
+            )
+        }
+
         // Parameters.
         var path = operation.path
         var query: [(String, String)] = []
@@ -362,6 +373,16 @@ enum ElevenLabsRequestBuilder {
     /// A path segment: unreserved plus the sub-delimiters a segment may carry. Never `/`, so
     /// an id cannot climb into another route.
     static let segmentAllowed = CharacterSet(charactersIn: unreserved + "!$&'()*+,=:@")
+
+    /// Whether any string inside `value` holds the redaction placeholder.
+    static func containsRedactionPlaceholder(_ value: JSONValue) -> Bool {
+        switch value {
+        case .string(let text): text.contains(ElevenLabsRedaction.placeholder)
+        case .array(let items): items.contains(where: containsRedactionPlaceholder)
+        case .object(let fields): fields.values.contains(where: containsRedactionPlaceholder)
+        case .null, .bool, .number: false
+        }
+    }
 
     static func percentEncode(_ text: String, allowed: CharacterSet) -> String {
         text.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
