@@ -88,7 +88,14 @@ struct ElevenLabsPane: View {
         ContentUnavailableView {
             Label("ElevenLabs is not connected", systemImage: "waveform.and.mic")
         } description: {
-            Text("Add an API key in Settings → ElevenLabs to use it here.")
+            VStack(spacing: 6) {
+                Text("Add an API key in Settings → ElevenLabs to use it here.")
+                if let problem = model.elevenLabsLastError {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         } actions: {
             Button("Open Settings", action: openSettings)
         }

@@ -157,6 +157,8 @@ struct ElevenLabsRunnerOutput: View {
             }
             if let credential = runner.credential {
                 ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
+                    // Shown once means once: leaving the screen forgets it.
+                    .onDisappear { runner.dismissCredential() }
             }
             if showsResult, let result = runner.result {
                 ElevenLabsResultView(

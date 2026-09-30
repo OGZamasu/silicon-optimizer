@@ -30,7 +30,7 @@ struct ElevenLabsSettingsSection: View {
             .foregroundStyle(.secondary)
 
             keyRow
-            if let failure = connection.failure {
+            if let failure = Self.errorToShow(connectionFailure: connection.failure, lastError: model.elevenLabsLastError) {
                 Label(failure, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -108,6 +108,12 @@ struct ElevenLabsSettingsSection: View {
         } message: {
             Text("It is deleted from this Mac's Keychain and the ElevenLabs pane leaves the sidebar. The key itself keeps working on ElevenLabs until you revoke it there.")
         }
+    }
+
+    /// What goes under the key row: this Connect's failure, else the last thing that went
+    /// wrong with the key — a Keychain removal that failed after Remove said it was done.
+    static func errorToShow(connectionFailure: String?, lastError: String?) -> String? {
+        connectionFailure ?? lastError
     }
 
     private func connect() {

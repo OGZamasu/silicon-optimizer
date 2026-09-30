@@ -75,6 +75,8 @@ final class ElevenLabsPaneState {
     /// Every runner that has run with this pane, weakly, so a reset can reach the ones still
     /// asking or running.
     @ObservationIgnored private var runners: [WeakRunner] = []
+    /// Runners with a shown-once secret on screen: forgotten when the owner leaves.
+    @ObservationIgnored private var credentialHolders: [WeakRunner] = []
 
     private struct WeakRunner {
         weak var runner: ElevenLabsRunner?
@@ -166,6 +168,7 @@ final class ElevenLabsPaneState {
     /// dropped by the new epoch.
     private func endAccountWork() {
         epoch += 1
+        forgetCredentials()
         let asking = [confirming].compactMap { $0 } + waiting
         confirming = nil
         waiting = []
@@ -192,8 +195,9 @@ final class ElevenLabsPaneState {
         confirming = waiting.isEmpty ? nil : waiting.removeFirst()
     }
 
-    /// Shows `section`.
+    /// Shows `section`. Leaving one forgets any secret it showed once.
     func open(_ section: ElevenLabsSection) {
+        if section != self.section || showsRecents { forgetCredentials() }
         self.section = section
         showsRecents = false
     }
@@ -206,7 +210,22 @@ final class ElevenLabsPaneState {
 
     /// Shows this session's results.
     func showRecents() {
+        forgetCredentials()
         showsRecents = true
+    }
+
+    /// `runner` is showing a secret once; it is forgotten when the owner leaves.
+    func holdCredential(_ runner: ElevenLabsRunner) {
+        credentialHolders.removeAll { $0.runner == nil }
+        if !credentialHolders.contains(where: { $0.runner === runner }) {
+            credentialHolders.append(WeakRunner(runner: runner))
+        }
+    }
+
+    /// Forgets every secret shown once: they are for the moment they were asked for.
+    func forgetCredentials() {
+        for runner in credentialHolders.compactMap(\.runner) { runner.dismissCredential() }
+        credentialHolders.removeAll()
     }
 
     /// The Explorer's model, made on first use with `context`.

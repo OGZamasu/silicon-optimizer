@@ -393,6 +393,7 @@ final class ElevenLabsRunner: Identifiable {
         if operation.returnsCredential {
             let revealed = ElevenLabsRevealedCredential(operation: operation, result: answer)
             credential = revealed.fields.isEmpty ? nil : revealed
+            if credential != nil { currentPane?.holdCredential(self) }
         }
         let shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         result = shown
