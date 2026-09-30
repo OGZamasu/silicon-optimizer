@@ -344,7 +344,8 @@ struct VoicesStudioReviewFixesTests {
     }
 
     /// A yes given after the account changed — asked for account A, answered under B — sends
-    /// nothing: the kill switch must never disable B's key.
+    /// nothing: the kill switch must never disable B's key. (The shell's runner refuses it; the
+    /// section adds nothing that would let it through.)
     @Test func anAnswerGivenAfterTheAccountChangedSendsNothing() async throws {
         let one = VoicesStudioFixture()
         let two = VoicesStudioFixture(["disable": [.json(["status": "ok"])]])
@@ -358,7 +359,65 @@ struct VoicesStudioReviewFixesTests {
         model.actions.answer(true)
         await task.value
         #expect(two.transport.recorded.isEmpty && one.transport.recorded.isEmpty)
-        #expect(model.actions.refusal?.contains("account changed") == true)
+        #expect(model.actions.runner("disable")?.failure == .other(ElevenLabsRunner.accountChangedMessage))
+        #expect(model.actions.unknownOutcomes.isEmpty, "nothing was sent, so nothing is unknown")
+    }
+
+    /// The section's own question (before replacing a project's content) holds to the same
+    /// rule: answered after the account changed, it sends nothing.
+    @Test func theSectionsOwnQuestionAnsweredAfterTheAccountChangedSendsNothing() async throws {
+        let scratch = try VoicesStudioScratch()
+        defer { scratch.remove() }
+        let one = VoicesStudioFixture()
+        let two = VoicesStudioFixture(["edit_project_content": [.json(["project": ["project_id": "p1", "name": "A"]])]])
+        defer { one.clean(); two.clean() }
+        let current = VoicesStudioSwitchableClient(one.client)
+        let environment = VoicesStudioEnvironment(context: .init(client: { current.client }), voices: one.voices)
+        let model = StudioSectionModel(environment: environment)
+        let project = try #require(StudioProject(json: VoicesStudioStudioTests.project("p1")))
+        model.load(projects: [project], selected: project)
+        model.contentDocument = [try scratch.file("second-draft.epub")]
+        let task = Task { await model.updateContent() }
+        try await voicesStudioWait { model.actions.presentedQuestion != nil }
+        current.client = two.client
+        model.actions.answer(true)
+        await task.value
+        #expect(two.transport.recorded.isEmpty && one.transport.recorded.isEmpty)
+        #expect(model.actions.refusal == ElevenLabsRunner.accountChangedMessage)
+    }
+
+    /// A webhook deleted since the list was drawn: the editor does not open on the stale entry.
+    @Test func aWebhookGoneSinceTheListWasDrawnIsNotEdited() async throws {
+        let fixture = VoicesStudioFixture(["get_workspace_webhooks_route": [.json(["webhooks": []])]])
+        defer { fixture.clean() }
+        let model = WebhooksSectionModel(environment: fixture.environment)
+        let stale = try #require(WorkspaceWebhook(json: [
+            "name": "Ops", "webhook_id": "w1", "webhook_url": "https://example.com/hook", "is_disabled": false,
+            "is_auto_disabled": false, "created_at_unix": 1,
+        ]))
+        model.load(webhooks: [stale])
+        await model.startEditing(stale)
+        #expect(model.editing == nil)
+        #expect(model.editArguments() == nil)
+        #expect(model.problems == ["“Ops” is no longer in the workspace's webhooks."])
+    }
+
+    /// An email and a key id both typed: two targets, so nothing is shared until one is cleared.
+    @Test func sharingRefusesAnEmailAndAKeyIdTogether() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        model.load(resource: try #require(WorkspaceResource(json: [
+            "resource_id": "r1", "resource_name": "Narrator", "resource_type": "voice", "role_to_group_ids": [:],
+            "share_options": [],
+        ])))
+        model.shareEmail = "kim@example.com"
+        model.shareKeyID = "k1"
+        #expect(model.targetArguments().isEmpty)
+        #expect(model.shareProblem?.contains("not both") == true)
+        model.shareKeyID = ""
+        #expect(model.targetArguments() == ["user_email": "kim@example.com"])
+        #expect(model.shareProblem == nil)
     }
 
     /// R7: "Show API call" and "Copy as curl" never show what an owner types as a sign-in

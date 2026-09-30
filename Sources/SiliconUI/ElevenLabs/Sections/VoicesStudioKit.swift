@@ -98,15 +98,29 @@ final class VoicesStudioActions {
     /// project's content), waiting for its answer.
     private(set) var pendingQuestion: ElevenLabsConfirmationRequest?
     @ObservationIgnored private var pendingAnswer: CheckedContinuation<Bool, Never>?
-    /// The account a question was asked under: an answer given after the account changed
-    /// sends nothing.
-    @ObservationIgnored private var askedUnder: [String: ObjectIdentifier] = [:]
     /// Spending calls whose outcome is unknown — cancelled or lost after they were sent — by
     /// operation, with what they were.
     private(set) var unknownOutcomes: [String: String] = [:]
     /// Fetches the section's list again after an unknown outcome, so the owner can see whether
     /// the thing was made.
     @ObservationIgnored var onUnknownOutcome: (@MainActor (String) async -> Void)?
+    /// Lists and lookups that failed, by operation, with why — until that read runs again.
+    private(set) var readFailures: [String: String] = [:]
+    /// The reads whose failure the section draws where their content goes (its lists, a voice's
+    /// settings). The foot names every other failed read, so a detail that could not be fetched
+    /// says why instead of staying empty or stale.
+    @ObservationIgnored var readsShownInPlace: Set<String> = []
+
+    /// The failed reads the foot names: those not drawn in place, and not `except` (the foot's
+    /// own fallback runner, which it describes already).
+    func readProblems(except: String? = nil) -> [(operationID: String, text: String)] {
+        readFailures.keys.sorted()
+            .filter { !readsShownInPlace.contains($0) && $0 != except }
+            .map { id in
+                let what = runners[id].map { $0.operation.summary } ?? id
+                return (id, "“\(what)” could not be read: \(readFailures[id] ?? "")")
+            }
+    }
 
     init(context: ElevenLabsRunner.Context) {
         self.context = context
@@ -199,11 +213,10 @@ final class VoicesStudioActions {
         refusal = nil
         runner.title = title
         runner.recordsResults = !quietly
-        if !quietly { last = runner }
+        if !quietly { last = runner } else { readFailures[operationID] = nil }
         if let question, !runner.operation.requiresConfirmation {
             guard await ask(question, for: runner.operation) else { return nil }
         }
-        askedUnder[operationID] = context.client().map(ObjectIdentifier.init)
         if spendsNow { spendingOverrides.insert(operationID) }
         let asks = question != nil && runner.operation.requiresConfirmation
         let result = await runner.perform(
@@ -213,6 +226,10 @@ final class VoicesStudioActions {
             warning: asks ? question?.warning : nil
         )
         spendingOverrides.remove(operationID)
+        if quietly {
+            // A read replaced by a newer one of the same operation leaves the runner to it.
+            readFailures[operationID] = runner.phase == .failed ? (runner.errorMessage ?? "it failed.") : nil
+        }
         if spendsNow, result == nil, !Self.passingSpends.contains(operationID), Self.outcomeIsUnknown(runner) {
             unknownOutcomes[operationID] = title ?? runner.operation.summary
             await onUnknownOutcome?(operationID)
@@ -232,6 +249,9 @@ final class VoicesStudioActions {
             case .offline?:
                 return true
             case .other(let message)?:
+                // The runner reports no HTTP status, only its words: a refusal ElevenLabs gave
+                // reads "answered 4xx"; a question confirmed after the account changed sent nothing.
+                if message == ElevenLabsRunner.accountChangedMessage { return false }
                 return message.range(of: #"answered 4\d\d"#, options: .regularExpression) == nil
             default:
                 return false
@@ -251,38 +271,36 @@ final class VoicesStudioActions {
         return runners.values.first { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation }?.confirmation
     }
 
-    /// Answers the question on screen. A yes given after the account changed sends nothing.
+    /// Answers the question on screen. A yes to the section's own question given after the
+    /// account or region changed sends nothing; a runner's question checks that itself (the
+    /// shell's runner refuses a confirmed question whose account changed).
     func answer(_ yes: Bool) {
-        let now = context.client().map(ObjectIdentifier.init)
         if let continuation = pendingAnswer {
-            let changed = pendingClient != now
+            let changed = accountMark() != pendingMark
             pendingAnswer = nil
             pendingQuestion = nil
-            if yes, changed {
-                refusal = "The ElevenLabs account changed while this was being asked, so nothing was sent."
-            }
+            if yes, changed { refusal = ElevenLabsRunner.accountChangedMessage }
             continuation.resume(returning: yes && !changed)
             return
         }
         guard let runner = runners.values.first(where: { $0.presentsOwnConfirmation && $0.isAwaitingConfirmation })
         else { return }
-        guard yes else {
-            runner.decline()
-            return
-        }
-        if let asked = askedUnder[runner.operation.id], asked != now {
-            runner.decline()
-            refusal = "The ElevenLabs account changed while this was being asked, so nothing was sent."
-            return
-        }
-        runner.confirm()
+        if yes { runner.confirm() } else { runner.decline() }
     }
 
-    @ObservationIgnored private var pendingClient: ObjectIdentifier?
+    /// Which account a question is asked under: the pane's session epoch — which moves on a
+    /// disconnect, a new key or another region — and, where there is no pane (a test's
+    /// context), the client itself.
+    private func accountMark() -> String {
+        if let epoch = context.pane?.epoch { return "epoch \(epoch)" }
+        return context.client().map { "client \(ObjectIdentifier($0).hashValue)" } ?? "none"
+    }
+
+    @ObservationIgnored private var pendingMark: String?
 
     private func ask(_ question: VoicesStudioQuestion, for operation: ElevenLabsOperation) async -> Bool {
         pendingAnswer?.resume(returning: false)
-        pendingClient = context.client().map(ObjectIdentifier.init)
+        pendingMark = accountMark()
         pendingQuestion = ElevenLabsConfirmationRequest(
             operationID: operation.id, risk: .destructive, title: question.title,
             consequence: question.consequence, call: "\(operation.method) \(operation.path)",
@@ -820,6 +838,13 @@ struct VoicesStudioActivity: View {
                 }
                 .padding(10)
                 .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
+            }
+            ForEach(actions.readProblems(except: fallback?.operation.id), id: \.operationID) { problem in
+                Label(problem.text, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let refusal = actions.refusal {
                 Label(refusal, systemImage: "hourglass")

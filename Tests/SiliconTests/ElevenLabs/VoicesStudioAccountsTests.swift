@@ -160,7 +160,7 @@ struct VoicesStudioAccountsTests {
         let model = WebhooksSectionModel(environment: fixture.environment)
         model.draft.name = "Ops"
         model.draft.url = "http://example.com/hook"
-        #expect(model.createArguments().1 == ["The address must be an https:// URL, as the spec asks."])
+        #expect(model.createArguments().1 == ["The address must be an https:// URL."])
         model.draft.url = "https://example.com/hook"
         model.draft.headers = "X-Team: voice"
         let (arguments, problems) = model.createArguments()

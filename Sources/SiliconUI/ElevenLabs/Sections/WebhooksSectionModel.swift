@@ -115,7 +115,7 @@ final class WebhooksSectionModel {
         let name = draft.name.trimmingCharacters(in: .whitespaces)
         let url = draft.url.trimmingCharacters(in: .whitespaces)
         if name.isEmpty { problems.append("Give the webhook a name.") }
-        if !url.lowercased().hasPrefix("https://") { problems.append("The address must be an https:// URL, as the spec asks.") }
+        if !url.lowercased().hasPrefix("https://") { problems.append("The address must be an https:// URL.") }
         var settings: [String: JSONValue] = ["auth_type": "hmac", "name": .string(name), "webhook_url": .string(url)]
         let headers = Self.headers(draft.headers)
         if !headers.isEmpty { settings["request_headers"] = .object(headers) }
@@ -142,21 +142,36 @@ final class WebhooksSectionModel {
     /// The subscriptions the webhook had when the editor opened.
     private var originalEvents: Set<String> = []
 
+    /// The webhook whose editor was last asked for: an answer that arrives after another Edit
+    /// was pressed is dropped, so the editor never opens on the wrong webhook.
+    @ObservationIgnored private var wantedEdit: String?
+
     /// Opens the editor, listing the webhooks with their usages first so the events shown (and
     /// any change to them) start from what ElevenLabs holds.
     func startEditing(_ webhook: WorkspaceWebhook) async {
-        if let json = await actions.perform(
+        wantedEdit = webhook.id
+        let json = await actions.perform(
             "get_workspace_webhooks_route", ["include_usages": true], quietly: true
-        )?.voicesStudioJSON {
+        )?.voicesStudioJSON
+        guard wantedEdit == webhook.id else { return }
+        if let json {
             webhooks = (json["webhooks"].arrayValue ?? []).compactMap(WorkspaceWebhook.init(json:))
             includeUsages = true
-            edit(webhooks.first { $0.id == webhook.id } ?? webhook, eventsKnown: true)
+            guard let fresh = webhooks.first(where: { $0.id == webhook.id }) else {
+                // Gone since the list was drawn: nothing to edit, and the old entry is stale.
+                edit(nil)
+                problems = ["“\(webhook.name)” is no longer in the workspace's webhooks."]
+                return
+            }
+            problems = []
+            edit(fresh, eventsKnown: true)
         } else {
             edit(webhook, eventsKnown: false)
         }
     }
 
     func edit(_ webhook: WorkspaceWebhook?, eventsKnown: Bool? = nil) {
+        if webhook?.id != wantedEdit { wantedEdit = webhook?.id }
         editing = webhook
         guard let webhook else {
             draft = WebhookDraft()

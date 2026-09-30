@@ -88,6 +88,7 @@ struct VoicesStudioWorkspaceTests {
         #expect(model.targetName == "every member of the workspace")
         model.shareKeyID = "k1"
         #expect(model.targetArguments() == ["workspace_api_key_id": "k1"])
+        model.shareKeyID = ""
         model.shareEmail = "lee@example.com"
         #expect(model.targetArguments() == ["user_email": "lee@example.com"])
         var arguments = model.targetArguments()

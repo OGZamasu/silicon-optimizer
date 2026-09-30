@@ -202,6 +202,9 @@ struct WorkspaceSharingCard: View {
                         .help(VoicesStudioSchema.description("share_resource_endpoint", "workspace_api_key_id"))
                 }
                 .textFieldStyle(.roundedBorder)
+                if let problem = model.shareProblem {
+                    Label(problem, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
+                }
                 let others = resource.shareOptions.filter { $0.type != "group" }
                 if !others.isEmpty {
                     Text("Also listed: " + others.map { "\($0.name) (\($0.type == "key" ? "key \($0.id)" : $0.type))" }

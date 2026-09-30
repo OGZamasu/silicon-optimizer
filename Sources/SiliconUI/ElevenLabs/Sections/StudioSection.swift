@@ -492,7 +492,7 @@ struct StudioPodcastCard: View {
             .font(.callout)
             if !model.problems.isEmpty { ElevenLabsProblemList(problems: model.problems) }
             if let runner = model.actions.runner("create_podcast") {
-                Text("The spec says the audio a podcast generates is charged; writing its script is not, for now.")
+                Text("The audio a podcast generates is charged; writing its script is not charged for now.")
                     .font(.caption).foregroundStyle(.secondary)
                 VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Make podcast") {
                     Task { await model.createPodcast() }

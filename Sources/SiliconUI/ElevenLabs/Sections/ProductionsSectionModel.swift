@@ -280,7 +280,7 @@ final class ProductionsSectionModel {
             let type = mediaURLType.trimmingCharacters(in: .whitespaces)
             let name = mediaURLName.trimmingCharacters(in: .whitespaces)
             if type.isEmpty || name.isEmpty {
-                problems.append("A link needs its content type and a file name, as the spec requires.")
+                problems.append("A link needs its content type and a file name.")
             }
             arguments.voicesStudioSet("media_url_content_type", VoicesStudioFormat.text(type))
             arguments.voicesStudioSet("media_url_filename", VoicesStudioFormat.text(name))

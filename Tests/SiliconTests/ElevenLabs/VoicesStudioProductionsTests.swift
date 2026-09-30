@@ -64,7 +64,7 @@ struct VoicesStudioProductionsTests {
         model.mediaURL = "https://example.com/episode.mp4"
         model.mediaLanguage = "en"
         let missing = try #require(model.registerArguments())
-        #expect(missing.2 == ["A link needs its content type and a file name, as the spec requires."])
+        #expect(missing.2 == ["A link needs its content type and a file name."])
         model.mediaURLType = "video/mp4"
         model.mediaURLName = "episode.mp4"
         let complete = try #require(model.registerArguments())

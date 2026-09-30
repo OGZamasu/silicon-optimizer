@@ -422,12 +422,23 @@ final class WorkspaceSectionModel {
     /// the list offers only groups (and `default`), whose ids it does carry.
     func targetArguments() -> [String: JSONValue] {
         let email = shareEmail.trimmingCharacters(in: .whitespaces)
-        if !email.isEmpty { return ["user_email": .string(email)] }
         let key = shareKeyID.trimmingCharacters(in: .whitespaces)
+        if !email.isEmpty, !key.isEmpty { return [:] }  // two targets: `shareProblem` says so
+        if !email.isEmpty { return ["user_email": .string(email)] }
         if !key.isEmpty { return ["workspace_api_key_id": .string(key)] }
         if shareTarget == "default" { return ["group_id": "default"] }
         guard let target = groupOptions.first(where: { $0.id == shareTarget }) else { return [:] }
         return ["group_id": .string(target.id)]
+    }
+
+    /// Why nothing can be shared or unshared as the fields stand, when that is so.
+    var shareProblem: String? {
+        let email = shareEmail.trimmingCharacters(in: .whitespaces)
+        let key = shareKeyID.trimmingCharacters(in: .whitespaces)
+        if !email.isEmpty, !key.isEmpty {
+            return "Share with an email or with a key id, not both — clear one of them."
+        }
+        return nil
     }
 
     /// The groups a resource can be shared with, from its share options.
