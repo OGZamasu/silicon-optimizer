@@ -163,17 +163,22 @@ final class AgentMCPServersModel {
 
     func loadTools() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.listMCPTools, ["mcp_server_id": .string(selectedID)], quiet: true) else { return }
-        let states = Dictionary(
-            (json["tool_approval_statuses"].arrayValue ?? []).compactMap { status in
-                status["tool_id"].stringValue.map { ($0, status["approval_policy"].stringValue ?? status["state"].stringValue ?? "") }
+        guard let json = await calls.json(AgentsOp.listMCPTools, ["mcp_server_id": .string(selectedID)], slot: selectedID,
+                                          quiet: true) else { return }
+        // The spec names a tool in the statuses as `mcp:<server id>:<tool name>`.
+        let prefix = "mcp:\(selectedID):"
+        let statuses = Dictionary(
+            (json["tool_approval_statuses"].arrayValue ?? []).compactMap { status -> (String, JSONValue)? in
+                guard let id = status["tool_id"].stringValue else { return nil }
+                return (id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : id, status)
             },
             uniquingKeysWith: { first, _ in first }
         )
         tools = (json["tools"].arrayValue ?? []).compactMap { tool in
             tool["name"].stringValue.map {
                 AgentsMCPTool(name: $0, description: tool["description"].stringValue ?? "",
-                              inputSchema: tool["inputSchema"], approval: states[$0])
+                              inputSchema: tool["inputSchema"], approval: statuses[$0]?["approval_policy"].stringValue,
+                              state: statuses[$0]?["state"].stringValue)
             }
         }
         toolsError = json["success"].boolValue == false ? (json["error_message"].stringValue ?? "The server did not list its tools.") : nil
@@ -187,18 +192,42 @@ final class AgentMCPServersModel {
         guard !changes.isEmpty else { return }
         var arguments = changes
         arguments["mcp_server_id"] = .string(server.id)
+        var consequence = "Every agent using “\(server.name)” (\(AgentsFormat.count(server.dependentAgents, "agent"))) calls "
+            + "its tools with the new settings from its next conversation."
+        if settings.approvalPolicy != originalSettings.approvalPolicy {
+            consequence = Self.approvalChange(to: settings.approvalPolicy, server: server) + " " + consequence
+        }
         guard let json = await calls.json(
-            AgentsOp.updateMCPServer, arguments,
-            subject: "the MCP server “\(server.name)”",
-            consequence: "Every agent using “\(server.name)” (\(AgentsFormat.count(server.dependentAgents, "agent"))) calls its tools "
-                + "with the new settings from its next conversation.",
-            confirmTitle: "Change the MCP server “\(server.name)”?", confirmLabel: "Change"
+            AgentsOp.updateMCPServer, arguments, slot: server.id,
+            subject: settings.approvalPolicy != originalSettings.approvalPolicy
+                ? "“\(server.name)” — tools \(Self.policyWords(settings.approvalPolicy))" : "“\(server.name)”",
+            consequence: consequence
         ) else { return }
         if let updated = AgentsMCPServer(json: json) {
             show(updated)
             list.upsert(updated)
         } else {
             originalSettings = settings
+        }
+    }
+
+    /// What a change of the server's approval policy means, in words.
+    static func approvalChange(to policy: String, server: AgentsMCPServer) -> String {
+        switch policy {
+        case "auto_approve_all":
+            "Every tool on \(server.url) will run without asking the caller first — including tools the server adds later."
+        case "require_approval_all":
+            "Every tool on “\(server.name)” will ask the caller before it runs."
+        default:
+            "Tools on “\(server.name)” run as each one is set: those allowed run without asking, the rest ask first."
+        }
+    }
+
+    static func policyWords(_ policy: String) -> String {
+        switch policy {
+        case "auto_approve_all": "run without asking"
+        case "require_approval_all": "all ask first"
+        default: "set tool by tool"
         }
     }
 
@@ -210,13 +239,11 @@ final class AgentMCPServersModel {
             "mcp_server_id": .string(server.id), "tool_name": .string(tool.name),
             "tool_description": .string(tool.description), "input_schema": tool.inputSchema == .null ? [:] : tool.inputSchema,
             "approval_policy": .string(policy),
-        ], slot: tool.name,
-           subject: "the tool “\(tool.name)” of “\(server.name)”",
+        ], slot: "\(server.id)/\(tool.name)",
+           subject: autoApproved ? "“\(tool.name)” to run without asking" : "“\(tool.name)” to ask first",
            consequence: autoApproved
             ? "Agents may call “\(tool.name)” on \(server.url) without asking the caller first."
-            : "Agents must get the caller's approval before calling “\(tool.name)”.",
-           confirmTitle: autoApproved ? "Let agents run “\(tool.name)” without asking?" : "Make “\(tool.name)” ask first?",
-           confirmLabel: autoApproved ? "Allow" : "Require approval"
+            : "Agents must get the caller's approval before calling “\(tool.name)”."
         ) != nil else { return }
         await loadTools()
     }
@@ -225,7 +252,7 @@ final class AgentMCPServersModel {
         guard let server else { return }
         guard await calls.json(
             AgentsOp.removeMCPToolApproval, ["mcp_server_id": .string(server.id), "tool_name": .string(tool.name)],
-            slot: tool.name, subject: "the approval of “\(tool.name)”",
+            slot: "\(server.id)/\(tool.name)", subject: "the approval of “\(tool.name)”",
             consequence: "“\(tool.name)” goes back to the server's approval policy (\(AgentsFormat.words(server.approvalPolicy)))."
         ) != nil else { return }
         await loadTools()
@@ -235,7 +262,7 @@ final class AgentMCPServersModel {
         guard let server else { return }
         let json = await calls.json(
             AgentsOp.getMCPToolOverride, ["mcp_server_id": .string(server.id), "tool_name": .string(tool.name)],
-            slot: tool.name, quiet: true
+            slot: "\(server.id)/\(tool.name)", quiet: true
         )
         overrides[tool.name] = json ?? .object([:])
         overrideTimeout[tool.name] = json?["response_timeout_secs"].intValue ?? 0
@@ -250,9 +277,8 @@ final class AgentMCPServersModel {
         let exists = (overrides[tool.name]?["tool_name"].stringValue) != nil
         let operation = exists ? AgentsOp.updateMCPToolOverride : AgentsOp.addMCPToolOverride
         guard await calls.json(
-            operation, arguments, slot: tool.name, subject: "the settings of “\(tool.name)”",
-            consequence: "Agents calling “\(tool.name)” on “\(server.name)” use these settings instead of the server's.",
-            confirmTitle: "Override the settings of “\(tool.name)”?", confirmLabel: "Save override"
+            operation, arguments, slot: "\(server.id)/\(tool.name)", subject: "“\(tool.name)” on “\(server.name)”",
+            consequence: "Agents calling “\(tool.name)” on “\(server.name)” use these settings instead of the server's."
         ) != nil else { return }
         await loadOverride(tool)
     }
@@ -261,7 +287,7 @@ final class AgentMCPServersModel {
         guard let server else { return }
         guard await calls.json(
             AgentsOp.removeMCPToolOverride, ["mcp_server_id": .string(server.id), "tool_name": .string(tool.name)],
-            slot: tool.name, subject: "the override of “\(tool.name)”",
+            slot: "\(server.id)/\(tool.name)", subject: "the override of “\(tool.name)”",
             consequence: "“\(tool.name)” goes back to the server's settings."
         ) != nil else { return }
         overrides[tool.name] = nil
@@ -270,7 +296,7 @@ final class AgentMCPServersModel {
     func delete() async {
         guard let server else { return }
         guard await calls.json(
-            AgentsOp.deleteMCPServer, ["mcp_server_id": .string(server.id)],
+            AgentsOp.deleteMCPServer, ["mcp_server_id": .string(server.id)], slot: server.id,
             subject: "the MCP server “\(server.name)”",
             consequence: "ElevenLabs forgets the connection to \(server.url). "
                 + "\(AgentsFormat.count(server.dependentAgents, "agent")) using it lose its tools."
@@ -283,10 +309,13 @@ final class AgentMCPServersModel {
 
     // MARK: Connecting
 
+    /// What the address typed for a new server is: refused, or allowed with warnings.
+    var newAddress: AgentsOutsideAddress { AgentsOutsideAddress(newURL) }
+
     func createArguments() -> [String: JSONValue]? {
         let name = newName.trimmingCharacters(in: .whitespaces)
         let url = newURL.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, URL(string: url)?.scheme == "https" || URL(string: url)?.scheme == "http" else { return nil }
+        guard !name.isEmpty, newAddress.isAllowed else { return nil }
         var config: [String: JSONValue] = ["name": .string(name), "url": .string(url)]
         if !newTransport.isEmpty { config["transport"] = .string(newTransport) }
         if !newDescription.isEmpty { config["description"] = .string(newDescription) }
@@ -298,13 +327,18 @@ final class AgentMCPServersModel {
     func create() async {
         guard let arguments = createArguments() else { return }
         let url = newURL.trimmingCharacters(in: .whitespaces)
+        let warnings = newAddress.warnings
+        let tools: String = switch newApprovalPolicy {
+        case "auto_approve_all": "Its tools will run without asking the caller first."
+        case "require_approval_all": "Its tools ask the caller before they run."
+        default: "Its tools ask the caller first unless you allow one by one."
+        }
         guard let json = await calls.json(
             AgentsOp.createMCPServer, arguments, title: "Connected “\(newName)”",
-            subject: "the MCP server at \(url)",
-            consequence: "Agents you give it to can call its tools during conversations and send it what callers say. "
-                + "Tools \(newApprovalPolicy == "auto_approve_all" ? "run without asking" : "ask for approval first"). "
-                + "Only connect servers you trust.",
-            confirmTitle: "Connect agents to \(url)?", confirmLabel: "Connect"
+            subject: "“\(newName)” at \(url)",
+            consequence: (warnings.isEmpty ? "" : "Careful: " + warnings.joined(separator: " ") + " ")
+                + "Agents you give it to can call its tools during conversations and send it what callers say. "
+                + tools + " Only connect servers you trust."
         ), let server = AgentsMCPServer(json: json) else { return }
         list.upsert(server)
         store.directory.mcpServers.upsert(server)
@@ -371,7 +405,17 @@ private struct AgentMCPServerComposer: View {
             .formStyle(.columns)
             Text("A token the server needs is sent from one of your workspace secrets; add it in Secrets first.")
                 .font(.caption).foregroundStyle(.secondary)
-            ElevenLabsRunButton(runner: runner, title: "Connect…", disabled: model.createArguments() == nil) {
+            let address = model.newAddress
+            if !model.newURL.trimmingCharacters(in: .whitespaces).isEmpty {
+                if let refusal = address.refusal {
+                    Label(refusal, systemImage: "xmark.octagon").font(.caption).foregroundStyle(.red)
+                }
+                ForEach(address.warnings, id: \.self) { warning in
+                    Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            AgentsRunButton(runner: runner, title: "Connect…", disabled: model.createArguments() == nil) {
                 Task { await model.create() }
             }
             AgentsRunnerOutput(runner: runner, showsResult: false)
@@ -395,7 +439,7 @@ private struct AgentMCPServerDetail: View {
             }
             AgentsCard("Tools", subtitle: "What the server offers agents, and whether each asks the caller before running.") {
                 Button("List the server's tools") { Task { await model.loadTools() } }
-                AgentsRunnerError(runner: calls.runner(AgentsOp.listMCPTools))
+                AgentsRunnerError(runner: calls.runner(AgentsOp.listMCPTools, slot: server.id))
                 if let error = model.toolsError {
                     Label(error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                 }
@@ -438,17 +482,22 @@ private struct AgentMCPServerDetail: View {
                     .task { await model.store.directory.secrets.loadIfNeeded() }
                 }
                 .formStyle(.columns)
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.updateMCPServer), title: "Save…",
+                if model.settings.approvalPolicy != model.originalSettings.approvalPolicy {
+                    Label(AgentMCPServersModel.approvalChange(to: model.settings.approvalPolicy, server: server),
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                AgentsRunButton(runner: calls.runner(AgentsOp.updateMCPServer, slot: server.id), title: "Save…",
                                     disabled: model.settings == model.originalSettings) {
                     Task { await model.saveSettings() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateMCPServer), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateMCPServer, slot: server.id))
             }
             AgentsCard("Disconnect") {
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteMCPServer), title: "Delete the server…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deleteMCPServer, slot: server.id), title: "Delete the server…") {
                     Task { await model.delete() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteMCPServer), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteMCPServer, slot: server.id))
             }
         }
     }
@@ -471,8 +520,8 @@ private struct AgentMCPToolRow: View {
                     }
                 }
                 Spacer()
-                if let approval = tool.approval, !approval.isEmpty {
-                    AgentsBadge(text: AgentsFormat.words(approval), color: approval == "auto_approved" ? .orange : .secondary)
+                if let badge = tool.badge {
+                    AgentsBadge(text: badge.text, color: badge.attention ? .orange : .secondary)
                 }
                 Menu("Approval") {
                     Button("Run without asking…") { Task { await model.setApproval(tool, autoApproved: true) } }
@@ -481,8 +530,8 @@ private struct AgentMCPToolRow: View {
                 }
                 .fixedSize()
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.approveMCPTool, slot: tool.name), showsResult: false)
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.removeMCPToolApproval, slot: tool.name), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.approveMCPTool, slot: "\(server.id)/\(tool.name)"), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.removeMCPToolApproval, slot: "\(server.id)/\(tool.name)"), showsResult: false)
             DisclosureGroup("Override its settings", isExpanded: $expanded) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -506,7 +555,7 @@ private struct AgentMCPToolRow: View {
                         }
                     }
                     ForEach([AgentsOp.addMCPToolOverride, AgentsOp.updateMCPToolOverride, AgentsOp.removeMCPToolOverride], id: \.self) {
-                        AgentsRunnerOutput(runner: calls.runner($0, slot: tool.name), showsResult: false)
+                        AgentsRunnerOutput(runner: calls.runner($0, slot: "\(server.id)/\(tool.name)"), showsResult: false)
                     }
                 }
                 .padding(.top, 4)

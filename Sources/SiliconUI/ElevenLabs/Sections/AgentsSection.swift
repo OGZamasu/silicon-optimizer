@@ -51,6 +51,7 @@ struct AgentsScreen: View {
             }
             AgentsWorkspaceSettingsCard(model: model.workspace)
         }
+        .agentsQuestion(model.questions)
         .task { await model.list.loadIfNeeded() }
     }
 }
@@ -105,6 +106,10 @@ final class AgentsModel {
     let branches: AgentsBranchesModel
     let sharing: AgentsSharingModel
     let workspace: AgentsWorkspaceSettingsModel
+    /// Questions for edits that reach callers or outside servers without the risk table asking.
+    let questions = AgentsQuestionBox()
+    /// Why "Keep as a draft" cannot run for the agent on screen, or nil.
+    private(set) var draftProblem: String?
     /// The LLMs ElevenLabs offers this account (filtered by region); nil until fetched.
     private(set) var availableLLMs: [AgentsLLMInfo]?
 
@@ -113,7 +118,7 @@ final class AgentsModel {
         let calls = store.calls
         let box = AgentsWeakBox<AgentsModel>()
         list = AgentsPagedList { cursor in await box.value?.fetchPage(cursor) }
-        branches = AgentsBranchesModel(calls: calls)
+        branches = AgentsBranchesModel(calls: calls, questions: questions)
         sharing = AgentsSharingModel(calls: calls)
         workspace = AgentsWorkspaceSettingsModel(calls: calls)
         box.value = self
@@ -152,6 +157,7 @@ final class AgentsModel {
         detailJSON = .null
         changeDescription = ""
         duplicateName = ""
+        draftProblem = nil
         branches.reset(agentID: id)
         sharing.reset(agentID: id)
         await load(id)
@@ -212,11 +218,60 @@ final class AgentsModel {
         return arguments
     }
 
+    /// An outside service the agent would start sending callers' words to: an MCP server or a
+    /// webhook tool newly given to it.
+    struct OutsideConnection: Equatable, Sendable {
+        var name: String
+        /// Where it sends, as a host; nil when the list has not said.
+        var host: String?
+        var line: String { host.map { "\(name) (\($0))" } ?? name }
+    }
+
+    /// The MCP servers and webhook tools Save would newly give the agent.
+    func newOutsideConnections() -> [OutsideConnection] {
+        guard let loaded else { return [] }
+        let directory = store.directory
+        var found: [OutsideConnection] = []
+        for id in draft.mcpServerIDs where !loaded.mcpServerIDs.contains(id) {
+            let server = directory.mcpServers.item(id)
+            found.append(OutsideConnection(name: server?.name ?? id, host: server.flatMap { URL(string: $0.url)?.host }))
+        }
+        for id in draft.toolIDs where !loaded.toolIDs.contains(id) {
+            let tool = directory.tools.item(id)
+            // Client tools run in the owner's own app; only tools that call out are asked about.
+            guard tool?.type != "client", tool?.type != "system" else { continue }
+            let url = tool?.config["api_schema"]["url"].stringValue
+            found.append(OutsideConnection(name: tool?.name ?? id, host: url.flatMap { URL(string: $0)?.host }))
+        }
+        return found
+    }
+
+    /// Saves the changes. When they give the agent an MCP server or a webhook tool, asks first:
+    /// that is the step that starts sending what callers say to that address.
     func save() async {
+        guard saveArguments() != nil else { return }
+        let outside = newOutsideConnections()
+        guard !outside.isEmpty else {
+            await commitSave()
+            return
+        }
+        let what = outside.count == 1 ? outside[0].line : AgentsFormat.count(outside.count, "outside service")
+        questions.ask(AgentsQuestion(
+            title: "Let “\(draft.name)” send callers' words to \(what)?",
+            message: "From its next conversation the agent may call "
+                + ListFormatter.localizedString(byJoining: outside.map(\.line))
+                + ", passing on what callers say. Only connect services you trust.",
+            confirmLabel: "Save and connect"
+        )) { [weak self] in
+            await self?.commitSave()
+        }
+    }
+
+    private func commitSave() async {
         guard let selectedID, let arguments = saveArguments() else { return }
-        let runner = calls.runner(AgentsOp.updateAgent)
-        runner.title = "Saved agent “\(draft.name)”"
-        guard let json = await calls.json(AgentsOp.updateAgent, arguments, title: "Saved agent “\(draft.name)”")
+        let runner = calls.runner(AgentsOp.updateAgent, slot: selectedID)
+        guard let json = await calls.json(AgentsOp.updateAgent, arguments, slot: selectedID,
+                                          title: "Saved agent “\(draft.name)”")
         else { return }
         runner.dismissCredential()
         changeDescription = ""
@@ -258,7 +313,8 @@ final class AgentsModel {
         let name = duplicateName.trimmingCharacters(in: .whitespacesAndNewlines)
         var arguments: [String: JSONValue] = ["agent_id": .string(selectedID)]
         if !name.isEmpty { arguments["name"] = .string(name) }
-        guard let json = await calls.json(AgentsOp.duplicateAgent, arguments, title: "Duplicated “\(selectedName)”"),
+        guard let json = await calls.json(AgentsOp.duplicateAgent, arguments, slot: selectedID,
+                                          title: "Duplicated “\(selectedName)”"),
               let id = json["agent_id"].stringValue
         else { return }
         let copyName = name.isEmpty ? "\(selectedName) (copy)" : name
@@ -272,7 +328,7 @@ final class AgentsModel {
         guard let selectedID else { return }
         let name = selectedName
         guard await calls.json(
-            AgentsOp.deleteAgent, ["agent_id": .string(selectedID)],
+            AgentsOp.deleteAgent, ["agent_id": .string(selectedID)], slot: selectedID,
             subject: "the agent “\(name)”",
             consequence: "ElevenLabs will delete “\(name)” and its configuration, branches and versions. "
                 + "Phone numbers, widgets and links that use it stop working. Its past conversations stay in history."
@@ -316,23 +372,54 @@ final class AgentsModel {
         }
     }
 
-    /// Keeps the edits as a draft on the branch on screen instead of committing a version:
-    /// the whole configuration as fetched, with the edits merged in.
-    func saveAsDraft() async {
-        guard let selectedID, let branchID, let loaded else { return }
+    /// Fields of an agent's answer that are credentials: never sent back, so ElevenLabs keeps
+    /// what it has.
+    static let credentialKeys: Set<String> = ["shareable_token"]
+
+    /// The draft body: the fetched configuration with the edits merged in, credential fields
+    /// left out — or, when the answer still holds a value ElevenLabs masked for this app (a
+    /// header of an inline tool, say), the reason it cannot be sent: re-sending the mask would
+    /// overwrite the real value.
+    func draftBody() -> Result<[String: JSONValue], AgentsDraftRefusal> {
+        guard let loaded else { return .failure(AgentsDraftRefusal(message: "The agent has not been fetched yet.")) }
         let changes = draft.changes(from: loaded)
+        let config = AgentsJSON.merging(changes["conversation_config"] ?? [:], into: detailJSON["conversation_config"])
+        let platform = AgentsJSON.merging(changes["platform_settings"] ?? [:], into: detailJSON["platform_settings"])
         var body: [String: JSONValue] = [
             "name": .string(draft.name),
-            "conversation_config": AgentsJSON.merging(changes["conversation_config"] ?? [:], into: detailJSON["conversation_config"]),
-            "platform_settings": AgentsJSON.merging(changes["platform_settings"] ?? [:], into: detailJSON["platform_settings"]),
-            "workflow": detailJSON["workflow"] == .null ? ["edges": [:], "nodes": [:]] : detailJSON["workflow"],
+            "conversation_config": AgentsJSON.removing(keys: Self.credentialKeys, from: config),
+            "platform_settings": AgentsJSON.removing(keys: Self.credentialKeys, from: platform),
+            "workflow": AgentsJSON.removing(
+                keys: Self.credentialKeys,
+                from: detailJSON["workflow"] == .null ? ["edges": [:], "nodes": [:]] : detailJSON["workflow"]
+            ),
         ]
         if !draft.tags.isEmpty { body["tags"] = .array(draft.tags.map(JSONValue.string)) }
-        var arguments = body
-        arguments["agent_id"] = .string(selectedID)
-        arguments["branch_id"] = .string(branchID)
-        guard await calls.json(AgentsOp.createDraft, arguments, title: "Draft of “\(draft.name)”") != nil else { return }
-        await branches.load()
+        let masked = AgentsJSON.paths(of: ElevenLabsRedaction.placeholder, in: .object(body))
+        guard masked.isEmpty else {
+            return .failure(AgentsDraftRefusal(message:
+                "This agent's configuration holds values ElevenLabs does not show this app ("
+                + masked.prefix(3).joined(separator: ", ") + (masked.count > 3 ? ", …" : "")
+                + "), and a draft would overwrite them with the mask. Save the change instead."))
+        }
+        return .success(body)
+    }
+
+    /// Keeps the edits as a draft on the branch on screen instead of committing a version.
+    func saveAsDraft() async {
+        guard let selectedID, let branchID else { return }
+        switch draftBody() {
+        case .failure(let refusal):
+            draftProblem = refusal.message
+        case .success(let body):
+            draftProblem = nil
+            var arguments = body
+            arguments["agent_id"] = .string(selectedID)
+            arguments["branch_id"] = .string(branchID)
+            guard await calls.json(AgentsOp.createDraft, arguments, slot: selectedID, title: "Draft of “\(draft.name)”") != nil
+            else { return }
+            await branches.load()
+        }
     }
 
     /// Shows this agent's conversations.
@@ -380,6 +467,11 @@ extension AgentsPagedList where Item == AgentsAgent {
 }
 
 // MARK: - The editable configuration
+
+/// Why a draft cannot be kept, in words.
+struct AgentsDraftRefusal: Error, Equatable, Sendable {
+    var message: String
+}
 
 struct AgentsKnowledgeLocator: Identifiable, Hashable, Sendable {
     var id: String
@@ -641,7 +733,7 @@ private struct AgentsNewAgentForm: View {
             }
             .formStyle(.columns)
             HStack {
-                ElevenLabsRunButton(runner: runner, title: "Create agent",
+                AgentsRunButton(runner: runner, title: "Create agent",
                                     disabled: model.newDraft.name.trimmingCharacters(in: .whitespaces).isEmpty) {
                     Task { await model.create() }
                 }
@@ -725,16 +817,16 @@ private struct AgentsAgentEditor: View {
                         TextField("Name of the copy", text: $model.duplicateName,
                                   prompt: Text("\(model.selectedName) (copy)"))
                             .textFieldStyle(.roundedBorder)
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.duplicateAgent), title: "Duplicate") {
+                        AgentsRunButton(runner: model.calls.runner(AgentsOp.duplicateAgent, slot: id), title: "Duplicate") {
                             Task { await model.duplicate() }
                         }
                     }
-                    AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.duplicateAgent), showsResult: false)
+                    AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.duplicateAgent, slot: id))
                     Divider()
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteAgent), title: "Delete agent…") {
+                    AgentsRunButton(runner: model.calls.runner(AgentsOp.deleteAgent, slot: id), title: "Delete agent…") {
                         Task { await model.delete() }
                     }
-                    AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteAgent), showsResult: false)
+                    AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteAgent, slot: id))
                 }
                 .padding(.top, 6)
             }
@@ -743,27 +835,35 @@ private struct AgentsAgentEditor: View {
     }
 
     private var saveBar: some View {
-        let runner = model.calls.runner(AgentsOp.updateAgent)
+        let id = model.selectedID ?? ""
+        let runner = model.calls.runner(AgentsOp.updateAgent, slot: id)
+        let draftRunner = model.calls.runner(AgentsOp.createDraft, slot: id)
         return AgentsCard(model.isDirty ? "Unsaved changes" : "Saved", subtitle: model.isDirty
                           ? "Save sends only what changed; ElevenLabs keeps a version of each save." : nil) {
             HStack(spacing: 8) {
                 TextField("Describe this change (optional)", text: $model.changeDescription)
                     .textFieldStyle(.roundedBorder)
-                ElevenLabsRunButton(runner: runner, title: "Save changes", disabled: !model.isDirty) {
+                    .disabled(!model.isDirty)
+                AgentsRunButton(runner: runner, title: "Save changes", disabled: !model.isDirty, showsRisk: model.isDirty) {
                     Task { await model.save() }
                 }
                 Button("Revert") { model.revert() }
                     .disabled(!model.isDirty)
             }
-            if model.branchID != nil {
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.createDraft), title: "Keep as a draft instead",
-                                    disabled: !model.isDirty) {
+            if model.branchID != nil, model.isDirty {
+                AgentsRunButton(runner: draftRunner, title: "Keep as a draft instead") {
                     Task { await model.saveAsDraft() }
                 }
                 .controlSize(.small)
             }
-            AgentsRunnerOutput(runner: runner, showsResult: false)
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.createDraft), showsResult: false)
+            if let problem = model.draftProblem {
+                Label(problem, systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            AgentsRunnerOutput(runner: runner)
+            AgentsRunnerOutput(runner: draftRunner)
         }
     }
 }
@@ -985,40 +1085,55 @@ final class AgentsSharingModel {
         self.calls = calls
     }
 
+    /// This agent's runner for `operationID`: another agent's result, question or token never
+    /// shows here.
+    func runner(_ operationID: String) -> ElevenLabsRunner {
+        calls.runner(operationID, slot: agentID)
+    }
+
     func reset(agentID: String) {
+        forgetShownCredentials()
         self.agentID = agentID
         widget = .null
     }
 
+    /// Takes the link token off screen: on a change of agent, and when Sharing is left.
+    func forgetShownCredentials() {
+        guard !agentID.isEmpty else { return }
+        runner(AgentsOp.agentLink).dismissCredential()
+    }
+
     func loadWidget() async {
         guard !agentID.isEmpty else { return }
-        guard let json = await calls.json(AgentsOp.agentWidget, ["agent_id": .string(agentID)], quiet: true) else { return }
+        guard let json = await calls.json(AgentsOp.agentWidget, ["agent_id": .string(agentID)], slot: agentID, quiet: true)
+        else { return }
         widget = json["widget_config"]
     }
 
     /// The shareable link's token, shown once through the runner.
     func fetchLink() async {
         guard !agentID.isEmpty else { return }
-        await calls.json(AgentsOp.agentLink, ["agent_id": .string(agentID)], title: "Shareable link")
+        await calls.json(AgentsOp.agentLink, ["agent_id": .string(agentID)], slot: agentID, title: "Shareable link")
     }
 
     func uploadAvatar(_ url: URL) async {
         guard !agentID.isEmpty else { return }
         let result = await calls.json(AgentsOp.agentAvatar, ["agent_id": .string(agentID)],
-                                      files: ["avatar_file": [ElevenLabsFile(url: url)]], title: "Agent avatar")
+                                      files: ["avatar_file": [ElevenLabsFile(url: url)]], slot: agentID, title: "Agent avatar")
         if result != nil { await loadWidget() }
     }
 
     func uploadHoldAudio(_ url: URL) async {
         guard !agentID.isEmpty else { return }
         await calls.json(AgentsOp.setHoldAudio, ["agent_id": .string(agentID)],
-                         files: ["hold_audio_file": [ElevenLabsFile(url: url)]], title: "Hold audio")
+                         files: ["hold_audio_file": [ElevenLabsFile(url: url)]], slot: agentID, title: "Hold audio")
     }
 
     func removeHoldAudio(agentName: String) async {
         guard !agentID.isEmpty else { return }
         await calls.json(
-            AgentsOp.deleteHoldAudio, ["agent_id": .string(agentID)], subject: "the custom hold audio of “\(agentName)”",
+            AgentsOp.deleteHoldAudio, ["agent_id": .string(agentID)], slot: agentID,
+            subject: "the custom hold audio of “\(agentName)”",
             consequence: "Callers waiting for “\(agentName)” will hear the default hold tone again."
         )
     }
@@ -1043,15 +1158,15 @@ private struct AgentsSharingTab: View {
                 Text("Saved with the other changes below.").font(.caption).foregroundStyle(.secondary)
             }
             AgentsCard("Shareable link", subtitle: "A token that lets anyone holding it start a conversation with this agent. Shown once.") {
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.agentLink), title: "Get the link token") {
+                AgentsRunButton(runner: model.runner(AgentsOp.agentLink), title: "Get the link token") {
                     Task { await model.fetchLink() }
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.agentLink), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.agentLink), showsResult: false)
             }
             AgentsCard("Widget", subtitle: "How the embeddable widget looks for this agent.") {
                 let widget = model.widget
                 if widget == .null {
-                    AgentsRunnerError(runner: model.calls.runner(AgentsOp.agentWidget))
+                    AgentsRunnerError(runner: model.runner(AgentsOp.agentWidget))
                     Text("Not fetched yet.").font(.caption).foregroundStyle(.secondary)
                 } else {
                     AgentsFact(label: "Layout", value: AgentsFormat.words(widget["variant"].stringValue))
@@ -1068,7 +1183,7 @@ private struct AgentsSharingTab: View {
                     }
                     Button("Fetch again") { Task { await model.loadWidget() } }
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.agentAvatar), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.agentAvatar), showsResult: false)
             }
             AgentsCard("Hold audio", subtitle: "Played on loop to callers waiting in this agent's queue.") {
                 HStack {
@@ -1077,15 +1192,16 @@ private struct AgentsSharingTab: View {
                             Task { await model.uploadHoldAudio(url) }
                         }
                     }
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteHoldAudio), title: "Remove…") {
+                    AgentsRunButton(runner: model.runner(AgentsOp.deleteHoldAudio), title: "Remove…") {
                         Task { await model.removeHoldAudio(agentName: agentName) }
                     }
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.setHoldAudio), showsResult: false)
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteHoldAudio), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.setHoldAudio), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.deleteHoldAudio), showsResult: false)
             }
         }
         .task(id: model.agentID) { await model.loadWidget() }
+        .onDisappear { model.forgetShownCredentials() }
     }
 }
 
@@ -1124,8 +1240,43 @@ final class AgentsBranchesModel {
     var proposalComment = ""
     var reviewComment = ""
 
-    init(calls: AgentsCalls) {
+    @ObservationIgnored let questions: AgentsQuestionBox
+
+    init(calls: AgentsCalls, questions: AgentsQuestionBox) {
         self.calls = calls
+        self.questions = questions
+    }
+
+    /// Which item an operation's runner belongs to — the branch, the procedure, the proposal or
+    /// the agent on screen — so one item's result or question never shows on another.
+    func slot(for operationID: String) -> String {
+        switch operationID {
+        case AgentsOp.getBranch, AgentsOp.updateBranch, AgentsOp.mergePreview, AgentsOp.mergeBranch,
+             AgentsOp.rebasePreview, AgentsOp.rebaseBranch, AgentsOp.deleteDraft, AgentsOp.listProcedures,
+             AgentsOp.compileProcedures, AgentsOp.createProcedure:
+            return "\(agentID)/\(selectedBranchID ?? "")"
+        case AgentsOp.getProcedure, AgentsOp.getProcedureDraft, AgentsOp.updateProcedureDraft,
+             AgentsOp.deleteProcedureDraft, AgentsOp.removeProcedure:
+            return "\(agentID)/\(selectedBranchID ?? "")/\(selectedProcedureID ?? "")"
+        case AgentsOp.getMergeProposal, AgentsOp.commentMergeProposal, AgentsOp.reviewMergeProposal,
+             AgentsOp.acceptMergeProposal, AgentsOp.updateMergeProposal:
+            return "\(agentID)/\(selectedProposalID ?? "")"
+        default:
+            return agentID
+        }
+    }
+
+    func runner(_ operationID: String) -> ElevenLabsRunner {
+        calls.runner(operationID, slot: slot(for: operationID))
+    }
+
+    @discardableResult
+    private func json(
+        _ operationID: String, _ arguments: [String: JSONValue] = [:], quiet: Bool = false, title: String? = nil,
+        subject: String? = nil, consequence: String? = nil
+    ) async -> JSONValue? {
+        await calls.json(operationID, arguments, slot: slot(for: operationID), quiet: quiet, title: title,
+                         subject: subject, consequence: consequence)
     }
 
     func reset(agentID: String) {
@@ -1149,7 +1300,7 @@ final class AgentsBranchesModel {
         let arguments: [String: JSONValue] = [
             "agent_id": .string(agentID), "include_archived": .bool(includeArchived), "include_commit_status": true,
         ]
-        guard let json = await calls.json(AgentsOp.listBranches, arguments, quiet: true) else { return }
+        guard let json = await json(AgentsOp.listBranches, arguments, quiet: true) else { return }
         branches = (json["results"].arrayValue ?? []).compactMap { AgentsBranch(json: $0, mainBranchID: mainBranchID) }
         loaded = true
         traffic = Dictionary(uniqueKeysWithValues: branches.map { ($0.id, $0.livePercentage ?? 0) })
@@ -1160,13 +1311,13 @@ final class AgentsBranchesModel {
 
     func loadVersion() async {
         guard let currentVersionID, !agentID.isEmpty else { return }
-        version = await calls.json(
+        version = await json(
             AgentsOp.versionMetadata, ["agent_id": .string(agentID), "version_id": .string(currentVersionID)], quiet: true
         ) ?? .null
     }
 
     func loadBranch(_ id: String) async {
-        guard let json = await calls.json(
+        guard let json = await json(
             AgentsOp.getBranch, ["agent_id": .string(agentID), "branch_id": .string(id)], quiet: true
         ), let branch = AgentsBranch(json: json, mainBranchID: mainBranchID) else { return }
         if let index = branches.firstIndex(where: { $0.id == id }) { branches[index] = branch }
@@ -1178,7 +1329,7 @@ final class AgentsBranchesModel {
             "agent_id": .string(agentID), "name": .string(newBranchName.trimmingCharacters(in: .whitespaces)),
             "description": .string(newBranchDescription), "parent_version_id": .string(currentVersionID),
         ]
-        guard await calls.json(AgentsOp.createBranch, arguments, title: "New branch “\(newBranchName)”") != nil else { return }
+        guard await json(AgentsOp.createBranch, arguments, title: "New branch “\(newBranchName)”") != nil else { return }
         newBranchName = ""
         newBranchDescription = ""
         await load()
@@ -1186,7 +1337,7 @@ final class AgentsBranchesModel {
 
     func setArchived(_ archived: Bool) async {
         guard let branch = selectedBranch else { return }
-        guard await calls.json(
+        guard await json(
             AgentsOp.updateBranch,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "is_archived": .bool(archived)],
             title: archived ? "Archived “\(branch.name)”" : "Restored “\(branch.name)”"
@@ -1196,27 +1347,39 @@ final class AgentsBranchesModel {
 
     func setProtection(_ status: String) async {
         guard let branch = selectedBranch else { return }
-        guard await calls.json(
+        guard await json(
             AgentsOp.updateBranch,
-            ["agent_id": .string(agentID), "branch_id": .string(branch.id), "protection_status": .string(status)],
-            slot: "protection"
+            ["agent_id": .string(agentID), "branch_id": .string(branch.id), "protection_status": .string(status)]
         ) != nil else { return }
         await loadBranch(branch.id)
     }
 
     func previewMerge() async {
         guard let branch = selectedBranch, let target = mainBranch else { return }
-        let runner = calls.runner(AgentsOp.mergePreview)
-        await calls.json(AgentsOp.mergePreview, [
+        let runner = runner(AgentsOp.mergePreview)
+        await json(AgentsOp.mergePreview, [
             "agent_id": .string(agentID), "source_branch_id": .string(branch.id),
             "target_branch_id": .string(target.id),
         ], quiet: true)
         runner.dismissCredential()
     }
 
+    /// Asks first: a merge into main changes what live callers hear from their next call.
+    func requestMerge(agentName: String) {
+        guard let branch = selectedBranch, let target = mainBranch else { return }
+        questions.ask(AgentsQuestion(
+            title: "Merge “\(branch.name)” into “\(target.name)” of “\(agentName)”?",
+            message: "Callers of “\(agentName)” who reach “\(target.name)” hear the merged configuration from their next "
+                + "conversation." + (archiveSourceOnMerge ? " “\(branch.name)” is archived afterwards." : ""),
+            confirmLabel: "Merge"
+        )) { [weak self] in
+            await self?.merge()
+        }
+    }
+
     func merge() async {
         guard let branch = selectedBranch, let target = mainBranch else { return }
-        guard await calls.json(AgentsOp.mergeBranch, [
+        guard await json(AgentsOp.mergeBranch, [
             "agent_id": .string(agentID), "source_branch_id": .string(branch.id),
             "target_branch_id": .string(target.id), "archive_source_branch": .bool(archiveSourceOnMerge),
         ], title: "Merged “\(branch.name)” into “\(target.name)”") != nil else { return }
@@ -1225,14 +1388,14 @@ final class AgentsBranchesModel {
 
     func previewRebase() async {
         guard let branch = selectedBranch else { return }
-        let runner = calls.runner(AgentsOp.rebasePreview)
-        await calls.json(AgentsOp.rebasePreview, ["agent_id": .string(agentID), "branch_id": .string(branch.id)], quiet: true)
+        let runner = runner(AgentsOp.rebasePreview)
+        await json(AgentsOp.rebasePreview, ["agent_id": .string(agentID), "branch_id": .string(branch.id)], quiet: true)
         runner.dismissCredential()
     }
 
     func rebase() async {
         guard let branch = selectedBranch else { return }
-        guard await calls.json(
+        guard await json(
             AgentsOp.rebaseBranch, ["agent_id": .string(agentID), "branch_id": .string(branch.id)],
             title: "Rebased “\(branch.name)”"
         ) != nil else { return }
@@ -1241,7 +1404,7 @@ final class AgentsBranchesModel {
 
     func deleteDraft(agentName: String) async {
         guard let branch = selectedBranch else { return }
-        guard await calls.json(
+        guard await json(
             AgentsOp.deleteDraft, ["agent_id": .string(agentID), "branch_id": .string(branch.id)],
             subject: "the unsaved draft on “\(branch.name)”",
             consequence: "ElevenLabs will throw away the draft changes on the branch “\(branch.name)” of “\(agentName)”. Committed versions are kept."
@@ -1254,6 +1417,19 @@ final class AgentsBranchesModel {
         branches.filter { !$0.isArchived }.reduce(0) { $0 + (traffic[$1.id] ?? 0) }
     }
 
+    /// Asks first, naming each branch's share: a deployment moves live callers at once.
+    func requestDeploy(agentName: String) {
+        let split = branches.filter { !$0.isArchived }
+            .map { "\($0.name) \(Int(traffic[$0.id] ?? 0)) %" }
+        questions.ask(AgentsQuestion(
+            title: "Send “\(agentName)”'s callers to " + ListFormatter.localizedString(byJoining: split) + "?",
+            message: "New conversations with “\(agentName)” are shared out this way as soon as you confirm.",
+            confirmLabel: "Deploy"
+        )) { [weak self] in
+            await self?.deploy()
+        }
+    }
+
     func deploy() async {
         let requests: [JSONValue] = branches.filter { !$0.isArchived }.map { branch in
             [
@@ -1261,7 +1437,7 @@ final class AgentsBranchesModel {
                 "deployment_strategy": ["type": "percentage", "traffic_percentage": .number(traffic[branch.id] ?? 0)],
             ]
         }
-        guard await calls.json(AgentsOp.createDeployment, [
+        guard await json(AgentsOp.createDeployment, [
             "agent_id": .string(agentID), "deployment_request": ["requests": .array(requests)],
         ], title: "Deployed the traffic split") != nil else { return }
         await load()
@@ -1269,7 +1445,7 @@ final class AgentsBranchesModel {
 
     func loadProcedures() async {
         guard let branch = selectedBranch else { return }
-        guard let json = await calls.json(
+        guard let json = await json(
             AgentsOp.listProcedures, ["agent_id": .string(agentID), "branch_id": .string(branch.id)], quiet: true
         ) else { return }
         procedures = (json["procedures"].arrayValue ?? []).compactMap(AgentsProcedure.init(json:))
@@ -1283,7 +1459,7 @@ final class AgentsBranchesModel {
             "agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(procedure.id),
         ]
         let operation = procedure.hasDraft ? AgentsOp.getProcedureDraft : AgentsOp.getProcedure
-        guard let json = await calls.json(operation, arguments, quiet: true), selectedProcedureID == procedure.id else { return }
+        guard let json = await json(operation, arguments, quiet: true), selectedProcedureID == procedure.id else { return }
         procedureName = json["name"].stringValue ?? procedure.name
         procedureType = json["type"].stringValue ?? procedure.type
         procedureTrigger = json["trigger"].stringValue ?? procedure.trigger
@@ -1309,10 +1485,10 @@ final class AgentsBranchesModel {
         if !procedureTrigger.isEmpty { arguments["trigger"] = .string(procedureTrigger) }
         if let id = selectedProcedureID {
             arguments["procedure_id"] = .string(id)
-            guard await calls.json(AgentsOp.updateProcedureDraft, arguments, title: "Procedure “\(procedureName)”") != nil
+            guard await json(AgentsOp.updateProcedureDraft, arguments, title: "Procedure “\(procedureName)”") != nil
             else { return }
         } else {
-            guard let json = await calls.json(AgentsOp.createProcedure, arguments, title: "Procedure “\(procedureName)”")
+            guard let json = await json(AgentsOp.createProcedure, arguments, title: "Procedure “\(procedureName)”")
             else { return }
             selectedProcedureID = json["procedure_id"].stringValue
         }
@@ -1321,7 +1497,7 @@ final class AgentsBranchesModel {
 
     func discardProcedureDraft() async {
         guard let branch = selectedBranch, let id = selectedProcedureID else { return }
-        guard await calls.json(
+        guard await json(
             AgentsOp.deleteProcedureDraft,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(id)],
             subject: "your draft of “\(procedureName)”",
@@ -1333,7 +1509,7 @@ final class AgentsBranchesModel {
 
     func removeProcedure() async {
         guard let branch = selectedBranch, let id = selectedProcedureID else { return }
-        guard await calls.json(
+        guard await json(
             AgentsOp.removeProcedure,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(id)],
             subject: "the procedure “\(procedureName)” from “\(branch.name)”",
@@ -1347,28 +1523,28 @@ final class AgentsBranchesModel {
     /// Turns the branch's procedure drafts into its workflow. The result is shown as it comes.
     func compileProcedures() async {
         guard let branch = selectedBranch else { return }
-        await calls.json(AgentsOp.compileProcedures, ["agent_id": .string(agentID), "branch_id": .string(branch.id)],
+        await json(AgentsOp.compileProcedures, ["agent_id": .string(agentID), "branch_id": .string(branch.id)],
                          title: "Compiled the procedures of “\(branch.name)”")
     }
 
     // Merge proposals
 
     func loadProposals() async {
-        guard let json = await calls.json(AgentsOp.listMergeProposals, ["agent_id": .string(agentID)], quiet: true)
+        guard let json = await json(AgentsOp.listMergeProposals, ["agent_id": .string(agentID)], quiet: true)
         else { return }
         proposals = (json["results"].arrayValue ?? []).compactMap(AgentsMergeProposal.init(json:))
     }
 
     func openProposal(_ id: String) async {
         selectedProposalID = id
-        proposal = await calls.json(
+        proposal = await json(
             AgentsOp.getMergeProposal, ["agent_id": .string(agentID), "merge_proposal_id": .string(id)], quiet: true
         ) ?? .null
     }
 
     func propose() async {
         guard let branch = selectedBranch, let target = mainBranch else { return }
-        guard let json = await calls.json(AgentsOp.createMergeProposal, [
+        guard let json = await json(AgentsOp.createMergeProposal, [
             "agent_id": .string(agentID), "source_branch_id": .string(branch.id),
             "target_branch_id": .string(target.id), "title": .string(proposalTitle),
             "description": .string(proposalDescription),
@@ -1381,7 +1557,7 @@ final class AgentsBranchesModel {
 
     func comment() async {
         guard let id = selectedProposalID else { return }
-        guard await calls.json(AgentsOp.commentMergeProposal, [
+        guard await json(AgentsOp.commentMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id), "body": .string(proposalComment),
         ]) != nil else { return }
         proposalComment = ""
@@ -1390,7 +1566,7 @@ final class AgentsBranchesModel {
 
     func review(approve: Bool) async {
         guard let id = selectedProposalID else { return }
-        guard await calls.json(AgentsOp.reviewMergeProposal, [
+        guard await json(AgentsOp.reviewMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id),
             "state": .string(approve ? "approved" : "changes_requested"), "comment": .string(reviewComment),
         ]) != nil else { return }
@@ -1400,7 +1576,7 @@ final class AgentsBranchesModel {
 
     func acceptProposal() async {
         guard let id = selectedProposalID else { return }
-        guard await calls.json(AgentsOp.acceptMergeProposal, [
+        guard await json(AgentsOp.acceptMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id),
             "archive_source_branch": .bool(archiveSourceOnMerge),
         ], title: "Merged a proposal") != nil else { return }
@@ -1410,7 +1586,7 @@ final class AgentsBranchesModel {
 
     func closeProposal() async {
         guard let id = selectedProposalID else { return }
-        guard await calls.json(AgentsOp.updateMergeProposal, [
+        guard await json(AgentsOp.updateMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id), "close": true,
         ]) != nil else { return }
         await loadProposals()
@@ -1474,18 +1650,17 @@ private struct AgentsProceduresEditor: View {
     @Bindable var model: AgentsBranchesModel
 
     var body: some View {
-        let calls = model.calls
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Button("List procedures") { Task { await model.loadProcedures() } }
                 Button("New procedure") { model.newProcedure() }
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.compileProcedures), title: "Compile drafts into the workflow") {
+                AgentsRunButton(runner: model.runner(AgentsOp.compileProcedures), title: "Compile drafts into the workflow") {
                     Task { await model.compileProcedures() }
                 }
                 .controlSize(.small)
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.compileProcedures), showsResult: true)
-            AgentsRunnerError(runner: calls.runner(AgentsOp.listProcedures))
+            AgentsRunnerOutput(runner: model.runner(AgentsOp.compileProcedures), showsResult: true)
+            AgentsRunnerError(runner: model.runner(AgentsOp.listProcedures))
             ForEach(model.procedures) { procedure in
                 AgentsRow(selected: model.selectedProcedureID == procedure.id) {
                     Task { await model.openProcedure(procedure) }
@@ -1516,7 +1691,7 @@ private struct AgentsProceduresEditor: View {
                 .overlay { RoundedRectangle(cornerRadius: 5).stroke(.separator) }
             HStack {
                 let saveOperation = model.selectedProcedureID == nil ? AgentsOp.createProcedure : AgentsOp.updateProcedureDraft
-                ElevenLabsRunButton(runner: calls.runner(saveOperation), title: model.selectedProcedureID == nil ? "Create" : "Save draft",
+                AgentsRunButton(runner: model.runner(saveOperation), title: model.selectedProcedureID == nil ? "Create" : "Save draft",
                                     disabled: model.procedureName.trimmingCharacters(in: .whitespaces).isEmpty) {
                     Task { await model.saveProcedure() }
                 }
@@ -1527,7 +1702,7 @@ private struct AgentsProceduresEditor: View {
             }
             ForEach([AgentsOp.createProcedure, AgentsOp.updateProcedureDraft, AgentsOp.deleteProcedureDraft,
                      AgentsOp.removeProcedure], id: \.self) {
-                AgentsRunnerOutput(runner: calls.runner($0), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner($0), showsResult: false)
             }
         }
     }
@@ -1544,7 +1719,7 @@ private struct AgentsBranchesTab: View {
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .onChange(of: model.includeArchived) { Task { await model.load() } }
-                AgentsRunnerError(runner: model.calls.runner(AgentsOp.listBranches))
+                AgentsRunnerError(runner: model.runner(AgentsOp.listBranches))
                 if model.loaded, model.branches.isEmpty {
                     Text("This agent has no branches.").font(.callout).foregroundStyle(.secondary)
                 }
@@ -1602,29 +1777,29 @@ private struct AgentsBranchesTab: View {
             AgentsCard("“\(branch.name)”", subtitle: branch.description.isEmpty ? nil : branch.description) {
                 HStack(spacing: 8) {
                     if !branch.isMain {
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.mergePreview), title: "Preview merge") {
+                        AgentsRunButton(runner: model.runner(AgentsOp.mergePreview), title: "Preview merge") {
                             Task { await model.previewMerge() }
                         }
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.mergeBranch),
+                        AgentsRunButton(runner: model.runner(AgentsOp.mergeBranch),
                                             title: "Merge into \(model.mainBranch?.name ?? "main")") {
-                            Task { await model.merge() }
+                            model.requestMerge(agentName: agentName)
                         }
                     }
                     Toggle("Archive after merging", isOn: $model.archiveSourceOnMerge).toggleStyle(.checkbox)
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.mergePreview), showsResult: true)
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.mergeBranch), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.mergePreview), showsResult: true)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.mergeBranch), showsResult: false)
                 if !branch.isMain {
                     HStack(spacing: 8) {
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.rebasePreview), title: "Preview rebase") {
+                        AgentsRunButton(runner: model.runner(AgentsOp.rebasePreview), title: "Preview rebase") {
                             Task { await model.previewRebase() }
                         }
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.rebaseBranch), title: "Rebase onto main") {
+                        AgentsRunButton(runner: model.runner(AgentsOp.rebaseBranch), title: "Rebase onto main") {
                             Task { await model.rebase() }
                         }
                     }
-                    AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.rebasePreview), showsResult: true)
-                    AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.rebaseBranch), showsResult: false)
+                    AgentsRunnerOutput(runner: model.runner(AgentsOp.rebasePreview), showsResult: true)
+                    AgentsRunnerOutput(runner: model.runner(AgentsOp.rebaseBranch), showsResult: false)
                 }
                 HStack(spacing: 8) {
                     Button(branch.isArchived ? "Restore" : "Archive") {
@@ -1642,12 +1817,12 @@ private struct AgentsBranchesTab: View {
                     .fixedSize()
                 }
                 if branch.draftExists {
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteDraft), title: "Discard the draft…") {
+                    AgentsRunButton(runner: model.runner(AgentsOp.deleteDraft), title: "Discard the draft…") {
                         Task { await model.deleteDraft(agentName: agentName) }
                     }
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.updateBranch), showsResult: false)
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteDraft), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.updateBranch), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.deleteDraft), showsResult: false)
                 DisclosureGroup("Procedures") {
                     AgentsProceduresEditor(model: model)
                         .padding(.top, 4)
@@ -1662,13 +1837,13 @@ private struct AgentsBranchesTab: View {
             HStack {
                 TextField("Name", text: $model.newBranchName).textFieldStyle(.roundedBorder)
                 TextField("What it is for", text: $model.newBranchDescription).textFieldStyle(.roundedBorder)
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.createBranch), title: "Create",
+                AgentsRunButton(runner: model.runner(AgentsOp.createBranch), title: "Create",
                                     disabled: model.newBranchName.trimmingCharacters(in: .whitespaces).isEmpty
                                         || model.currentVersionID == nil) {
                     Task { await model.createBranch() }
                 }
             }
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.createBranch), showsResult: false)
+            AgentsRunnerOutput(runner: model.runner(AgentsOp.createBranch), showsResult: false)
         }
     }
 
@@ -1689,12 +1864,12 @@ private struct AgentsBranchesTab: View {
                     .font(.caption)
                     .foregroundStyle(model.trafficTotal == 100 ? Color.secondary : Color.red)
                 Spacer()
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.createDeployment), title: "Deploy",
+                AgentsRunButton(runner: model.runner(AgentsOp.createDeployment), title: "Deploy",
                                     disabled: model.trafficTotal != 100 || model.branches.isEmpty) {
-                    Task { await model.deploy() }
+                    model.requestDeploy(agentName: agentName)
                 }
             }
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.createDeployment), showsResult: false)
+            AgentsRunnerOutput(runner: model.runner(AgentsOp.createDeployment), showsResult: false)
         }
     }
 
@@ -1719,11 +1894,11 @@ private struct AgentsBranchesTab: View {
                     TextField("Title", text: $model.proposalTitle).textFieldStyle(.roundedBorder)
                     TextField("Description", text: $model.proposalDescription).textFieldStyle(.roundedBorder)
                 }
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.createMergeProposal), title: "Propose the merge",
+                AgentsRunButton(runner: model.runner(AgentsOp.createMergeProposal), title: "Propose the merge",
                                     disabled: model.proposalTitle.trimmingCharacters(in: .whitespaces).isEmpty) {
                     Task { await model.propose() }
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.createMergeProposal), showsResult: false)
+                AgentsRunnerOutput(runner: model.runner(AgentsOp.createMergeProposal), showsResult: false)
             }
             if model.proposal != .null {
                 Divider()
@@ -1739,7 +1914,7 @@ private struct AgentsBranchesTab: View {
                 }
                 HStack {
                     TextField("Comment", text: $model.proposalComment).textFieldStyle(.roundedBorder)
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.commentMergeProposal), title: "Comment",
+                    AgentsRunButton(runner: model.runner(AgentsOp.commentMergeProposal), title: "Comment",
                                         disabled: model.proposalComment.isEmpty) {
                         Task { await model.comment() }
                     }
@@ -1750,14 +1925,14 @@ private struct AgentsBranchesTab: View {
                     Button("Request changes") { Task { await model.review(approve: false) } }
                 }
                 HStack {
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.acceptMergeProposal), title: "Merge it") {
+                    AgentsRunButton(runner: model.runner(AgentsOp.acceptMergeProposal), title: "Merge it") {
                         Task { await model.acceptProposal() }
                     }
                     Button("Close proposal") { Task { await model.closeProposal() } }
                 }
                 ForEach([AgentsOp.commentMergeProposal, AgentsOp.reviewMergeProposal, AgentsOp.acceptMergeProposal,
                          AgentsOp.updateMergeProposal], id: \.self) { op in
-                    AgentsRunnerOutput(runner: model.calls.runner(op), showsResult: false)
+                    AgentsRunnerOutput(runner: model.runner(op), showsResult: false)
                 }
             }
         }
@@ -1823,8 +1998,7 @@ final class AgentsWorkspaceSettingsModel {
         guard let json = await calls.json(
             AgentsOp.updateSettings, body, subject: "the workspace's agent settings",
             consequence: "This changes \(ListFormatter.localizedString(byJoining: changed)) for every agent in the "
-                + "workspace. Post-call webhooks send conversation data to the webhook's address.",
-            confirmTitle: "Change the workspace's agent settings?", confirmLabel: "Change settings"
+                + "workspace. Post-call webhooks send conversation data to the webhook's address."
         ) else { return }
         if json["can_use_mcp_servers"] != .null { settings = json } else { await load() }
     }
@@ -1836,8 +2010,7 @@ final class AgentsWorkspaceSettingsModel {
         charts.remove(at: index)
         guard let json = await calls.json(
             AgentsOp.updateDashboardSettings, ["charts": .array(charts)], subject: "the dashboard chart “\(name)”",
-            consequence: "Everyone in the workspace stops seeing the chart “\(name)” on the agents dashboard.",
-            confirmTitle: "Remove the dashboard chart “\(name)”?", confirmLabel: "Remove chart"
+            consequence: "Everyone in the workspace stops seeing the chart “\(name)” on the agents dashboard."
         ) else { return }
         dashboard = json["charts"] != .null ? json : ["charts": .array(charts)]
     }
@@ -1890,7 +2063,7 @@ private struct AgentsWorkspaceSettingsCard: View {
                             }
                         }
                         .formStyle(.columns)
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.updateSettings), title: "Save settings…",
+                        AgentsRunButton(runner: model.calls.runner(AgentsOp.updateSettings), title: "Save settings…",
                                             disabled: model.changes().isEmpty) {
                             Task { await model.save() }
                         }

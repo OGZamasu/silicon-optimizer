@@ -104,11 +104,23 @@ enum AgentsBatchRecipients {
         var duplicates: Int
     }
 
+    /// The most problems listed one by one; past this the list says how many more.
+    static let problemLimit = 20
+
+    /// The spec's limit on recipients in one batch.
+    static var recipientLimit: Int {
+        AgentsSchema.schema(AgentsOp.submitBatch, "recipients").map(JSONSchema.unwrapNullable)?["maxItems"].intValue ?? 10_000
+    }
+
     static func parse(_ text: String, whatsApp: Bool) -> Parsed {
-        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        guard let first = lines.first else { return Parsed(recipients: [], problems: [], duplicates: 0) }
-        let header = fields(first).map { $0.lowercased() }
+        // Line numbers count every line, blank ones too, so a problem points where the owner looks.
+        let numbered = text.components(separatedBy: .newlines).enumerated()
+            .map { (number: $0.offset + 1, text: $0.element) }
+            .filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard let first = numbered.first else { return Parsed(recipients: [], problems: [], duplicates: 0) }
+        // Column names are matched without regard to case but kept as written: an agent's
+        // prompt says {{FirstName}}, not {{firstname}}.
+        let header = fields(first.text)
         let key = whatsApp ? "whatsapp_user_id" : "phone_number"
         var recipients: [AgentsBatchRecipientDraft] = []
         var problems: [String] = []
@@ -116,8 +128,8 @@ enum AgentsBatchRecipients {
         var duplicates = 0
 
         func add(_ address: String, variables: [String: String], line: Int) {
-            let cleaned = whatsApp ? address.filter(\.isNumber) : normalizedPhone(address)
-            guard let cleaned, isValid(cleaned, whatsApp: whatsApp) else {
+            guard let cleaned = whatsApp ? normalizedWhatsApp(address) : normalizedPhone(address),
+                  isValid(cleaned, whatsApp: whatsApp) else {
                 problems.append("Line \(line): “\(address)” is not a \(whatsApp ? "WhatsApp number" : "phone number").")
                 return
             }
@@ -130,11 +142,11 @@ enum AgentsBatchRecipients {
             ))
         }
 
-        if let column = header.firstIndex(of: key) {
-            for (offset, line) in lines.dropFirst().enumerated() {
-                let values = fields(line)
+        if let column = header.firstIndex(where: { $0.caseInsensitiveCompare(key) == .orderedSame }) {
+            for line in numbered.dropFirst() {
+                let values = fields(line.text)
                 guard values.indices.contains(column) else {
-                    problems.append("Line \(offset + 2): no \(key) value.")
+                    problems.append("Line \(line.number): no \(key) value.")
                     continue
                 }
                 var variables: [String: String] = [:]
@@ -142,30 +154,57 @@ enum AgentsBatchRecipients {
                     let value = values[index]
                     if !name.isEmpty, !value.isEmpty { variables[name] = value }
                 }
-                add(values[column], variables: variables, line: offset + 2)
+                add(values[column], variables: variables, line: line.number)
             }
         } else if header.count > 1 {
             problems.append("The first line looks like a header but has no “\(key)” column.")
         } else {
-            for (offset, line) in lines.enumerated() {
-                add(line.trimmingCharacters(in: .whitespaces), variables: [:], line: offset + 1)
+            for line in numbered {
+                add(line.text.trimmingCharacters(in: .whitespaces), variables: [:], line: line.number)
             }
+        }
+        if recipients.count > recipientLimit {
+            problems.insert("A batch takes at most \(recipientLimit.formatted()) recipients; this list has \(recipients.count.formatted()).", at: 0)
         }
         return Parsed(recipients: recipients, problems: problems, duplicates: duplicates)
     }
 
-    /// `+1 (555) 010-0199` → `+15550100199`; nil for anything with letters.
+    /// The problems as the screen lists them: the first ones, then how many more.
+    static func shown(_ problems: [String]) -> [String] {
+        guard problems.count > problemLimit else { return problems }
+        return Array(problems.prefix(problemLimit)) + ["… and \(problems.count - problemLimit) more lines to fix."]
+    }
+
+    /// Characters a written phone number may hold besides its digits.
+    private static let phoneFormatting = Set(" -().\u{00A0}")
+
+    /// `+1 (555) 010-0199` → `+15550100199`. Nil for anything but ASCII digits, a leading `+`,
+    /// spaces, dashes, dots and brackets — so `²`, full-width digits or `5550100;5550101` are
+    /// refused rather than sent.
     static func normalizedPhone(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.contains(where: \.isLetter) else { return nil }
-        let digits = trimmed.filter(\.isNumber)
+        var digits = ""
+        for (index, character) in trimmed.enumerated() {
+            if character.isASCII, character.isNumber {
+                digits.append(character)
+            } else if character == "+", index == 0 {
+                continue
+            } else if !phoneFormatting.contains(character) {
+                return nil
+            }
+        }
         return trimmed.hasPrefix("+") ? "+" + digits : digits
     }
 
-    /// E.164 in shape: an optional `+` and 7 to 15 digits.
+    /// A WhatsApp user id: ASCII digits only, formatting allowed as for phone numbers.
+    static func normalizedWhatsApp(_ text: String) -> String? {
+        normalizedPhone(text).map { $0.filter { $0 != "+" } }
+    }
+
+    /// E.164 in shape: an optional `+` and 7 to 15 ASCII digits.
     static func isValid(_ address: String, whatsApp: Bool) -> Bool {
-        let digits = address.filter(\.isNumber)
-        return (7...15).contains(digits.count) && (address.first == "+" || address.first?.isNumber == true)
+        let body = address.hasPrefix("+") ? address.dropFirst() : Substring(address)
+        return (7...15).contains(body.count) && body.allSatisfy { $0.isASCII && $0.isNumber }
     }
 
     /// One CSV line's fields: commas separate, double quotes group, `""` inside quotes is a quote.
@@ -227,17 +266,31 @@ final class AgentBatchCallsModel {
     var composing = false
     var name = ""
     var agentID = ""
-    var channel: Channel = .phone
+    var channel: Channel = .phone {
+        didSet { if channel != oldValue { reparse() } }
+    }
     var phoneNumberID = ""
     var whatsAppAccountID = ""
     var whatsAppTemplate = ""
     var whatsAppLanguage = "en"
-    var recipientsText = ""
+    /// The pasted or imported list; read into `parsed` as it changes.
+    var recipientsText = "" {
+        didSet { reparse() }
+    }
     var startLater = false
     var startAt = Date().addingTimeInterval(3600)
     var concurrency = 0
     var ringSeconds = 60
     var recordCalls = false
+    /// What went wrong reading an imported file.
+    private(set) var importProblem: String?
+    private(set) var parsed = AgentsBatchRecipients.Parsed(recipients: [], problems: [], duplicates: 0)
+
+    /// Submit's guard: after an unknown outcome no second batch goes out until the owner has
+    /// looked at the list.
+    let submitGuard = AgentsSendGuard()
+    /// Retry's, per batch.
+    @ObservationIgnored private var retryGuards: [String: AgentsSendGuard] = [:]
 
     init(store: AgentsPlatformStore) {
         self.store = store
@@ -259,8 +312,8 @@ final class AgentBatchCallsModel {
 
     // MARK: Composing
 
-    var parsed: AgentsBatchRecipients.Parsed {
-        AgentsBatchRecipients.parse(recipientsText, whatsApp: channel == .whatsApp)
+    private func reparse() {
+        parsed = AgentsBatchRecipients.parse(recipientsText, whatsApp: channel == .whatsApp)
     }
 
     var fromNumber: AgentsPhoneNumber? { store.directory.phoneNumber(phoneNumberID) }
@@ -279,7 +332,6 @@ final class AgentBatchCallsModel {
                 problems.append("Name the template that asks each recipient for permission to call.")
             }
         }
-        let parsed = parsed
         if parsed.recipients.isEmpty { problems.append("Add at least one recipient.") }
         problems += parsed.problems
         if startLater, startAt <= now() { problems.append("The start time is in the past.") }
@@ -290,7 +342,7 @@ final class AgentBatchCallsModel {
     @ObservationIgnored var now: () -> Date = Date.init
 
     func submitArguments() -> [String: JSONValue]? {
-        guard submitProblems.isEmpty else { return nil }
+        guard submitProblems.isEmpty, submitGuard.canSend else { return nil }
         var arguments: [String: JSONValue] = [
             "call_name": .string(name.trimmingCharacters(in: .whitespaces)),
             "agent_id": .string(agentID),
@@ -315,8 +367,8 @@ final class AgentBatchCallsModel {
     }
 
     /// What the confirmation says: the number of people called, the agent, the number called
-    /// from, and when.
-    func submitConfirmation() -> (title: String, label: String, consequence: String) {
+    /// from, and when. The pane's question reads "Place <subject>?" with "Call now".
+    func submitConfirmation() -> (subject: String, consequence: String) {
         let count = parsed.recipients.count
         let agent = store.directory.agentName(agentID)
         let people = AgentsFormat.count(count, "recipient")
@@ -330,25 +382,35 @@ final class AgentBatchCallsModel {
             : "starting as soon as you confirm"
         let pace = concurrency > 0 ? ", up to \(concurrency) at a time" : ""
         return (
-            title: "Place \(AgentsFormat.count(count, kind)) with “\(agent)”?",
-            label: "Place \(AgentsFormat.count(count, "call"))",
+            subject: "\(AgentsFormat.count(count, kind)) with “\(agent)”",
             consequence: "ElevenLabs will call \(people) from \(from), \(when)\(pace). The agent “\(agent)” talks to "
-                + "everyone who answers. Every call is a real call to a real person, billed by the minute."
+                + "everyone who answers. Every call is a real call to a real person, billed by the minute. "
+                + "Once confirmed it cannot be stopped from here; stop the batch from its page."
         )
     }
 
+    /// Submits the batch once. If the outcome is unknown — no answer, a timeout, ElevenLabs
+    /// failing — the form is cleared, the list fetched again, and nothing more can be submitted
+    /// until the owner says they have looked for the batch there.
     func submit() async {
         guard let arguments = submitArguments() else { return }
         let wording = submitConfirmation()
-        let count = parsed.recipients.count
-        guard let json = await calls.json(
-            AgentsOp.submitBatch, arguments, title: "Batch “\(name)”",
-            subject: AgentsFormat.count(count, "call"), consequence: wording.consequence,
-            confirmTitle: wording.title, confirmLabel: wording.label
-        ) else { return }
+        let batchName = name.trimmingCharacters(in: .whitespaces)
+        let runner = calls.runner(AgentsOp.submitBatch)
+        let json = await submitGuard.send(runner: runner, what: "The batch “\(batchName)”",
+                                          check: "the batches below for “\(batchName)”") {
+            await calls.json(AgentsOp.submitBatch, arguments, title: "Batch “\(batchName)”",
+                             subject: wording.subject, consequence: wording.consequence)
+        }
+        guard let json else {
+            if submitGuard.warning != nil {
+                clearComposer()
+                await list.refresh()
+            }
+            return
+        }
+        clearComposer()
         composing = false
-        recipientsText = ""
-        name = ""
         if let batch = AgentsBatchCall(json: json) {
             list.upsert(batch)
             await select(batch.id)
@@ -357,10 +419,31 @@ final class AgentBatchCallsModel {
         }
     }
 
-    func importCSV(_ url: URL) {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        recipientsText = text
+    private func clearComposer() {
+        recipientsText = ""
+        name = ""
     }
+
+    /// Reads a CSV file into the list. UTF-8 first, then Windows-1252 (what Excel often writes);
+    /// a file too big or unreadable says so instead of doing nothing.
+    func importCSV(_ url: URL) {
+        importProblem = nil
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size <= Self.importLimit else {
+            importProblem = "\(url.lastPathComponent) is \(AgentsFormat.bytes(size)); lists up to \(AgentsFormat.bytes(Self.importLimit)) can be imported."
+            return
+        }
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            recipientsText = text
+        } else if let text = try? String(contentsOf: url, encoding: .windowsCP1252) {
+            recipientsText = text
+            importProblem = "\(url.lastPathComponent) is not UTF-8; it was read as Windows Latin 1. Check names with accents."
+        } else {
+            importProblem = "\(url.lastPathComponent) could not be read as text."
+        }
+    }
+
+    static let importLimit = 5 << 20
 
     // MARK: A batch
 
@@ -388,13 +471,20 @@ final class AgentBatchCallsModel {
         recipients.filter { ["pending", "dispatched", "initiated", "in_progress"].contains($0.status) }.count
     }
 
-    func retryConfirmation() -> (title: String, label: String, consequence: String)? {
+    /// Retry's guard for one batch.
+    func retryGuard(for id: String) -> AgentsSendGuard {
+        if let existing = retryGuards[id] { return existing }
+        let made = AgentsSendGuard()
+        retryGuards[id] = made
+        return made
+    }
+
+    func retryConfirmation() -> (subject: String, consequence: String)? {
         guard let batch else { return nil }
         let count = retryCount
         let from = store.directory.phoneNumber(batch.phoneNumberID)?.displayName ?? "the batch's number"
         return (
-            title: "Call \(AgentsFormat.count(count, "recipient")) of “\(batch.name)” again with “\(batch.agentName)”?",
-            label: "Place \(AgentsFormat.count(count, "call"))",
+            subject: "\(AgentsFormat.count(count, "call")) again to recipients of “\(batch.name)” with “\(batch.agentName)”",
             consequence: "ElevenLabs will call again the \(AgentsFormat.count(count, "recipient")) whose calls failed or went "
                 + "unanswered (by the statuses on screen), from \(from). The agent “\(batch.agentName)” talks to everyone who "
                 + "answers. These are real calls to real people, billed by the minute."
@@ -403,36 +493,38 @@ final class AgentBatchCallsModel {
 
     func retry() async {
         guard let batch, let wording = retryConfirmation() else { return }
-        guard await calls.json(
-            AgentsOp.retryBatch, ["batch_id": .string(batch.id)], title: "Retried “\(batch.name)”",
-            subject: AgentsFormat.count(retryCount, "call"), consequence: wording.consequence,
-            confirmTitle: wording.title, confirmLabel: wording.label
-        ) != nil else { return }
-        await reload()
+        let guardian = retryGuard(for: batch.id)
+        let runner = calls.runner(AgentsOp.retryBatch, slot: batch.id)
+        let answer = await guardian.send(runner: runner, what: "The retry of “\(batch.name)”",
+                                         check: "this batch's recipients") {
+            await calls.json(AgentsOp.retryBatch, ["batch_id": .string(batch.id)], slot: batch.id,
+                             title: "Retried “\(batch.name)”", subject: wording.subject, consequence: wording.consequence)
+        }
+        if answer != nil || guardian.warning != nil { await reload() }
     }
 
     func cancel() async {
         guard let batch else { return }
         let pending = pendingCount
         guard await calls.json(
-            AgentsOp.cancelBatch, ["batch_id": .string(batch.id)],
-            subject: "the batch “\(batch.name)”",
+            AgentsOp.cancelBatch, ["batch_id": .string(batch.id)], slot: batch.id,
+            subject: "“\(batch.name)” — stop placing its calls",
             consequence: "ElevenLabs stops the batch: calls not yet placed (\(pending) by the statuses on screen) are not "
-                + "placed, and every recipient is marked cancelled. Calls already in progress may finish.",
-            confirmTitle: "Stop the batch “\(batch.name)”?", confirmLabel: "Stop the batch"
+                + "placed, and every recipient is marked cancelled. Calls already in progress may finish."
         ) != nil else { return }
         await reload()
     }
 
     func export() async {
         guard let batch else { return }
-        await calls.run(AgentsOp.exportBatch, ["batch_id": .string(batch.id)], title: "Results of “\(batch.name)”")
+        await calls.run(AgentsOp.exportBatch, ["batch_id": .string(batch.id)], slot: batch.id,
+                        title: "Results of “\(batch.name)”")
     }
 
     func delete() async {
         guard let batch else { return }
         guard await calls.json(
-            AgentsOp.deleteBatch, ["batch_id": .string(batch.id)],
+            AgentsOp.deleteBatch, ["batch_id": .string(batch.id)], slot: batch.id,
             subject: "the batch “\(batch.name)”",
             consequence: "ElevenLabs deletes the batch and its \(AgentsFormat.count(recipients.count, "recipient record")) for good. "
                 + "The conversations stay in history." + (batch.isActive ? " Calls still to be placed will not be." : "")
@@ -536,9 +628,13 @@ private struct AgentBatchComposer: View {
                     }
                 }
             }
-            ElevenLabsProblemList(problems: model.submitProblems)
-            ElevenLabsRunButton(runner: runner, title: "Place \(AgentsFormat.count(parsed.recipients.count, "call"))…",
-                                disabled: !model.submitProblems.isEmpty) {
+            if let problem = model.importProblem {
+                Label(problem, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
+            }
+            ElevenLabsProblemList(problems: AgentsBatchRecipients.shown(model.submitProblems))
+            AgentsSendButton(runner: runner, guardian: model.submitGuard,
+                             title: "Place \(AgentsFormat.count(parsed.recipients.count, "call"))…",
+                             disabled: !model.submitProblems.isEmpty) {
                 Task { await model.submit() }
             }
             AgentsRunnerOutput(runner: runner, showsResult: false)
@@ -580,27 +676,29 @@ private struct AgentBatchDetail: View {
                 AgentsRunnerError(runner: calls.runner(AgentsOp.getBatch, slot: batch.id))
             }
             AgentsCard("Actions") {
-                HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     if batch.isActive {
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.cancelBatch), title: "Stop the batch…") {
+                        AgentsRunButton(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id), title: "Stop the batch…") {
                             Task { await model.cancel() }
                         }
+                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id))
                     }
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.retryBatch),
-                                        title: "Call \(AgentsFormat.count(model.retryCount, "recipient")) again…",
-                                        disabled: model.retryCount == 0 || batch.isActive) {
+                    AgentsSendButton(runner: calls.runner(AgentsOp.retryBatch, slot: batch.id),
+                                     guardian: model.retryGuard(for: batch.id),
+                                     title: "Call \(AgentsFormat.count(model.retryCount, "recipient")) again…",
+                                     disabled: model.retryCount == 0 || batch.isActive,
+                                     disabledReason: batch.isActive ? "The batch is still running." : nil) {
                         Task { await model.retry() }
                     }
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.exportBatch), title: "Export CSV",
-                                        disabled: batch.isActive) {
+                    Text("Retry calls the recipients whose calls failed or went unanswered.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    AgentsRunnerOutput(runner: calls.runner(AgentsOp.retryBatch, slot: batch.id))
+                    AgentsRunButton(runner: calls.runner(AgentsOp.exportBatch, slot: batch.id), title: "Export CSV",
+                                    disabled: batch.isActive, disabledReason: "Export needs a finished batch.") {
                         Task { await model.export() }
                     }
+                    AgentsRunnerOutput(runner: calls.runner(AgentsOp.exportBatch, slot: batch.id), showsResult: true)
                 }
-                Text("Retry calls the recipients whose calls failed or went unanswered; export needs a finished batch.")
-                    .font(.caption).foregroundStyle(.secondary)
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.cancelBatch), showsResult: false)
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.retryBatch), showsResult: false)
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.exportBatch), showsResult: true)
             }
             AgentsCard("Recipients", subtitle: AgentsFormat.count(model.recipients.count, "recipient")) {
                 let counts = Dictionary(grouping: model.recipients, by: \.status).mapValues(\.count)
@@ -631,10 +729,10 @@ private struct AgentBatchDetail: View {
                 }
             }
             AgentsCard("Delete") {
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteBatch), title: "Delete the batch…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id), title: "Delete the batch…") {
                     Task { await model.delete() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteBatch), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id))
             }
         }
     }

@@ -103,6 +103,9 @@ final class AgentPhoneNumbersModel {
     var callRingSeconds = 60
 
     // Import
+    /// Whether the import form and the WhatsApp card are open.
+    var showsImport = false
+    var showsWhatsApp = false
     var importProvider: ImportProvider = .twilio
     var importLabel = ""
     var importNumber = ""
@@ -185,13 +188,11 @@ final class AgentPhoneNumbersModel {
         let agent = assignAgentID.isEmpty ? nil : store.directory.agentName(assignAgentID)
         let value: JSONValue = assignAgentID.isEmpty ? .null : .string(assignAgentID)
         guard await calls.json(
-            AgentsOp.updatePhoneNumber, ["phone_number_id": .string(number.id), "agent_id": value], slot: "agent",
-            subject: agent.map { "\(number.number) to the agent “\($0)”" } ?? "\(number.number) from its agent",
+            AgentsOp.updatePhoneNumber, ["phone_number_id": .string(number.id), "agent_id": value],
+            slot: "\(number.id)#agent",
+            subject: agent.map { "\(number.number) answered by “\($0)”" } ?? "\(number.number) answered by no agent",
             consequence: agent.map { "From now on, calls to \(number.number) are answered by “\($0)”." }
-                ?? "Calls to \(number.number) will no longer be answered by an agent.",
-            confirmTitle: agent.map { "Answer calls to \(number.number) with “\($0)”?" }
-                ?? "Stop answering calls to \(number.number) with an agent?",
-            confirmLabel: agent == nil ? "Unassign" : "Assign"
+                ?? "Calls to \(number.number) will no longer be answered by an agent."
         ) != nil else { return }
         await select(number.id)
     }
@@ -200,16 +201,17 @@ final class AgentPhoneNumbersModel {
         guard let number = selected else { return }
         let label = labelText.trimmingCharacters(in: .whitespaces)
         guard await calls.json(
-            AgentsOp.updatePhoneNumber, ["phone_number_id": .string(number.id), "label": .string(label)], slot: "label",
-            subject: "the label of \(number.number)", consequence: "Only its name in ElevenLabs changes, to “\(label)”.",
-            confirmTitle: "Rename \(number.number) to “\(label)”?", confirmLabel: "Rename"
+            AgentsOp.updatePhoneNumber, ["phone_number_id": .string(number.id), "label": .string(label)],
+            slot: "\(number.id)#label",
+            subject: "\(number.number) renamed “\(label)”", consequence: "Only its name in ElevenLabs changes."
         ) != nil else { return }
         await select(number.id)
     }
 
     func loadSIPMessages() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.phoneSIPMessages, ["phone_number_id": .string(selectedID), "page_size": 20], quiet: true)
+        guard let json = await calls.json(AgentsOp.phoneSIPMessages, ["phone_number_id": .string(selectedID), "page_size": 20],
+                                          slot: selectedID, quiet: true)
         else { return }
         sipMessages = json["sip_messages"].arrayValue ?? []
     }
@@ -217,11 +219,10 @@ final class AgentPhoneNumbersModel {
     func delete() async {
         guard let number = selected else { return }
         guard await calls.json(
-            AgentsOp.deletePhoneNumber, ["phone_number_id": .string(number.id)],
+            AgentsOp.deletePhoneNumber, ["phone_number_id": .string(number.id)], slot: number.id,
             subject: "\(number.number) from ElevenLabs",
             consequence: "Calls to \(number.number) stop reaching your agents, and agents can no longer call from it. "
-                + "The number itself stays with \(number.providerName).",
-            confirmTitle: "Remove \(number.number) from ElevenLabs?", confirmLabel: "Remove"
+                + "The number itself stays with \(number.providerName)."
         ) != nil else { return }
         list.remove(number.id)
         store.directory.phoneNumbers.remove(number.id)
@@ -248,7 +249,7 @@ final class AgentPhoneNumbersModel {
 
     func callArguments() -> [String: JSONValue]? {
         let to = callTo.trimmingCharacters(in: .whitespaces)
-        guard let from = callFrom, !callAgentID.isEmpty, !to.isEmpty else { return nil }
+        guard let from = callFrom, from.outboundCallOperation != nil, !callAgentID.isEmpty, !to.isEmpty else { return nil }
         var arguments: [String: JSONValue] = [
             "agent_id": .string(callAgentID), "agent_phone_number_id": .string(from.id), "to_number": .string(to),
             "telephony_call_config": ["ringing_timeout_secs": .number(Double(callRingSeconds))],
@@ -261,18 +262,33 @@ final class AgentPhoneNumbersModel {
         return arguments
     }
 
+    /// The outbound call's guard: one for the screen, whichever provider places the call, so
+    /// switching the From number during a call cannot start a second one.
+    let callGuard = AgentsSendGuard()
+    let whatsAppMessageGuard = AgentsSendGuard()
+    let whatsAppCallGuard = AgentsSendGuard()
+
     /// Places one real phone call, after the owner confirms who is called, from where and by whom.
+    /// If the outcome is unknown, the number is cleared and nothing more can be dialled until the
+    /// owner has looked in Conversations.
     func placeCall() async {
-        guard let from = callFrom, let arguments = callArguments() else { return }
+        guard callGuard.canSend, let from = callFrom, let operation = from.outboundCallOperation,
+              let arguments = callArguments() else { return }
         let to = callTo.trimmingCharacters(in: .whitespaces)
         let agent = store.directory.agentName(callAgentID)
-        await calls.json(
-            from.outboundCallOperation, arguments, title: "Call to \(to)",
-            subject: "a real phone call to \(to)",
-            consequence: "ElevenLabs will dial \(to) now from \(from.displayName) through \(from.providerName), and the agent “\(agent)” "
-                + "will talk to whoever answers. The call is billed by the minute.",
-            confirmTitle: "Call \(to) now with “\(agent)”?", confirmLabel: "Place the call"
-        )
+        let runner = calls.runner(operation)
+        let answer = await callGuard.send(runner: runner, what: "The call to \(to)", check: "Conversations") {
+            await calls.json(
+                operation, arguments, title: "Call to \(to)",
+                subject: "a call to \(to) with “\(agent)”",
+                consequence: "ElevenLabs will dial \(to) now from \(from.displayName) through \(from.providerName), and the agent "
+                    + "“\(agent)” will talk to whoever answers. The call is billed by the minute and cannot be stopped from here."
+            )
+        }
+        if answer != nil || callGuard.warning != nil {
+            callTo = ""
+            await store.conversations.list.refresh()
+        }
     }
 
     // MARK: Import
@@ -326,8 +342,7 @@ final class AgentPhoneNumbersModel {
             subject: "\(number) from \(importProvider.rawValue)",
             consequence: "ElevenLabs will connect \(number) to your account using the \(importProvider.rawValue) credentials "
                 + "you entered, so agents can answer\(importOutbound ? " and place" : "") calls on it. "
-                + "The credentials are sent to ElevenLabs and not kept by this app.",
-            confirmTitle: "Import \(number) from \(importProvider.rawValue)?", confirmLabel: "Import"
+                + "The credentials are sent to ElevenLabs and not written to disk by this app."
         ) else { return }
         twilioToken = ""
         sipPassword = ""
@@ -360,18 +375,16 @@ final class AgentPhoneNumbersModel {
         arguments["phone_number_id"] = .string(account.id)
         guard await calls.json(
             AgentsOp.updateWhatsAppAccount, arguments, slot: account.id,
-            subject: "the WhatsApp account \(account.number)", consequence: what,
-            confirmTitle: "Change the WhatsApp account \(account.number)?", confirmLabel: "Change"
+            subject: "\(account.number)", consequence: what
         ) != nil else { return }
         await refreshWhatsAppAccount(account.id)
     }
 
     func deleteWhatsApp(_ account: AgentsWhatsAppAccount) async {
         guard await calls.json(
-            AgentsOp.deleteWhatsAppAccount, ["phone_number_id": .string(account.id)],
+            AgentsOp.deleteWhatsAppAccount, ["phone_number_id": .string(account.id)], slot: account.id,
             subject: "the WhatsApp account \(account.number) from ElevenLabs",
-            consequence: "Messages and calls to \(account.number) on WhatsApp stop reaching your agents.",
-            confirmTitle: "Remove the WhatsApp account \(account.number) from ElevenLabs?", confirmLabel: "Remove"
+            consequence: "Messages and calls to \(account.number) on WhatsApp stop reaching your agents."
         ) != nil else { return }
         whatsApp.remove(account.id)
     }
@@ -392,32 +405,58 @@ final class AgentPhoneNumbersModel {
     }
 
     func sendWhatsAppMessage() async {
-        guard let account = whatsAppAccount, let arguments = whatsAppMessageArguments() else { return }
+        guard whatsAppMessageGuard.canSend, let account = whatsAppAccount, let arguments = whatsAppMessageArguments()
+        else { return }
+        let recipient = whatsAppRecipient.trimmingCharacters(in: .whitespaces)
         let agent = store.directory.agentName(whatsAppAgentID)
-        await calls.json(
-            AgentsOp.whatsAppMessage, arguments, title: "WhatsApp message to \(whatsAppRecipient)",
-            subject: "a WhatsApp message to \(whatsAppRecipient)",
-            consequence: "ElevenLabs will send the template “\(whatsAppTemplate)” from \(account.number) to \(whatsAppRecipient) "
-                + "on WhatsApp, and the agent “\(agent)” will carry on the conversation if they reply. It is billed."
-        )
+        let runner = calls.runner(AgentsOp.whatsAppMessage)
+        let answer = await whatsAppMessageGuard.send(runner: runner, what: "The WhatsApp message to \(recipient)",
+                                                     check: "Conversations") {
+            await calls.json(
+                AgentsOp.whatsAppMessage, arguments, title: "WhatsApp message to \(recipient)",
+                subject: "a WhatsApp message to \(recipient)",
+                consequence: "ElevenLabs will send the template “\(whatsAppTemplate)” from \(account.number) to \(recipient) "
+                    + "on WhatsApp, and the agent “\(agent)” will carry on the conversation if they reply. It is billed."
+            )
+        }
+        if answer != nil || whatsAppMessageGuard.warning != nil {
+            whatsAppRecipient = ""
+            await store.conversations.list.refresh()
+        }
     }
 
-    func placeWhatsAppCall() async {
-        guard let account = whatsAppAccount, !whatsAppAgentID.isEmpty else { return }
+    func whatsAppCallArguments() -> [String: JSONValue]? {
+        guard let account = whatsAppAccount, !whatsAppAgentID.isEmpty else { return nil }
         let recipient = whatsAppRecipient.trimmingCharacters(in: .whitespaces)
         let template = whatsAppPermissionTemplate.trimmingCharacters(in: .whitespaces)
-        guard !recipient.isEmpty, !template.isEmpty else { return }
-        let agent = store.directory.agentName(whatsAppAgentID)
-        await calls.json(AgentsOp.whatsAppCall, [
+        guard !recipient.isEmpty, !template.isEmpty else { return nil }
+        return [
             "agent_id": .string(whatsAppAgentID), "whatsapp_phone_number_id": .string(account.id),
             "whatsapp_user_id": .string(recipient),
             "whatsapp_call_permission_request_template_name": .string(template),
             "whatsapp_call_permission_request_template_language_code": .string(whatsAppLanguage),
-        ], title: "WhatsApp call to \(recipient)",
-           subject: "a WhatsApp call to \(recipient)",
-           consequence: "ElevenLabs will call \(recipient) on WhatsApp from \(account.number) (asking their permission first with the "
-            + "template “\(template)”), and the agent “\(agent)” will talk to them. The call is billed by the minute.",
-           confirmTitle: "Call \(recipient) on WhatsApp now with “\(agent)”?", confirmLabel: "Place the call")
+        ]
+    }
+
+    func placeWhatsAppCall() async {
+        guard whatsAppCallGuard.canSend, let account = whatsAppAccount, let arguments = whatsAppCallArguments() else { return }
+        let recipient = whatsAppRecipient.trimmingCharacters(in: .whitespaces)
+        let template = whatsAppPermissionTemplate.trimmingCharacters(in: .whitespaces)
+        let agent = store.directory.agentName(whatsAppAgentID)
+        let runner = calls.runner(AgentsOp.whatsAppCall)
+        let answer = await whatsAppCallGuard.send(runner: runner, what: "The WhatsApp call to \(recipient)",
+                                                  check: "Conversations") {
+            await calls.json(
+                AgentsOp.whatsAppCall, arguments, title: "WhatsApp call to \(recipient)",
+                subject: "a WhatsApp call to \(recipient) with “\(agent)”",
+                consequence: "ElevenLabs will call \(recipient) on WhatsApp from \(account.number) (asking their permission first with "
+                    + "the template “\(template)”), and the agent “\(agent)” will talk to them. The call is billed by the minute."
+            )
+        }
+        if answer != nil || whatsAppCallGuard.warning != nil {
+            whatsAppRecipient = ""
+            await store.conversations.list.refresh()
+        }
     }
 
     static let arguments: [AgentsArgument] = [
@@ -491,26 +530,26 @@ private struct AgentPhoneNumberDetail: View {
                 HStack {
                     AgentsAgentPicker(directory: model.store.directory, selection: $model.assignAgentID, noneTitle: "No agent")
                         .fixedSize()
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "agent"), title: "Assign…",
-                                        disabled: model.assignAgentID == (number.agentID ?? "")) {
+                    AgentsRunButton(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "\(number.id)#agent"), title: "Assign…",
+                                    disabled: model.assignAgentID == (number.agentID ?? "")) {
                         Task { await model.assignAgent() }
                     }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "agent"), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "\(number.id)#agent"))
             }
             AgentsCard("Label") {
                 HStack {
                     TextField("Label", text: $model.labelText).textFieldStyle(.roundedBorder)
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "label"), title: "Rename…",
-                                        disabled: model.labelText == number.label || model.labelText.isEmpty) {
+                    AgentsRunButton(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "\(number.id)#label"), title: "Rename…",
+                                    disabled: model.labelText == number.label || model.labelText.isEmpty) {
                         Task { await model.rename() }
                     }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "label"), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updatePhoneNumber, slot: "\(number.id)#label"))
             }
             AgentsCard("SIP log", subtitle: "The signalling of recent calls on this number, for troubleshooting.") {
                 Button("Fetch SIP messages") { Task { await model.loadSIPMessages() } }
-                AgentsRunnerError(runner: calls.runner(AgentsOp.phoneSIPMessages))
+                AgentsRunnerError(runner: calls.runner(AgentsOp.phoneSIPMessages, slot: number.id))
                 ForEach(Array(model.sipMessages.enumerated()), id: \.offset) { _, message in
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(AgentsFormat.words(message["direction"].stringValue)) · \(message["transport"].stringValue ?? "")")
@@ -520,10 +559,10 @@ private struct AgentPhoneNumberDetail: View {
                 }
             }
             AgentsCard("Remove") {
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.deletePhoneNumber), title: "Remove from ElevenLabs…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deletePhoneNumber, slot: number.id), title: "Remove from ElevenLabs…") {
                     Task { await model.delete() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deletePhoneNumber), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deletePhoneNumber, slot: number.id))
             }
         }
     }
@@ -533,23 +572,12 @@ private struct AgentOutboundCallCard: View {
     @Bindable var model: AgentPhoneNumbersModel
 
     var body: some View {
-        let operation = model.callFrom?.outboundCallOperation ?? AgentsOp.twilioCall
-        let runner = model.calls.runner(operation)
+        let runner = model.calls.runner(model.callFrom?.outboundCallOperation ?? AgentsOp.twilioCall)
         AgentsCard("Place a call", subtitle: "An agent calls one person now. For many at once, use Batch calls.") {
             Form {
                 AgentsPhoneNumberPicker(directory: model.store.directory, selection: $model.callFromID)
                 AgentsAgentPicker(directory: model.store.directory, selection: $model.callAgentID)
                 TextField("Number to call", text: $model.callTo, prompt: Text("+15550100"))
-                LabeledContent("Dynamic variables") {
-                    VStack(alignment: .leading, spacing: 3) {
-                        TextEditor(text: $model.callVariables)
-                            .font(.callout.monospaced())
-                            .frame(minHeight: 44)
-                            .overlay { RoundedRectangle(cornerRadius: 5).stroke(.separator) }
-                        Text("One name=value per line, filled into the agent's prompt.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
                 Stepper("Ring for \(model.callRingSeconds) s", value: $model.callRingSeconds, in: {
                     let range = AgentsSchema.range(AgentsOp.twilioCall, "telephony_call_config.ringing_timeout_secs", fallback: 1...999)
                     return Int(range.lowerBound)...Int(range.upperBound)
@@ -559,22 +587,35 @@ private struct AgentOutboundCallCard: View {
                 }
             }
             .formStyle(.columns)
-            ElevenLabsRunButton(runner: runner, title: "Call…", disabled: model.callArguments() == nil) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Dynamic variables").font(.callout)
+                TextEditor(text: $model.callVariables)
+                    .font(.callout.monospaced())
+                    .frame(minHeight: 44)
+                    .overlay { RoundedRectangle(cornerRadius: 5).stroke(.separator) }
+                Text("One name=value per line, filled into the agent's prompt.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            AgentsSendButton(runner: runner, guardian: model.callGuard, title: "Call…",
+                             disabled: model.callArguments() == nil,
+                             disabledReason: model.callFrom != nil && model.callFrom?.outboundCallOperation == nil
+                                 ? "This app cannot place calls through \(model.callFrom?.providerName ?? "that provider")." : nil) {
                 Task { await model.placeCall() }
             }
-            AgentsRunnerOutput(runner: runner, showsResult: true)
+            ForEach([AgentsOp.twilioCall, AgentsOp.sipTrunkCall, AgentsOp.exotelCall], id: \.self) {
+                AgentsRunnerOutput(runner: model.calls.runner($0), showsResult: true)
+            }
         }
     }
 }
 
 private struct AgentPhoneImportCard: View {
     @Bindable var model: AgentPhoneNumbersModel
-    @State private var expanded = false
 
     var body: some View {
         let runner = model.calls.runner(AgentsOp.importPhoneNumber)
         AgentsCard("Import a number", subtitle: "Connect a number you have with Twilio, a SIP trunk or Exotel. Its credentials go to ElevenLabs and are not kept by this app.") {
-            DisclosureGroup("Show the form", isExpanded: $expanded) {
+            DisclosureGroup("Show the form", isExpanded: $model.showsImport) {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("Provider", selection: $model.importProvider) {
                         ForEach(AgentPhoneNumbersModel.ImportProvider.allCases) { Text($0.rawValue).tag($0) }
@@ -618,10 +659,10 @@ private struct AgentPhoneImportCard: View {
                         Toggle("Place outgoing calls", isOn: $model.importOutbound)
                     }
                     .formStyle(.columns)
-                    ElevenLabsRunButton(runner: runner, title: "Import…", disabled: model.importBody() == nil) {
+                    AgentsRunButton(runner: runner, title: "Import…", disabled: model.importBody() == nil) {
                         Task { await model.importNumberNow() }
                     }
-                    AgentsRunnerOutput(runner: runner, maskedFields: AgentPhoneNumbersModel.secretFields)
+                    AgentsRunnerOutput(runner: runner, showsResult: false)
                 }
                 .padding(.top, 6)
             }
@@ -631,12 +672,11 @@ private struct AgentPhoneImportCard: View {
 
 private struct AgentWhatsAppCard: View {
     @Bindable var model: AgentPhoneNumbersModel
-    @State private var expanded = false
 
     var body: some View {
         let calls = model.calls
         AgentsCard("WhatsApp", subtitle: "WhatsApp Business numbers connected to ElevenLabs: which agent answers, and messages or calls an agent starts.") {
-            DisclosureGroup("Show WhatsApp", isExpanded: $expanded) {
+            DisclosureGroup("Show WhatsApp", isExpanded: $model.showsWhatsApp) {
                 VStack(alignment: .leading, spacing: 10) {
                     AgentsListBody(model.whatsApp, runner: calls.runner(AgentsOp.listWhatsAppAccounts),
                                    empty: "No WhatsApp accounts. Connect one in the ElevenLabs dashboard first.") { account in
@@ -689,16 +729,14 @@ private struct AgentWhatsAppCard: View {
                         TextField("Call permission template", text: $model.whatsAppPermissionTemplate, prompt: Text("For calls"))
                     }
                     .formStyle(.columns)
-                    HStack {
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.whatsAppMessage), title: "Send message…",
-                                            disabled: model.whatsAppMessageArguments() == nil) {
-                            Task { await model.sendWhatsAppMessage() }
-                        }
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.whatsAppCall), title: "Call…",
-                                            disabled: model.whatsAppAccount == nil || model.whatsAppAgentID.isEmpty
-                                                || model.whatsAppRecipient.isEmpty || model.whatsAppPermissionTemplate.isEmpty) {
-                            Task { await model.placeWhatsAppCall() }
-                        }
+                    AgentsSendButton(runner: calls.runner(AgentsOp.whatsAppMessage), guardian: model.whatsAppMessageGuard,
+                                     title: "Send message…", disabled: model.whatsAppMessageArguments() == nil,
+                                     note: "Billed per message.") {
+                        Task { await model.sendWhatsAppMessage() }
+                    }
+                    AgentsSendButton(runner: calls.runner(AgentsOp.whatsAppCall), guardian: model.whatsAppCallGuard,
+                                     title: "Call…", disabled: model.whatsAppCallArguments() == nil) {
+                        Task { await model.placeWhatsAppCall() }
                     }
                     AgentsRunnerOutput(runner: calls.runner(AgentsOp.whatsAppMessage), showsResult: true)
                     AgentsRunnerOutput(runner: calls.runner(AgentsOp.whatsAppCall), showsResult: true)
@@ -706,12 +744,10 @@ private struct AgentWhatsAppCard: View {
                 .padding(.top, 6)
             }
         }
-        .onChange(of: expanded) {
-            if expanded {
-                Task {
-                    await model.whatsApp.loadIfNeeded()
-                    await model.store.directory.agents.loadIfNeeded()
-                }
+        .task(id: model.showsWhatsApp) {
+            if model.showsWhatsApp {
+                await model.whatsApp.loadIfNeeded()
+                await model.store.directory.agents.loadIfNeeded()
             }
         }
     }

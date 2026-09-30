@@ -87,6 +87,8 @@ final class AgentSecretsModel {
     var newVariableValues: [(environment: String, value: String)] = [("production", "")]
     private(set) var selectedVariableID: String?
     var editedValues: [(environment: String, value: String)] = []
+    /// The environments the selected variable had when fetched.
+    private(set) var originalEnvironments: Set<String> = []
 
     init(store: AgentsPlatformStore) {
         self.store = store
@@ -138,7 +140,7 @@ final class AgentSecretsModel {
         guard let selectedID else { return }
         guard let json = await calls.json(AgentsOp.secretDependencies, [
             "secret_id": .string(selectedID), "resource_type": .string(kind), "page_size": 100,
-        ], slot: kind, quiet: true) else { return }
+        ], slot: "\(selectedID)/\(kind)", quiet: true) else { return }
         let items = json["dependencies"].arrayValue ?? json["results"].arrayValue ?? json[kind].arrayValue ?? []
         dependencies[kind] = items.map { $0["name"].stringValue ?? $0["phone_number"].stringValue ?? $0["id"].stringValue ?? "?" }
     }
@@ -149,10 +151,9 @@ final class AgentSecretsModel {
         let value = newValue
         guard let json = await calls.json(
             AgentsOp.createSecret, ["type": "new", "name": .string(name), "value": .string(value)],
-            title: "New secret “\(name)”", subject: "the secret “\(name)”",
+            title: "New secret “\(name)”", subject: "“\(name)”",
             consequence: "ElevenLabs stores the value in your workspace, where tools and MCP servers you point at it can use it. "
-                + "It cannot be read back, here or in ElevenLabs.",
-            confirmTitle: "Store the secret “\(name)” in the workspace?", confirmLabel: "Store"
+                + "It cannot be read back, here or in ElevenLabs."
         ) else { return }
         newValue = ""
         newName = ""
@@ -172,10 +173,9 @@ final class AgentSecretsModel {
         guard await calls.json(
             AgentsOp.updateSecret,
             ["secret_id": .string(secret.id), "type": "update", "name": .string(name), "value": .string(replaceValue)],
-            subject: "the secret “\(secret.name)”",
+            slot: secret.id, subject: "“\(secret.name)” with a new value",
             consequence: "Everything using it — \(secret.usageSummary.lowercased()) — uses the new value from now on. "
-                + "The old value is gone.",
-            confirmTitle: "Replace the value of “\(secret.name)”?", confirmLabel: "Replace"
+                + "The old value is gone."
         ) != nil else { return }
         replaceValue = ""
         await list.refresh()
@@ -185,7 +185,7 @@ final class AgentSecretsModel {
     func delete() async {
         guard let secret = selected else { return }
         guard await calls.json(
-            AgentsOp.deleteSecret, ["secret_id": .string(secret.id)],
+            AgentsOp.deleteSecret, ["secret_id": .string(secret.id)], slot: secret.id,
             subject: "the secret “\(secret.name)”",
             consequence: secret.usageCount > 0
                 ? "\(secret.usageSummary). ElevenLabs refuses to delete a secret that is in use."
@@ -216,6 +216,7 @@ final class AgentSecretsModel {
               let variable = AgentsEnvironmentVariable(json: json) else { return }
         variables.upsert(variable)
         editedValues = Self.editable(json["values"], type: variable.type)
+        originalEnvironments = Set(editedValues.map(\.environment))
     }
 
     var selectedVariable: AgentsEnvironmentVariable? {
@@ -262,18 +263,41 @@ final class AgentSecretsModel {
             "label": .string(newVariableLabel.trimmingCharacters(in: .whitespaces)), "type": .string(newVariableType),
             "values": Self.valuesJSON(newVariableValues, type: newVariableType),
         ]
-        guard let json = await calls.json(AgentsOp.createEnvironmentVariable, ["body": body],
-                                          title: "Variable “\(newVariableLabel)”") else { return }
+        let label = newVariableLabel.trimmingCharacters(in: .whitespaces)
+        guard let json = await calls.json(
+            AgentsOp.createEnvironmentVariable, ["body": body], title: "Variable “\(label)”",
+            subject: "“\(label)” (\(AgentsFormat.words(newVariableType).lowercased()))",
+            consequence: "Tools, MCP servers and agents that refer to {{\(label)}} use these values in "
+                + ListFormatter.localizedString(byJoining: newVariableValues.map(\.environment).filter { !$0.isEmpty })
+                + " from their next conversation. The values themselves are not shown here again."
+        ) else { return }
         newVariableLabel = ""
         newVariableValues = [("production", "")]
         if let variable = AgentsEnvironmentVariable(json: json) { variables.upsert(variable) } else { await variables.refresh() }
     }
 
+    /// The update's `values`: the edited ones, and null for an environment that was removed or
+    /// emptied (the API keeps what a replace leaves out otherwise). Production cannot be removed.
+    func editedValuesJSON(for variable: AgentsEnvironmentVariable) -> JSONValue {
+        var values = Self.valuesJSON(editedValues, type: variable.type).objectValue ?? [:]
+        for environment in originalEnvironments where environment != "production" && values[environment] == nil {
+            values[environment] = .null
+        }
+        return .object(values)
+    }
+
     func saveVariable() async {
         guard let variable = selectedVariable else { return }
+        let removed = originalEnvironments.filter { environment in
+            environment != "production" && !editedValues.contains { $0.environment == environment && !$0.value.isEmpty }
+        }.sorted()
         guard await calls.json(AgentsOp.updateEnvironmentVariable, [
-            "env_var_id": .string(variable.id), "values": Self.valuesJSON(editedValues, type: variable.type),
-        ], title: "Variable “\(variable.label)”") != nil else { return }
+            "env_var_id": .string(variable.id), "values": editedValuesJSON(for: variable),
+        ], slot: variable.id, title: "Variable “\(variable.label)”",
+           subject: "“\(variable.label)”",
+           consequence: "What refers to {{\(variable.label)}} uses the new values from its next conversation."
+            + (removed.isEmpty ? "" : " Removed: " + ListFormatter.localizedString(byJoining: removed) + ".")
+        ) != nil else { return }
         await selectVariable(variable.id)
     }
 
@@ -326,15 +350,16 @@ private struct AgentSecretDetail: View {
                 SecureField("New value", text: $model.replaceValue)
             }
             .formStyle(.columns)
-            ElevenLabsRunButton(runner: calls.runner(AgentsOp.updateSecret), title: "Replace…", disabled: model.replaceValue.isEmpty) {
+            AgentsRunButton(runner: calls.runner(AgentsOp.updateSecret, slot: secret.id), title: "Replace…",
+                            disabled: model.replaceValue.isEmpty) {
                 Task { await model.replace() }
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateSecret), maskedFields: AgentSecretsModel.secretFields)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateSecret, slot: secret.id))
             Divider()
-            ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteSecret), title: "Delete the secret…") {
+            AgentsRunButton(runner: calls.runner(AgentsOp.deleteSecret, slot: secret.id), title: "Delete the secret…") {
                 Task { await model.delete() }
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteSecret), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteSecret, slot: secret.id))
         }
     }
 }
@@ -350,11 +375,11 @@ private struct AgentSecretComposer: View {
                 SecureField("Value", text: $model.newValue)
             }
             .formStyle(.columns)
-            ElevenLabsRunButton(runner: runner, title: "Store…",
+            AgentsRunButton(runner: runner, title: "Store…",
                                 disabled: model.newName.trimmingCharacters(in: .whitespaces).isEmpty || model.newValue.isEmpty) {
                 Task { await model.create() }
             }
-            AgentsRunnerOutput(runner: runner, maskedFields: AgentSecretsModel.secretFields)
+            AgentsRunnerOutput(runner: runner, showsResult: false)
         }
     }
 }
@@ -393,10 +418,10 @@ private struct AgentEnvironmentVariablesCard: View {
                         Divider()
                         Text("“\(variable.label)” by environment").font(.subheadline.weight(.medium))
                         valuesEditor($model.editedValues, type: variable.type)
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.updateEnvironmentVariable), title: "Save values") {
+                        AgentsRunButton(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id), title: "Save values…") {
                             Task { await model.saveVariable() }
                         }
-                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateEnvironmentVariable), showsResult: false)
+                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id))
                     }
                     Divider()
                     Text("New variable").font(.subheadline.weight(.medium))
@@ -409,7 +434,7 @@ private struct AgentEnvironmentVariablesCard: View {
                     }
                     valuesEditor($model.newVariableValues, type: model.newVariableType)
                     ElevenLabsProblemList(problems: model.newVariableProblems)
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.createEnvironmentVariable), title: "Create",
+                    AgentsRunButton(runner: calls.runner(AgentsOp.createEnvironmentVariable), title: "Create…",
                                         disabled: !model.newVariableProblems.isEmpty) {
                         Task { await model.createVariable() }
                     }

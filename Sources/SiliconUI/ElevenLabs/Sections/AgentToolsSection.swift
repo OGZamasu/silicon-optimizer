@@ -145,8 +145,8 @@ struct AgentsToolEditor: Equatable, Sendable {
         if description.trimmingCharacters(in: .whitespaces).isEmpty {
             problems.append("A tool needs a description: it is how the agent knows when to call it.")
         }
-        if kind == "webhook", URL(string: url.trimmingCharacters(in: .whitespaces))?.scheme?.hasPrefix("http") != true {
-            problems.append("A webhook needs an http or https address.")
+        if kind == "webhook", let refusal = AgentsOutsideAddress(url).refusal {
+            problems.append(refusal)
         }
         if kind == "client", !parametersJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            (try? JSONValue(data: Data(parametersJSON.utf8))) == nil {
@@ -242,10 +242,35 @@ final class AgentToolsModel {
         }
     }
 
+    /// What saving a tool's configuration means, for the question: its name, where it sends
+    /// and which headers go with it (names only, never their values), and any warning about
+    /// the address.
+    static func describe(_ config: JSONValue) -> (subject: String, consequence: String) {
+        let name = config["name"].stringValue ?? "tool"
+        let url = config["api_schema"]["url"].stringValue
+        let address = url.map(AgentsOutsideAddress.init)
+        let headers = (config["api_schema"]["request_headers"].objectValue ?? [:]).keys.sorted()
+        var subject = "“\(name)”"
+        if let host = address?.host { subject += " calling \(host)" }
+        var consequence: String
+        if let host = address?.host {
+            consequence = "Agents that use “\(name)” will send it what the conversation needs, at \(host)"
+                + (headers.isEmpty ? "" : ", with the headers " + ListFormatter.localizedString(byJoining: headers)) + "."
+        } else {
+            consequence = "Agents that use “\(name)” can call it during conversations."
+        }
+        if let warnings = address?.warnings, !warnings.isEmpty {
+            consequence = "Careful: " + warnings.joined(separator: " ") + " " + consequence
+        }
+        return (subject, consequence + " Every agent using it gets the change from its next conversation.")
+    }
+
     func save() async {
         guard let selectedID, case .success(let config) = configToSave() else { return }
+        let wording = Self.describe(config)
         guard let json = await calls.json(AgentsOp.updateTool, ["tool_id": .string(selectedID), "tool_config": config],
-                                          title: "Saved tool “\(config["name"].stringValue ?? "")”"),
+                                          slot: selectedID, title: "Saved tool “\(config["name"].stringValue ?? "")”",
+                                          subject: wording.subject, consequence: wording.consequence),
               let tool = AgentsTool(json: json) else { return }
         list.upsert(tool)
         store.directory.tools.upsert(tool)
@@ -259,7 +284,9 @@ final class AgentToolsModel {
 
     func create() async {
         guard newTool.problems.isEmpty, let config = try? newTool.config() else { return }
-        guard let json = await calls.json(AgentsOp.createTool, ["tool_config": config], title: "New tool “\(newTool.name)”"),
+        let wording = Self.describe(config)
+        guard let json = await calls.json(AgentsOp.createTool, ["tool_config": config], title: "New tool “\(newTool.name)”",
+                                          subject: wording.subject, consequence: wording.consequence),
               let tool = AgentsTool(json: json) else { return }
         list.upsert(tool)
         store.directory.tools.upsert(tool)
@@ -270,7 +297,8 @@ final class AgentToolsModel {
 
     func loadDependents() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.toolDependents, ["tool_id": .string(selectedID)], quiet: true) else { return }
+        guard let json = await calls.json(AgentsOp.toolDependents, ["tool_id": .string(selectedID)], slot: selectedID, quiet: true)
+        else { return }
         dependents = (json["agents"].arrayValue ?? []).map { $0["name"].stringValue ?? $0["id"].stringValue ?? "An agent" }
     }
 
@@ -278,7 +306,7 @@ final class AgentToolsModel {
         guard let selectedID else { return }
         var arguments: [String: JSONValue] = ["tool_id": .string(selectedID), "page_size": 30]
         if errorsOnly { arguments["is_error"] = true }
-        guard let json = await calls.json(AgentsOp.toolExecutions, arguments, quiet: true) else { return }
+        guard let json = await calls.json(AgentsOp.toolExecutions, arguments, slot: selectedID, quiet: true) else { return }
         executions = (json["executions"].arrayValue ?? []).compactMap(AgentsToolExecution.init(json:))
         await store.directory.resolveAgentNames(executions.map(\.agentID))
     }
@@ -288,7 +316,7 @@ final class AgentToolsModel {
         var arguments: [String: JSONValue] = ["tool_id": .string(selectedID)]
         if forceDelete { arguments["force"] = true }
         guard await calls.json(
-            AgentsOp.deleteTool, arguments, subject: "the tool “\(tool.name)”",
+            AgentsOp.deleteTool, arguments, slot: selectedID, subject: "the tool “\(tool.name)”",
             consequence: forceDelete
                 ? "ElevenLabs deletes it and takes it out of every agent that uses it; those agents can no longer call it."
                 : "ElevenLabs deletes it. If an agent still uses it, the deletion is refused."
@@ -330,7 +358,8 @@ private struct AgentToolForm: View {
     let isNew: Bool
 
     var body: some View {
-        let runner = model.calls.runner(isNew ? AgentsOp.createTool : AgentsOp.updateTool)
+        let runner = isNew ? model.calls.runner(AgentsOp.createTool)
+            : model.calls.runner(AgentsOp.updateTool, slot: model.selectedID ?? "")
         AgentsCard(isNew ? "New tool" : "Settings") {
             Form {
                 if isNew {
@@ -344,6 +373,10 @@ private struct AgentToolForm: View {
                     .lineLimit(2...4)
                 if editor.kind == "webhook" {
                     TextField("Address", text: $editor.url, prompt: Text("https://example.com/orders/{order_id}"))
+                    ForEach(AgentsOutsideAddress(editor.url).warnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Picker("Method", selection: $editor.method) {
                         ForEach(AgentsSchema.choices(AgentsOp.createTool, "tool_config.api_schema.method"), id: \.self) {
                             Text($0).tag($0)
@@ -365,8 +398,8 @@ private struct AgentToolForm: View {
             .formStyle(.columns)
             ElevenLabsProblemList(problems: editor.problems)
             HStack {
-                ElevenLabsRunButton(runner: runner, title: isNew ? "Create tool" : "Save", disabled: !editor.problems.isEmpty
-                                        || (!isNew && !model.isDirty)) {
+                AgentsRunButton(runner: runner, title: isNew ? "Create tool…" : "Save…", disabled: !editor.problems.isEmpty
+                                    || (!isNew && !model.isDirty)) {
                     Task { if isNew { await model.create() } else { await model.save() } }
                 }
             }
@@ -402,10 +435,11 @@ private struct AgentToolDetailView: View {
                         if case .failure(let error) = model.configToSave() {
                             ElevenLabsProblemList(problems: [error.message])
                         }
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.updateTool), title: "Save", disabled: !model.isDirty) {
+                        AgentsRunButton(runner: calls.runner(AgentsOp.updateTool, slot: model.selectedID ?? ""), title: "Save…",
+                                        disabled: !model.isDirty) {
                             Task { await model.save() }
                         }
-                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTool), showsResult: false)
+                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTool, slot: model.selectedID ?? ""))
                     }
                 } else {
                     AgentToolForm(model: model, editor: $model.editor, isNew: false)
@@ -421,14 +455,14 @@ private struct AgentToolDetailView: View {
                 } else {
                     Text(ListFormatter.localizedString(byJoining: model.dependents)).font(.callout)
                 }
-                AgentsRunnerError(runner: calls.runner(AgentsOp.toolDependents))
+                AgentsRunnerError(runner: calls.runner(AgentsOp.toolDependents, slot: model.selectedID ?? ""))
             }
             AgentsCard("Recent calls", subtitle: "What agents sent the tool and how it went.") {
                 HStack {
                     Toggle("Errors only", isOn: $model.errorsOnly).toggleStyle(.checkbox)
                     Button("Show calls") { Task { await model.loadExecutions() } }
                 }
-                AgentsRunnerError(runner: calls.runner(AgentsOp.toolExecutions))
+                AgentsRunnerError(runner: calls.runner(AgentsOp.toolExecutions, slot: model.selectedID ?? ""))
                 ForEach(model.executions) { execution in
                     HStack {
                         Image(systemName: execution.isError ? "xmark.octagon" : "checkmark.circle")
@@ -449,10 +483,10 @@ private struct AgentToolDetailView: View {
             }
             AgentsCard("Delete") {
                 Toggle("Even if agents use it", isOn: $model.forceDelete).toggleStyle(.checkbox)
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteTool), title: "Delete tool…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deleteTool, slot: model.selectedID ?? ""), title: "Delete tool…") {
                     Task { await model.delete() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTool), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTool, slot: model.selectedID ?? ""))
             }
         }
     }

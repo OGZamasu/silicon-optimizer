@@ -45,23 +45,18 @@ final class AgentsCalls {
     /// - Parameters:
     ///   - quiet: For reads that fill a list: kept out of the pane's recent results.
     ///   - subject/consequence: For the confirmation of a destructive or real-world operation.
-    ///   - confirmTitle/confirmLabel: The confirmation's question and button, where the shell's
-    ///     wording built from the operation would not say plainly what happens.
+    ///   The pane asks the question: its title is the shell's verb (or the operation's summary)
+    ///   followed by `subject`, so a subject is a noun phrase ("3 real phone calls with “Support”").
     @discardableResult
     func run(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], slot: String = "", quiet: Bool = false,
-        title: String? = nil, subject: String? = nil, consequence: String? = nil,
-        confirmTitle: String? = nil, confirmLabel: String? = nil
+        title: String? = nil, subject: String? = nil, consequence: String? = nil
     ) async -> ElevenLabsResult? {
         guard Self.isAvailable(operationID) else { return nil }
         let runner = runner(operationID, slot: slot)
         runner.recordsResults = !quiet
         if let title { runner.title = title }
-        AgentsConfirmationWording.set(
-            confirmTitle == nil && confirmLabel == nil ? nil : .init(title: confirmTitle, label: confirmLabel),
-            for: runner
-        )
         return await runner.perform(
             arguments: arguments, files: files, subject: subject, consequence: consequence
         )
@@ -72,12 +67,11 @@ final class AgentsCalls {
     func json(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], slot: String = "", quiet: Bool = false,
-        title: String? = nil, subject: String? = nil, consequence: String? = nil,
-        confirmTitle: String? = nil, confirmLabel: String? = nil
+        title: String? = nil, subject: String? = nil, consequence: String? = nil
     ) async -> JSONValue? {
         guard let result = await run(
             operationID, arguments, files: files, slot: slot, quiet: quiet, title: title,
-            subject: subject, consequence: consequence, confirmTitle: confirmTitle, confirmLabel: confirmLabel
+            subject: subject, consequence: consequence
         ) else { return nil }
         return Self.json(of: result)
     }
@@ -103,35 +97,6 @@ final class AgentsCalls {
             parameters: [], body: nil, response: .json, risk: .read, billable: false,
             returnsCredential: false, supportsStreaming: false
         )
-    }
-}
-
-/// A section's own words for a confirmation — its question and its button — kept per runner,
-/// so the view showing that runner's sheet can use them.
-@MainActor
-enum AgentsConfirmationWording {
-    struct Wording: Equatable, Sendable {
-        var title: String?
-        var label: String?
-    }
-
-    private static var byRunner: [UUID: Wording] = [:]
-
-    static func set(_ wording: Wording?, for runner: ElevenLabsRunner) {
-        byRunner[runner.id] = wording
-    }
-
-    static func wording(for runner: ElevenLabsRunner) -> Wording? {
-        byRunner[runner.id]
-    }
-
-    /// The question as the owner sees it: the section's words where it gave some.
-    static func title(for runner: ElevenLabsRunner) -> String? {
-        wording(for: runner)?.title ?? runner.confirmation?.title
-    }
-
-    static func label(for runner: ElevenLabsRunner) -> String? {
-        wording(for: runner)?.label ?? runner.confirmation?.confirmLabel
     }
 }
 
@@ -182,21 +147,31 @@ final class AgentsPagedList<Item: Identifiable & Sendable> where Item.ID: Sendab
         await refresh()
     }
 
-    /// The first page again, replacing what is shown.
+    /// The first page again, replacing what is shown. Asked while a fetch is under way (a
+    /// filter changed mid-load), it fetches once more when that one ends, so the list matches
+    /// the filters on screen.
     func refresh() async {
-        guard !loading else { return }
-        loading = true
-        defer { loading = false }
-        guard let page = await fetch(nil) else {
-            failed = true
+        guard !loading else {
+            refreshAgain = true
             return
         }
-        failed = false
-        items = page.items
-        cursor = page.cursor
-        hasMore = page.hasMore && page.cursor != nil
-        loaded = true
+        loading = true
+        defer { loading = false }
+        repeat {
+            refreshAgain = false
+            guard let page = await fetch(nil) else {
+                failed = true
+                return
+            }
+            failed = false
+            items = page.items
+            cursor = page.cursor
+            hasMore = page.hasMore && page.cursor != nil
+            loaded = true
+        } while refreshAgain
     }
+
+    @ObservationIgnored private var refreshAgain = false
 
     /// The next page, appended.
     func loadMore() async {
@@ -289,39 +264,52 @@ final class AgentsPlatformStore {
     @ObservationIgnored private(set) lazy var testing = AgentTestingModel(store: self)
     @ObservationIgnored private(set) lazy var analytics = AgentAnalyticsModel(store: self)
 
-    // MARK: Registry
+    // MARK: Which account it belongs to
 
-    private struct Entry {
-        weak var pane: ElevenLabsPaneState?
-        var store: AgentsPlatformStore
-        var client: ObjectIdentifier?
+    /// The client this store was made for, held weakly: once that client is gone (a disconnect,
+    /// a new key, a region change), no later client can be mistaken for it — not even one the
+    /// allocator places at the same address.
+    @ObservationIgnored private weak var madeFor: ElevenLabsClient?
+    @ObservationIgnored private var madeWithClient = false
+
+    /// Whether this store holds data for `client`'s account.
+    func belongs(to client: ElevenLabsClient?) -> Bool {
+        guard madeWithClient else { return client == nil }
+        guard let madeFor, let client else { return false }
+        return madeFor === client
     }
 
-    private static var entries: [ObjectIdentifier: Entry] = [:]
+    fileprivate func claim(for client: ElevenLabsClient?) {
+        madeFor = client
+        madeWithClient = client != nil
+    }
 
-    /// The running app's store for `model`'s pane.
+    static let stateKey = "agents.platform"
+
+    /// The running app's store for `model`'s pane, kept in the pane's section state (which the
+    /// shell drops on disconnect, a new key or a region change) and checked against the
+    /// current client besides, so another account's data is never handed back.
     static func shared(for model: AppModel) -> AgentsPlatformStore {
         let pane = model.elevenLabsPane
-        let key = ObjectIdentifier(pane)
-        let client = model.elevenLabsClient.map(ObjectIdentifier.init)
-        entries = entries.filter { $0.value.pane != nil }
-        if let entry = entries[key], entry.pane === pane, entry.client == client || entry.client == nil {
-            if entry.client == nil, client != nil { entries[key]?.client = client }
-            return entry.store
+        let client = model.elevenLabsClient
+        let make = { () -> AgentsPlatformStore in
+            let store = AgentsPlatformStore(context: .app(model)) { [weak model] section in
+                model?.elevenLabsPane.open(section)
+            }
+            store.claim(for: client)
+            return store
         }
-        let store = AgentsPlatformStore(context: .app(model)) { [weak model] section in
-            model?.elevenLabsPane.open(section)
-        }
-        entries[key] = Entry(pane: pane, store: store, client: client)
-        return store
+        let store = pane.state(key: stateKey, make: make)
+        if store.belongs(to: client) { return store }
+        pane.dropSectionStates()
+        return pane.state(key: stateKey, make: make)
     }
 
     /// Puts `store` in place for `model`'s pane: for tests and snapshots with a fake client.
     static func register(_ store: AgentsPlatformStore, for model: AppModel) {
-        let pane = model.elevenLabsPane
-        entries[ObjectIdentifier(pane)] = Entry(
-            pane: pane, store: store, client: model.elevenLabsClient.map(ObjectIdentifier.init)
-        )
+        store.claim(for: model.elevenLabsClient)
+        model.elevenLabsPane.dropSectionStates()
+        _ = model.elevenLabsPane.state(key: stateKey) { store }
     }
 }
 
@@ -597,6 +585,32 @@ enum AgentsJSON {
         return .object(merged)
     }
 
+    /// `value` without the given keys, at any depth.
+    static func removing(keys: Set<String>, from value: JSONValue) -> JSONValue {
+        switch value {
+        case .object(let object):
+            return .object(object.filter { !keys.contains($0.key) }.mapValues { removing(keys: keys, from: $0) })
+        case .array(let array):
+            return .array(array.map { removing(keys: keys, from: $0) })
+        case .null, .bool, .number, .string:
+            return value
+        }
+    }
+
+    /// The dotted paths of every string equal to `text` (the redaction placeholder, say).
+    static func paths(of text: String, in value: JSONValue, prefix: String = "") -> [String] {
+        switch value {
+        case .string(let string):
+            return string == text ? [prefix.isEmpty ? "(the whole answer)" : prefix] : []
+        case .object(let object):
+            return object.keys.sorted().flatMap { paths(of: text, in: object[$0] ?? .null, prefix: prefix.isEmpty ? $0 : "\(prefix).\($0)") }
+        case .array(let array):
+            return array.enumerated().flatMap { paths(of: text, in: $0.element, prefix: "\(prefix)[\($0.offset)]") }
+        case .null, .bool, .number:
+            return []
+        }
+    }
+
     /// The value at a dotted path.
     static func value(at path: String, in object: JSONValue) -> JSONValue {
         path.split(separator: ".").reduce(object) { $0[String($1)] }
@@ -624,6 +638,73 @@ enum AgentsJSON {
 
     static func date(_ value: JSONValue) -> Date? {
         value.doubleValue.map { Date(timeIntervalSince1970: $0 > 10_000_000_000 ? $0 / 1000 : $0) }
+    }
+}
+
+// MARK: - Outside addresses
+
+/// What an address an agent will send callers' words to is: refused outright (no host, a
+/// password in it, not http or https), or allowed with warnings the confirmation repeats
+/// (plain http, this Mac, a private network).
+struct AgentsOutsideAddress: Equatable, Sendable {
+    var refusal: String?
+    var warnings: [String]
+
+    var host: String?
+
+    init(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        warnings = []
+        guard let components = URLComponents(string: trimmed), let scheme = components.scheme?.lowercased() else {
+            refusal = "That is not a web address."
+            return
+        }
+        guard scheme == "https" || scheme == "http" else {
+            refusal = "Only http and https addresses can be used."
+            return
+        }
+        guard components.user == nil, components.password == nil else {
+            refusal = "Leave the user name and password out of the address; put a token in Secrets instead."
+            return
+        }
+        guard let host = components.host?.lowercased(), !host.isEmpty else {
+            refusal = "The address has no host."
+            return
+        }
+        self.host = host
+        if scheme == "http" {
+            warnings.append("It is plain http: what callers say, and any token, travel unencrypted.")
+        }
+        if Self.isLoopback(host) {
+            warnings.append("It points at this Mac or another machine's own loopback (\(host)); ElevenLabs cannot reach it.")
+        } else if Self.isLinkLocal(host) {
+            warnings.append("It is a link-local address (\(host)), such as a cloud metadata service.")
+        } else if Self.isPrivate(host) {
+            warnings.append("It is a private-network address (\(host)).")
+        }
+    }
+
+    var isAllowed: Bool { refusal == nil }
+
+    static func isLoopback(_ host: String) -> Bool {
+        host == "localhost" || host.hasSuffix(".localhost") || host.hasPrefix("127.") || host == "::1" || host == "[::1]"
+            || host == "0.0.0.0"
+    }
+
+    static func isLinkLocal(_ host: String) -> Bool {
+        host.hasPrefix("169.254.") || host.hasPrefix("fe80:") || host.hasPrefix("[fe80:")
+    }
+
+    static func isPrivate(_ host: String) -> Bool {
+        if host.hasSuffix(".local") || host.hasSuffix(".internal") || host.hasSuffix(".lan") { return true }
+        if host.hasPrefix("10.") || host.hasPrefix("192.168.") { return true }
+        if host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("[fc") || host.hasPrefix("[fd") {
+            return host.contains(":")
+        }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        if parts.count == 4, parts[0] == 172, (16...31).contains(parts[1]) { return true }
+        if parts.count == 4, parts[0] == 100, (64...127).contains(parts[1]) { return true }
+        return false
     }
 }
 
@@ -1053,141 +1134,262 @@ struct AgentsPhoneNumberPicker: View {
     }
 }
 
-/// Everything a run leaves on screen — `ElevenLabsRunnerOutput`, with two things a section
-/// sometimes needs to change:
-///
-/// - `maskedFields`: for operations whose request carries a secret the owner typed (a secret's
-///   value, a telephony provider's token), "Show API call" masks those fields and offers no
-///   curl, so the secret is not put on screen or on the clipboard a second time.
-/// - `confirmTitle`/`confirmLabel`: the confirmation's question and button in the section's
-///   words ("Place 124 calls", "Stop the batch") where the shell's generic verb would mislead.
+/// Everything a run leaves on screen — the shell's `ElevenLabsRunnerOutput` — or nothing while
+/// the runner has done nothing: a card with several actions would otherwise carry a gap for
+/// each. Questions are the pane's to ask; secrets the owner typed are masked by the core.
 struct AgentsRunnerOutput: View {
     let runner: ElevenLabsRunner
     var showsResult = false
-    var maskedFields: Set<String> = []
-    var confirmTitle: String?
-    var confirmLabel: String?
 
     var body: some View {
-        let wording = AgentsConfirmationWording.wording(for: runner)
-        // A runner that has done nothing yet takes no room: a card with several actions would
-        // otherwise carry a gap for each.
         if runner.phase == .idle, runner.result == nil, runner.failure == nil, runner.credential == nil,
            runner.confirmation == nil {
             EmptyView()
-        } else if maskedFields.isEmpty, confirmTitle == nil, confirmLabel == nil, wording == nil {
-            ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult)
         } else {
-            VStack(alignment: .leading, spacing: 10) {
-                if let failure = runner.failure {
-                    switch failure {
-                    case .invalidArguments(let problems):
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Nothing was sent:").font(.caption.weight(.medium))
-                            ElevenLabsProblemList(problems: problems)
-                        }
-                    default:
-                        Label(failure.message, systemImage: "exclamationmark.triangle.fill")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                if runner.phase == .cancelled {
-                    Text("Cancelled.").font(.caption).foregroundStyle(.secondary)
-                }
-                if let credential = runner.credential {
-                    ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
-                }
-                if showsResult, let result = runner.result {
-                    ElevenLabsResultView(result: result, operation: runner.operation)
-                }
-                if runner.apiCall != nil || runner.phase != .idle {
-                    if maskedFields.isEmpty {
-                        ElevenLabsAPICallDisclosure(runner: runner)
-                    } else {
-                        AgentsMaskedAPICall(runner: runner, maskedFields: maskedFields)
-                    }
-                }
-            }
-            .sheet(item: Binding(
-                get: { runner.confirmation.map(adjusted) },
-                set: { if $0 == nil { runner.decline() } }
-            )) { request in
-                ElevenLabsRiskConfirmation(
-                    request: request, onConfirm: { runner.confirm() }, onCancel: { runner.decline() }
-                )
-            }
+            ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult)
         }
-    }
-
-    /// The runner's question with the section's title and button, keeping its identity.
-    private func adjusted(_ request: ElevenLabsConfirmationRequest) -> ElevenLabsConfirmationRequest {
-        var request = request
-        let wording = AgentsConfirmationWording.wording(for: runner)
-        if let title = confirmTitle ?? wording?.title { request.title = title }
-        if let label = confirmLabel ?? wording?.label { request.confirmLabel = label }
-        return request
     }
 }
 
-/// "Show API call" with the given body fields masked.
-struct AgentsMaskedAPICall: View {
+/// The Run button for the agents screens: the shell's look, but Return runs it only where the
+/// screen says it is safe (`isDefault`), and Cancel is offered only where stopping cannot leave
+/// something half done in the world.
+struct AgentsRunButton: View {
     let runner: ElevenLabsRunner
-    let maskedFields: Set<String>
-    @State private var expanded = false
+    var title: String
+    var disabled = false
+    var disabledReason: String?
+    /// Return presses it. Only for reads and edits the owner can take back; never for anything
+    /// that asks first.
+    var isDefault = false
+    /// The risk capsule beside the button; off where it would read as a state ("Changes" next
+    /// to a Save with nothing to save).
+    var showsRisk = true
+    let action: () -> Void
+
+    init(runner: ElevenLabsRunner, title: String = "Run", disabled: Bool = false, disabledReason: String? = nil,
+         isDefault: Bool = false, showsRisk: Bool = true, action: @escaping () -> Void) {
+        self.runner = runner
+        self.title = title
+        self.disabled = disabled
+        self.disabledReason = disabledReason
+        self.isDefault = isDefault
+        self.showsRisk = showsRisk
+        self.action = action
+    }
 
     var body: some View {
-        DisclosureGroup("Show API call", isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 6) {
-                if let call = runner.apiCall {
-                    Text("\(call.method) \(call.url)")
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                    ForEach(call.headers.keys.sorted(), id: \.self) { name in
-                        Text("\(name): \(call.headers[name] ?? "")")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    if let body = call.body {
-                        ElevenLabsTextBlock(
-                            text: AgentsSecretMask.masked(body, fields: maskedFields).jsonString(pretty: true),
-                            monospaced: true
-                        )
-                    }
-                    Text("Operation \(runner.operation.id). Secret values are masked here and left out of curl.")
+        HStack(spacing: 10) {
+            if runner.isRunning {
+                ProgressView().controlSize(.small)
+                Text("Working…").font(.callout).foregroundStyle(.secondary)
+                Button("Cancel") { runner.cancel() }
+            } else {
+                button
+                if showsRisk, runner.operation.risk != .read {
+                    ElevenLabsRiskBadge(risk: runner.operation.risk)
+                }
+                if disabled, let disabledReason, !disabledReason.isEmpty {
+                    Label(disabledReason, systemImage: "exclamationmark.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
-                    Text("\(runner.operation.method) \(runner.operation.path) — operation \(runner.operation.id)")
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
+                        .lineLimit(2)
+                } else if let note = ElevenLabsCostNote.text(for: runner.operation) {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            .padding(.top, 4)
         }
-        .font(.caption)
+    }
+
+    @ViewBuilder
+    private var button: some View {
+        let base = Button(action: action) { Text(title).frame(minWidth: 60) }
+            .buttonStyle(.borderedProminent)
+            .tint(runner.operation.requiresConfirmation ? .orange : .accentColor)
+            .disabled(disabled || runner.isAwaitingConfirmation)
+        if isDefault, !runner.operation.requiresConfirmation, !runner.operation.billable {
+            base.keyboardShortcut(.defaultAction)
+        } else {
+            base
+        }
     }
 }
 
-/// Masks secret fields in a request body before it is shown.
-enum AgentsSecretMask {
-    static let placeholder = "‹secret›"
+// MARK: - Questions the screen asks itself
 
-    static func masked(_ value: JSONValue, fields: Set<String>) -> JSONValue {
-        switch value {
-        case .object(let object):
-            return .object(Dictionary(uniqueKeysWithValues: object.map { key, inner in
-                if fields.contains(key), inner != .null { return (key, .string(placeholder)) }
-                return (key, masked(inner, fields: fields))
-            }))
-        case .array(let array):
-            return .array(array.map { masked($0, fields: fields) })
-        case .string(let text):
-            return .string(ElevenLabsRedaction.redact(text))
-        case .null, .bool, .number:
-            return value
+/// A question for an edit the risk table files as an ordinary change but that reaches live
+/// callers or outside servers — merging a branch into main, moving traffic, wiring an MCP
+/// server into an agent. Asked in the screen's words before anything is sent.
+struct AgentsQuestion: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    var title: String
+    var message: String
+    var confirmLabel: String
+}
+
+/// Holds the question on screen and what to do on "yes".
+@MainActor
+@Observable
+final class AgentsQuestionBox {
+    private(set) var question: AgentsQuestion?
+    @ObservationIgnored private var onYes: (@MainActor () async -> Void)?
+
+    func ask(_ question: AgentsQuestion, then onYes: @escaping @MainActor () async -> Void) {
+        self.question = question
+        self.onYes = onYes
+    }
+
+    /// Answers the question on screen; "yes" runs what was waiting for it.
+    func answer(_ yes: Bool) async {
+        let action = onYes
+        question = nil
+        onYes = nil
+        if yes { await action?() }
+    }
+}
+
+extension View {
+    /// Presents `box`'s question as a sheet-style dialog: Cancel is the default.
+    func agentsQuestion(_ box: AgentsQuestionBox) -> some View {
+        confirmationDialog(
+            box.question?.title ?? "",
+            isPresented: Binding(get: { box.question != nil }, set: { if !$0 { Task { await box.answer(false) } } }),
+            titleVisibility: .visible,
+            presenting: box.question
+        ) { question in
+            Button(question.confirmLabel, role: .destructive) { Task { await box.answer(true) } }
+            Button("Cancel", role: .cancel) { Task { await box.answer(false) } }
+        } message: { question in
+            Text(question.message)
+        }
+    }
+}
+
+// MARK: - Real-world sends
+
+/// Keeps one kind of real-world send — a batch of calls, a call, a WhatsApp message — from going
+/// out twice. Once the owner has confirmed and the request is on its way there is no Cancel:
+/// stopping the wait would not stop the call. If the run ends without an answer that proves
+/// nothing was placed (cancelled, timed out, the network dropped, ElevenLabs failed), the
+/// screen says it may already have been placed, and no second send is possible until the owner
+/// says they have checked.
+@MainActor
+@Observable
+final class AgentsSendGuard {
+    enum State: Equatable {
+        case ready
+        case sending
+        /// It may have gone out; the text says what to check.
+        case uncertain(String)
+    }
+
+    private(set) var state: State = .ready
+    /// The runner of the send in progress — whichever provider's it is.
+    @ObservationIgnored private(set) weak var inFlight: ElevenLabsRunner?
+
+    var canSend: Bool { state == .ready }
+
+    /// Waiting for the owner's answer to the question, rather than for ElevenLabs.
+    var isAsking: Bool { isSending && (inFlight?.isAwaitingConfirmation ?? false) }
+    var isSending: Bool { state == .sending }
+
+    var warning: String? {
+        if case .uncertain(let text) = state { return text }
+        return nil
+    }
+
+    /// Runs one send. `send` performs the runner; `check` says where to look if the outcome is
+    /// unknown ("Batch calls", "Conversations"). Returns the answer, or nil.
+    func send(
+        runner: ElevenLabsRunner, what: String, check: String, _ send: () async -> JSONValue?
+    ) async -> JSONValue? {
+        guard state == .ready else { return nil }
+        state = .sending
+        inFlight = runner
+        defer { inFlight = nil }
+        let answer = await send()
+        if answer != nil {
+            state = .ready
+            return answer
+        }
+        if Self.provesNothingWasSent(runner) {
+            state = .ready
+        } else {
+            state = .uncertain(
+                "\(what) may already have been placed: the request reached ElevenLabs and no answer came back"
+                    + (runner.failure.map { " (\($0.message.trimmingCharacters(in: CharacterSet(charactersIn: ". "))))" } ?? "")
+                    + ". Check \(check) before trying again."
+            )
+        }
+        return nil
+    }
+
+    /// The owner has looked; another send may go.
+    func acknowledge() {
+        if case .uncertain = state { state = .ready }
+    }
+
+    /// Declined, refused before sending, or refused by ElevenLabs with a reason that means it
+    /// did not act: nothing went out.
+    static func provesNothingWasSent(_ runner: ElevenLabsRunner) -> Bool {
+        switch runner.phase {
+        case .idle:
+            return true
+        case .failed:
+            switch runner.failure {
+            case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden, .rateLimited:
+                return true
+            case .offline, .other, .none:
+                return false
+            }
+        case .cancelled, .running, .awaitingConfirmation, .succeeded:
+            return false
+        }
+    }
+}
+
+/// The send button for a real-world send: no Cancel once it is on its way, never the default
+/// button, and — after an unknown outcome — the warning and the owner's "I have checked".
+struct AgentsSendButton: View {
+    let runner: ElevenLabsRunner
+    let guardian: AgentsSendGuard
+    var title: String
+    var disabled = false
+    var disabledReason: String?
+    /// What sending costs, beside the button.
+    var note = "Billed by the minute once answered."
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let warning = guardian.warning {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("I have checked — allow sending again") { guardian.acknowledge() }
+                }
+                .padding(10)
+                .background(.orange.opacity(0.1), in: .rect(cornerRadius: 8))
+            }
+            HStack(spacing: 10) {
+                if guardian.isSending, !guardian.isAsking {
+                    ProgressView().controlSize(.small)
+                    Text("Sending — this cannot be stopped from here").font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Button(action: action) { Text(title).frame(minWidth: 60) }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .disabled(disabled || !guardian.canSend)
+                    ElevenLabsRiskBadge(risk: runner.operation.risk)
+                    if disabled, let disabledReason, !disabledReason.isEmpty {
+                        Text(disabledReason).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    } else if guardian.canSend {
+                        Text(note).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
     }
 }

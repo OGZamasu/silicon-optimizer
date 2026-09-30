@@ -261,7 +261,8 @@ final class AgentTestingModel {
     func renameCurrentFolder() async {
         guard let folderID else { return }
         let name = renameFolder.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, await calls.json(AgentsOp.renameTestFolder, ["folder_id": .string(folderID), "name": .string(name)]) != nil
+        guard !name.isEmpty, await calls.json(AgentsOp.renameTestFolder, ["folder_id": .string(folderID), "name": .string(name)],
+                                              slot: folderID) != nil
         else { return }
         if !breadcrumb.isEmpty { breadcrumb[breadcrumb.count - 1].name = name }
     }
@@ -269,7 +270,7 @@ final class AgentTestingModel {
     func deleteCurrentFolder() async {
         guard let folderID, let name = breadcrumb.last?.name else { return }
         guard await calls.json(
-            AgentsOp.deleteTestFolder, ["folder_id": .string(folderID), "force": true],
+            AgentsOp.deleteTestFolder, ["folder_id": .string(folderID), "force": true], slot: folderID,
             subject: "the test folder “\(name)”",
             consequence: "ElevenLabs deletes the folder and every test and folder inside it."
         ) != nil else { return }
@@ -311,7 +312,7 @@ final class AgentTestingModel {
         guard draft.problems.isEmpty else { return }
         if let selectedID {
             let body = draft.body(operationID: AgentsOp.updateTest)
-            guard await calls.json(AgentsOp.updateTest, ["test_id": .string(selectedID), "body": body],
+            guard await calls.json(AgentsOp.updateTest, ["test_id": .string(selectedID), "body": body], slot: selectedID,
                                    title: "Saved test “\(draft.name)”") != nil else { return }
             original = draft
             await list.refresh()
@@ -328,7 +329,7 @@ final class AgentTestingModel {
     func delete() async {
         guard let selectedID else { return }
         guard await calls.json(
-            AgentsOp.deleteTest, ["test_id": .string(selectedID)], subject: "the test “\(draft.name)”",
+            AgentsOp.deleteTest, ["test_id": .string(selectedID)], slot: selectedID, subject: "the test “\(draft.name)”",
             consequence: "ElevenLabs deletes the test. Past runs keep their results."
         ) != nil else { return }
         list.remove(selectedID)
@@ -392,7 +393,7 @@ final class AgentTestingModel {
         guard await calls.json(AgentsOp.resubmitTests, [
             "test_invocation_id": .string(id), "agent_id": .string(agentID),
             "test_run_ids": .array(resubmitRunIDs.sorted().map(JSONValue.string)),
-        ], title: "Ran tests again") != nil else { return }
+        ], slot: id, title: "Ran tests again") != nil else { return }
         await openInvocation(id)
     }
 
@@ -511,15 +512,15 @@ private struct AgentTestBrowser: View {
                 HStack {
                     TextField("Folder name", text: $model.renameFolder).textFieldStyle(.roundedBorder)
                     Button("Rename") { Task { await model.renameCurrentFolder() } }
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteTestFolder), title: "Delete…") {
+                    AgentsRunButton(runner: model.calls.runner(AgentsOp.deleteTestFolder, slot: model.breadcrumb.last?.id ?? ""), title: "Delete…") {
                         Task { await model.deleteCurrentFolder() }
                     }
                 }
                 .font(.callout)
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteTestFolder), showsResult: false)
+                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteTestFolder, slot: model.breadcrumb.last?.id ?? ""))
             }
             AgentsRunnerError(runner: model.calls.runner(AgentsOp.createTestFolder))
-            AgentsRunnerError(runner: model.calls.runner(AgentsOp.renameTestFolder))
+            AgentsRunnerError(runner: model.calls.runner(AgentsOp.renameTestFolder, slot: model.breadcrumb.last?.id ?? ""))
         }
     }
 }
@@ -528,7 +529,8 @@ private struct AgentTestEditor: View {
     @Bindable var model: AgentTestingModel
 
     var body: some View {
-        let runner = model.calls.runner(model.selectedID == nil ? AgentsOp.createTest : AgentsOp.updateTest)
+        let runner = model.selectedID.map { model.calls.runner(AgentsOp.updateTest, slot: $0) }
+            ?? model.calls.runner(AgentsOp.createTest)
         VStack(alignment: .leading, spacing: 14) {
             AgentsCard(model.selectedID == nil ? "New test" : model.draft.name) {
                 if let id = model.selectedID {
@@ -605,18 +607,18 @@ private struct AgentTestEditor: View {
             AgentsCard("Save") {
                 ElevenLabsProblemList(problems: model.draft.problems)
                 HStack {
-                    ElevenLabsRunButton(runner: runner, title: model.selectedID == nil ? "Create test" : "Save test",
+                    AgentsRunButton(runner: runner, title: model.selectedID == nil ? "Create test" : "Save test",
                                         disabled: !model.draft.problems.isEmpty || (model.selectedID != nil && !model.isDirty)) {
                         Task { await model.save() }
                     }
                     if model.selectedID != nil {
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteTest), title: "Delete…") {
+                        AgentsRunButton(runner: model.calls.runner(AgentsOp.deleteTest, slot: model.selectedID ?? ""), title: "Delete…") {
                             Task { await model.delete() }
                         }
                     }
                 }
                 AgentsRunnerOutput(runner: runner, showsResult: false)
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteTest), showsResult: false)
+                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.deleteTest, slot: model.selectedID ?? ""))
             }
         }
     }
@@ -641,7 +643,7 @@ private struct AgentTestRunCard: View {
             if tests.hasMore {
                 Button("More tests") { Task { await tests.loadMore() } }.buttonStyle(.link)
             }
-            ElevenLabsRunButton(runner: runner, title: "Run \(AgentsFormat.count(model.runTestIDs.count, "test"))",
+            AgentsRunButton(runner: runner, title: "Run \(AgentsFormat.count(model.runTestIDs.count, "test"))",
                                 disabled: model.runAgentID.isEmpty || model.runTestIDs.isEmpty) {
                 Task { await model.runTests() }
             }
@@ -696,13 +698,13 @@ private struct AgentTestInvocationsCard: View {
                         }
                     }
                 }
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.resubmitTests),
+                AgentsRunButton(runner: model.calls.runner(AgentsOp.resubmitTests, slot: model.invocation["id"].stringValue ?? ""),
                                     title: model.resubmitRunIDs.isEmpty ? "Run the ticked tests again"
                                         : "Run \(AgentsFormat.count(model.resubmitRunIDs.count, "test")) again",
                                     disabled: model.resubmitRunIDs.isEmpty) {
                     Task { await model.resubmit() }
                 }
-                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.resubmitTests), showsResult: false)
+                AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.resubmitTests, slot: model.invocation["id"].stringValue ?? ""))
             }
         }
         .task { await model.invocations.loadIfNeeded() }
@@ -726,7 +728,7 @@ private struct AgentSimulationCard: View {
             TextField("The caller", text: $model.simulatedUser, prompt: Text("You want to move your delivery to Friday and are in a hurry."), axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...4)
-            ElevenLabsRunButton(runner: runner, title: "Simulate",
+            AgentsRunButton(runner: runner, title: "Simulate",
                                 disabled: model.simulationAgentID.isEmpty || model.simulatedUser.isEmpty) {
                 Task { await model.simulate() }
             }

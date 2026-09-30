@@ -18,6 +18,14 @@ enum AgentsFixtures {
         let store: AgentsPlatformStore
         let pane = ElevenLabsPaneState(defaults: nil, client: { nil })
 
+        /// A rig whose answers for some operations are replaced (a delay, a failure, another body).
+        init(overriding overrides: [String: FakeElevenLabsTransport.Reply]) {
+            self.init { request in
+                if let reply = overrides[request.operationID] { return reply }
+                return try await AgentsFixtures.reply(request)
+            }
+        }
+
         init(handler: @escaping @Sendable (ElevenLabsRequest) async throws -> FakeElevenLabsTransport.Reply = AgentsFixtures.reply) {
             transport = FakeElevenLabsTransport(handler: handler)
             client = ElevenLabsClient(credentials: credentials, region: .global, transport: transport, sink: sink)
@@ -234,8 +242,11 @@ enum AgentsFixtures {
             return ["success": true, "tools": [
                 ["name": "lookup_order", "description": "Finds an order by number", "inputSchema": ["type": "object"]],
                 ["name": "issue_refund", "description": "Refunds an order", "inputSchema": ["type": "object"]],
-            ], "tool_approval_statuses": [["tool_id": "lookup_order", "state": "up_to_date", "approval_policy": "auto_approved"],
-                                          ["tool_id": "issue_refund", "state": "needs_review", "approval_policy": "requires_approval"]]]
+            ], "tool_approval_statuses": [
+                // As the spec names them: `mcp:<server id>:<tool name>`.
+                ["tool_id": "mcp:mcp_orders01:lookup_order", "state": "up_to_date", "approval_policy": "auto_approved"],
+                ["tool_id": "mcp:mcp_orders01:issue_refund", "state": "needs_review", "approval_policy": "requires_approval"],
+            ]]
         case AgentsOp.listSecrets:
             return ["secrets": [secret(secretID, "crm_api_key", tools: 2, agents: 1), secret("sec_unused02", "old_token", tools: 0, agents: 0)]]
         case AgentsOp.getSecret:
@@ -248,6 +259,10 @@ enum AgentsFixtures {
                                                "workspace_id": "ws", "values": ["production": "https://crm.example.com",
                                                                                 "staging": "https://staging.crm.example.com"]]],
                     "has_more": false]
+        case AgentsOp.getEnvironmentVariable:
+            return ["label": "CRM_BASE_URL", "created_at_unix_secs": 1_780_000_000, "updated_at_unix_secs": 1_789_000_000,
+                    "type": "string", "id": "env_1", "workspace_id": "ws",
+                    "values": ["production": "https://crm.example.com", "staging": "https://staging.crm.example.com"]]
         case AgentsOp.createEnvironmentVariable:
             return ["label": "NEW_VAR", "created_at_unix_secs": 1_790_000_000, "updated_at_unix_secs": 1_790_000_000,
                     "type": "string", "id": "env_new", "workspace_id": "ws", "values": ["production": "x"]]
@@ -347,6 +362,18 @@ enum AgentsFixtures {
         "workflow": ["edges": [:], "nodes": [:]],
         "metadata": ["created_at_unix_secs": 1_780_000_000],
     ]
+
+    /// The agent with an inline webhook tool whose header value ElevenLabs masks for the app.
+    static var agentWithInlineToolHeader: JSONValue {
+        var value = agent
+        value = AgentsJSON.setting(
+            [["type": "webhook", "name": "crm_lookup", "description": "Looks up the caller",
+              "api_schema": ["url": "https://crm.example.com/lookup", "method": "GET",
+                             "request_headers": ["Authorization": "Bearer crm-fixture-token"]]]],
+            at: "conversation_config.agent.prompt.tools", in: value
+        )
+        return value
+    }
 
     static func conversationSummary(_ id: String, _ title: String, result: String, start: Int, duration: Int) -> JSONValue {
         ["agent_id": .string(agentID), "agent_name": "Support", "conversation_id": .string(id),

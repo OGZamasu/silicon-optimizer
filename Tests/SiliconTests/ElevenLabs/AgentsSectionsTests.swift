@@ -106,6 +106,7 @@ struct AgentsSectionsTests {
         model.changeDescription = "Shorter prompt"
         #expect(model.isDirty)
         await model.save()
+        #expect(model.questions.question == nil, "removing a tool connects nothing new, so nothing is asked")
         let body = try #require(rig.body(AgentsOp.updateAgent))
         #expect(body == [
             "conversation_config": [
@@ -148,51 +149,179 @@ struct AgentsSectionsTests {
         let model = rig.store.agents
         await model.select(AgentsFixtures.agentID)
         let deleting = Task { await model.delete() }
-        let runner = rig.store.calls.runner(AgentsOp.deleteAgent)
+        let runner = rig.store.calls.runner(AgentsOp.deleteAgent, slot: AgentsFixtures.agentID)
         try await waitUntil { runner.isAwaitingConfirmation }
         #expect(runner.confirmation?.title == "Delete the agent “Support”?")
         #expect(runner.confirmation?.consequence.contains("Phone numbers") == true)
+        #expect(rig.pane.confirming === runner, "the pane asks the question")
         runner.decline()
         await deleting.value
         #expect(rig.requests(AgentsOp.deleteAgent).isEmpty)
         #expect(model.selectedID == AgentsFixtures.agentID)
     }
 
-    @Test func aDraftKeepsTheWholeConfigurationWithTheEditsMergedIn() async throws {
+    /// Review blocker 1: the fetched agent is masked (it carries a link token), so a draft built
+    /// from it must leave the token out instead of sending the mask back as the token.
+    @Test func aDraftLeavesCredentialsOutAndNeverSendsTheMask() async throws {
         let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        #expect(model.detailJSON["platform_settings"]["auth"]["shareable_token"] == .string(ElevenLabsRedaction.placeholder),
+                "the fixture's agent has a link token, which the app only ever sees masked")
+        model.draft.firstMessage = "Hi there!"
+        await model.saveAsDraft()
+        #expect(model.draftProblem == nil)
+        let recorded = try #require(rig.requests(AgentsOp.createDraft).last)
+        #expect(recorded.request.url.query?.contains("branch_id=agtbrch_main") == true)
+        let body = try JSONValue(data: recorded.body)
+        #expect(!body.jsonString().contains(ElevenLabsRedaction.placeholder))
+        #expect(body["platform_settings"]["auth"].objectValue?["shareable_token"] == nil)
+        #expect(body["platform_settings"]["auth"]["enable_auth"] == false, "the rest of the settings go as fetched")
+        #expect(body["conversation_config"]["agent"]["first_message"] == "Hi there!")
+        #expect(body["conversation_config"]["agent"]["prompt"]["llm"] == "gemini-2.5-flash")
+    }
+
+    /// Review blocker 1, the other half: a masked value that is not a credential field (an
+    /// inline tool's header) cannot be left out, so the draft is refused and nothing is sent.
+    @Test func aDraftIsRefusedWhenTheAgentHoldsAMaskedHeader() async throws {
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.getAgent: .json(AgentsFixtures.agentWithInlineToolHeader)])
         defer { rig.clean() }
         let model = rig.store.agents
         await model.select(AgentsFixtures.agentID)
         model.draft.firstMessage = "Hi there!"
         await model.saveAsDraft()
-        let recorded = try #require(rig.requests(AgentsOp.createDraft).last)
-        #expect(recorded.request.url.query?.contains("branch_id=agtbrch_main") == true)
-        let body = try JSONValue(data: recorded.body)
-        #expect(body["conversation_config"]["agent"]["first_message"] == "Hi there!")
-        #expect(body["conversation_config"]["agent"]["prompt"]["llm"] == "gemini-2.5-flash")
-        #expect(body["workflow"] != .null)
+        #expect(rig.requests(AgentsOp.createDraft).isEmpty)
+        let problem = try #require(model.draftProblem)
+        #expect(problem.contains("request_headers"))
+        #expect(!problem.contains("crm-fixture-token"))
+    }
+
+    /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
+    /// out, so Save asks first, naming where.
+    @Test func savingAnAgentWithANewMCPServerOrWebhookToolAsksFirst() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        await rig.store.directory.mcpServers.refresh()
+        await rig.store.directory.tools.refresh()
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        model.draft.mcpServerIDs = [AgentsFixtures.serverID]
+        await model.save()
+        let question = try #require(model.questions.question)
+        #expect(question.title == "Let “Support” send callers' words to Order system (mcp.example.com)?")
+        #expect(rig.requests(AgentsOp.updateAgent).isEmpty, "nothing is sent before the answer")
+        await model.questions.answer(false)
+        #expect(rig.requests(AgentsOp.updateAgent).isEmpty)
+        await model.save()
+        await model.questions.answer(true)
+        #expect(rig.body(AgentsOp.updateAgent)?["conversation_config"]["agent"]["prompt"]["mcp_server_ids"]
+                == [.string(AgentsFixtures.serverID)])
+    }
+
+    /// Review BR-1: merging into main and moving traffic change what live callers hear.
+    @Test func mergingIntoMainAndDeployingAskFirstNamingTheBranch() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        branches.selectedBranchID = "agtbrch_tone"
+        branches.requestMerge(agentName: "Support")
+        #expect(model.questions.question?.title == "Merge “Warmer tone” into “Main” of “Support”?")
+        await model.questions.answer(false)
+        #expect(rig.requests(AgentsOp.mergeBranch).isEmpty)
+        branches.requestMerge(agentName: "Support")
+        await model.questions.answer(true)
+        #expect(rig.requests(AgentsOp.mergeBranch).count == 1)
+
+        branches.traffic = ["agtbrch_main": 80, "agtbrch_tone": 20]
+        branches.requestDeploy(agentName: "Support")
+        #expect(model.questions.question?.title == "Send “Support”'s callers to Main 80 % and Warmer tone 20 %?")
+        #expect(rig.requests(AgentsOp.createDeployment).isEmpty)
+        await model.questions.answer(true)
+        #expect(rig.requests(AgentsOp.createDeployment).count == 1)
+    }
+
+    /// Review A-2: a show-once token belongs to the agent it was fetched for.
+    @Test func aLinkTokenDoesNotFollowToAnotherAgent() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        await model.sharing.fetchLink()
+        let supportRunner = model.sharing.runner(AgentsOp.agentLink)
+        #expect(supportRunner.credential != nil)
+        await model.select(AgentsFixtures.salesAgentID)
+        #expect(model.sharing.runner(AgentsOp.agentLink).credential == nil)
+        #expect(supportRunner.credential == nil, "switching agents takes the token off screen for good")
     }
 
     // MARK: - Batch calls
 
     @Test func recipientsAreReadFromCSVWithVariablesOrFromPlainLines() {
         let csv = """
-        phone_number,first_name,order
+        phone_number,FirstName,Order
         +1 (555) 010-0111,Ana,1042
+
         "+15550112","Ben, Jr.",1043
         +15550112,Dupe,1
         not-a-number,Cy,9
         """
         let parsed = AgentsBatchRecipients.parse(csv, whatsApp: false)
         #expect(parsed.recipients.map(\.phoneNumber) == ["+15550100111", "+15550112"])
-        #expect(parsed.recipients[1].variables == ["first_name": "Ben, Jr.", "order": "1043"])
+        #expect(parsed.recipients[1].variables == ["FirstName": "Ben, Jr.", "Order": "1043"], "names keep their case")
         #expect(parsed.duplicates == 1)
-        #expect(parsed.problems == ["Line 5: “not-a-number” is not a phone number."])
+        #expect(parsed.problems == ["Line 6: “not-a-number” is not a phone number."], "line numbers count blank lines")
 
         let plain = AgentsBatchRecipients.parse("+15550121\n\n+15550122\n", whatsApp: false)
         #expect(plain.recipients.count == 2)
         #expect(plain.recipients.allSatisfy { $0.variables.isEmpty })
         #expect(AgentsBatchRecipients.parse("name,email\nA,a@example.com", whatsApp: false).problems.first?.contains("phone_number") == true)
+        #expect(AgentsBatchRecipients.parse("PHONE_NUMBER,x\n+15550123,y", whatsApp: false).recipients.count == 1)
+    }
+
+    /// Review B-3: only ASCII digits make a number; separators are refused, not merged.
+    @Test func onlyPlainDigitsMakeAPhoneNumber() {
+        for bad in ["+1555010019²", "+１５５５０１００１２３", "5550100;5550101", "+1555٠١٠٠١٢٣", "555-CALL-NOW"] {
+            #expect(AgentsBatchRecipients.parse(bad, whatsApp: false).recipients.isEmpty, "\(bad)")
+        }
+        #expect(AgentsBatchRecipients.normalizedPhone("+1 (555) 010.0199") == "+15550100199")
+    }
+
+    /// Review B-4: the spec's limit on recipients is checked here, and a long problem list is cut.
+    @Test func aBatchOverTheRecipientLimitIsRefusedAndProblemsAreCapped() {
+        let limit = AgentsBatchRecipients.recipientLimit
+        #expect(limit == 10_000)
+        let many = (0...limit).map { String(format: "+1555%07d", $0) }.joined(separator: "\n")
+        let parsed = AgentsBatchRecipients.parse(many, whatsApp: false)
+        #expect(parsed.problems.first == "A batch takes at most 10,000 recipients; this list has 10,001.")
+        let bad = Array(repeating: "x", count: 50).joined(separator: "\n")
+        let shown = AgentsBatchRecipients.shown(AgentsBatchRecipients.parse(bad, whatsApp: false).problems)
+        #expect(shown.count == AgentsBatchRecipients.problemLimit + 1)
+        #expect(shown.last == "… and 30 more lines to fix.")
+    }
+
+    /// Review CSV-1: a file that is not UTF-8 is read as Windows Latin 1 and says so.
+    @Test func aWindowsLatinCSVIsReadAndSaysSo() throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-agents-csv-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer {
+            if folder.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
+                == FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath().path {
+                try? FileManager.default.removeItem(at: folder)
+            }
+        }
+        let file = folder.appendingPathComponent("list.csv")
+        try Data("phone_number,Name\n+15550131,Jos\u{E9}\n".data(using: .windowsCP1252)!).write(to: file)
+        let model = rig.store.batchCalls
+        model.importCSV(file)
+        #expect(model.importProblem?.contains("not UTF-8") == true)
+        #expect(model.parsed.recipients.first?.variables == ["Name": "José"])
     }
 
     @Test func submittingABatchSaysHowManyPeopleWhichAgentAndFromWhereBeforeCalling() async throws {
@@ -201,30 +330,26 @@ struct AgentsSectionsTests {
         await rig.store.directory.agents.refresh()
         await rig.store.directory.phoneNumbers.refresh()
         let model = rig.store.batchCalls
-        model.name = "October renewals"
-        model.agentID = AgentsFixtures.agentID
-        model.phoneNumberID = AgentsFixtures.phoneID
-        model.recipientsText = "phone_number,first_name\n+15550111,Ana\n+15550112,Ben\n+15550113,Cy"
+        fillBatch(model)
         #expect(model.submitProblems.isEmpty)
 
         let wording = model.submitConfirmation()
-        #expect(wording.title == "Place 3 real phone calls with “Support”?")
-        #expect(wording.label == "Place 3 calls")
         #expect(wording.consequence.contains("3 recipients"))
         #expect(wording.consequence.contains("Support line (+15550100) through Twilio"))
         #expect(wording.consequence.contains("billed by the minute"))
 
-        // Declined: nothing is sent.
+        // Declined: nothing is sent, and the form stays for another try.
         let runner = rig.store.calls.runner(AgentsOp.submitBatch)
         let declined = Task { await model.submit() }
         try await waitUntil { runner.isAwaitingConfirmation }
-        #expect(AgentsConfirmationWording.title(for: runner) == wording.title)
-        #expect(AgentsConfirmationWording.label(for: runner) == wording.label)
+        #expect(runner.confirmation?.title == "Place 3 real phone calls with “Support”?")
+        #expect(runner.confirmation?.confirmLabel == "Call now")
         #expect(runner.confirmation?.consequence == wording.consequence)
         #expect(runner.confirmation?.risk == .realWorld)
         runner.decline()
         await declined.value
         #expect(rig.requests(AgentsOp.submitBatch).isEmpty)
+        #expect(model.submitGuard.canSend)
 
         // Confirmed: the recipients go with their variables.
         let confirmed = Task { await model.submit() }
@@ -234,11 +359,71 @@ struct AgentsSectionsTests {
         let body = try #require(rig.body(AgentsOp.submitBatch))
         #expect(body["recipients"].arrayValue?.count == 3)
         #expect(body["recipients"][0] == ["phone_number": "+15550111",
-                                          "conversation_initiation_client_data": ["dynamic_variables": ["first_name": "Ana"]]])
+                                          "conversation_initiation_client_data": ["dynamic_variables": ["FirstName": "Ana"]]])
         #expect(body["agent_phone_number_id"] == .string(AgentsFixtures.phoneID))
         #expect(body["call_name"] == "October renewals")
         #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.submitBatch).isEmpty)
         #expect(model.selectedID == AgentsFixtures.batchID)
+        #expect(model.recipientsText.isEmpty, "a sent batch leaves the form")
+    }
+
+    /// Review blocker 2: a cancelled wait does not stop a batch that is already on its way, so
+    /// a second press must not send it again.
+    @Test func aBatchCancelledOnTheWayCannotBeSubmittedAgainUnseen() async throws {
+        var slow = FakeElevenLabsTransport.Reply.json(AgentsFixtures.answer(for: AgentsOp.submitBatch))
+        slow.delay = .milliseconds(400)
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.submitBatch: slow])
+        defer { rig.clean() }
+        await rig.store.directory.agents.refresh()
+        await rig.store.directory.phoneNumbers.refresh()
+        let model = rig.store.batchCalls
+        fillBatch(model)
+        let runner = rig.store.calls.runner(AgentsOp.submitBatch)
+        let first = Task { await model.submit() }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        runner.confirm()
+        try await waitUntil { runner.isRunning && rig.requests(AgentsOp.submitBatch).count == 1 }
+        #expect(model.submitGuard.isSending, "no Cancel is offered: the screen shows it cannot be stopped")
+        runner.cancel()
+        await first.value
+        #expect(model.submitGuard.warning?.contains("may already have been placed") == true)
+        #expect(model.recipientsText.isEmpty && model.name.isEmpty, "the form is cleared")
+        #expect(model.submitArguments() == nil)
+
+        // Pressing again does nothing until the owner says they have looked.
+        fillBatch(model)
+        await model.submit()
+        #expect(rig.requests(AgentsOp.submitBatch).count == 1)
+        #expect(!runner.isAwaitingConfirmation)
+        model.submitGuard.acknowledge()
+        let second = Task { await model.submit() }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        runner.decline()
+        await second.value
+        #expect(rig.requests(AgentsOp.submitBatch).count == 1)
+    }
+
+    /// Review blocker 2: a timeout or a failure from ElevenLabs is no proof the batch did not
+    /// start; a refusal that names the arguments is.
+    @Test func aTimedOutBatchNeedsTheOwnersAcknowledgementBeforeAnotherTry() async throws {
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.submitBatch: .failure(.network("The request timed out."))])
+        defer { rig.clean() }
+        await rig.store.directory.agents.refresh()
+        await rig.store.directory.phoneNumbers.refresh()
+        let model = rig.store.batchCalls
+        fillBatch(model)
+        let runner = rig.store.calls.runner(AgentsOp.submitBatch)
+        let first = Task { await model.submit() }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        runner.confirm()
+        await first.value
+        #expect(model.submitGuard.warning?.contains("timed out") == true)
+        #expect(model.submitArguments() == nil)
+        #expect(rig.requests(AgentsOp.listBatches).count >= 1, "the list is fetched again to look for it")
+        fillBatch(model)
+        #expect(model.submitArguments() == nil)
+        model.submitGuard.acknowledge()
+        #expect(model.submitArguments() != nil)
     }
 
     @Test func aBatchWithProblemsCannotBeSubmitted() {
@@ -257,7 +442,7 @@ struct AgentsSectionsTests {
         #expect(model.submitArguments() == nil)
     }
 
-    @Test func retryCountsTheFailedAndUnansweredAndCancelSaysItStops() async throws {
+    @Test func retryCountsTheFailedAndUnansweredAndStopNamesTheBatch() async throws {
         let rig = AgentsFixtures.Rig()
         defer { rig.clean() }
         let model = rig.store.batchCalls
@@ -266,17 +451,18 @@ struct AgentsSectionsTests {
         #expect(model.retryCount == 2)
         #expect(model.pendingCount == 2)
         let retry = try #require(model.retryConfirmation())
-        #expect(retry.title == "Call 2 recipients of “October renewals” again with “Support”?")
-        #expect(retry.label == "Place 2 calls")
+        #expect(retry.subject == "2 calls again to recipients of “October renewals” with “Support”")
 
-        let runner = rig.store.calls.runner(AgentsOp.cancelBatch)
+        let runner = rig.store.calls.runner(AgentsOp.cancelBatch, slot: AgentsFixtures.batchID)
         let cancelling = Task { await model.cancel() }
         try await waitUntil { runner.isAwaitingConfirmation }
-        #expect(AgentsConfirmationWording.label(for: runner) == "Stop the batch")
-        #expect(AgentsConfirmationWording.title(for: runner) == "Stop the batch “October renewals”?")
+        #expect(runner.confirmation?.title.contains("“October renewals”") == true)
+        #expect(runner.confirmation?.consequence.contains("are not placed") == true)
         runner.confirm()
         await cancelling.value
         #expect(rig.requests(AgentsOp.cancelBatch).count == 1)
+        // Another batch's actions have their own runners.
+        #expect(rig.store.calls.runner(AgentsOp.cancelBatch, slot: "btcal_sep02") !== runner)
     }
 
     // MARK: - Phone numbers
@@ -294,7 +480,8 @@ struct AgentsSectionsTests {
         let runner = rig.store.calls.runner(AgentsOp.sipTrunkCall)
         let calling = Task { await model.placeCall() }
         try await waitUntil { runner.isAwaitingConfirmation }
-        #expect(AgentsConfirmationWording.title(for: runner) == "Call +15550199 now with “Sales follow-up”?")
+        #expect(runner.confirmation?.title == "Place a call to +15550199 with “Sales follow-up”?")
+        #expect(runner.confirmation?.confirmLabel == "Call now")
         #expect(runner.confirmation?.consequence.contains("Outbound (+15550101) through SIP trunk") == true)
         runner.confirm()
         await calling.value
@@ -303,9 +490,41 @@ struct AgentsSectionsTests {
         #expect(body["conversation_initiation_client_data"]["dynamic_variables"] == ["first_name": "Ana", "order": "1042"])
         #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.sipTrunkCall).isEmpty)
         #expect(rig.requests(AgentsOp.twilioCall).isEmpty)
+        #expect(model.callTo.isEmpty, "a placed call leaves the form")
     }
 
-    @Test func importingANumberMasksTheProviderTokenInShowAPICall() async throws {
+    /// Review P-2 and blocker 2: the call's busy state belongs to the screen, not to the
+    /// provider's runner, and an unknown outcome blocks another call until acknowledged.
+    @Test func switchingTheFromNumberDuringACallCannotStartASecond() async throws {
+        var slow = FakeElevenLabsTransport.Reply.json(AgentsFixtures.answer(for: AgentsOp.twilioCall))
+        slow.delay = .milliseconds(400)
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.twilioCall: slow])
+        defer { rig.clean() }
+        await rig.store.directory.agents.refresh()
+        await rig.store.directory.phoneNumbers.refresh()
+        let model = rig.store.phoneNumbers
+        model.callFromID = AgentsFixtures.phoneID
+        model.callAgentID = AgentsFixtures.agentID
+        model.callTo = "+15550199"
+        let twilio = rig.store.calls.runner(AgentsOp.twilioCall)
+        let first = Task { await model.placeCall() }
+        try await waitUntil { twilio.isAwaitingConfirmation }
+        twilio.confirm()
+        try await waitUntil { twilio.isRunning }
+        model.callFromID = AgentsFixtures.secondPhoneID
+        #expect(!model.callGuard.canSend)
+        await model.placeCall()
+        #expect(rig.requests(AgentsOp.sipTrunkCall).isEmpty)
+        twilio.cancel()
+        await first.value
+        #expect(model.callGuard.warning?.contains("may already have been placed") == true)
+        #expect(model.callTo.isEmpty)
+        model.callTo = "+15550198"
+        await model.placeCall()
+        #expect(rig.requests(AgentsOp.sipTrunkCall).isEmpty)
+    }
+
+    @Test func importingANumberNeverShowsTheProviderToken() async throws {
         let rig = AgentsFixtures.Rig()
         defer { rig.clean() }
         let model = rig.store.phoneNumbers
@@ -316,16 +535,15 @@ struct AgentsSectionsTests {
         let runner = rig.store.calls.runner(AgentsOp.importPhoneNumber)
         let importing = Task { await model.importNumberNow() }
         try await waitUntil { runner.isAwaitingConfirmation }
-        let shown = try #require(runner.apiCall?.body)
-        #expect(shown.jsonString().contains("twilio-token-fixture"), "the runner holds what it will send")
-        let masked = AgentsSecretMask.masked(shown, fields: AgentPhoneNumbersModel.secretFields).jsonString()
-        #expect(!masked.contains("twilio-token-fixture"))
-        #expect(masked.contains("AC0000"))
+        let shown = try #require(runner.apiCall?.body).jsonString()
+        #expect(!shown.contains("twilio-token-fixture"), "Show API call and curl carry the mask, not the token")
+        #expect(shown.contains("AC0000"))
         runner.confirm()
         await importing.value
         #expect(model.twilioToken.isEmpty, "the token leaves the form once sent")
         let body = try #require(rig.body(AgentsOp.importPhoneNumber))
         #expect(body["provider"] == "twilio")
+        #expect(body["token"] == "twilio-token-fixture", "ElevenLabs gets the real token")
         #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.importPhoneNumber).isEmpty)
     }
 
@@ -340,42 +558,60 @@ struct AgentsSectionsTests {
         let runner = rig.store.calls.runner(AgentsOp.createSecret)
         let creating = Task { await model.create() }
         try await waitUntil { runner.isAwaitingConfirmation }
-        #expect(AgentsConfirmationWording.title(for: runner) == "Store the secret “crm_api_key_2” in the workspace?")
+        #expect(runner.confirmation?.title.contains("“crm_api_key_2”") == true)
+        #expect(!(runner.apiCall?.body?.jsonString().contains("crm-secret-fixture") ?? true))
         runner.confirm()
         await creating.value
         #expect(rig.body(AgentsOp.createSecret) == ["type": "new", "name": "crm_api_key_2", "value": "crm-secret-fixture"])
         #expect(model.newValue.isEmpty)
-        let call = try #require(runner.apiCall?.body)
-        #expect(!AgentsSecretMask.masked(call, fields: AgentSecretsModel.secretFields).jsonString().contains("crm-secret-fixture"))
     }
 
-    @Test func anEnvironmentVariableGoesAsOneOfItsKinds() async throws {
+    @Test func anEnvironmentVariableGoesAsOneOfItsKindsAfterTheOwnerSaysSo() async throws {
         let rig = AgentsFixtures.Rig()
         defer { rig.clean() }
         let model = rig.store.secrets
         model.newVariableLabel = "CRM_KEY"
         model.newVariableType = "secret"
         model.newVariableValues = [("production", AgentsFixtures.secretID), ("staging", "sec_staging")]
-        await model.createVariable()
+        let runner = rig.store.calls.runner(AgentsOp.createEnvironmentVariable)
+        let creating = Task { await model.createVariable() }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        #expect(runner.confirmation?.title.contains("“CRM_KEY”") == true)
+        #expect(runner.confirmation?.consequence.contains("production and staging") == true)
+        runner.confirm()
+        await creating.value
         let body = try #require(rig.body(AgentsOp.createEnvironmentVariable))
         #expect(body == ["label": "CRM_KEY", "type": "secret",
                          "values": ["production": ["secret_id": .string(AgentsFixtures.secretID)], "staging": ["secret_id": "sec_staging"]]])
     }
 
+    /// Review S-2: an environment emptied in the editor is removed on the server, not left as it was.
+    @Test func anEmptiedEnvironmentIsSentAsRemoved() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.secrets
+        await model.variables.refresh()
+        await model.selectVariable("env_1")
+        #expect(model.originalEnvironments == ["production", "staging"])
+        model.editedValues = [("production", "https://crm.example.com")]
+        let variable = try #require(model.selectedVariable)
+        #expect(model.editedValuesJSON(for: variable) == ["production": "https://crm.example.com", "staging": nil])
+    }
+
     // MARK: - Conversations
 
-    @Test func aSignedURLIsShownOnceAndKeptOutOfTheRecentList() async throws {
+    @Test func aSignedURLIsShownOnceKeptOutOfRecentsAndGoneWithTheAgent() async throws {
         let rig = AgentsFixtures.Rig()
         defer { rig.clean() }
         let model = rig.store.conversations
         model.startAgentID = AgentsFixtures.agentID
         await model.fetchSignedURL()
-        let runner = rig.store.calls.runner(AgentsOp.signedURL)
+        let runner = rig.store.calls.runner(AgentsOp.signedURL, slot: AgentsFixtures.agentID)
         #expect(runner.credential?.fields.first?.value.contains("sig_fixture") == true)
         #expect(!(runner.result.flatMap(AgentsCalls.json(of:))?.jsonString().contains("sig_fixture") ?? true))
         #expect(rig.pane.recents.isEmpty)
-        runner.dismissCredential()
-        #expect(runner.credential == nil)
+        model.startAgentID = AgentsFixtures.salesAgentID
+        #expect(runner.credential == nil, "choosing another agent takes the URL off screen")
     }
 
     @Test func aConversationShowsItsTranscriptAnalysisAndTags() async throws {
@@ -393,10 +629,12 @@ struct AgentsSectionsTests {
         #expect(detail.collected.first?.value == "1042")
         #expect(detail.feedback == "like")
 
-        let runner = rig.store.calls.runner(AgentsOp.unassignTag)
+        await rig.store.directory.tags.refresh()
+        let runner = rig.store.calls.runner(AgentsOp.unassignTag, slot: AgentsFixtures.conversationID)
         let removing = Task { await model.unassignTag("tag_refund") }
         try await waitUntil { runner.isAwaitingConfirmation }
-        #expect(AgentsConfirmationWording.label(for: runner) == "Remove tag")
+        #expect(runner.confirmation?.title == "Delete the tag “Refund” from this conversation?")
+        #expect(runner.confirmation?.consequence.contains("The tag itself is kept") == true)
         runner.confirm()
         await removing.value
         #expect(model.detail?.tagIDs.isEmpty == true)
@@ -439,21 +677,84 @@ struct AgentsSectionsTests {
         #expect(model.selectedID == "doc_new04")
     }
 
-    @Test func aToolKeepsWhatTheFormDoesNotShowWhenSaved() async throws {
+    /// Review K-1: cancelling a crawl (destructive now) asks once, in the pane, naming the site.
+    @Test func cancellingACrawlAsksOnceNamingTheSite() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.knowledge
+        await model.crawls.refresh()
+        let job = try #require(model.crawls.items.first)
+        let runner = rig.store.calls.runner(AgentsOp.cancelCrawl, slot: job.id)
+        let cancelling = Task { await model.cancelCrawl(job) }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        #expect(runner.confirmation?.title.contains("https://example.com/help") == true)
+        #expect(runner.confirmation?.consequence.contains("deletes every document") == true)
+        runner.confirm()
+        await cancelling.value
+        #expect(rig.requests(AgentsOp.cancelCrawl).count == 1)
+        #expect(rig.pane.confirming == nil, "one question, answered")
+    }
+
+    /// Review NC-1: saving a tool is real-world now; the question names the tool, where it
+    /// sends and which headers (never their values) go with it.
+    @Test func savingAToolAsksNamingItsHostAndHeaderNames() async throws {
         let rig = AgentsFixtures.Rig()
         defer { rig.clean() }
         let model = rig.store.tools
         await model.select(AgentsFixtures.toolID)
         #expect(model.editor.url == "https://api.example.com/orders/{order_id}")
-        model.editor.timeoutSeconds = 45
-        await model.save()
+        model.editsJSON = true
+        model.configJSON = """
+        {"type": "webhook", "name": "lookup_order", "description": "Finds an order by its number",
+         "response_timeout_secs": 45, "api_schema": {"url": "https://api.example.com/orders/{order_id}", "method": "GET",
+         "request_headers": {"Authorization": "Bearer tool-fixture-token", "X-Shop": "7"}}}
+        """
+        let runner = rig.store.calls.runner(AgentsOp.updateTool, slot: AgentsFixtures.toolID)
+        let saving = Task { await model.save() }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        let question = try #require(runner.confirmation)
+        #expect(question.title.contains("“lookup_order” calling api.example.com"))
+        #expect(question.consequence.contains("Authorization and X-Shop"))
+        #expect(!question.consequence.contains("tool-fixture-token"))
+        #expect(!(runner.apiCall?.body?.jsonString().contains("tool-fixture-token") ?? true))
+        runner.confirm()
+        await saving.value
         let body = try #require(rig.body(AgentsOp.updateTool))
         #expect(body["tool_config"]["response_timeout_secs"] == 45)
-        #expect(body["tool_config"]["api_schema"]["method"] == "GET")
         #expect(body["tool_config"]["description"] == "Finds an order by its number")
         // Executions from an agent the list has not reached are named by a lookup.
         await model.loadExecutions()
         #expect(rig.store.directory.agentName("agent_unknown9") == "Old returns agent")
+    }
+
+    @Test func aWebhookToolNeedsARealAddress() {
+        var editor = AgentsToolEditor()
+        editor.name = "hook"
+        editor.description = "Calls a hook"
+        for bad in ["httpfoo://x", "https://user:pass@example.com/x", "ftp://example.com", "https://"] {
+            editor.url = bad
+            #expect(!editor.problems.isEmpty, "\(bad)")
+        }
+        editor.url = "https://example.com/hook"
+        #expect(editor.problems.isEmpty)
+    }
+
+    /// Review M-2: an MCP address with a password is refused; plain http, this Mac, private and
+    /// link-local addresses are allowed only with a warning that the question repeats.
+    @Test func anMCPAddressIsCheckedBeforeAgentsSendAnythingThere() {
+        #expect(AgentsOutsideAddress("https://user:pass@mcp.example.com/sse").refusal != nil)
+        #expect(AgentsOutsideAddress("https:///sse").refusal != nil)
+        #expect(AgentsOutsideAddress("file:///etc/passwd").refusal != nil)
+        #expect(AgentsOutsideAddress("https://mcp.example.com/sse").warnings.isEmpty)
+        for (address, word) in [("http://mcp.example.com/sse", "plain http"), ("https://localhost:8080/sse", "loopback"),
+                                ("https://127.0.0.1/sse", "loopback"), ("https://192.168.1.20/sse", "private"),
+                                ("https://10.0.0.5/sse", "private"), ("https://172.20.1.1/sse", "private"),
+                                ("https://169.254.169.254/latest", "link-local"), ("https://printer.local/sse", "private"),
+                                ("https://[::1]/sse", "loopback")] {
+            let found = AgentsOutsideAddress(address)
+            #expect(found.isAllowed, "\(address)")
+            #expect(found.warnings.contains { $0.contains(word) }, "\(address): \(found.warnings)")
+        }
     }
 
     @Test func connectingAnMCPServerSaysWhereAgentsWillSendThings() async throws {
@@ -461,20 +762,51 @@ struct AgentsSectionsTests {
         defer { rig.clean() }
         let model = rig.store.mcpServers
         model.newName = "Order system"
-        model.newURL = "https://mcp.example.com/sse"
+        model.newURL = "http://192.168.1.20/sse"
         model.newApprovalPolicy = "require_approval_all"
         let runner = rig.store.calls.runner(AgentsOp.createMCPServer)
         let creating = Task { await model.create() }
         try await waitUntil { runner.isAwaitingConfirmation }
-        #expect(AgentsConfirmationWording.title(for: runner) == "Connect agents to https://mcp.example.com/sse?")
-        #expect(runner.confirmation?.consequence.contains("ask for approval first") == true)
+        let question = try #require(runner.confirmation)
+        #expect(question.title.contains("http://192.168.1.20/sse"))
+        #expect(question.consequence.hasPrefix("Careful: It is plain http"))
+        #expect(question.consequence.contains("private-network"))
+        #expect(question.consequence.contains("ask the caller before they run"))
         runner.confirm()
         await creating.value
         let body = try #require(rig.body(AgentsOp.createMCPServer))
-        #expect(body["config"]["url"] == "https://mcp.example.com/sse")
+        #expect(body["config"]["url"] == "http://192.168.1.20/sse")
         #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.createMCPServer).isEmpty)
+    }
+
+    /// Review M-1: statuses are matched by the spec's `mcp:<server>:<tool>` ids, and a changed
+    /// definition says so.
+    @Test func eachMCPToolShowsItsApprovalAndAChangedDefinition() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.mcpServers
+        await model.select(AgentsFixtures.serverID)
         await model.loadTools()
         #expect(model.tools.map(\.approval) == ["auto_approved", "requires_approval"])
+        #expect(model.tools.map { $0.badge?.text } == ["Runs without asking", "Changed since approval"])
+    }
+
+    /// Review M-3: switching a server to run every tool without asking says exactly that.
+    @Test func turningOnAutoApproveAllSaysToolsRunWithoutAsking() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.mcpServers
+        await model.select(AgentsFixtures.serverID)
+        model.settings.approvalPolicy = "auto_approve_all"
+        let runner = rig.store.calls.runner(AgentsOp.updateMCPServer, slot: AgentsFixtures.serverID)
+        let saving = Task { await model.saveSettings() }
+        try await waitUntil { runner.isAwaitingConfirmation }
+        #expect(runner.confirmation?.title.contains("run without asking") == true)
+        #expect(runner.confirmation?.consequence.hasPrefix(
+            "Every tool on https://mcp.example.com/sse will run without asking the caller first") == true)
+        runner.decline()
+        await saving.value
+        #expect(rig.requests(AgentsOp.updateMCPServer).isEmpty)
     }
 
     @Test func aResponseTestIsSentWithOnlyTheFieldsItsKindAccepts() async throws {
@@ -529,7 +861,51 @@ struct AgentsSectionsTests {
         #expect(rig.transport.requests.allSatisfy { $0.url.host == ElevenLabsRegion.global.host })
     }
 
+    /// Review LIST-1: a filter changed while the list loads is fetched too, not dropped.
+    @Test func aFilterChangedDuringALoadIsFetchedAgain() async throws {
+        var slow = FakeElevenLabsTransport.Reply.json(AgentsFixtures.answer(for: AgentsOp.listBatches))
+        slow.delay = .milliseconds(200)
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.listBatches: slow])
+        defer { rig.clean() }
+        let model = rig.store.batchCalls
+        let first = Task { await model.list.refresh() }
+        try await waitUntil { rig.requests(AgentsOp.listBatches).count == 1 }
+        model.filterAgentID = AgentsFixtures.agentID
+        await model.list.refresh()
+        await first.value
+        #expect(rig.requests(AgentsOp.listBatches).count == 2)
+        #expect(rig.requests(AgentsOp.listBatches).last?.request.url.query?.contains("agent_id=agent_support01") == true)
+    }
+
+    // MARK: - Store
+
+    /// Review item 3: a region change, a new key or a disconnect never hands back the previous
+    /// account's store — even when the new client lands at the old one's address.
+    @Test func aRegionChangeStartsAFreshStore() {
+        var settings = Settings()
+        settings.elevenLabsLinked = true
+        let app = AppModel(settings: settings)
+        var reused = 0
+        for index in 0..<40 {
+            let before = AgentsPlatformStore.shared(for: app)
+            before.batchCalls.name = "workspace \(index)"
+            #expect(AgentsPlatformStore.shared(for: app) === before, "the same account keeps its store")
+            app.elevenLabsRegion = index.isMultiple(of: 2) ? .eu : .global
+            let after = AgentsPlatformStore.shared(for: app)
+            if after === before || after.batchCalls.name == "workspace \(index)" { reused += 1 }
+        }
+        #expect(reused == 0, "\(reused) of 40 region changes kept the previous workspace's store")
+    }
+
     // MARK: - Helpers
+
+    func fillBatch(_ model: AgentBatchCallsModel) {
+        model.name = "October renewals"
+        model.agentID = AgentsFixtures.agentID
+        model.phoneNumberID = AgentsFixtures.phoneID
+        model.recipientsText = "phone_number,FirstName\n+15550111,Ana\n+15550112,Ben\n+15550113,Cy"
+    }
+
 
     func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         for _ in 0..<500 {

@@ -180,7 +180,10 @@ final class AgentConversationsModel {
     private(set) var sipMessages: [JSONValue] = []
 
     // Start elsewhere
-    var startAgentID = ""
+    /// The agent a signed URL or token is for. Changing it takes any shown one off screen.
+    var startAgentID = "" {
+        didSet { if startAgentID != oldValue { forgetShownCredentials(for: oldValue) } }
+    }
     var includeConversationID = false
 
     // Lookup
@@ -274,7 +277,8 @@ final class AgentConversationsModel {
     func sendFeedback(_ feedback: String?) async {
         guard let detail else { return }
         let value: JSONValue = feedback.map(JSONValue.string) ?? .null
-        guard await calls.json(AgentsOp.conversationFeedback, ["conversation_id": .string(detail.id), "feedback": value])
+        guard await calls.json(AgentsOp.conversationFeedback, ["conversation_id": .string(detail.id), "feedback": value],
+                               slot: detail.id)
             != nil else { return }
         self.detail?.feedback = feedback
     }
@@ -283,7 +287,7 @@ final class AgentConversationsModel {
         guard let detail else { return }
         guard await calls.json(AgentsOp.assignTags, [
             "conversation_id": .string(detail.id), "tag_ids": [.string(tagID)],
-        ]) != nil else { return }
+        ], slot: detail.id) != nil else { return }
         if !(self.detail?.tagIDs.contains(tagID) ?? true) { self.detail?.tagIDs.append(tagID) }
     }
 
@@ -291,10 +295,9 @@ final class AgentConversationsModel {
         guard let detail else { return }
         let name = store.directory.tags.item(tagID)?.title ?? tagID
         guard await calls.json(
-            AgentsOp.unassignTag, ["conversation_id": .string(detail.id), "tag_id": .string(tagID)],
+            AgentsOp.unassignTag, ["conversation_id": .string(detail.id), "tag_id": .string(tagID)], slot: detail.id,
             subject: "the tag “\(name)” from this conversation",
-            consequence: "The conversation will no longer carry the tag “\(name)”. The tag itself is kept.",
-            confirmTitle: "Remove the tag “\(name)” from this conversation?", confirmLabel: "Remove tag"
+            consequence: "The conversation will no longer carry the tag “\(name)”. The tag itself is kept."
         ) != nil else { return }
         self.detail?.tagIDs.removeAll { $0 == tagID }
     }
@@ -302,7 +305,7 @@ final class AgentConversationsModel {
     /// Analyses the conversation again with the agent's current criteria. Spends credits.
     func runAnalysis() async {
         guard let detail else { return }
-        guard let json = await calls.json(AgentsOp.runAnalysis, ["conversation_id": .string(detail.id)],
+        guard let json = await calls.json(AgentsOp.runAnalysis, ["conversation_id": .string(detail.id)], slot: detail.id,
                                           title: "Analysis of \(detail.title ?? detail.id)") else { return }
         if let updated = AgentsConversationDetail(json: json), selectedID == detail.id { self.detail = updated }
     }
@@ -311,14 +314,14 @@ final class AgentConversationsModel {
         guard let detail else { return }
         guard await calls.json(AgentsOp.runEvaluation, [
             "conversation_id": .string(detail.id), "evaluation_id": .string(evaluationID),
-        ], slot: evaluationID) != nil else { return }
+        ], slot: "\(detail.id)/\(evaluationID)") != nil else { return }
         await loadDetail(detail.id)
     }
 
     func loadSIPMessages() async {
         guard let detail else { return }
         guard let json = await calls.json(AgentsOp.conversationSIPMessages,
-                                          ["conversation_id": .string(detail.id), "page_size": 20], quiet: true)
+                                          ["conversation_id": .string(detail.id), "page_size": 20], slot: detail.id, quiet: true)
         else { return }
         sipMessages = json["sip_messages"].arrayValue ?? []
     }
@@ -327,7 +330,7 @@ final class AgentConversationsModel {
         guard let detail else { return }
         let title = detail.title.map { "“\($0)”" } ?? "from \(AgentsFormat.date(detail.startedAt))"
         guard await calls.json(
-            AgentsOp.deleteConversation, ["conversation_id": .string(detail.id)],
+            AgentsOp.deleteConversation, ["conversation_id": .string(detail.id)], slot: detail.id,
             subject: "the conversation \(title)",
             consequence: "ElevenLabs will delete its transcript, recording and analysis. This cannot be undone."
         ) != nil else { return }
@@ -345,13 +348,21 @@ final class AgentConversationsModel {
         guard !startAgentID.isEmpty else { return }
         var arguments: [String: JSONValue] = ["agent_id": .string(startAgentID)]
         if includeConversationID { arguments["include_conversation_id"] = true }
-        await calls.json(AgentsOp.signedURL, arguments)
+        await calls.json(AgentsOp.signedURL, arguments, slot: startAgentID)
     }
 
     /// A WebRTC session token for the same. Shown once.
     func fetchWebRTCToken() async {
         guard !startAgentID.isEmpty else { return }
-        await calls.json(AgentsOp.webRTCToken, ["agent_id": .string(startAgentID)])
+        await calls.json(AgentsOp.webRTCToken, ["agent_id": .string(startAgentID)], slot: startAgentID)
+    }
+
+    /// Takes a shown signed URL or token off screen: on a change of agent, and when the section
+    /// is left. They are shown once and never kept.
+    func forgetShownCredentials(for agentID: String? = nil) {
+        let agent = agentID ?? startAgentID
+        calls.runner(AgentsOp.signedURL, slot: agent).dismissCredential()
+        calls.runner(AgentsOp.webRTCToken, slot: agent).dismissCredential()
     }
 
     // MARK: Lookup and callers
@@ -510,12 +521,12 @@ private struct AgentConversationDetailView: View {
                 if let call = detail.phoneCall, !call.isEmpty { AgentsFact(label: "Phone call", value: call) }
                 if let language = detail.mainLanguage { AgentsFact(label: "Language", value: language) }
                 AgentsFact(label: "ID", value: detail.id, monospaced: true)
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.conversationFeedback), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.conversationFeedback, slot: detail.id))
             }
             tagsCard
             if detail.hasAudio {
                 AgentsCard("Recording") {
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.conversationAudio, slot: detail.id), title: "Fetch the recording") {
+                    AgentsRunButton(runner: calls.runner(AgentsOp.conversationAudio, slot: detail.id), title: "Fetch the recording") {
                         Task { await model.fetchAudio() }
                     }
                     AgentsRunnerOutput(runner: calls.runner(AgentsOp.conversationAudio, slot: detail.id), showsResult: true)
@@ -528,7 +539,7 @@ private struct AgentConversationDetailView: View {
             if detail.phoneCall != nil {
                 AgentsCard("SIP messages", subtitle: "The signalling of the phone call, for troubleshooting.") {
                     Button("Fetch SIP messages") { Task { await model.loadSIPMessages() } }
-                    AgentsRunnerError(runner: calls.runner(AgentsOp.conversationSIPMessages))
+                    AgentsRunnerError(runner: calls.runner(AgentsOp.conversationSIPMessages, slot: detail.id))
                     ForEach(Array(model.sipMessages.enumerated()), id: \.offset) { _, message in
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(AgentsFormat.words(message["direction"].stringValue)) · \(message["transport"].stringValue ?? "")")
@@ -540,10 +551,10 @@ private struct AgentConversationDetailView: View {
                 }
             }
             AgentsCard("Delete") {
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteConversation), title: "Delete conversation…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deleteConversation, slot: detail.id), title: "Delete conversation…") {
                     Task { await model.delete() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteConversation), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteConversation, slot: detail.id))
             }
         }
     }
@@ -576,8 +587,8 @@ private struct AgentConversationDetailView: View {
                 .fixedSize()
                 .disabled(tags.items.isEmpty)
             }
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.assignTags), showsResult: false)
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.unassignTag), showsResult: false)
+            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.assignTags, slot: detail.id))
+            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.unassignTag, slot: detail.id))
         }
         .task { await tags.loadIfNeeded() }
     }
@@ -600,16 +611,16 @@ private struct AgentConversationDetailView: View {
                     if !evaluation.rationale.isEmpty {
                         Text(evaluation.rationale).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    AgentsRunnerError(runner: model.calls.runner(AgentsOp.runEvaluation, slot: evaluation.id))
+                    AgentsRunnerError(runner: model.calls.runner(AgentsOp.runEvaluation, slot: "\(detail.id)/\(evaluation.id)"))
                 }
             }
             ForEach(detail.collected) { item in
                 AgentsFact(label: item.id, value: item.value)
             }
-            ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.runAnalysis), title: "Analyse again") {
+            AgentsRunButton(runner: model.calls.runner(AgentsOp.runAnalysis, slot: detail.id), title: "Analyse again") {
                 Task { await model.runAnalysis() }
             }
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.runAnalysis), showsResult: false)
+            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.runAnalysis, slot: detail.id))
         }
     }
 }
@@ -624,18 +635,19 @@ private struct AgentConversationStartCard: View {
                 Toggle("Include a conversation ID", isOn: $model.includeConversationID).toggleStyle(.checkbox)
             }
             HStack(spacing: 8) {
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.signedURL), title: "Get a signed URL",
+                AgentsRunButton(runner: model.calls.runner(AgentsOp.signedURL, slot: model.startAgentID), title: "Get a signed URL",
                                     disabled: model.startAgentID.isEmpty) {
                     Task { await model.fetchSignedURL() }
                 }
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.webRTCToken), title: "Get a WebRTC token",
+                AgentsRunButton(runner: model.calls.runner(AgentsOp.webRTCToken, slot: model.startAgentID), title: "Get a WebRTC token",
                                     disabled: model.startAgentID.isEmpty) {
                     Task { await model.fetchWebRTCToken() }
                 }
             }
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.signedURL), showsResult: false)
-            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.webRTCToken), showsResult: false)
+            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.signedURL, slot: model.startAgentID))
+            AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.webRTCToken, slot: model.startAgentID))
         }
+        .onDisappear { model.forgetShownCredentials() }
     }
 }
 
@@ -648,7 +660,7 @@ private struct AgentConversationLookupCard: View {
                 AgentsAgentPicker(directory: model.store.directory, selection: $model.lookupAgentID).fixedSize()
                 TextField("Link", text: $model.lookupReference, prompt: Text("https://…"))
                     .textFieldStyle(.roundedBorder)
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.resolveReference), title: "Open",
+                AgentsRunButton(runner: model.calls.runner(AgentsOp.resolveReference), title: "Open",
                                     disabled: model.lookupAgentID.isEmpty || model.lookupReference.isEmpty) {
                     Task { await model.resolveReference() }
                 }

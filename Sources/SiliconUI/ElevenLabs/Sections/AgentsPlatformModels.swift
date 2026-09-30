@@ -762,12 +762,14 @@ struct AgentsPhoneNumber: Identifiable, Hashable, Sendable {
         }
     }
 
-    /// The operation that places an outbound call from this number.
-    var outboundCallOperation: String {
+    /// The operation that places an outbound call from this number; nil for a provider this
+    /// build does not know, rather than guessing Twilio.
+    var outboundCallOperation: String? {
         switch provider {
+        case "twilio": AgentsOp.twilioCall
         case "sip_trunk": AgentsOp.sipTrunkCall
         case "exotel": AgentsOp.exotelCall
-        default: AgentsOp.twilioCall
+        default: nil
         }
     }
 }
@@ -920,8 +922,32 @@ struct AgentsMCPTool: Identifiable, Hashable, Sendable {
     var name: String
     var description: String
     var inputSchema: JSONValue
-    /// The approval state ElevenLabs reports for it, when per-tool approval applies.
+    /// The tool's approval policy, when per-tool approval applies: auto_approved or requires_approval.
     var approval: String?
+    /// up_to_date, needs_review (its definition changed since it was approved) or not_approved.
+    var state: String?
+
+    init(name: String, description: String, inputSchema: JSONValue, approval: String? = nil, state: String? = nil) {
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema
+        self.approval = approval
+        self.state = state
+    }
+
+    /// What the tool's badge says: a changed definition first, since that is what needs a look.
+    var badge: (text: String, attention: Bool)? {
+        switch state {
+        case "needs_review": return ("Changed since approval", true)
+        case "not_approved": return ("Not approved", true)
+        default: break
+        }
+        switch approval {
+        case "auto_approved": return ("Runs without asking", true)
+        case "requires_approval": return ("Asks first", false)
+        default: return nil
+        }
+    }
 }
 
 // MARK: - Secrets and environment variables

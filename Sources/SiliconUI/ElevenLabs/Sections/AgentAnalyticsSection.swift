@@ -207,7 +207,7 @@ final class AgentAnalyticsModel {
         var arguments: [String: JSONValue] = ["agentqa_ticket_id": .string(ticket.id)]
         if let status { arguments["status"] = .string(status) }
         if let assignee { arguments["assignee_user_id"] = assignee.isEmpty ? .null : .string(assignee) }
-        guard await calls.json(AgentsOp.updateTicket, arguments) != nil else { return }
+        guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticket.id) != nil else { return }
         await openTicket(ticket.id)
     }
 
@@ -215,7 +215,7 @@ final class AgentAnalyticsModel {
         guard let ticket, !ticketComment.isEmpty else { return }
         guard await calls.json(AgentsOp.commentTicket, [
             "agentqa_ticket_id": .string(ticket.id), "comment": .string(ticketComment),
-        ]) != nil else { return }
+        ], slot: ticket.id) != nil else { return }
         ticketComment = ""
         await openTicket(ticket.id)
     }
@@ -224,7 +224,7 @@ final class AgentAnalyticsModel {
         guard let ticket, !turnComment.isEmpty else { return }
         guard await calls.json(AgentsOp.commentTicketTurn, [
             "agentqa_ticket_id": .string(ticket.id), "turn_index": .number(Double(turnIndex)), "comment": .string(turnComment),
-        ]) != nil else { return }
+        ], slot: ticket.id) != nil else { return }
         turnComment = ""
         await openTicket(ticket.id)
     }
@@ -232,7 +232,7 @@ final class AgentAnalyticsModel {
     func deleteTicket() async {
         guard let ticket else { return }
         guard await calls.json(
-            AgentsOp.deleteTicket, ["agentqa_ticket_id": .string(ticket.id)],
+            AgentsOp.deleteTicket, ["agentqa_ticket_id": .string(ticket.id)], slot: ticket.id,
             subject: "the ticket “\(ticket.comment.prefix(60))”",
             consequence: "ElevenLabs deletes the ticket and its comments."
         ) != nil else { return }
@@ -285,7 +285,7 @@ final class AgentAnalyticsModel {
         guard let selectedTagID else { return }
         guard let json = await calls.json(AgentsOp.updateTag, [
             "tag_id": .string(selectedTagID), "title": .string(editTagTitle), "description": .string(editTagDescription),
-        ]) else { return }
+        ], slot: selectedTagID) else { return }
         if let tag = AgentsTag(json: json) {
             tags.upsert(tag)
             store.directory.tags.upsert(tag)
@@ -295,7 +295,7 @@ final class AgentAnalyticsModel {
     func deleteTag() async {
         guard let selectedTagID, let tag = tags.item(selectedTagID) else { return }
         guard await calls.json(
-            AgentsOp.deleteTag, ["tag_id": .string(selectedTagID)], subject: "the tag “\(tag.title)”",
+            AgentsOp.deleteTag, ["tag_id": .string(selectedTagID)], slot: selectedTagID, subject: "the tag “\(tag.title)”",
             consequence: "ElevenLabs deletes the tag and takes it off every conversation that carries it."
         ) != nil else { return }
         tags.remove(selectedTagID)
@@ -495,7 +495,7 @@ private struct AgentTicketsCard: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
             let manual = model.newTicketConversationID.trimmingCharacters(in: .whitespaces).isEmpty
-            ElevenLabsRunButton(runner: calls.runner(manual ? AgentsOp.createManualTicket : AgentsOp.createTicket), title: "Raise ticket",
+            AgentsRunButton(runner: calls.runner(manual ? AgentsOp.createManualTicket : AgentsOp.createTicket), title: "Raise ticket",
                                 disabled: model.newTicketComment.isEmpty || (manual && model.agentID.isEmpty)) {
                 Task { await model.createTicket() }
             }
@@ -547,7 +547,7 @@ private struct AgentTicketDetail: View {
                 }
                 .fixedSize()
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTicket), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTicket, slot: ticket.id))
             ForEach(Array(ticket.comments.enumerated()), id: \.offset) { _, comment in
                 Text("• \(comment.comment)").font(.callout).textSelection(.enabled)
             }
@@ -563,12 +563,12 @@ private struct AgentTicketDetail: View {
                 TextField("Comment on that message", text: $model.turnComment).textFieldStyle(.roundedBorder)
                 Button("Comment") { Task { await model.commentOnTurn() } }.disabled(model.turnComment.isEmpty)
             }
-            AgentsRunnerError(runner: calls.runner(AgentsOp.commentTicket))
-            AgentsRunnerError(runner: calls.runner(AgentsOp.commentTicketTurn))
-            ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteTicket), title: "Delete ticket…") {
+            AgentsRunnerError(runner: calls.runner(AgentsOp.commentTicket, slot: ticket.id))
+            AgentsRunnerError(runner: calls.runner(AgentsOp.commentTicketTurn, slot: ticket.id))
+            AgentsRunButton(runner: calls.runner(AgentsOp.deleteTicket, slot: ticket.id), title: "Delete ticket…") {
                 Task { await model.deleteTicket() }
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTicket), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTicket, slot: ticket.id))
         }
         .font(.callout)
     }
@@ -595,18 +595,18 @@ private struct AgentTagsCard: View {
                     TextField("Title", text: $model.editTagTitle).textFieldStyle(.roundedBorder)
                     TextField("Description", text: $model.editTagDescription).textFieldStyle(.roundedBorder)
                     Button("Save") { Task { await model.saveTag() } }
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteTag), title: "Delete…") {
+                    AgentsRunButton(runner: calls.runner(AgentsOp.deleteTag, slot: model.selectedTagID ?? ""), title: "Delete…") {
                         Task { await model.deleteTag() }
                     }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTag), showsResult: false)
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTag), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTag, slot: model.selectedTagID ?? ""))
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTag, slot: model.selectedTagID ?? ""))
             }
             Divider()
             HStack {
                 TextField("New tag", text: $model.newTagTitle, prompt: Text("Refund")).textFieldStyle(.roundedBorder)
                 TextField("Description", text: $model.newTagDescription, prompt: Text("Optional")).textFieldStyle(.roundedBorder)
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.createTag), title: "Add",
+                AgentsRunButton(runner: calls.runner(AgentsOp.createTag), title: "Add",
                                     disabled: model.newTagTitle.trimmingCharacters(in: .whitespaces).isEmpty) {
                     Task { await model.createTag() }
                 }

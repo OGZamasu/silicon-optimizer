@@ -272,7 +272,8 @@ final class AgentKnowledgeModel {
 
     func loadContent() async {
         guard let selectedID else { return }
-        guard let result = await calls.run(AgentsOp.documentContent, ["documentation_id": .string(selectedID)], quiet: true)
+        guard let result = await calls.run(AgentsOp.documentContent, ["documentation_id": .string(selectedID)],
+                                           slot: selectedID, quiet: true)
         else { return }
         switch result {
         case .text(let text, _): content = text
@@ -286,7 +287,7 @@ final class AgentKnowledgeModel {
         let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, await calls.json(AgentsOp.updateDocument, [
             "documentation_id": .string(selectedID), "name": .string(name),
-        ], slot: "name") != nil else { return }
+        ], slot: "\(selectedID)#name") != nil else { return }
         if var document = list.item(selectedID) {
             document.name = name
             list.upsert(document)
@@ -297,21 +298,23 @@ final class AgentKnowledgeModel {
         guard let selectedID else { return }
         guard await calls.json(AgentsOp.updateDocument, [
             "documentation_id": .string(selectedID), "content": .string(editedContent),
-        ], slot: "content", title: "Edited a document") != nil else { return }
+        ], slot: "\(selectedID)#content", title: "Edited a document") != nil else { return }
         content = editedContent
     }
 
     func replaceFile(_ url: URL) async {
         guard let selectedID else { return }
         guard await calls.json(AgentsOp.replaceDocumentFile, ["documentation_id": .string(selectedID)],
-                               files: ["file": [ElevenLabsFile(url: url)]], title: "Replaced a document's file") != nil
+                               files: ["file": [ElevenLabsFile(url: url)]], slot: selectedID,
+                               title: "Replaced a document's file") != nil
         else { return }
         await select(selectedID)
     }
 
     func refreshFromSource() async {
         guard let selectedID else { return }
-        guard await calls.json(AgentsOp.refreshURLDocument, ["documentation_id": .string(selectedID)]) != nil else { return }
+        guard await calls.json(AgentsOp.refreshURLDocument, ["documentation_id": .string(selectedID)], slot: selectedID) != nil
+        else { return }
         await select(selectedID)
     }
 
@@ -319,7 +322,8 @@ final class AgentKnowledgeModel {
     /// fetched by the app.
     func openSourceFile() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.documentSourceURL, ["documentation_id": .string(selectedID)], quiet: true),
+        guard let json = await calls.json(AgentsOp.documentSourceURL, ["documentation_id": .string(selectedID)],
+                                          slot: selectedID, quiet: true),
               let link = json["signed_url"].stringValue, let url = URL(string: link), url.scheme == "https"
         else { return }
         NSWorkspace.shared.open(url)
@@ -328,21 +332,24 @@ final class AgentKnowledgeModel {
     func move() async {
         guard let selectedID else { return }
         let destination: JSONValue = moveTo.isEmpty ? .null : .string(moveTo)
-        guard await calls.json(AgentsOp.moveDocument, ["document_id": .string(selectedID), "move_to": destination]) != nil
+        guard await calls.json(AgentsOp.moveDocument, ["document_id": .string(selectedID), "move_to": destination],
+                               slot: selectedID) != nil
         else { return }
         await list.refresh()
     }
 
     func loadDependents() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.documentDependents, ["documentation_id": .string(selectedID)], quiet: true)
+        guard let json = await calls.json(AgentsOp.documentDependents, ["documentation_id": .string(selectedID)],
+                                          slot: selectedID, quiet: true)
         else { return }
         dependents = (json["agents"].arrayValue ?? []).map { $0["name"].stringValue ?? $0["id"].stringValue ?? "An agent" }
     }
 
     func loadIndexes() async {
         guard let selectedID else { return }
-        guard let json = await calls.json(AgentsOp.ragIndexes, ["documentation_id": .string(selectedID)], quiet: true)
+        guard let json = await calls.json(AgentsOp.ragIndexes, ["documentation_id": .string(selectedID)], slot: selectedID,
+                                          quiet: true)
         else { return }
         indexes = (json["indexes"].arrayValue ?? []).compactMap(AgentsRAGIndex.init(json:))
     }
@@ -352,7 +359,7 @@ final class AgentKnowledgeModel {
         guard let selectedID, !embeddingModel.isEmpty else { return }
         guard let json = await calls.json(AgentsOp.computeRAGIndex, [
             "documentation_id": .string(selectedID), "model": .string(embeddingModel),
-        ], title: "RAG index") else { return }
+        ], slot: selectedID, title: "RAG index") else { return }
         if let index = AgentsRAGIndex(json: json) {
             indexes.removeAll { $0.id == index.id }
             indexes.append(index)
@@ -364,7 +371,7 @@ final class AgentKnowledgeModel {
         let name = selectedDocument?.name ?? selectedID
         guard await calls.json(
             AgentsOp.deleteRAGIndex, ["documentation_id": .string(selectedID), "rag_index_id": .string(index.id)],
-            subject: "the \(index.model) index of “\(name)”",
+            slot: selectedID, subject: "the \(index.model) index of “\(name)”",
             consequence: "Agents that retrieve from “\(name)” with this model stop finding it until it is indexed again."
         ) != nil else { return }
         indexes.removeAll { $0.id == index.id }
@@ -374,7 +381,7 @@ final class AgentKnowledgeModel {
         guard let selectedID, !embeddingModel.isEmpty else { return }
         guard let json = await calls.json(AgentsOp.documentChunks, [
             "documentation_id": .string(selectedID), "embedding_model": .string(embeddingModel), "page_size": 30,
-        ], quiet: true) else { return }
+        ], slot: selectedID, quiet: true) else { return }
         chunks = (json["chunks"].arrayValue ?? []).compactMap { chunk in
             chunk["id"].stringValue.map {
                 AgentsChunk(id: $0, title: chunk["name"].stringValue ?? $0, content: chunk["content"].stringValue ?? "")
@@ -396,7 +403,7 @@ final class AgentKnowledgeModel {
         if forceDelete { arguments["force"] = true }
         let what = document.isFolder ? "folder" : "document"
         guard await calls.json(
-            AgentsOp.deleteDocument, arguments, subject: "the \(what) “\(document.name)”",
+            AgentsOp.deleteDocument, arguments, slot: selectedID, subject: "the \(what) “\(document.name)”",
             consequence: forceDelete
                 ? "ElevenLabs will delete it even though agents use it, and take it out of those agents."
                     + (document.isFolder ? " Everything inside the folder goes too." : "")
@@ -417,8 +424,7 @@ final class AgentKnowledgeModel {
         guard await calls.json(
             AgentsOp.bulkDeleteDocuments, arguments, subject: AgentsFormat.count(ids.count, "document"),
             consequence: "ElevenLabs will delete \(AgentsFormat.count(ids.count, "document or folder", plural: "documents and folders")). "
-                + (forceDelete ? "Agents using them lose them." : "Any still used by an agent are refused; the rest are deleted."),
-            confirmTitle: "Delete \(AgentsFormat.count(ids.count, "item"))?", confirmLabel: "Delete"
+                + (forceDelete ? "Agents using them lose them." : "Any still used by an agent are refused; the rest are deleted.")
         ) != nil else { return }
         checked = []
         await list.refresh()
@@ -481,7 +487,7 @@ final class AgentKnowledgeModel {
     func cancelCrawl(_ job: AgentsCrawlJob) async {
         guard await calls.json(
             AgentsOp.cancelCrawl, ["crawl_job_id": .string(job.id)], slot: job.id,
-            subject: "the crawl of \(job.url)",
+            subject: "the crawl of \(job.url) and everything it made",
             consequence: "ElevenLabs stops crawling and deletes every document and folder it made."
         ) != nil else { return }
         await refreshCrawl(job.id)
@@ -630,7 +636,7 @@ private struct AgentKnowledgeAddCard: View {
                 }
             }
             .formStyle(.columns)
-            ElevenLabsRunButton(runner: runner, title: model.addKind == .crawl ? "Start crawling" : "Add", disabled: !canAdd) {
+            AgentsRunButton(runner: runner, title: model.addKind == .crawl ? "Start crawling" : "Add", disabled: !canAdd) {
                 Task { await model.add() }
             }
             AgentsRunnerOutput(runner: runner, showsResult: false)
@@ -765,7 +771,7 @@ private struct AgentKnowledgeBrowser: View {
             }
             HStack {
                 Toggle("Even if agents use them", isOn: $model.forceDelete).toggleStyle(.checkbox)
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.bulkDeleteDocuments), title: "Delete…") {
+                AgentsRunButton(runner: model.calls.runner(AgentsOp.bulkDeleteDocuments), title: "Delete…") {
                     Task { await model.bulkDelete() }
                 }
             }
@@ -799,14 +805,14 @@ private struct AgentKnowledgeDocumentView: View {
                 AgentsRunnerError(runner: calls.runner(AgentsOp.getDocument, slot: document.id))
                 HStack {
                     TextField("Name", text: $model.renameText).textFieldStyle(.roundedBorder)
-                    ElevenLabsRunButton(runner: calls.runner(AgentsOp.updateDocument, slot: "name"), title: "Rename",
+                    AgentsRunButton(runner: calls.runner(AgentsOp.updateDocument, slot: "\(document.id)#name"), title: "Rename",
                                         disabled: model.renameText.isEmpty || model.renameText == document.name) {
                         Task { await model.rename() }
                     }
                 }
                 HStack(spacing: 8) {
                     if document.type == "url" {
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.refreshURLDocument), title: "Fetch the page again") {
+                        AgentsRunButton(runner: calls.runner(AgentsOp.refreshURLDocument, slot: document.id), title: "Fetch the page again") {
                             Task { await model.refreshFromSource() }
                         }
                     }
@@ -825,10 +831,10 @@ private struct AgentKnowledgeDocumentView: View {
                     .fixedSize()
                     Button("Move") { Task { await model.move() } }
                 }
-                ForEach([AgentsOp.updateDocument + "#name", AgentsOp.refreshURLDocument, AgentsOp.replaceDocumentFile,
-                         AgentsOp.documentSourceURL, AgentsOp.moveDocument], id: \.self) { key in
-                    let parts = key.split(separator: "#").map(String.init)
-                    AgentsRunnerOutput(runner: calls.runner(parts[0], slot: parts.count > 1 ? parts[1] : ""), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateDocument, slot: "\(document.id)#name"))
+                ForEach([AgentsOp.refreshURLDocument, AgentsOp.replaceDocumentFile, AgentsOp.documentSourceURL,
+                         AgentsOp.moveDocument], id: \.self) {
+                    AgentsRunnerOutput(runner: calls.runner($0, slot: document.id))
                 }
             }
             .task { await model.store.directory.documents.loadIfNeeded() }
@@ -839,17 +845,17 @@ private struct AgentKnowledgeDocumentView: View {
                             .font(.callout)
                             .frame(minHeight: 160)
                             .overlay { RoundedRectangle(cornerRadius: 5).stroke(.separator) }
-                        ElevenLabsRunButton(runner: calls.runner(AgentsOp.updateDocument, slot: "content"), title: "Save text",
+                        AgentsRunButton(runner: calls.runner(AgentsOp.updateDocument, slot: "\(document.id)#content"), title: "Save text",
                                             disabled: model.editedContent == content) {
                             Task { await model.saveContent() }
                         }
-                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateDocument, slot: "content"), showsResult: false)
+                        AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateDocument, slot: "\(document.id)#content"), showsResult: false)
                     } else {
                         ElevenLabsTextBlock(text: content)
                     }
                 } else {
                     Button("Show the content") { Task { await model.loadContent() } }
-                    AgentsRunnerError(runner: calls.runner(AgentsOp.documentContent))
+                    AgentsRunnerError(runner: calls.runner(AgentsOp.documentContent, slot: document.id))
                 }
             }
             AgentsCard("Used by") {
@@ -858,15 +864,15 @@ private struct AgentKnowledgeDocumentView: View {
                 } else {
                     Text(ListFormatter.localizedString(byJoining: model.dependents)).font(.callout)
                 }
-                AgentsRunnerError(runner: calls.runner(AgentsOp.documentDependents))
+                AgentsRunnerError(runner: calls.runner(AgentsOp.documentDependents, slot: document.id))
             }
             ragCard
             AgentsCard("Delete") {
                 Toggle("Even if agents use it", isOn: $model.forceDelete).toggleStyle(.checkbox)
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.deleteDocument), title: "Delete…") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.deleteDocument, slot: document.id), title: "Delete…") {
                     Task { await model.delete() }
                 }
-                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteDocument), showsResult: false)
+                AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteDocument, slot: document.id), showsResult: false)
             }
         }
     }
@@ -879,12 +885,12 @@ private struct AgentKnowledgeDocumentView: View {
                     ForEach(AgentsSchema.choices(AgentsOp.computeRAGIndex, "model"), id: \.self) { Text($0).tag($0) }
                 }
                 .fixedSize()
-                ElevenLabsRunButton(runner: calls.runner(AgentsOp.computeRAGIndex), title: "Index") {
+                AgentsRunButton(runner: calls.runner(AgentsOp.computeRAGIndex, slot: document.id), title: "Index") {
                     Task { await model.computeIndex() }
                 }
                 Button("Show indexes") { Task { await model.loadIndexes() } }
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.computeRAGIndex), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.computeRAGIndex, slot: document.id), showsResult: false)
             ForEach(model.indexes) { index in
                 HStack {
                     Text(index.model).font(.callout)
@@ -895,11 +901,11 @@ private struct AgentKnowledgeDocumentView: View {
                     Button("Delete…") { Task { await model.deleteIndex(index) } }.buttonStyle(.link).font(.caption)
                 }
             }
-            AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteRAGIndex), showsResult: false)
+            AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteRAGIndex, slot: document.id), showsResult: false)
             DisclosureGroup("Chunks") {
                 VStack(alignment: .leading, spacing: 6) {
                     Button("Show chunks") { Task { await model.loadChunks() } }
-                    AgentsRunnerError(runner: calls.runner(AgentsOp.documentChunks))
+                    AgentsRunnerError(runner: calls.runner(AgentsOp.documentChunks, slot: document.id))
                     ForEach(model.chunks) { chunk in
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
@@ -921,9 +927,6 @@ private struct AgentKnowledgeDocumentView: View {
 private struct AgentKnowledgeCrawlsCard: View {
     let model: AgentKnowledgeModel
     @State private var expanded = false
-    /// Cancelling a crawl deletes what it made, but the risk table files it as a change of the
-    /// owner's own resources, so the runner would not ask; this screen does.
-    @State private var cancelling: AgentsCrawlJob?
 
     var body: some View {
         AgentsCard("Site crawls", subtitle: "Whole-site imports in progress and recently finished.") {
@@ -945,7 +948,7 @@ private struct AgentKnowledgeCrawlsCard: View {
                         .buttonStyle(.borderless)
                         .accessibilityLabel("Check the crawl again")
                         if job.status == "queued" || job.status == "processing" {
-                            Button("Cancel…") { cancelling = job }.buttonStyle(.link)
+                            Button("Cancel…") { Task { await model.cancelCrawl(job) } }.buttonStyle(.link)
                         }
                     }
                     AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.cancelCrawl, slot: job.id), showsResult: false)
@@ -954,19 +957,6 @@ private struct AgentKnowledgeCrawlsCard: View {
             }
         }
         .onChange(of: expanded) { if expanded { Task { await model.crawls.loadIfNeeded() } } }
-        .confirmationDialog(
-            "Cancel the crawl of \(cancelling?.url ?? "this site")?",
-            isPresented: Binding(get: { cancelling != nil }, set: { if !$0 { cancelling = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Cancel the crawl and delete what it made", role: .destructive) {
-                if let job = cancelling { Task { await model.cancelCrawl(job) } }
-                cancelling = nil
-            }
-            Button("Keep crawling", role: .cancel) { cancelling = nil }
-        } message: {
-            Text("ElevenLabs stops crawling and deletes every document and folder the crawl made.")
-        }
     }
 }
 
@@ -980,7 +970,7 @@ private struct AgentKnowledgeRetrievalCard: View {
                 TextField("Question", text: $model.testQuery, prompt: Text("What are your opening hours?"))
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { Task { await model.testRetrieval() } }
-                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.ragQuery), title: "Retrieve",
+                AgentsRunButton(runner: model.calls.runner(AgentsOp.ragQuery), title: "Retrieve",
                                     disabled: model.testAgentID.isEmpty || model.testQuery.isEmpty) {
                     Task { await model.testRetrieval() }
                 }
