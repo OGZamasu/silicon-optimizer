@@ -406,6 +406,7 @@ struct ElevenLabsRawAudioPlayerView: View {
                             Text("\(Int(rate)) Hz").tag(rate)
                         }
                     }
+                    .controlSize(.small)
                     .fixedSize()
                 } else {
                     Text("\(Int(rate)) Hz")
