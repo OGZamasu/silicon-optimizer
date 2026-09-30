@@ -144,7 +144,7 @@ struct ElevenLabsToolsTests {
         let cases: [(String, [String: JSONValue], [String])] = [
             ("elevenlabs_speak", ["voice_id": "v"], ["text is required."]),
             ("elevenlabs_speak", ["voice_id": "v", "text": "hi", "voice": "x"], ["no argument named voice"]),
-            ("elevenlabs_speak", ["voice_id": "v", "text": "hi", "seed": .number(18_446_744_073_709_551_615)],
+            ("elevenlabs_speak", ["voice_id": "v", "text": "hi", "seed": .number(18_446_744_073_709_551_616)],
              ["seed must be from 0 to 4294967295."]),
             ("elevenlabs_speak", ["voice_id": .number(3), "text": ""], [
                 "voice_id must be a non-empty string.", "text must be a non-empty string.",
