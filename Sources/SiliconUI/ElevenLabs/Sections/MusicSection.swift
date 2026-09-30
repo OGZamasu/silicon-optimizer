@@ -823,9 +823,9 @@ private struct MusicResultCard: View {
             CreativeCard("Result", systemImage: "play.circle") {
                 if let take = screen.takes.first {
                     if screen.songWords.isEmpty {
-                        ElevenLabsAudioPlayerView(url: take.file, title: take.title).id(take.file)
+                        CreativeAudioResult(take: take)
                     } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.songWords, title: take.title, showsSpeakers: false)
+                        CreativeTimedPlayer(url: take.file, words: screen.songWords, title: take.title, showsSpeakers: false, contentType: take.contentType)
                             .id(take.file)
                     }
                     if !screen.songWaveform.isEmpty { MusicWaveform(samples: screen.songWaveform) }

@@ -217,7 +217,7 @@ struct IsolationScreen: View {
                     if let original = screen.sources[take.id] {
                         ElevenLabsAudioPlayerView(url: original, title: "Before — \(original.lastPathComponent)").id(original)
                     }
-                    ElevenLabsAudioPlayerView(url: take.file, title: "After — voice only").id(take.file)
+                    CreativeAudioResult(take: take, title: "After — voice only")
                     HStack {
                         Button("Transcribe this") {
                             screen.session.transcription.source = take.file

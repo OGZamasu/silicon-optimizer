@@ -247,8 +247,8 @@ struct SpeechScreen: View {
             CreativeRunRow(
                 runner: screen.runner, title: "Generate speech",
                 estimatedCharacters: screen.estimatedCharacters, problems: screen.problems,
-                note: screen.delivery == .stream && !CreativeOutputFormat.isPlayable(screen.effectiveOutputFormat)
-                    ? "Raw \(CreativeOutputFormat.title(screen.effectiveOutputFormat)) cannot be played as it arrives; it is saved to a file."
+                note: screen.delivery == .stream && !CreativeOutputFormat.playsLive(screen.effectiveOutputFormat)
+                    ? "\(CreativeOutputFormat.title(screen.effectiveOutputFormat)) is not played as it arrives; the whole answer is kept and plays when it is done."
                     : nil
             ) {
                 Task { await screen.generate() }
@@ -366,11 +366,14 @@ struct SpeechScreen: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+                if let problem = runner.streamPlayer?.problem {
+                    Text(problem).font(.caption).foregroundStyle(.secondary)
+                }
                 if let take = screen.takes.first {
                     if screen.words.isEmpty {
-                        ElevenLabsAudioPlayerView(url: take.file, title: take.title).id(take.file)
+                        CreativeAudioResult(take: take)
                     } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false)
+                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false, contentType: take.contentType)
                             .id(take.file)
                         subtitleExports
                     }

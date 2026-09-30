@@ -737,6 +737,15 @@ struct CreativeScreenTests {
         for raw in ["pcm_44100", "ulaw_8000", "alaw_8000"] {
             #expect(CreativeOutputFormat.playabilityNote(raw) != nil, "\(raw)")
         }
+        // Streams: the shell's player decodes MP3 and raw PCM as they arrive, nothing else.
+        #expect(CreativeOutputFormat.playsLive("mp3_44100_128"))
+        #expect(CreativeOutputFormat.playsLive("pcm_24000"))
+        #expect(!CreativeOutputFormat.playsLive("ulaw_8000"))
+        #expect(!CreativeOutputFormat.playsLive("opus_48000_64"))
+        // A finished raw take gets the file row that says it cannot play, not a broken player.
+        #expect(CreativeAudioResult(url: URL(fileURLWithPath: "take.pcm"), contentType: "audio/pcm").isRaw)
+        #expect(CreativeAudioResult(url: URL(fileURLWithPath: "take.ulaw"), contentType: "application/octet-stream").isRaw)
+        #expect(!CreativeAudioResult(url: URL(fileURLWithPath: "take.mp3"), contentType: "audio/mpeg").isRaw)
     }
 
     // MARK: - Session

@@ -554,10 +554,17 @@ enum CreativeOutputFormat {
         !(id.hasPrefix("pcm_") || id.hasPrefix("ulaw_") || id.hasPrefix("alaw_"))
     }
 
+    /// Whether a stream in this format plays as it arrives: the shell's stream player decodes
+    /// MP3 and raw PCM live; other formats are only kept.
+    static func playsLive(_ id: String) -> Bool {
+        id.hasPrefix("mp3_") || id.hasPrefix("pcm_") || id == "auto"
+    }
+
     /// Said under a format picker when the choice cannot be played in the app.
     static func playabilityNote(_ id: String) -> String? {
-        isPlayable(id) ? nil
-            : "\(title(id)) arrives without a header: it is saved to a file, but the player here cannot open it."
+        guard !isPlayable(id) else { return nil }
+        return "\(title(id)) has no header: the file is kept, but the player here cannot open it"
+            + (id.hasPrefix("pcm_") ? " (streamed, it still plays as it arrives)." : ".")
     }
 }
 
@@ -579,24 +586,38 @@ struct CreativeOutputFormatPicker: View {
 // MARK: - Timed text
 
 /// A player for a file with timed words under it: the word being heard is marked, and a
-/// line's time jumps there.
+/// line's time jumps there. Raw audio, which cannot play here, gets the words alone.
 struct CreativeTimedPlayer: View {
     let url: URL
     let words: [CreativeTimedWord]
     var title: String?
     var showsSpeakers = true
+    var contentType: String
 
     @State private var player: ElevenLabsAudioPlayer
 
-    init(url: URL, words: [CreativeTimedWord], title: String? = nil, showsSpeakers: Bool = true) {
+    init(url: URL, words: [CreativeTimedWord], title: String? = nil, showsSpeakers: Bool = true,
+         contentType: String = "audio/mpeg") {
         self.url = url
         self.words = words
         self.title = title
         self.showsSpeakers = showsSpeakers
+        self.contentType = contentType
         _player = State(initialValue: ElevenLabsAudioPlayer(url: url))
     }
 
     var body: some View {
+        if ElevenLabsFileResult.isRawAudio(url: url, contentType: contentType.lowercased()) {
+            VStack(alignment: .leading, spacing: 10) {
+                CreativeAudioResult(url: url, contentType: contentType, title: title)
+                CreativeTranscriptView(segments: CreativeTimeline.segments(words), showsSpeakers: showsSpeakers)
+            }
+        } else {
+            playing
+        }
+    }
+
+    private var playing: some View {
         VStack(alignment: .leading, spacing: 10) {
             CreativePlayerBar(player: player, title: title)
             CreativeTranscriptView(
@@ -732,6 +753,42 @@ struct CreativeTranscriptView: View {
 
 // MARK: - Takes
 
+/// A take's audio: a player, or — for raw PCM, μ-law or A-law, which has no header — the
+/// shell's file row that says so.
+struct CreativeAudioResult: View {
+    let url: URL
+    let contentType: String
+    var bytes: Int = 0
+    var title: String?
+
+    init(take: CreativeTake, title: String? = nil) {
+        url = take.file
+        contentType = take.contentType
+        bytes = take.bytes
+        self.title = title ?? take.title
+    }
+
+    init(url: URL, contentType: String, bytes: Int = 0, title: String? = nil) {
+        self.url = url
+        self.contentType = contentType
+        self.bytes = bytes
+        self.title = title
+    }
+
+    var isRaw: Bool { ElevenLabsFileResult.isRawAudio(url: url, contentType: contentType.lowercased()) }
+
+    var body: some View {
+        if isRaw {
+            VStack(alignment: .leading, spacing: 4) {
+                if let title { Text(title).font(.callout.weight(.medium)).lineLimit(1) }
+                ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes)
+            }
+        } else {
+            ElevenLabsAudioPlayerView(url: url, title: title).id(url)
+        }
+    }
+}
+
 /// A result a screen made this session, kept so earlier takes stay one click away.
 struct CreativeTake: Identifiable, Hashable, Sendable {
     let id = UUID()
@@ -788,7 +845,7 @@ struct CreativeTakesList: View {
                                     .accessibilityLabel("Remove \(take.title) from the list")
                                 }
                             }
-                            ElevenLabsAudioPlayerView(url: take.file).id(take.file)
+                            CreativeAudioResult(take: take, title: nil)
                         }
                     }
                 }

@@ -127,7 +127,7 @@ struct SoundEffectsScreen: View {
             if screen.runner.phase != .idle || !screen.takes.isEmpty {
                 CreativeCard("Result", systemImage: "play.circle") {
                     if let take = screen.takes.first {
-                        ElevenLabsAudioPlayerView(url: take.file, title: take.title).id(take.file)
+                        CreativeAudioResult(take: take)
                         if let meta = screen.runner.result?.meta { ElevenLabsMetaLine(meta: meta) }
                     }
                     ElevenLabsRunnerOutput(runner: screen.runner, showsResult: false)

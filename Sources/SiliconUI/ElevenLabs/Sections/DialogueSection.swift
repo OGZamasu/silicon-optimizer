@@ -423,9 +423,9 @@ struct DialogueScreen: View {
             CreativeCard("Result", systemImage: "play.circle") {
                 if let take = screen.takes.first {
                     if screen.words.isEmpty {
-                        ElevenLabsAudioPlayerView(url: take.file, title: take.title).id(take.file)
+                        CreativeAudioResult(take: take)
                     } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false)
+                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false, contentType: take.contentType)
                             .id(take.file)
                     }
                     if !screen.segments.isEmpty {
