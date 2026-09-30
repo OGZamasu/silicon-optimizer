@@ -310,7 +310,18 @@ struct ShellExplorerTests {
 
         @MainActor
         init(replies: [FakeElevenLabsTransport.Reply] = []) {
-            transport = FakeElevenLabsTransport(replies: replies)
+            self.init(transport: FakeElevenLabsTransport(replies: replies))
+        }
+
+        /// Answers through `handler`, for tests that decide when an answer arrives.
+        @MainActor
+        init(handler: @escaping @Sendable (ElevenLabsRequest) async throws -> FakeElevenLabsTransport.Reply) {
+            self.init(transport: FakeElevenLabsTransport(handler: handler))
+        }
+
+        @MainActor
+        init(transport: FakeElevenLabsTransport) {
+            self.transport = transport
             let client = ElevenLabsClient(credentials: credentials, region: .global, transport: transport, sink: sink)
             self.client = client
             pane = ElevenLabsPaneState(defaults: nil, client: { client })

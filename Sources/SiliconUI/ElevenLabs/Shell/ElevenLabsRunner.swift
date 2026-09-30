@@ -108,6 +108,11 @@ final class ElevenLabsRunner: Identifiable {
     @ObservationIgnored private let context: Context
     @ObservationIgnored private var task: Task<ElevenLabsResult, any Error>?
     @ObservationIgnored private var pendingConfirmation: CheckedContinuation<Bool, Never>?
+    /// Which run owns the runner's state. Every run takes a new one, and so does Cancel; a
+    /// run's frame that wakes up — from its answer, a late completion, a withdrawn question —
+    /// under another number touches nothing, so it can never mark a newer run cancelled,
+    /// failed or done.
+    @ObservationIgnored private var generation = 0
 
     init(operation: ElevenLabsOperation, context: Context) {
         self.operation = operation
@@ -135,7 +140,8 @@ final class ElevenLabsRunner: Identifiable {
     /// What running it costs, for the Run button's caption. Nil for free operations.
     var costNote: String? { ElevenLabsCostNote.text(for: operation) }
 
-    /// Starts a run and returns at once; watch `phase`. See `perform`.
+    /// Starts a run and returns at once; watch `phase`. See `perform`, including what happens
+    /// to a run already in flight.
     func run(
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
         subject: String? = nil, consequence: String? = nil
@@ -144,8 +150,12 @@ final class ElevenLabsRunner: Identifiable {
     }
 
     /// Checks `arguments`, asks for confirmation when the operation's risk calls for it,
-    /// runs, and returns the answer — nil when it was refused, declined, cancelled or failed
-    /// (see `phase`, `problems` and `failure`).
+    /// runs, and returns the answer — nil when it was refused, declined, cancelled, failed or
+    /// replaced by a newer run (see `phase`, `problems` and `failure`).
+    ///
+    /// A run started while another is in flight replaces it: the old request is cancelled (or
+    /// its question withdrawn), its `perform` returns nil, and nothing it does afterwards — not
+    /// even a request that completes after the cancel — reaches this runner's state.
     ///
     /// - Parameters:
     ///   - subject: What the operation acts on, in words ("the voice “Rachel”", "12 phone
@@ -157,7 +167,9 @@ final class ElevenLabsRunner: Identifiable {
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
         subject: String? = nil, consequence: String? = nil
     ) async -> ElevenLabsResult? {
-        guard phase != .running, phase != .awaitingConfirmation else { return nil }
+        if phase == .running || phase == .awaitingConfirmation { abandonCurrentRun() }
+        generation += 1
+        let run = generation
         self.arguments = arguments
         self.files = files
         problems = []
@@ -184,7 +196,9 @@ final class ElevenLabsRunner: Identifiable {
             let request = ElevenLabsConfirmationRequest.make(
                 for: operation, subject: subject, consequence: consequence, call: apiCall
             )
-            guard await askForConfirmation(request) else {
+            let answer = await askForConfirmation(request, run: run)
+            guard run == generation else { return nil }
+            guard answer else {
                 phase = .idle
                 return nil
             }
@@ -203,7 +217,12 @@ final class ElevenLabsRunner: Identifiable {
                 try await ElevenLabsStreamCollector.collect(
                     client.stream(operation.id, arguments: arguments, files: files),
                     operation: operation, sink: sink, player: player,
-                    progress: { bytes in await MainActor.run { self?.receivedBytes = bytes } }
+                    progress: { bytes in
+                        await MainActor.run {
+                            guard let self, self.generation == run else { return }
+                            self.receivedBytes = bytes
+                        }
+                    }
                 )
             }
         } else {
@@ -213,12 +232,13 @@ final class ElevenLabsRunner: Identifiable {
 
         do {
             let answer = try await task.value
+            guard run == generation else { return nil }
             self.task = nil
             return succeed(answer)
         } catch {
+            guard run == generation else { return nil }
             self.task = nil
-            if Task.isCancelled || phase == .cancelled || (error as? ElevenLabsError) == .cancelled
-                || error is CancellationError {
+            if Task.isCancelled || (error as? ElevenLabsError) == .cancelled || error is CancellationError {
                 phase = .cancelled
                 finishedAt = Date()
                 return nil
@@ -244,9 +264,11 @@ final class ElevenLabsRunner: Identifiable {
             return
         }
         guard phase == .running else { return }
+        generation += 1
         phase = .cancelled
         finishedAt = Date()
         task?.cancel()
+        task = nil
         stopStreamPlayer()
     }
 
@@ -274,14 +296,32 @@ final class ElevenLabsRunner: Identifiable {
 
     // MARK: - Steps
 
-    private func askForConfirmation(_ request: ElevenLabsConfirmationRequest) async -> Bool {
+    private func askForConfirmation(_ request: ElevenLabsConfirmationRequest, run: Int) async -> Bool {
         confirmation = request
         phase = .awaitingConfirmation
         context.pane?.present(self)
         let answer = await withCheckedContinuation { pendingConfirmation = $0 }
-        confirmation = nil
-        context.pane?.dismissConfirmation(of: self)
+        // A newer run may already be asking its own question; leave that one on screen.
+        if run == generation {
+            confirmation = nil
+            context.pane?.dismissConfirmation(of: self)
+        }
         return answer
+    }
+
+    /// Lets go of the run in flight so a new one can start clean: its request is cancelled,
+    /// or its question withdrawn, and its frame — whenever it wakes — finds another
+    /// generation and leaves everything alone.
+    private func abandonCurrentRun() {
+        generation += 1
+        task?.cancel()
+        task = nil
+        stopStreamPlayer()
+        if confirmation != nil {
+            confirmation = nil
+            context.pane?.dismissConfirmation(of: self)
+        }
+        resolveConfirmation(false)
     }
 
     /// Whether this runner's host must show its confirmation itself: only when there is no
