@@ -2,11 +2,16 @@ import Foundation
 
 /// Where the owner's ElevenLabs account lives. The key is only ever sent to one of these
 /// hosts, over https — the allowlist is this enum, and nothing else can name a host.
+///
+/// Five hosts. The default routes each request to the nearest ElevenLabs region; US-only opts
+/// out of that routing with the same account and key. The three residency regions are
+/// isolated workspaces with keys of their own: a key from one does not work on another.
 public enum ElevenLabsRegion: String, Sendable, Codable, CaseIterable, Identifiable, Hashable {
     case global = "api.elevenlabs.io"
     case us = "api.us.elevenlabs.io"
     case eu = "api.eu.residency.elevenlabs.io"
     case india = "api.in.residency.elevenlabs.io"
+    case singapore = "api.sg.residency.elevenlabs.io"
 
     public var id: String { rawValue }
     public var host: String { rawValue }
@@ -14,13 +19,25 @@ public enum ElevenLabsRegion: String, Sendable, Codable, CaseIterable, Identifia
     public var displayName: String {
         switch self {
         case .global: "Global (default)"
-        case .us: "United States"
+        case .us: "US only"
         case .eu: "EU data residency"
         case .india: "India data residency"
+        case .singapore: "Singapore data residency"
+        }
+    }
+
+    /// A residency region: an isolated workspace whose keys work nowhere else.
+    public var isResidency: Bool {
+        switch self {
+        case .global, .us: false
+        case .eu, .india, .singapore: true
         }
     }
 
     public var baseURL: URL { URL(string: "https://\(host)")! }
+
+    /// The WebSocket origin for the same region: the REST base with `https` changed to `wss`.
+    public var webSocketBaseURL: URL { URL(string: "wss://\(host)")! }
 
     /// Every host the key may be sent to.
     public static let allowedHosts: Set<String> = Set(allCases.map(\.host))
