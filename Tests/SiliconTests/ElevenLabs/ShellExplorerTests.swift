@@ -264,6 +264,50 @@ struct ShellExplorerTests {
         #expect(fixture.sink.written == [url])
     }
 
+    /// The `…/stream/with-timestamps` answer is JSON chunks carrying base64 audio. The audio
+    /// is saved as the format asked for — not as `.json` because the stream was JSON — and
+    /// the timings stay in the result.
+    @Test func aStreamWithTimingsIsSavedAsTheAudioItCarries() async throws {
+        let first = Data([0x10, 0x20, 0x30]), second = Data([0x40, 0x50])
+        func chunk(_ audio: Data, _ characters: [String]) -> Data {
+            JSONValue.object([
+                "audio_base64": .string(audio.base64EncodedString()),
+                "alignment": .object([
+                    "characters": .array(characters.map(JSONValue.string)),
+                    "character_start_times_seconds": [0, 0.1],
+                    "character_end_times_seconds": [0.1, 0.2],
+                ]),
+            ]).encoded() + Data("\n".utf8)
+        }
+        let body = [chunk(first, ["H", "i"]), chunk(second, ["!", " "])]
+        for (format, ext, type) in [("pcm_24000", "pcm", "audio/pcm"), (nil, "mp3", "audio/mpeg")] {
+            let fixture = Fixture(replies: [.init(
+                status: 200, headers: ["content-type": "application/json"], body: body.reduce(Data(), +), chunks: body
+            )])
+            defer { fixture.clean() }
+            let runner = try #require(ElevenLabsRunner(operationID: "text_to_speech_stream_with_timestamps", context: fixture.context))
+            runner.streamMode = .play
+            var arguments: [String: JSONValue] = ["voice_id": "v1", "text": "Hi!"]
+            if let format { arguments["output_format"] = .string(format) }
+            let result = try #require(await runner.perform(arguments: arguments))
+            #expect(runner.phase == .succeeded)
+            guard case .parts(let parts, _) = result else {
+                Issue.record("expected audio and timings, got \(result)")
+                continue
+            }
+            let files = parts.compactMap { part -> (URL, String)? in
+                if case .file(let url, let contentType, _) = part { (url, contentType) } else { nil }
+            }
+            #expect(files.count == 1)
+            #expect(files.first?.0.pathExtension == ext)
+            #expect(files.first?.1 == type)
+            #expect(try files.first.map { try Data(contentsOf: $0.0) } == first + second)
+            let timings = parts.compactMap { part -> JSONValue? in if case .json(let value) = part { value } else { nil } }
+            #expect(timings.flatMap { $0["alignment"]["characters"].arrayValue ?? [] }.compactMap(\.stringValue) == ["H", "i", "!", " "])
+            #expect(fixture.sink.written.map(\.pathExtension) == [ext])
+        }
+    }
+
     @Test func aCollectedStreamGoesThroughCall() async throws {
         let fixture = Fixture(replies: [.audio(Data([9, 9]), chunks: [Data([9]), Data([9])])])
         defer { fixture.clean() }

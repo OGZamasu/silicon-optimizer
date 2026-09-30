@@ -217,6 +217,7 @@ final class ElevenLabsRunner: Identifiable {
                 try await ElevenLabsStreamCollector.collect(
                     client.stream(operation.id, arguments: arguments, files: files),
                     operation: operation, sink: sink, player: player,
+                    outputFormat: arguments["output_format"]?.stringValue,
                     progress: { bytes in
                         await MainActor.run {
                             guard let self, self.generation == run else { return }
