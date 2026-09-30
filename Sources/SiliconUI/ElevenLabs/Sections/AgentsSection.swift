@@ -406,7 +406,27 @@ final class AgentsModel {
     }
 
     /// Keeps the edits as a draft on the branch on screen instead of committing a version.
+    /// When the draft newly gives the agent an MCP server or webhook tool, asks first, as Save
+    /// does: the draft goes live the day it is merged or deployed.
     func saveAsDraft() async {
+        let outside = newOutsideConnections()
+        guard !outside.isEmpty else {
+            await commitDraft()
+            return
+        }
+        let what = outside.count == 1 ? outside[0].line : AgentsFormat.count(outside.count, "outside service")
+        questions.ask(AgentsQuestion(
+            title: "Keep a draft that lets “\(draft.name)” send callers' words to \(what)?",
+            message: "Once this draft is merged or deployed, the agent may call "
+                + ListFormatter.localizedString(byJoining: outside.map(\.line))
+                + ", passing on what callers say. Only connect services you trust.",
+            confirmLabel: "Keep the draft"
+        )) { [weak self] in
+            await self?.commitDraft()
+        }
+    }
+
+    private func commitDraft() async {
         guard let selectedID, let branchID else { return }
         switch draftBody() {
         case .failure(let refusal):
@@ -1574,6 +1594,28 @@ final class AgentsBranchesModel {
         await openProposal(id)
     }
 
+    /// Asks first: merging a proposal changes its target branch — usually main, what live
+    /// callers hear.
+    func requestAcceptProposal(agentName: String) {
+        guard let id = selectedProposalID else { return }
+        let listed = proposals.first { $0.id == id }
+        let title = proposal["title"].stringValue ?? listed?.title ?? "this proposal"
+        let sourceID = proposal["source_branch_id"].stringValue ?? listed?.sourceBranchID
+        let targetID = proposal["target_branch_id"].stringValue ?? listed?.targetBranchID
+        let source = branches.first { $0.id == sourceID }?.name ?? sourceID ?? "its branch"
+        let target = branches.first { $0.id == targetID }
+        let targetName = target?.name ?? targetID ?? "its target"
+        let live = target.flatMap { $0.livePercentage }.map { $0 > 0 ? " It answers \(Int($0)) % of calls now." : "" } ?? ""
+        questions.ask(AgentsQuestion(
+            title: "Merge “\(title)” (“\(source)”) into “\(targetName)” of “\(agentName)”?",
+            message: "Callers of “\(agentName)” who reach “\(targetName)” hear the merged configuration from their next "
+                + "conversation.\(live)" + (archiveSourceOnMerge ? " “\(source)” is archived afterwards." : ""),
+            confirmLabel: "Merge"
+        )) { [weak self] in
+            await self?.acceptProposal()
+        }
+    }
+
     func acceptProposal() async {
         guard let id = selectedProposalID else { return }
         guard await json(AgentsOp.acceptMergeProposal, [
@@ -1925,8 +1967,8 @@ private struct AgentsBranchesTab: View {
                     Button("Request changes") { Task { await model.review(approve: false) } }
                 }
                 HStack {
-                    AgentsRunButton(runner: model.runner(AgentsOp.acceptMergeProposal), title: "Merge it") {
-                        Task { await model.acceptProposal() }
+                    AgentsRunButton(runner: model.runner(AgentsOp.acceptMergeProposal), title: "Merge it…") {
+                        model.requestAcceptProposal(agentName: agentName)
                     }
                     Button("Close proposal") { Task { await model.closeProposal() } }
                 }

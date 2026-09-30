@@ -214,6 +214,58 @@ struct AgentsSectionsTests {
         #expect(problem.hasPrefix("The fetched configuration has masked values (conversation_config.agent.prompt.custom_llm.api_key)"))
     }
 
+    /// Round 2 (a): a value only partly masked ("Bearer ‹redacted›") is caught too.
+    @Test func aDraftIsRefusedForAPartlyMaskedValue() async throws {
+        let masked = AgentsJSON.setting(.string("Bearer " + ElevenLabsRedaction.placeholder),
+                                        at: "conversation_config.agent.prompt.custom_llm.request_headers.Authorization",
+                                        in: AgentsFixtures.agent)
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.getAgent: .json(masked)])
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        model.draft.firstMessage = "Hi there!"
+        await model.saveAsDraft()
+        #expect(rig.requests(AgentsOp.createDraft).isEmpty)
+        #expect(model.draftProblem?.contains("conversation_config.agent.prompt.custom_llm.request_headers.Authorization") == true)
+    }
+
+    /// Round 2 (d): a draft that newly gives the agent an MCP server asks as Save does.
+    @Test func aDraftThatAddsAnMCPServerAsksFirst() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        await rig.store.directory.mcpServers.refresh()
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        model.draft.mcpServerIDs = [AgentsFixtures.serverID]
+        await model.saveAsDraft()
+        let question = try #require(model.questions.question)
+        #expect(question.title == "Keep a draft that lets “Support” send callers' words to Order system (mcp.example.com)?")
+        #expect(question.message.contains("Once this draft is merged or deployed"))
+        #expect(rig.requests(AgentsOp.createDraft).isEmpty)
+        await model.questions.answer(true)
+        #expect(rig.requests(AgentsOp.createDraft).count == 1)
+    }
+
+    /// Round 2: merging a merge proposal changes its target (usually main) and asks first.
+    @Test func mergingAProposalAsksNamingItsTargetAndWhatGoesLive() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        await branches.openProposal("mp_1")
+        branches.requestAcceptProposal(agentName: "Support")
+        let question = try #require(model.questions.question)
+        #expect(question.title == "Merge “Warmer greeting” (“Warmer tone”) into “Main” of “Support”?")
+        #expect(question.message.contains("It answers 100 % of calls now."))
+        await model.questions.answer(false)
+        #expect(rig.requests(AgentsOp.acceptMergeProposal).isEmpty)
+        branches.requestAcceptProposal(agentName: "Support")
+        await model.questions.answer(true)
+        #expect(rig.requests(AgentsOp.acceptMergeProposal).count == 1)
+    }
+
     /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
     /// out, so Save asks first, naming where.
     @Test func savingAnAgentWithANewMCPServerOrWebhookToolAsksFirst() async throws {
@@ -297,6 +349,13 @@ struct AgentsSectionsTests {
         #expect(plain.recipients.allSatisfy { $0.variables.isEmpty })
         #expect(AgentsBatchRecipients.parse("name,email\nA,a@example.com", whatsApp: false).problems.first?.contains("phone_number") == true)
         #expect(AgentsBatchRecipients.parse("PHONE_NUMBER,x\n+15550123,y", whatsApp: false).recipients.count == 1)
+    }
+
+    /// Round 2 (b): Windows line ends count once, so problems name the right line.
+    @Test func windowsLineEndsCountAsOneLine() {
+        let parsed = AgentsBatchRecipients.parse("phone_number,Name\r\n+15550131,Ana\r\nnope,Ben\r\n", whatsApp: false)
+        #expect(parsed.recipients.count == 1)
+        #expect(parsed.problems == ["Line 3: “nope” is not a phone number."])
     }
 
     /// Review B-3: only ASCII digits make a number; separators are refused, not merged.
@@ -771,6 +830,27 @@ struct AgentsSectionsTests {
             let found = AgentsOutsideAddress(address)
             #expect(found.isAllowed, "\(address)")
             #expect(found.warnings.contains { $0.contains(word) }, "\(address): \(found.warnings)")
+        }
+    }
+
+    /// Round 2 (c): the same machines written other ways, over https too.
+    @Test func loopbackAndPrivateHostsAreRecognisedHoweverWritten() {
+        let cases: [(String, String)] = [
+            ("https://[::ffff:127.0.0.1]/sse", "loopback"), ("https://[::ffff:7f00:1]/sse", "loopback"),
+            ("https://localhost./sse", "loopback"), ("https://2130706433/sse", "loopback"),
+            ("https://0x7f000001/sse", "loopback"), ("https://0177.0.0.1/sse", "loopback"), ("https://127.1/sse", "loopback"),
+            ("https://[fe80::1]/sse", "link-local"), ("https://2852039166/latest", "link-local"),
+            ("https://[fd12:3456::1]/sse", "private"), ("https://[::ffff:10.0.0.5]/sse", "private"),
+            ("https://10.1/sse", "private"), ("https://0xc0a80001/sse", "private"),
+        ]
+        for (address, word) in cases {
+            let found = AgentsOutsideAddress(address)
+            #expect(found.isAllowed, "\(address)")
+            #expect(found.warnings.contains { $0.contains(word) }, "\(address): \(found.warnings)")
+            #expect(!found.warnings.contains { $0.contains("plain http") }, "\(address) is https")
+        }
+        for address in ["https://8.8.8.8/sse", "https://mcp.example.com/sse", "https://[2001:db8::1]/sse", "https://1000.example.com/x"] {
+            #expect(AgentsOutsideAddress(address).warnings.isEmpty, "\(address)")
         }
     }
 

@@ -597,11 +597,12 @@ enum AgentsJSON {
         }
     }
 
-    /// The dotted paths of every string equal to `text` (the redaction placeholder, say).
+    /// The dotted paths of every string holding `text` (the redaction placeholder, say), whole or
+    /// in part ("Bearer ‹redacted›").
     static func paths(of text: String, in value: JSONValue, prefix: String = "") -> [String] {
         switch value {
         case .string(let string):
-            return string == text ? [prefix.isEmpty ? "(the whole answer)" : prefix] : []
+            return string.contains(text) ? [prefix.isEmpty ? "(the whole answer)" : prefix] : []
         case .object(let object):
             return object.keys.sorted().flatMap { paths(of: text, in: object[$0] ?? .null, prefix: prefix.isEmpty ? $0 : "\(prefix).\($0)") }
         case .array(let array):
@@ -675,36 +676,98 @@ struct AgentsOutsideAddress: Equatable, Sendable {
         if scheme == "http" {
             warnings.append("It is plain http: what callers say, and any token, travel unencrypted.")
         }
-        if Self.isLoopback(host) {
-            warnings.append("It points at this Mac or another machine's own loopback (\(host)); ElevenLabs cannot reach it.")
-        } else if Self.isLinkLocal(host) {
+        switch Self.kind(of: host) {
+        case .loopback:
+            warnings.append("It points at a machine's own loopback (\(host)); ElevenLabs cannot reach this Mac there.")
+        case .linkLocal:
             warnings.append("It is a link-local address (\(host)), such as a cloud metadata service.")
-        } else if Self.isPrivate(host) {
+        case .privateNetwork:
             warnings.append("It is a private-network address (\(host)).")
+        case .public:
+            break
         }
     }
 
     var isAllowed: Bool { refusal == nil }
 
-    static func isLoopback(_ host: String) -> Bool {
-        host == "localhost" || host.hasSuffix(".localhost") || host.hasPrefix("127.") || host == "::1" || host == "[::1]"
-            || host == "0.0.0.0"
+    enum Kind: Equatable {
+        case loopback, linkLocal, privateNetwork, `public`
     }
 
-    static func isLinkLocal(_ host: String) -> Bool {
-        host.hasPrefix("169.254.") || host.hasPrefix("fe80:") || host.hasPrefix("[fe80:")
-    }
-
-    static func isPrivate(_ host: String) -> Bool {
-        if host.hasSuffix(".local") || host.hasSuffix(".internal") || host.hasSuffix(".lan") { return true }
-        if host.hasPrefix("10.") || host.hasPrefix("192.168.") { return true }
-        if host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("[fc") || host.hasPrefix("[fd") {
-            return host.contains(":")
+    /// What a host is, whatever way it is written: a name (`localhost`, `localhost.`, `.local`),
+    /// dotted, decimal, hex or octal IPv4 (`127.1`, `2130706433`, `0x7f000001`, `0177.0.0.1`),
+    /// or IPv6 including IPv4-mapped (`::1`, `::ffff:127.0.0.1`, `fe80::…`, `fd00::…`).
+    static func kind(of rawHost: String) -> Kind {
+        var host = rawHost.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        while host.hasSuffix(".") { host.removeLast() }
+        if host == "localhost" || host.hasSuffix(".localhost") { return .loopback }
+        if host.hasSuffix(".local") || host.hasSuffix(".internal") || host.hasSuffix(".lan") || host.hasSuffix(".home.arpa") {
+            return .privateNetwork
         }
-        let parts = host.split(separator: ".").compactMap { Int($0) }
-        if parts.count == 4, parts[0] == 172, (16...31).contains(parts[1]) { return true }
-        if parts.count == 4, parts[0] == 100, (64...127).contains(parts[1]) { return true }
-        return false
+        if host.contains(":") {
+            if let mapped = ipv4Mapped(host) { return kind(ofIPv4: mapped) }
+            if host == "::1" || host == "0:0:0:0:0:0:0:1" { return .loopback }
+            if host == "::" { return .loopback }
+            if host.hasPrefix("fe8") || host.hasPrefix("fe9") || host.hasPrefix("fea") || host.hasPrefix("feb") { return .linkLocal }
+            if host.hasPrefix("fc") || host.hasPrefix("fd") { return .privateNetwork }
+            return .public
+        }
+        if let address = ipv4(host) { return kind(ofIPv4: address) }
+        return .public
+    }
+
+    static func kind(ofIPv4 address: UInt32) -> Kind {
+        let a = address >> 24, b = (address >> 16) & 0xFF
+        if a == 127 || address == 0 { return .loopback }
+        if a == 169 && b == 254 { return .linkLocal }
+        if a == 10 || (a == 172 && (16...31).contains(b)) || (a == 192 && b == 168) || (a == 100 && (64...127).contains(b)) {
+            return .privateNetwork
+        }
+        return .public
+    }
+
+    /// An IPv4 address as `inet_aton` reads it: one to four parts, each decimal, `0x` hex or
+    /// leading-zero octal, the last part filling the remaining bytes.
+    static func ipv4(_ host: String) -> UInt32? {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard (1...4).contains(parts.count) else { return nil }
+        var values: [UInt64] = []
+        for part in parts {
+            guard !part.isEmpty else { return nil }
+            let value: UInt64?
+            if part.hasPrefix("0x") {
+                value = UInt64(part.dropFirst(2), radix: 16)
+            } else if part.count > 1, part.hasPrefix("0") {
+                value = UInt64(part.dropFirst(), radix: 8)
+            } else {
+                value = UInt64(part, radix: 10)
+            }
+            guard let value else { return nil }
+            values.append(value)
+        }
+        var address: UInt64 = 0
+        for (index, value) in values.enumerated() {
+            if index == values.count - 1 {
+                let remainingBytes = 4 - index
+                guard value < (UInt64(1) << (8 * UInt64(remainingBytes))) else { return nil }
+                address = (address << (8 * UInt64(remainingBytes))) | value
+            } else {
+                guard value < 256 else { return nil }
+                address = (address << 8) | value
+            }
+        }
+        return UInt32(truncatingIfNeeded: address)
+    }
+
+    /// The IPv4 address inside an IPv4-mapped IPv6 host (`::ffff:127.0.0.1`, `::ffff:7f00:1`).
+    static func ipv4Mapped(_ host: String) -> UInt32? {
+        guard host.hasPrefix("::ffff:") else { return nil }
+        let rest = String(host.dropFirst("::ffff:".count))
+        if rest.contains(".") { return ipv4(rest) }
+        let groups = rest.split(separator: ":").compactMap { UInt32($0, radix: 16) }
+        guard groups.count == 2, groups.allSatisfy({ $0 <= 0xFFFF }) else { return nil }
+        return (groups[0] << 16) | groups[1]
     }
 }
 

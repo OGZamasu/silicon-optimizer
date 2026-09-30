@@ -114,7 +114,9 @@ enum AgentsBatchRecipients {
 
     static func parse(_ text: String, whatsApp: Bool) -> Parsed {
         // Line numbers count every line, blank ones too, so a problem points where the owner looks.
-        let numbered = text.components(separatedBy: .newlines).enumerated()
+        // Windows (CRLF) and old Mac (CR) line ends count as one line end each.
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let numbered = normalized.components(separatedBy: "\n").enumerated()
             .map { (number: $0.offset + 1, text: $0.element) }
             .filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
         guard let first = numbered.first else { return Parsed(recipients: [], problems: [], duplicates: 0) }
