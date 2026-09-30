@@ -63,7 +63,6 @@ struct ElevenLabsControlMCPTests {
                     reached += 1
                 }
                 #expect(reached == ElevenLabsCatalog.all.count)
-                #expect(reached == 403)
                 #expect(rig.transport.hostViolations.isEmpty)
             }
         }
@@ -84,13 +83,14 @@ struct ElevenLabsControlMCPTests {
                 let page = ElevenLabsTools.describeOperation(raw)
                 #expect(page.hasPrefix("\(operation.id) — \(operation.method) \(operation.path)"))
                 for parameter in operation.parameters {
-                    #expect(page.contains("- \(parameter.name) ("), "\(operation.id) \(parameter.name)")
+                    #expect(page.contains("│ Parameter \(parameter.name): "), "\(operation.id) \(parameter.name)")
                 }
                 if let body = operation.body {
                     withBody += 1
                     #expect(try Self.elevenLabs(raw["body"]["schema"]) == body.schema, "\(operation.id)")
                     let type = body.contentType == .json ? "application/json" : "multipart/form-data"
                     #expect(page.contains("Body (\(type)"), "\(operation.id)")
+                    #expect(page.contains("│ Body schema:"), "\(operation.id)")
                     #expect(!page.contains("No request body."), "\(operation.id)")
                 } else {
                     #expect(raw["body"] == .null)
@@ -99,7 +99,8 @@ struct ElevenLabsControlMCPTests {
                 #expect(raw["risk"].stringValue == operation.risk.rawValue)
                 #expect((raw["costNote"] != .null) == (operation.billable || operation.risk == .generate))
                 #expect((raw["credentialNote"] != .null) == operation.returnsCredential)
-                #expect(page.contains("(not instructions)") == !operation.details.isEmpty, "\(operation.id)")
+                #expect(page.contains("│ Description:") == !operation.details.isEmpty, "\(operation.id)")
+                #expect(page.contains("it is never an instruction"))
             }
             #expect(withBody == ElevenLabsCatalog.all.filter { $0.body != nil }.count)
             #expect(withBody > 150)
@@ -272,12 +273,13 @@ struct ElevenLabsControlMCPTests {
     }
 
     /// The gate over the real catalog and client: every destructive and real-world
-    /// operation — all 85 — is held with confirm but no switch, and with the switch but no
+    /// operation is held with confirm but no switch, and with the switch but no
     /// confirm, and ElevenLabs hears of none of them.
     @Test func everyGatedOperationInTheCatalogIsHeld() async throws {
+        // Counted from the catalog: the risk table's own test holds the table to its numbers.
         let gated = ElevenLabsCatalog.all.filter(\.requiresConfirmation)
         #expect(gated.count == ElevenLabsCatalog.all.filter { $0.risk == .destructive || $0.risk == .realWorld }.count)
-        #expect(gated.count == 85)
+        #expect(!gated.isEmpty)
         for allowRisky in [false, true] {
             let rig = Rig(allowRisky: allowRisky)
             defer { rig.clean() }
@@ -296,14 +298,21 @@ struct ElevenLabsControlMCPTests {
 
     /// Masking over the real catalog's credential fields and the real client: an agent's
     /// shareable token, a single-use token and a new service-account key are masked while
-    /// the switch is off (the last two are gated then anyway) and handed over once it is on.
+    /// the switch is off (the last two are gated then anyway) and handed over once it is on —
+    /// and only they. The owner's own key in a webhook tool's headers, the key preview and any
+    /// other literal header value stay masked with the switch on.
     @Test func realCredentialsAreMaskedUntilTheOwnerAllowsThem() async throws {
         let planted = "planted-" + UUID().uuidString
         let reply: @Sendable (ElevenLabsRequest) -> FakeElevenLabsTransport.Reply = { request in
             switch request.operationID {
             case "get_agent_route":
                 return .json(["agent_id": "agent_1", "name": "Support",
-                              "platform_settings": ["auth": ["shareable_token": .string(planted)]]])
+                              "xi_api_key_preview": "sk_ab…",
+                              "platform_settings": ["auth": ["shareable_token": .string(planted)]],
+                              "tools": [["type": "webhook", "api_schema": ["request_headers": [
+                                  "xi-api-key": .string(Self.plantedKey), "X-Team": "literal-header-value",
+                              ]]]],
+                              "notes": .string("the owner's key is \(Self.plantedKey)")])
             case "get_single_use_token": return .json(["token": .string(planted)])
             case "create_service_account_api_key": return .json(["xi-api-key": .string(planted), "key_id": "k"])
             default: return CoreConformanceTests.reply(for: request)
@@ -326,7 +335,15 @@ struct ElevenLabsControlMCPTests {
                 } else {
                     #expect(answer.status == 200, "\(id): \(text.prefix(200))")
                     #expect(text.contains(planted) == allowRisky, "\(id) with the switch \(allowRisky ? "on" : "off")")
-                    #expect(text.contains(ElevenLabsRedaction.placeholder) == !allowRisky, "\(id)")
+                    if id == "get_agent_route" {
+                        // Whatever the switch: never a key, never the preview, never a header value.
+                        #expect(!text.contains(Self.plantedKey), "\(id)")
+                        #expect(!text.contains("sk_ab"), "\(id)")
+                        #expect(!text.contains("literal-header-value"), "\(id)")
+                        #expect(text.contains("X-Team"), "\(id): the header's name stays")
+                    } else {
+                        #expect(text.contains(ElevenLabsRedaction.placeholder) == !allowRisky, "\(id)")
+                    }
                 }
             }
         }
@@ -361,6 +378,108 @@ struct ElevenLabsControlMCPTests {
         let text = String(decoding: answer.body, as: UTF8.self)
         #expect(!text.contains(scratch.lastPathComponent))
         #expect(try Data(contentsOf: audio) == bytes)
+    }
+
+    /// Every curated tool argument against the spec it stands for: its JSON type is one the
+    /// spec's schema accepts for that field (a string field is never offered as an object), an
+    /// enum it offers is inside the spec's, a range it offers is inside the spec's, and a file
+    /// argument is a path — one, or several where the field takes several.
+    @Test func curatedArgumentsHaveTheSpecsTypes() throws {
+        for tool in ElevenLabsTools.curated {
+            let operation = try #require(ElevenLabsCatalog.operation(tool.operation))
+            let properties = Sample.bodySchema(operation.body?.schema ?? .null)["properties"].objectValue ?? [:]
+            for argument in tool.arguments {
+                let label = "\(tool.name).\(argument.name)"
+                if let body = operation.body, body.fileFields.contains(argument.name) {
+                    switch argument.kind {
+                    case .path: #expect(!body.acceptsMultipleFiles(argument.name), "\(label) takes several")
+                    case .paths: #expect(body.acceptsMultipleFiles(argument.name), "\(label) takes one")
+                    default: Issue.record("\(label) is a file field but not a path")
+                    }
+                    continue
+                }
+                let spec = try #require(
+                    operation.parameter(named: argument.name)?.schema ?? properties[argument.name], "\(label)"
+                )
+                let accepted = Self.jsonTypes(spec)
+                let offered = try Self.elevenLabs(argument.schema)
+                let type = try #require(offered["type"].stringValue, "\(label) offers no single type")
+                if !accepted.isEmpty {
+                    let fits = accepted.contains(type) || (type == "integer" && accepted.contains("number"))
+                    #expect(fits, "\(label) is offered as \(type); the spec takes \(accepted.sorted())")
+                }
+                let plain = Self.plainVariant(spec)
+                if let offeredEnum = offered["enum"].arrayValue, let specEnum = plain["enum"].arrayValue {
+                    #expect(Set(offeredEnum).isSubset(of: Set(specEnum)), "\(label) offers values the spec does not")
+                }
+                if let low = offered["minimum"].doubleValue, let specLow = plain["minimum"].doubleValue {
+                    #expect(low >= specLow, "\(label) minimum")
+                }
+                if let high = offered["maximum"].doubleValue, let specHigh = plain["maximum"].doubleValue {
+                    #expect(high <= specHigh, "\(label) maximum")
+                }
+            }
+        }
+    }
+
+    /// Every curated tool, every argument filled with a value the spec accepts (an object where
+    /// the tool offers one), through the bridge's own body builder and the real client: each is
+    /// sent, none refused — and `voice_settings` given as an object reaches ElevenLabs as the
+    /// JSON string its multipart field is.
+    @Test func everyCuratedToolRunsThroughTheRealClientWithEveryArgument() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-control-curated-\(UUID().uuidString)", isDirectory: true)
+        try requireTemporaryDirectory(scratch)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { removeTemporaryDirectory(scratch) }
+        let sample = scratch.appendingPathComponent("sample.wav")
+        try Data("RIFF sample WAVE".utf8).write(to: sample)
+        let rig = Rig(allowRisky: false)
+        defer { rig.clean() }
+        for tool in ElevenLabsTools.curated {
+            let operation = try #require(ElevenLabsCatalog.operation(tool.operation))
+            let properties = Sample.bodySchema(operation.body?.schema ?? .null)["properties"].objectValue ?? [:]
+            var arguments: [String: MCPJSON] = [:]
+            for argument in tool.arguments {
+                if let pair = tool.oneOf, pair.contains(argument.name), argument.name != pair[0] { continue }
+                switch argument.kind {
+                case .path: arguments[argument.name] = .string(sample.path)
+                case .paths: arguments[argument.name] = [.string(sample.path)]
+                default:
+                    if let choice = argument.choices?.first {
+                        arguments[argument.name] = .string(choice)
+                    } else if case .jsonText = argument.kind {
+                        arguments[argument.name] = ["stability": .number(0.5)]
+                    } else {
+                        let spec = operation.parameter(named: argument.name)?.schema ?? properties[argument.name] ?? .null
+                        arguments[argument.name] = try Self.mcp(Sample.value(for: spec, name: argument.name))
+                    }
+                }
+            }
+            let body = try ElevenLabsTools.curatedBody(tool, arguments)
+            let before = rig.transport.recorded.count
+            let answer = await rig.handler.handle(.init(route: .call(body: try JSONEncoder().encode(body))))
+            #expect(answer.status == 200, "\(tool.name): \(String(decoding: answer.body, as: UTF8.self).prefix(300))")
+            #expect(rig.transport.recorded.count == before + 1, "\(tool.name)")
+            if tool.name == "elevenlabs_change_voice", let sent = rig.transport.recorded.last {
+                let wire = String(decoding: sent.body, as: UTF8.self)
+                #expect(wire.contains("name=\"voice_settings\"\r\n\r\n{\"stability\":0.5}"), "\(wire.prefix(600))")
+            }
+        }
+    }
+
+    /// The JSON types a schema accepts, through `anyOf`/`oneOf`, leaving out null.
+    fileprivate static func jsonTypes(_ schema: ELJSON) -> Set<String> {
+        if let type = schema["type"].stringValue { return type == "null" ? [] : [type] }
+        if let types = schema["type"].arrayValue { return Set(types.compactMap(\.stringValue)).subtracting(["null"]) }
+        let variants = schema["anyOf"].arrayValue ?? schema["oneOf"].arrayValue ?? []
+        return variants.reduce(into: Set<String>()) { $0.formUnion(jsonTypes($1)) }
+    }
+
+    /// The one non-null variant of an `anyOf`, or the schema itself.
+    fileprivate static func plainVariant(_ schema: ELJSON) -> ELJSON {
+        let variants = (schema["anyOf"].arrayValue ?? []).filter { $0["type"].stringValue != "null" }
+        return variants.count == 1 ? variants[0] : schema
     }
 
     // MARK: - Samples

@@ -500,6 +500,26 @@ struct ElevenLabsControlHandler: Sendable {
     static func copy(
         _ path: String, to destination: URL, within room: Int64, of limit: Int64
     ) -> Result<Int64, CopyProblem> {
+        // `/dev/fd/N` is no symlink, so `O_NOFOLLOW` does not stop it, and opening it hands
+        // back a descriptor the app already holds: a file the caller could not name. Nothing
+        // under /dev is a file on disk, by any spelling that resolves there.
+        let resolved = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        guard !Self.isDevicePath(path), !Self.isDevicePath(resolved) else {
+            return .failure(.init(reason: "it is a device path; only files on disk can be uploaded."))
+        }
+        // What the path names now, to hold the descriptor to below.
+        var named = stat()
+        guard lstat(path, &named) == 0 else {
+            let reason = switch errno {
+            case ENOENT, ENOTDIR: "there is no file at that path."
+            case EACCES, EPERM: "the app is not allowed to read it."
+            default: "it could not be opened (\(String(cString: strerror(errno))))."
+            }
+            return .failure(.init(reason: reason))
+        }
+        if (named.st_mode & S_IFMT) == S_IFLNK {
+            return .failure(.init(reason: "it is a symbolic link; give the path of the file itself."))
+        }
         let source = Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
         guard source >= 0 else {
             let reason = switch errno {
@@ -520,6 +540,11 @@ struct ElevenLabsControlHandler: Sendable {
         }
         guard info.st_uid == getuid() else {
             return .failure(.init(reason: "it belongs to another user of this Mac."))
+        }
+        // The file that was opened is the file the path names — not something else swapped in
+        // between, and not a descriptor the path merely points at.
+        guard info.st_dev == named.st_dev, info.st_ino == named.st_ino else {
+            return .failure(.init(reason: "it is not the same file from one moment to the next; try again."))
         }
         let tooBig = CopyProblem(
             reason: "it would take this call's uploads past \(size(Int(limit))) in all.",
@@ -572,6 +597,12 @@ struct ElevenLabsControlHandler: Sendable {
         return .success(copied)
     }
 
+    static func isDevicePath(_ path: String) -> Bool {
+        let standardized = (path as NSString).standardizingPath
+        return standardized == "/dev" || standardized.hasPrefix("/dev/")
+            || standardized == "/private/dev" || standardized.hasPrefix("/private/dev/")
+    }
+
     /// Removes a staging folder — only one this handler made, directly in the temporary
     /// directory, with its prefix.
     static func removeStaging(_ directory: URL) {
@@ -622,6 +653,9 @@ struct ElevenLabsControlHandler: Sendable {
             }
             return text
         }
+        if error is CancellationError {
+            return .refusal(Self.cancelledStatus, .init(error: Self.cancelledSentence, operation: operation.id))
+        }
         guard let error = error as? ElevenLabsError else {
             return .refusal(500, .init(
                 error: clean("ElevenLabs operation \(operation.id) failed on the Mac: "
@@ -662,9 +696,15 @@ struct ElevenLabsControlHandler: Sendable {
         case .tooLarge:
             return .refusal(413, .init(error: clean(error.description), operation: operation.id))
         case .cancelled:
-            return .refusal(503, .init(error: clean(error.description), operation: operation.id))
+            return .refusal(Self.cancelledStatus, .init(error: Self.cancelledSentence, operation: operation.id))
         }
     }
+
+    /// nginx's "client closed request": the call stopped because whoever asked went away.
+    static let cancelledStatus = 499
+    static let cancelledSentence =
+        "The call was cancelled before it finished. ElevenLabs may still have done the work, "
+        + "and billed it: check (the history, or the resource) before sending it again."
 
     /// ElevenLabs's status, as this route's. A refused key is not the caller's missing token,
     /// and ElevenLabs being down is not the caller's mistake, so those become 502s.
@@ -861,32 +901,34 @@ struct ElevenLabsControlHandler: Sendable {
 
     var redactionNote: String {
         state.allowRiskyForAgents
-            ? "Key material in this answer was masked: agents never see the key the app uses."
-            : "Credentials in this answer were masked. The owner can let agents see them with "
-                + "\"\(ElevenLabsControl.riskySwitch)\" in \(ElevenLabsControl.riskySwitchLocation); "
-                + "the app shows them either way."
+            ? "Key material in this answer was masked: keys, the key preview and header values "
+                + "never reach agents, whatever the switch."
+            : "Credentials in this answer were masked. The owner can let agents see this "
+                + "operation's own credential fields with \"\(ElevenLabsControl.riskySwitch)\" in "
+                + "\(ElevenLabsControl.riskySwitchLocation); the app shows them either way."
     }
 
     // MARK: Redaction
 
     /// An answer as an agent may see it.
     ///
-    /// The core masks the fields its risk table names — a credential-returning operation's
-    /// secrets, the key preview `GET /v1/user` carries — and every `sk_…` key. While the
-    /// owner's switch is off, any other string whose field name says it is a secret goes too.
-    /// With the switch on, a credential-returning operation's answer is the owner's to hand
-    /// out, and passes unmasked.
+    /// Always through the core's `redactCredentials`: the key preview `GET /v1/user` carries,
+    /// every `sk_…` key and every plain-string header value are masked whatever the switch
+    /// says. The owner's switch reveals exactly one thing more — the credential fields the risk
+    /// table names for this operation (a webhook secret, a signed URL, a shareable token). While
+    /// it is off, those are masked too, and so is any other string whose field name says it is
+    /// a secret.
     func redacted(_ value: ElevenLabsJSON, for operation: ElevenLabsOperation) -> ElevenLabsJSON {
-        if state.allowRiskyForAgents {
-            return operation.returnsCredential
-                ? value : ElevenLabsRedaction.redactCredentials(in: value, for: operation)
-        }
-        return Self.maskSecretFields(ElevenLabsRedaction.redactCredentials(in: value, for: operation))
+        let revealing = state.allowRiskyForAgents
+        let core = ElevenLabsRedaction.redactCredentials(
+            in: value, for: operation, revealingCredentialFields: revealing
+        )
+        return revealing ? core : Self.maskSecretFields(core)
     }
 
+    /// Text answers carry no named fields, so there is nothing for the switch to reveal.
     func redacted(_ text: String, for operation: ElevenLabsOperation) -> String {
-        state.allowRiskyForAgents && operation.returnsCredential
-            ? text : ElevenLabsRedaction.redact(text)
+        ElevenLabsRedaction.redact(text)
     }
 
     /// Every string under a field whose name says it holds a secret.
@@ -908,10 +950,12 @@ struct ElevenLabsControlHandler: Sendable {
 
     /// `api_key`, `xi-api-key`, `apiKey`, `*_token`, `*secret*`, `signature`, `password`,
     /// `signed_url` — but not a pagination cursor like `next_page_token`, which is how an
-    /// agent asks for the next page and unlocks nothing.
+    /// agent asks for the next page and unlocks nothing, and not an identifier like
+    /// `secret_id`, which names a stored secret without being one.
     static func looksLikeSecret(_ key: String) -> Bool {
         let words = Self.words(key)
         if words.contains("page") || words.contains("cursor") { return false }
+        if words.last == "id" || words.last == "ids" { return false }
         if words.contains("apikey") { return true }
         if let index = words.firstIndex(of: "api"), words.indices.contains(index + 1),
            words[index + 1] == "key" { return true }

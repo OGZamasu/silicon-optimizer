@@ -226,7 +226,7 @@ struct ElevenLabsControlHandlerTests {
             (.api(status: 500, code: nil, message: "Oops", requestID: nil), 502),
             (.rateLimited(retryAfter: 7), 429), (.network("offline"), 502),
             (.refusedHost("example.com"), 502), (.tooLarge("big"), 413),
-            (.notLinked, 409), (.credentialUnavailable("locked"), 503), (.cancelled, 503),
+            (.notLinked, 409), (.credentialUnavailable("locked"), 503), (.cancelled, 499),
         ]
         for (error, status) in cases {
             let answer = await ELFixture.handler(backend: RecordingBackend(failure: error))
@@ -239,6 +239,46 @@ struct ElevenLabsControlHandlerTests {
                 #expect(refusal.requestID == requestID)
             }
             if case .rateLimited = error { #expect(refusal.retryAfterSeconds == 7) }
+        }
+    }
+
+    /// A call cut short — the MCP client went away — is a 499 in the usual error shape, saying
+    /// the work may have been done anyway, not a 500 quoting a Swift error type.
+    @Test func aCancelledCallSaysSoRatherThanFailing() async throws {
+        for backend in [
+            RecordingBackend { _ in throw CancellationError() }, RecordingBackend(failure: .cancelled),
+        ] {
+            let answer = await ELFixture.handler(backend: backend).call(ELFixture.body("speak"))
+            #expect(answer.status == 499)
+            let refusal = try ELFixture.decode(ElevenLabsWire.Refusal.self, answer)
+            #expect(refusal.error == ElevenLabsControlHandler.cancelledSentence)
+            #expect(refusal.operation == "speak")
+            #expect(!refusal.error.contains("CancellationError"))
+        }
+    }
+
+    /// With the owner's switch on, a credential-returning operation's own credential field is
+    /// handed over — and nothing else: a key, the key preview and a literal header value in the
+    /// same answer stay masked.
+    @Test func theSwitchRevealsTheNamedCredentialAndNothingElse() async throws {
+        let key = "sk_" + String(repeating: "c0ffee", count: 8)
+        let answer: JSON = [
+            "token": "shareable-agent-token", "note": .string("uses \(key)"),
+            "xi_api_key_preview": "sk_c0…",
+            "request_headers": ["Authorization": "Bearer literal-header-value", "X-Auth": ["secret_id": "s1"]],
+        ]
+        for allowed in [false, true] {
+            let result = await ELFixture.handler(
+                backend: RecordingBackend(result: .json(answer, .init(status: 200))), allowRisky: allowed
+            ).call(ELFixture.body("agent_link"))
+            let text = String(decoding: result.body, as: UTF8.self)
+            let json = try ELFixture.json(result)["json"]
+            #expect((json["token"] == "shareable-agent-token") == allowed)
+            #expect(!text.contains(key))
+            #expect(json["xi_api_key_preview"] == .string(ElevenLabsRedaction.placeholder))
+            #expect(json["request_headers"]["Authorization"] == .string(ElevenLabsRedaction.placeholder))
+            // A reference to a stored secret is not the secret: it stays.
+            #expect(json["request_headers"]["X-Auth"] == ["secret_id": "s1"])
         }
     }
 
@@ -339,7 +379,7 @@ struct ElevenLabsControlHandlerTests {
             #expect(ElevenLabsControlHandler.looksLikeSecret(key), "\(key)")
         }
         for key in ["next_page_token", "pageToken", "cursor_token", "voice_id", "tokenizer", "keys",
-                    "key_id", "api_version", "signed"] {
+                    "key_id", "api_version", "signed", "secret_id", "tokenId", "api_key_ids"] {
             #expect(!ElevenLabsControlHandler.looksLikeSecret(key), "\(key)")
         }
     }

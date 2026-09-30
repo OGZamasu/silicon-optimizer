@@ -80,7 +80,7 @@ struct ElevenLabsControlUploadTests {
                 (linkToFolder.path, "symbolic link"),
                 (linkToFile.path, "symbolic link"),
                 (pipe.path, "not a regular file"),
-                ("/dev/null", "not a regular file"),
+                ("/dev/null", "device path"),
                 ("relative/voice.wav", "the path must be absolute"),
             ]
             for (path, says) in cases {
@@ -106,6 +106,34 @@ struct ElevenLabsControlUploadTests {
             #expect(answer.status == 400)
             #expect(try ELFixture.decode(ElevenLabsWire.Refusal.self, answer).problems?.count == 2)
             #expect(backend.calls.isEmpty)
+        }
+    }
+
+    /// `/dev/fd/N` is not a symlink, so `O_NOFOLLOW` lets it through, and it opens a
+    /// descriptor the app already holds — a file the caller never named. Refused, however it is
+    /// spelled: directly, through `/dev/stdin`, through a folder link into /dev, or as
+    /// /private/dev; and the app's open file is never read.
+    @Test func aDescriptorTheAppHoldsCannotBeUploadedByAnySpelling() async throws {
+        try await withScratch { scratch in
+            let secret = scratch.appendingPathComponent("app-private-state.db")
+            try Data("app state \(UUID().uuidString)".utf8).write(to: secret)
+            let descriptor = open(secret.path, O_RDONLY)
+            try #require(descriptor >= 0)
+            defer { close(descriptor) }
+            let intoDev = scratch.appendingPathComponent("devlink")
+            try FileManager.default.createSymbolicLink(at: intoDev, withDestinationURL: URL(fileURLWithPath: "/dev"))
+            for path in [
+                "/dev/fd/\(descriptor)", "/dev/stdin", "/dev/fd/0", "/private/dev/fd/\(descriptor)",
+                intoDev.appendingPathComponent("fd/\(descriptor)").path, "/dev/../dev/fd/\(descriptor)",
+            ] {
+                let backend = RecordingBackend()
+                let answer = await ELFixture.handler(backend: backend).call(
+                    ELFixture.body("isolate", files: [("audio", path)])
+                )
+                #expect(answer.status == 400, "\(path)")
+                #expect(try ELFixture.decode(ElevenLabsWire.Refusal.self, answer).error.contains("device path"), "\(path)")
+                #expect(backend.calls.isEmpty, "\(path)")
+            }
         }
     }
 
