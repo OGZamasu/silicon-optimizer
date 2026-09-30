@@ -636,6 +636,87 @@ struct CreativeScreenTests {
         #expect(rig.session.alignment.source == audio)
     }
 
+    // MARK: - History
+
+    @Test func historyFiltersBecomeArgumentsAndPagesFollowTheLastItem() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.queue(HistoryScreenModel.list,
+                  .json(["history": [Self.historyItem("h1"), Self.historyItem("h2")], "has_more": true, "last_history_item_id": "h2"]),
+                  .json(["history": [Self.historyItem("h3")], "has_more": false]))
+        let history = rig.session.history
+        history.search = "hello"
+        history.voiceID = "voice-rachel"
+        history.source = "TTS"
+        history.sortDirection = "asc"
+        history.since = Date(timeIntervalSince1970: 1_700_000_000)
+        let arguments = history.listArguments()
+        #expect(arguments["date_after_unix"] == 1_700_000_000)
+        #expect(arguments["page_size"] == 100)
+        #expect(CreativeSpec.unknownArguments(arguments, for: try #require(ElevenLabsCatalog.operation(HistoryScreenModel.list))).isEmpty)
+        await history.refresh()
+        #expect(history.items.map(\.id) == ["h1", "h2"])
+        #expect(history.hasMore)
+        await history.loadMore()
+        #expect(history.items.map(\.id) == ["h1", "h2", "h3"])
+        #expect(!history.hasMore)
+        let query = try #require(rig.requests(HistoryScreenModel.list).last?.request.url.query)
+        #expect(query.contains("start_after_history_item_id=h2"))
+        #expect(history.items[0].characters == 12)
+    }
+
+    @Test func historyItemsPlayDownloadDeleteAndGoBackToSpeech() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(HistoryScreenModel.list, .json(["history": [Self.historyItem("h1"), Self.historyItem("h2")], "has_more": false]))
+        rig.always(HistoryScreenModel.audio, .audio(CreativeRig.wavData(seconds: 0.3), contentType: "audio/wav"))
+        rig.always(HistoryScreenModel.download, .init(status: 200, headers: ["content-type": "application/zip"], body: Data("PK".utf8)))
+        let history = rig.session.history
+        await history.refresh()
+        await history.fetchAudio(history.items[0])
+        #expect(history.audioFiles["h1"] != nil)
+        history.selection = ["h2", "h1"]
+        history.downloadFormat = "wav"
+        #expect(history.downloadArguments() == ["history_item_ids": ["h1", "h2"], "output_format": "wav"])
+        await history.downloadSelected()
+        #expect(history.download?.pathExtension == "zip")
+
+        let deleting = Task { await history.delete(history.items[1]) }
+        try await CreativeRig.waitUntil { history.deleteRunner.phase == .awaitingConfirmation }
+        #expect(history.deleteRunner.confirmation?.title == "Delete the history item “Hello from h2”?")
+        history.deleteRunner.decline()
+        await deleting.value
+        #expect(rig.requests(HistoryScreenModel.delete).isEmpty)
+
+        history.reuseInSpeech(history.items[0])
+        #expect(rig.session.speech.text == "Hello from h1")
+        #expect(rig.session.speech.voiceID == "voice-rachel")
+        #expect(rig.session.speech.modelID == "eleven_flash_v2_5")
+    }
+
+    // MARK: - Models
+
+    @Test func modelsAreReadAndFilteredByWhatTheyCanDoAndSpeak() async {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(ModelsScreenModel.list, .json(CreativeRig.modelsJSON))
+        let screen = rig.session.modelsScreen
+        await screen.directory.loadIfNeeded()
+        #expect(screen.shown.count == 3)
+        screen.required = [.voiceConversion]
+        #expect(screen.shown.map(\.id) == ["eleven_english_sts_v2"])
+        screen.required = []
+        screen.search = "japanese"
+        #expect(screen.shown.map(\.id) == ["eleven_multilingual_v2"])
+        let flash = rig.session.models.model(id: "eleven_flash_v2_5")
+        #expect(flash?.characterCostMultiplier == 0.5)
+        #expect(flash?.languageSummary == ListFormatter.localizedString(byJoining: ["English", "French"]))
+        await screen.directory.loadIfNeeded()
+        #expect(rig.requests(ModelsScreenModel.list).count == 1, "fetched once per session")
+        screen.useForSpeech(flash!)
+        #expect(rig.session.speech.modelID == "eleven_flash_v2_5")
+    }
+
     // MARK: - Controls
 
     @Test func finelySteppedSlidersRoundInsteadOfDrawingTicks() {

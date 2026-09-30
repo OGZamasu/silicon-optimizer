@@ -21,11 +21,24 @@ struct CreativeSpecTests {
         case .isolation: IsolationScreenModel.self
         case .transcription: TranscriptionScreenModel.self
         case .alignment: AlignmentScreenModel.self
+        case .history: HistoryScreenModel.self
+        case .models: ModelsScreenModel.self
         default: nil
         }
     }
 
-    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation, .transcription, .alignment])
+    /// The sections this builder owns: the pane's Create category, exactly.
+    @Test func theCreativeScreensAreTheCreateCategory() {
+        #expect(ElevenLabsSectionCategory.create.sections
+                == [.speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation, .transcription,
+                    .alignment, .history, .models])
+        for section in ElevenLabsSectionCategory.create.sections {
+            #expect(Self.model(for: section) != nil, "\(section) has no screen model")
+        }
+    }
+
+    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation,
+                      .transcription, .alignment, .history, .models])
     func everyControlSetsARealArgumentOfARealOperation(section: ElevenLabsSection) throws {
         let model = try #require(Self.model(for: section))
         for control in model.controls {
@@ -39,7 +52,8 @@ struct CreativeSpecTests {
         }
     }
 
-    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation, .transcription, .alignment])
+    @Test(arguments: [ElevenLabsSection.speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation,
+                      .transcription, .alignment, .history, .models])
     func everyOperationOfTheSectionIsReachableFromItsScreen(section: ElevenLabsSection) throws {
         let model = try #require(Self.model(for: section))
         let claimed = Set(section.operations.map(\.id))

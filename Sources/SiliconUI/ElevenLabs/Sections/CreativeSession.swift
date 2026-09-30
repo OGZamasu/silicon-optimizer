@@ -35,6 +35,8 @@ final class CreativeSession {
     lazy var isolation = IsolationScreenModel(session: self)
     lazy var transcription = TranscriptionScreenModel(session: self)
     lazy var alignment = AlignmentScreenModel(session: self)
+    lazy var history = HistoryScreenModel(session: self)
+    lazy var modelsScreen = ModelsScreenModel(session: self)
     /// Pronunciation dictionaries, for Speech and Dialogue to attach.
     lazy var dictionaries = CreativeDictionaryDirectory(
         runner: Self.runner("get_pronunciation_dictionaries_metadata", context: context, records: false)
