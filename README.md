@@ -96,7 +96,9 @@ image rendering is on Auto.
 
 Type a line and hear it: LuxTTS, Kokoro 82M and Sesame CSM 1B all run locally. There is a
 music model and a sound-effect model beside them, and Whisper large-v3 turbo and Parakeet
-turn speech back into text — from a file or live from the microphone.
+turn speech back into text — from a file or live from the microphone. Link an ElevenLabs API
+key in Settings and the whole ElevenLabs API — voices, speech, music, dubbing, agents and the
+rest — is there too, in its own pane and over MCP ([how it works](docs/ELEVENLABS.md)).
 
 ### Makes video, and characters that perform
 
@@ -1787,11 +1789,11 @@ Scripts/build-app.sh --install  # ...and replace the copy in ~/Applications
 
 Local builds are signed ad hoc, and macOS files an ad-hoc app under a hash of that exact build.
 The Keychain does too, so after every rebuild the app has to ask for your login password again
-before it can read the saved Hugging Face token or TypeSafe key, and "Always Allow" only lasts
-until the next build. Sign with an Apple-issued identity and the app is filed under your Team ID
-instead: the first build signed that way asks once more, and later builds don't ask at all. A
-free Apple Development certificate is enough (Xcode → Settings → Accounts → your Apple ID →
-Manage Certificates → + → Apple Development):
+before it can read the saved Hugging Face token, TypeSafe key or ElevenLabs key, and "Always
+Allow" only lasts until the next build. Sign with an Apple-issued identity and the app is filed
+under your Team ID instead: the first build signed that way asks once more, and later builds
+don't ask at all. A free Apple Development certificate is enough (Xcode → Settings → Accounts →
+your Apple ID → Manage Certificates → + → Apple Development):
 
 ```bash
 security find-identity -v -p codesigning   # copy the "Apple Development: …" name
