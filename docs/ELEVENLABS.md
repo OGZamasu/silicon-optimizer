@@ -306,7 +306,7 @@ refused too.
 |---|---|
 | `GET /elevenlabs/status` | `linked`, `region`, `regionName`, `agentsMayRunRiskyActions`, `riskySwitch`, `operations`, the last `account` balance the app checked (never fetched by this route), and a `note` |
 | `GET /elevenlabs/operations?q=&group=&risk=&limit=` | `total`, `returned`, `operations` (id, method, path, group, summary, risk, billable, returnsCredential, requiresConfirmation, deprecated, supportsStreaming, fileFields), and every `group` with its count. `q`: every word must appear in the id, path, method, summary or group. `limit`: 1–500, default 50. A bad filter is a 400 naming every problem |
-| `GET /elevenlabs/operations/{id}` | Everything needed to call it: `parameters` (name, in, required, description, schema, default), `body` (contentType, required, schema, fileFields, multipleFileFields), `response` (kind and what the call returns), `risk` and `riskDescription`, `costNote`, `credentialNote`, `confirmationNote`, an `example` call with placeholders, and `vendorDescription` — ElevenLabs's own text, returned as data and labelled so. Unknown id: 404 with `closeMatches` |
+| `GET /elevenlabs/operations/{id}` | Everything needed to call it: `parameters` (name, in, required, description, schema, default), `body` (contentType, required, schema, fileFields, multipleFileFields), `response` (kind and what the call returns), `risk` and `riskDescription`, `costNote`, `credentialNote`, `confirmationNote`, an `example` call with placeholders, and `vendorDescription` — ElevenLabs's own text, returned as data and labelled so. `elevenlabs_describe_operation` prints every piece of ElevenLabs's text — summary, description, parameter descriptions and schemas, the body schema with its field and enum descriptions — inside one fence whose boundary is random per call and whose every line starts with `│`, so no text in the spec can close it early. Unknown id: 404 with `closeMatches` |
 | `POST /elevenlabs/call` | Runs one operation: `{"operation": id, "arguments": {…}, "files": [{"field", "path"}], "confirm": false}` |
 
 Every refusal is `{"error": "…"}` — what every control client already reads — plus, where they
@@ -325,9 +325,11 @@ apply, `operation`, `risk`, `summary`, `setting`, `closeMatches`, `problems`, `u
    is missing. Nothing is read or sent.
 4. **The link.** No key linked: 409 "ElevenLabs is not connected."
 5. **Uploads.** Each `files` entry must name one of the operation's multipart file fields (one file
-   where the schema takes one). Each path is opened on the Mac without following a final symbolic
-   link or waiting on a pipe, must be a regular file of this user's, and all of a call's uploads
-   together must fit in 3 GiB (413 past it). It is copied through that same descriptor into a
+   where the schema takes one). Nothing under `/dev` is accepted, by any spelling that resolves
+   there (`/dev/fd/N` would open a descriptor the app already holds). Each path is opened on the
+   Mac without following a final symbolic link or waiting on a pipe, must be the same file the
+   path named a moment before (device and inode), must be a regular file of this user's, and all
+   of a call's uploads together must fit in 3 GiB (413 past it). It is copied through that same descriptor into a
    private folder — a clone where the volume allows — and the copy is what is sent, under the
    file's own name; the folder is removed when the call ends. Problems are named by position and
    field (`files[1] (audio)`), never by path, and no path ever appears in an answer.
@@ -336,7 +338,9 @@ apply, `operation`, `risk`, `summary`, `setting`, `closeMatches`, `problems`, `u
 Client errors become statuses a caller can act on: invalid arguments 400 with every problem;
 ElevenLabs's 404/409/413 as they are and 422 as 400; a refused key, a permission error or an
 ElevenLabs outage 502 with `upstreamStatus`; rate limits 429 with `retryAfterSeconds`; an unreadable
-Keychain 503. Every message is redacted of anything key-shaped and of every upload path.
+Keychain 503; a call cut short because its caller went away 499, saying ElevenLabs may have done
+(and billed) the work anyway. Every message is redacted of anything key-shaped and of every upload
+path. A value an earlier answer masked (`‹redacted›`) is refused if an agent sends it back.
 
 ### What a call answers
 
@@ -355,13 +359,20 @@ JSON, text and events past 256 KB come back shortened — lists cut to their fir
 strings cut, by the gentlest step that fits — with `truncated: true`, a `note` saying what was cut,
 and the whole answer saved as `fullResult` `{file, contentType, bytes}`.
 
-**Redaction.** Unless the owner's switch is on, the credential fields of the eleven operations that
-return one (new API keys, webhook secrets, single-use tokens, signed conversation URLs, shareable
-agent tokens) are masked, and so is any string under a field whose name says it is a secret
-(`api_key`, `*token*`, `*secret*`, `signature`, `password`, `signed_url` — but not a pagination
-cursor like `next_page_token`). The key preview `GET /v1/user` carries, and any `sk_…` string, are
-masked even with the switch on. A masked answer says so in `redacted` and `redactionNote`; the
-saved `fullResult` is the masked answer too. The app's own pane shows everything.
+**Redaction.** Always, whatever the switch: the key preview `GET /v1/user` carries, any `sk_…`
+string, and every plain-string header value (a webhook tool's `request_headers`, custom headers)
+are masked — the owner's own key typed into an agent's tool never reaches another agent. While the
+owner's switch is off, the credential fields of the operations that return one (webhook secrets,
+single-use tokens, signed conversation URLs, shareable agent tokens) are masked too, and so is any
+string under a field whose name says it is a secret (`api_key`, `*token*`, `*secret*`, `signature`,
+`password`, `signed_url` — but not a pagination cursor like `next_page_token`). Turning the switch
+on reveals exactly those named credential fields of that one operation, and nothing else; a key
+shaped like `sk_…` stays masked even there. A masked answer says so in `redacted` and
+`redactionNote`; the saved `fullResult` is the masked answer too. The app's own pane shows
+everything.
+
+`confirm: true` is the agent's own statement that the user agreed; nothing can check it. The
+owner's switch, off by default, is the real lock.
 
 ### MCP tools
 
@@ -382,8 +393,9 @@ saved `fullResult` is the masked answer too. The app's own pane shows everything
 | `elevenlabs_describe_operation` | `GET /elevenlabs/operations/{id}` | free |
 | `elevenlabs_call` | `POST /elevenlabs/call`, any operation | per operation |
 
-Argument names are the spec's. Upload arguments (`file`, `audio`, `files`) take absolute paths on
-this Mac. The bridge checks arguments before sending anything — types, the spec's ranges, whole
+Argument names are the spec's, and so are their JSON types: `elevenlabs_change_voice`'s
+`voice_settings` is JSON text because the spec's multipart field is a string (an object is encoded
+into one). Upload arguments (`file`, `audio`, `files`) take absolute paths on this Mac. The bridge checks arguments before sending anything — types, the spec's ranges, whole
 numbers without overflow, absolute paths, unknown arguments — and names every problem at once.
 None of the curated tools maps to a gated operation; if one ever were refused by the gate, the tool
 error says to use `elevenlabs_call` with `confirm: true` once the user agrees.
@@ -421,7 +433,7 @@ curl -s -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
 | A browser `Host`/`Origin` on loopback | 403 | A page that rebinds its name to 127.0.0.1 is still a page |
 | `destructive` / `realWorld` without `confirm: true` and the switch | 403 | Deleting, calling, inviting, minting keys need the user's yes and the owner's leave |
 | Nothing linked | 409 | |
-| An upload that is not a regular file of this user's, a relative path, an unknown file field | 400 | The Mac reads the owner's disk only for what the call is meant to send |
+| An upload that is not a regular file of this user's, anything under `/dev`, a relative path, an unknown file field | 400 | The Mac reads the owner's disk only for what the call is meant to send |
 | Uploads over 3 GiB in all | 413 | |
 
 ### Tests
