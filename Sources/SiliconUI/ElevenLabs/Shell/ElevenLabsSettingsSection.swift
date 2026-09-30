@@ -93,6 +93,7 @@ struct ElevenLabsSettingsSection: View {
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || connection.verifying)
                 if model.elevenLabsLinked {
                     Button("Remove key…") { confirmingRemove = true }
+                        .disabled(connection.verifying)
                 } else {
                     Button("Get a key") {
                         NSWorkspace.shared.open(URL(string: "https://elevenlabs.io/app/settings/api-keys")!)
@@ -158,6 +159,7 @@ struct ElevenLabsSettingsSection: View {
                     Text(region.displayName).tag(region)
                 }
             }
+            .disabled(connection.verifying)
             Text("Data-residency regions are separate workspaces, each with its own key; Global and US only share one.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -31,6 +31,10 @@ final class ElevenLabsConnectionModel {
     /// Why the account cannot change while a run that is not a read is still on the wire.
     static let busyAccountMessage =
         "An ElevenLabs run that may be billed is still in progress. Wait for it to finish, or cancel it, first."
+    /// Why the region cannot change while a key is being checked.
+    static let verifyingMessage = "Wait for the key check to finish before changing region."
+    /// What a Connect says when Remove was pressed while it was checking.
+    static let removedWhileCheckingMessage = "The key was removed while it was being checked, so it was not kept."
 
     init() {}
 
@@ -47,17 +51,24 @@ final class ElevenLabsConnectionModel {
             failure = Self.busyAccountMessage
             return false
         }
+        // The region as it was when Connect was pressed: the key is checked there, stored for
+        // it, and any failure is worded for it. The picker is locked until the check ends.
+        let region = model.elevenLabsRegion
         verifying = true
         failure = nil
         connected = false
+        regionNotice = nil
         defer { verifying = false }
         do {
-            _ = try await model.linkElevenLabs(key: key)
+            _ = try await model.linkElevenLabs(key: key, region: region)
             model.elevenLabsPane.reset()
             connected = true
             return true
+        } catch ElevenLabsError.cancelled {
+            failure = Self.removedWhileCheckingMessage
+            return false
         } catch {
-            failure = Self.describe(error, key: key, region: model.elevenLabsRegion)
+            failure = Self.describe(error, key: key, region: region)
             return false
         }
     }
@@ -76,6 +87,10 @@ final class ElevenLabsConnectionModel {
         let current = model.elevenLabsRegion
         regionNotice = nil
         guard region != current else { return }
+        guard !verifying else {
+            regionNotice = Self.verifyingMessage
+            return
+        }
         guard model.elevenLabsLinked else {
             model.elevenLabsRegion = region
             failure = nil
