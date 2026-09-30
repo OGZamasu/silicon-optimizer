@@ -2,26 +2,41 @@ import AppKit
 import SiliconElevenLabs
 import SwiftUI
 
-/// The Run button for a runner: a verb, what it costs, and Cancel while it runs. Attach
-/// `.elevenLabsConfirmation(for:)` somewhere above it (`ElevenLabsRunnerOutput` does) so a
-/// risky operation's question has somewhere to appear.
+/// The Run button for a runner: a verb, what it costs, why it cannot run yet, and Cancel
+/// while it runs. A risky operation's question is shown by the pane (or, for a runner with no
+/// pane, by `ElevenLabsRunnerOutput`), so nothing here has to host it.
 struct ElevenLabsRunButton: View {
     let runner: ElevenLabsRunner
     var title: String
     /// What the input is likely to cost, when the section can tell (text length for speech).
     var estimatedCharacters: Int?
+    /// The audio's length, for operations billed by it (transcription, isolation, music…).
+    var estimatedSeconds: Double?
     var disabled = false
+    /// Why the button is disabled, said beside it — "Choose a voice first".
+    var disabledReason: String?
     let action: () -> Void
 
     init(
         runner: ElevenLabsRunner, title: String = "Run", estimatedCharacters: Int? = nil,
-        disabled: Bool = false, action: @escaping () -> Void
+        estimatedSeconds: Double? = nil, disabled: Bool = false, disabledReason: String? = nil,
+        action: @escaping () -> Void
     ) {
         self.runner = runner
         self.title = title
         self.estimatedCharacters = estimatedCharacters
+        self.estimatedSeconds = estimatedSeconds
         self.disabled = disabled
+        self.disabledReason = disabledReason
         self.action = action
+    }
+
+    /// What stops a run, in words: the section's reason while disabled, otherwise the first
+    /// problem the last attempt was refused for.
+    var blocker: String? {
+        if disabled, let disabledReason, !disabledReason.isEmpty { return disabledReason }
+        guard runner.phase == .failed, let first = runner.problems.first else { return nil }
+        return runner.problems.count > 1 ? "\(first) (and \(runner.problems.count - 1) more)" : first
     }
 
     var body: some View {
@@ -42,10 +57,18 @@ struct ElevenLabsRunButton: View {
                 .tint(runner.operation.requiresConfirmation ? .orange : .accentColor)
                 .keyboardShortcut(.defaultAction)
                 .disabled(disabled || runner.isAwaitingConfirmation)
+                .help(blocker ?? "")
                 if runner.operation.risk != .read {
                     ElevenLabsRiskBadge(risk: runner.operation.risk)
                 }
-                if let note = ElevenLabsCostNote.text(for: runner.operation, characters: estimatedCharacters) {
+                if let blocker {
+                    Label(blocker, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(disabled ? .secondary : Color.red)
+                        .lineLimit(2)
+                } else if let note = ElevenLabsCostNote.text(
+                    for: runner.operation, characters: estimatedCharacters, seconds: estimatedSeconds
+                ) {
                     Text(note)
                         .font(.caption)
                         .foregroundStyle(.secondary)
