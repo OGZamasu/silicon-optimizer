@@ -212,6 +212,9 @@ final class ElevenLabsRunner: Identifiable {
         let run = generation
         refusal = nil
         cancellationNote = nil
+        // A run that stops early (bad arguments, not linked) must not leave the last run's
+        // call in "Show API call".
+        apiCall = nil
         context.pane?.track(self)
         runEpoch = context.pane?.epoch
         self.arguments = arguments
@@ -311,8 +314,14 @@ final class ElevenLabsRunner: Identifiable {
         resolveConfirmation(true)
     }
 
-    /// Answers the confirmation on screen with no: nothing is sent.
+    /// Answers the confirmation on screen with no: nothing is sent. The runner is idle at
+    /// once, so Run pressed straight after asks again rather than being refused as busy.
     func decline() {
+        if phase == .awaitingConfirmation {
+            phase = .idle
+            confirmation = nil
+            context.pane?.dismissConfirmation(of: self)
+        }
         resolveConfirmation(false)
     }
 

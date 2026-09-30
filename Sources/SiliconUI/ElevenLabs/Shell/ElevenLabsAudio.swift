@@ -9,6 +9,9 @@ import SwiftUI
 @Observable
 final class ElevenLabsAudioPlayer {
     let url: URL
+    /// Decoding a headerless file in the background; Play waits for it.
+    private(set) var preparing = false
+    @ObservationIgnored private var playWhenReady = false
     /// Set for headerless audio: the player opens a WAV made from it in memory.
     let raw: ElevenLabsRawAudio.Format?
     private(set) var isPlaying = false
@@ -26,24 +29,52 @@ final class ElevenLabsAudioPlayer {
     }
 
     /// Opens the file without playing it, so the duration is known before the first press.
+    /// Headerless audio is decoded off the main actor: a long take would stall the window.
     func prepare() {
-        guard player == nil, problem == nil else { return }
+        guard player == nil, problem == nil, !preparing else { return }
+        if let raw {
+            prepareRaw(raw)
+            return
+        }
         do {
-            let player: AVAudioPlayer
-            if let raw {
-                let data = try Data(contentsOf: url, options: .alwaysMapped)
-                player = try AVAudioPlayer(data: ElevenLabsRawAudio.wav(
-                    from: data, encoding: raw.encoding, sampleRate: raw.sampleRate
-                ))
-            } else {
-                player = try AVAudioPlayer(contentsOf: url)
-            }
-            player.prepareToPlay()
-            self.player = player
-            duration = player.duration
+            adopt(try AVAudioPlayer(contentsOf: url))
         } catch {
             problem = "This audio could not be opened: \(error.localizedDescription)"
         }
+    }
+
+    private func prepareRaw(_ raw: ElevenLabsRawAudio.Format) {
+        preparing = true
+        let url = url
+        Task { [weak self] in
+            let wav = await Task.detached(priority: .userInitiated) { () -> Data? in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                guard size <= ElevenLabsRawAudio.playbackLimit,
+                      let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
+                let wav = ElevenLabsRawAudio.wav(from: data, encoding: raw.encoding, sampleRate: raw.sampleRate)
+                return wav.isEmpty ? nil : wav
+            }.value
+            self?.finishPreparing(wav)
+        }
+    }
+
+    private func finishPreparing(_ wav: Data?) {
+        preparing = false
+        guard let wav, let player = try? AVAudioPlayer(data: wav) else {
+            problem = "This raw audio is too long or too odd to play here. Save… keeps it exactly as it came."
+            return
+        }
+        adopt(player)
+        if playWhenReady {
+            playWhenReady = false
+            play()
+        }
+    }
+
+    private func adopt(_ player: AVAudioPlayer) {
+        player.prepareToPlay()
+        self.player = player
+        duration = player.duration
     }
 
     func togglePlayback() {
@@ -52,7 +83,10 @@ final class ElevenLabsAudioPlayer {
 
     func play() {
         prepare()
-        guard let player else { return }
+        guard let player else {
+            playWhenReady = preparing
+            return
+        }
         if player.currentTime >= player.duration - 0.05 { player.currentTime = 0 }
         player.play()
         isPlaying = true
@@ -142,6 +176,7 @@ struct ElevenLabsAudioPlayerView: View {
                 )
                 .disabled(player.duration <= 0)
 
+                if player.preparing { ProgressView().controlSize(.small) }
                 Text("\(Self.clock(player.currentTime)) / \(Self.clock(player.duration))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -296,8 +331,13 @@ enum ElevenLabsRawAudio {
         var sampleRate: Double
     }
 
-    /// The sample rates ElevenLabs offers for PCM.
-    static let pcmRates: [Double] = [8_000, 16_000, 22_050, 24_000, 44_100, 48_000]
+    /// The sample rates ElevenLabs offers for PCM — the only ones taken from an
+    /// `output_format`, so `pcm_inf` or `pcm_1e10` can never reach the WAV writer.
+    static let pcmRates: [Double] = [8_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000]
+
+    /// Past this, a raw file is not decoded for playback (Save… still works): a long
+    /// `pcm_44100` take is hundreds of MB, and its WAV has to fit in 32-bit sizes.
+    static let playbackLimit = 1 << 30
 
     /// The raw encoding of a file, from its extension or content type; nil for audio that
     /// carries its own header (MP3, WAV, Opus…).
@@ -321,13 +361,17 @@ enum ElevenLabsRawAudio {
     static func sampleRate(outputFormat: String?) -> Double? {
         guard let format = outputFormat?.lowercased(),
               let digits = format.split(separator: "_").dropFirst().first,
-              let rate = Double(digits), rate > 0
+              digits.allSatisfy(\.isNumber), let rate = Double(digits), pcmRates.contains(rate)
         else { return nil }
         return rate
     }
 
-    /// Mono 16-bit PCM WAV bytes for `data` in `encoding` at `sampleRate`.
+    /// Mono 16-bit PCM WAV bytes for `data` in `encoding` at `sampleRate`; empty (never a
+    /// trap) for a rate outside 1–384 kHz or audio too long for a WAV's 32-bit sizes.
     static func wav(from data: Data, encoding: Encoding, sampleRate: Double) -> Data {
+        guard sampleRate.isFinite, sampleRate >= 1_000, sampleRate <= 384_000 else { return Data() }
+        let sampleCount = encoding == .pcm16 ? data.count / 2 : data.count
+        guard sampleCount <= (Int(UInt32.max) - 44) / 2 else { return Data() }
         var samples: [Int16]
         switch encoding {
         case .pcm16:
