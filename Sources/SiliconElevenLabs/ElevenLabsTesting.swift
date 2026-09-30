@@ -279,7 +279,7 @@ public final class TemporaryFileSink: ElevenLabsFileSink, @unchecked Sendable {
     /// The require-scratch check every test cleanup goes through: removes `directory` only
     /// when it sits directly in the system temporary directory and has one of this module's
     /// scratch prefixes.
-    static func removeScratch(_ directory: URL) {
+    public static func removeScratch(_ directory: URL) {
         let temporary = FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
         let target = directory.standardizedFileURL.resolvingSymlinksInPath()
         guard target.deletingLastPathComponent().path == temporary.path,

@@ -327,7 +327,7 @@ public final class AppModel {
     /// the network only in the running app; under injected settings, memory and a transport
     /// that refuses everything, so no test can reach either.
     @ObservationIgnored lazy var elevenLabsLink: ElevenLabsLink =
-        readsCredentialsFromKeychain ? .live() : .inert()
+        readsCredentialsFromKeychain ? .live(registry: eventMediaRegistry) : .inert()
 
     // MARK: - UI state
 
