@@ -16,11 +16,13 @@ struct AgentsSnapshotTests {
     @Test func everyAgentsScreenDrawsInLightAndDarkNarrowAndWide() async throws {
         let output = try AgentsSnapshot.Output()
         defer { output.finish() }
-        let rig = AgentsFixtures.Rig()
+        // The batch submit times out, so the composer shows its "may already have been placed".
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.submitBatch: .failure(.network("The request timed out."))])
         defer { rig.clean() }
         let app = AppModel(settings: .init())
         AgentsPlatformStore.register(rig.store, for: app)
-        await AgentsSnapshot.fill(rig.store)
+        try await AgentsSnapshot.fill(rig.store)
+        let sentWhileFilling = rig.transport.requests.count
 
         var written: [URL] = []
         for (name, screen) in AgentsSnapshot.screens(rig.store) {
@@ -36,9 +38,18 @@ struct AgentsSnapshotTests {
                 }
             }
         }
-        #expect(written.count == AgentsSnapshot.screens(rig.store).count * 4)
+        // The questions the pane asks before the most dangerous sends, as the owner sees them.
+        for (name, sheet) in AgentsSnapshot.sheets(rig.store) {
+            for dark in [false, true] {
+                let data = try await AgentsSnapshot.png(sheet, app: app, width: 480, height: 320, dark: dark)
+                let url = output.directory.appendingPathComponent("agents-sheet-\(name)-\(dark ? "dark" : "light").png")
+                try data.write(to: url)
+                written.append(url)
+            }
+        }
+        #expect(written.count == AgentsSnapshot.screens(rig.store).count * 4 + AgentsSnapshot.sheets(rig.store).count * 2)
         // Drawing reads only what the fixtures hold; nothing was placed, sent or deleted.
-        let risky = rig.transport.requests.compactMap { ElevenLabsCatalog.operation($0.operationID) }
+        let risky = rig.transport.requests.dropFirst(sentWhileFilling).compactMap { ElevenLabsCatalog.operation($0.operationID) }
             .filter { $0.requiresConfirmation || $0.risk == .generate || $0.billable }
         #expect(risky.isEmpty, "drawing sent \(risky.map(\.id))")
     }
@@ -95,7 +106,7 @@ enum AgentsSnapshot {
     }
 
     /// Loads the fixtures into every section's view-model, as a session of use would.
-    static func fill(_ store: AgentsPlatformStore) async {
+    static func fill(_ store: AgentsPlatformStore) async throws {
         let directory = store.directory
         await directory.agents.refresh()
         await directory.phoneNumbers.refresh()
@@ -139,20 +150,44 @@ enum AgentsSnapshot {
         numbers.callFromID = AgentsFixtures.phoneID
         numbers.callAgentID = AgentsFixtures.agentID
         numbers.callTo = "+15550199"
+        numbers.showsImport = true
+        numbers.importLabel = "Support line"
+        numbers.importNumber = "+15550103"
+        numbers.twilioSID = "AC0000"
+        numbers.twilioToken = "twilio-token-fixture"
+        numbers.showsWhatsApp = true
+        await numbers.whatsApp.refresh()
+        numbers.whatsAppAccountID = "wa_num1"
+        numbers.whatsAppAgentID = AgentsFixtures.agentID
+        numbers.whatsAppRecipient = "15550177"
+        numbers.whatsAppTemplate = "order_update"
+        numbers.whatsAppBodyParameters = "Ana\n1042"
 
         let batches = store.batchCalls
         await batches.list.refresh()
         await batches.select(AgentsFixtures.batchID)
         batches.composing = true
+        // A submit that timed out: the composer now warns and waits for the owner.
         batches.name = "November check-in"
         batches.agentID = AgentsFixtures.agentID
         batches.phoneNumberID = AgentsFixtures.phoneID
-        batches.recipientsText = "phone_number,first_name\n+15550131,Ana\n+15550132,Ben\n+15550133,Cy\n+15550133,Cy"
+        batches.recipientsText = "phone_number,FirstName\n+15550131,Ana\n+15550132,Ben"
+        let submit = store.calls.runner(AgentsOp.submitBatch)
+        let submitting = Task { await batches.submit() }
+        for _ in 0..<500 where !submit.isAwaitingConfirmation { try await Task.sleep(for: .milliseconds(10)) }
+        submit.confirm()
+        await submitting.value
+        batches.name = "November check-in"
+        batches.agentID = AgentsFixtures.agentID
+        batches.recipientsText = "phone_number,FirstName\n+15550131,Ana\n+15550132,Ben\n+15550133,Cy\n+15550133,Cy"
 
         let servers = store.mcpServers
         await servers.list.refresh()
         await servers.select(AgentsFixtures.serverID)
         await servers.loadTools()
+        servers.creating = true
+        servers.newName = "Warehouse"
+        servers.newURL = "http://192.168.1.20/sse"
 
         let secrets = store.secrets
         await secrets.list.refresh()
@@ -174,6 +209,31 @@ enum AgentsSnapshot {
         await analytics.tickets.refresh()
         await analytics.openTicket("tkt_1")
         await analytics.tags.refresh()
+    }
+
+    /// The pane's questions before a batch, a call and connecting an MCP server, built the way
+    /// the runner builds them from the screens' own words.
+    static func sheets(_ store: AgentsPlatformStore) -> [(String, AnyView)] {
+        func sheet(_ operationID: String, _ subject: String, _ consequence: String) -> AnyView {
+            let operation = ElevenLabsCatalog.operation(operationID)!
+            return AnyView(ElevenLabsRiskConfirmation(
+                request: .make(for: operation, subject: subject, consequence: consequence),
+                onConfirm: {}, onCancel: {}
+            ))
+        }
+        let batch = store.batchCalls.submitConfirmation()
+        let address = AgentsOutsideAddress("http://192.168.1.20/sse")
+        return [
+            ("batch-submit", sheet(AgentsOp.submitBatch, batch.subject, batch.consequence)),
+            ("outbound-call", sheet(AgentsOp.twilioCall, "a call to +15550199 with “Support”",
+                                    "ElevenLabs will dial +15550199 now from Support line (+15550100) through Twilio, and the agent "
+                                        + "“Support” will talk to whoever answers. The call is billed by the minute and cannot be "
+                                        + "stopped from here.")),
+            ("mcp-connect", sheet(AgentsOp.createMCPServer, "“Warehouse” at http://192.168.1.20/sse",
+                                  "Careful: " + address.warnings.joined(separator: " ")
+                                      + " Agents you give it to can call its tools during conversations and send it what "
+                                      + "callers say. Its tools ask the caller first unless you allow one by one.")),
+        ]
     }
 
     static func screens(_ store: AgentsPlatformStore) -> [(String, AnyView)] {
