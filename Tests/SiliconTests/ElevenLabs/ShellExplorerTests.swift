@@ -64,9 +64,11 @@ struct ShellExplorerTests {
         }
     }
 
-    /// And every one of those forms draws. Yields between forms: the suite shares the main
-    /// actor, and 403 layouts in one go would stall every other test waiting on it.
-    @Test func everyOperationsFormDraws() async {
+    /// And every one of those forms draws. Opt-in, like the snapshots (`ELEVENLABS_DRAW=1`):
+    /// 403 layouts hold the main actor for about ten seconds, which starves other suites'
+    /// timing tests in a full run on a loaded Mac. Yields between forms all the same.
+    @Test(.enabled(if: ElevenLabsSnapshot.enabled))
+    func everyOperationsFormDraws() async {
         for operation in ElevenLabsCatalog.all {
             await Task.yield()
             let form = ElevenLabsFormModel(operation: operation)
