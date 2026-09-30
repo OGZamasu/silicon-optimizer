@@ -222,20 +222,37 @@ struct CreativeRunRow: View {
     let runner: ElevenLabsRunner
     var title: String
     var estimatedCharacters: Int?
+    /// The audio's length, for operations billed by it.
+    var estimatedSeconds: Double?
     var problems: [String]
     var note: String?
     let action: () -> Void
 
+    init(
+        runner: ElevenLabsRunner, title: String, estimatedCharacters: Int? = nil, estimatedSeconds: Double? = nil,
+        problems: [String], note: String? = nil, action: @escaping () -> Void
+    ) {
+        self.runner = runner
+        self.title = title
+        self.estimatedCharacters = estimatedCharacters
+        self.estimatedSeconds = estimatedSeconds
+        self.problems = problems
+        self.note = note
+        self.action = action
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // The first reason is said beside the button; the rest are listed under it.
             ElevenLabsRunButton(
                 runner: runner, title: title, estimatedCharacters: estimatedCharacters,
-                disabled: !problems.isEmpty, action: action
+                estimatedSeconds: estimatedSeconds, disabled: !problems.isEmpty,
+                disabledReason: problems.first, action: action
             )
             if let note {
-                Text(note).font(.caption).foregroundStyle(.secondary)
+                Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(problems, id: \.self) { problem in
+            ForEach(problems.dropFirst(), id: \.self) { problem in
                 Label(problem, systemImage: "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)

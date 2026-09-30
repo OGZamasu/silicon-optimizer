@@ -8,7 +8,7 @@ import SiliconElevenLabs
 /// The pane shows one section at a time behind a `switch`, so a screen's SwiftUI state would
 /// be thrown away on every trip to another section — a half-written script, the transcript on
 /// screen, the history page loaded. Each screen's model lives here instead, one session per
-/// `AppModel`, made the first time any creative screen appears.
+/// account, kept in the pane's section store and made the first time a creative screen appears.
 @MainActor
 final class CreativeSession {
     /// How runners reach the account.
@@ -77,47 +77,21 @@ final class CreativeSession {
         pane?.open(section)
     }
 
-    // MARK: - One per app model and account
+    // MARK: - One per account, in the pane's section store
 
-    private struct Entry {
-        weak var owner: AppModel?
-        /// The client the session was made for; nil until one existed.
-        weak var client: ElevenLabsClient?
-        var boundToClient: Bool
-        let session: CreativeSession
-    }
+    /// The key the session is kept under in the pane's section store.
+    static let stateKey = "creative.session"
 
-    private static var sessions: [ObjectIdentifier: Entry] = [:]
-
-    /// The running app's session for `model`, made on first use.
+    /// The running app's session for `model`: made on first use, kept by the pane, and dropped
+    /// with every other section's state when the account's client changes (a disconnect, a
+    /// new key, a region change) — its takes, transcripts and lists start over.
     static func shared(for model: AppModel) -> CreativeSession {
-        shared(for: model, client: model.elevenLabsClient)
+        shared(in: model.elevenLabsPane, context: .app(model))
     }
 
-    /// The session for `model` while `client` is its account's client. The app model drops
-    /// its client when the key is removed or the region changes, so a different (or a
-    /// released) client means another account: its takes, transcripts and lists start over,
-    /// as the pane's own state does on disconnect. Entries whose model has gone are dropped.
-    static func shared(for model: AppModel, client: ElevenLabsClient?) -> CreativeSession {
-        let key = ObjectIdentifier(model)
-        if var entry = sessions[key], entry.owner === model {
-            if !entry.boundToClient {
-                if let client {
-                    entry.client = client
-                    entry.boundToClient = true
-                    sessions[key] = entry
-                }
-                return entry.session
-            }
-            if let bound = entry.client, bound === client { return entry.session }
-            if client == nil { return entry.session }
-        }
-        sessions = sessions.filter { $0.value.owner != nil }
-        let session = CreativeSession(
-            context: .app(model), voices: model.elevenLabsPane.voices, pane: model.elevenLabsPane
-        )
-        sessions[key] = Entry(owner: model, client: client, boundToClient: client != nil, session: session)
-        return session
+    /// The session `pane` keeps, made with `context` the first time.
+    static func shared(in pane: ElevenLabsPaneState, context: @autoclosure () -> ElevenLabsRunner.Context) -> CreativeSession {
+        pane.state(key: stateKey) { CreativeSession(context: context(), voices: pane.voices, pane: pane) }
     }
 }
 

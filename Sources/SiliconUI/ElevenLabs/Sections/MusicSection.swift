@@ -382,7 +382,7 @@ final class MusicScreenModel: CreativeScreenModel {
         guard let result = await runner.perform(arguments: composeArguments()) else { return }
         readDetails(result)
         let title = usesPlan ? "Song from a plan (\(plan?.sections.count ?? 0) sections)" : Self.excerpt(prompt)
-        if let take = CreativeTake(result: result, title: title) { takes.insert(take, at: 0) }
+        if let take = CreativeTake(result: result, title: title, runner: runner) { takes.insert(take, at: 0) }
     }
 
     /// Lyrics timings, waveform and the plan the model used, from a detailed answer.
@@ -505,7 +505,7 @@ final class MusicScreenModel: CreativeScreenModel {
         guard let result = await videoRunner.perform(
             arguments: videoArguments(), files: ["videos": videos.map { ElevenLabsFile(url: $0) }]
         ) else { return }
-        if let take = CreativeTake(result: result, title: "Score for \(videos.map(\.lastPathComponent).joined(separator: ", "))") {
+        if let take = CreativeTake(result: result, title: "Score for \(videos.map(\.lastPathComponent).joined(separator: ", "))", runner: videoRunner) {
             takes.insert(take, at: 0)
         }
     }
@@ -825,7 +825,7 @@ private struct MusicResultCard: View {
                     if screen.songWords.isEmpty {
                         CreativeAudioResult(take: take)
                     } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.songWords, title: take.title, showsSpeakers: false, contentType: take.contentType)
+                        CreativeTimedPlayer(url: take.file, words: screen.songWords, title: take.title, showsSpeakers: false, contentType: take.contentType, outputFormat: take.outputFormat)
                             .id(take.file)
                     }
                     if !screen.songWaveform.isEmpty { MusicWaveform(samples: screen.songWaveform) }

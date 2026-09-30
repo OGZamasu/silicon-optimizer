@@ -116,6 +116,7 @@ struct CreativeScreenTests {
         let take = try #require(speech.takes.first)
         #expect(take.requestID == "req-1")
         #expect(take.characterCost == 12)
+        #expect(take.outputFormat == "wav_44100", "the take keeps the format the run asked for")
         #expect(FileManager.default.fileExists(atPath: take.file.path))
 
         speech.continueFromLastTake = true
@@ -726,26 +727,26 @@ struct CreativeScreenTests {
         #expect(CreativeSlider.snapped(0.123, to: nil, in: 0...1) == 0.123)
     }
 
-    @Test func outputFormatsAreNamedAndRawOnesSayTheyCannotBePlayedHere() {
+    @Test func outputFormatsAreNamedAndRawTakesPlayAtTheirRate() {
         #expect(CreativeOutputFormat.title("mp3_44100_128") == "MP3 · 44.1 kHz · 128 kbps")
         #expect(CreativeOutputFormat.title("mp3_22050_32") == "MP3 · 22.05 kHz · 32 kbps")
         #expect(CreativeOutputFormat.title("pcm_16000") == "PCM · 16 kHz")
         #expect(CreativeOutputFormat.title("ulaw_8000") == "μ-law · 8 kHz")
         #expect(CreativeOutputFormat.title("auto") == "Automatic")
-        #expect(CreativeOutputFormat.playabilityNote("mp3_44100_128") == nil)
-        #expect(CreativeOutputFormat.playabilityNote("opus_48000_64") == nil)
-        for raw in ["pcm_44100", "ulaw_8000", "alaw_8000"] {
-            #expect(CreativeOutputFormat.playabilityNote(raw) != nil, "\(raw)")
-        }
         // Streams: the shell's player decodes MP3 and raw PCM as they arrive, nothing else.
         #expect(CreativeOutputFormat.playsLive("mp3_44100_128"))
         #expect(CreativeOutputFormat.playsLive("pcm_24000"))
         #expect(!CreativeOutputFormat.playsLive("ulaw_8000"))
         #expect(!CreativeOutputFormat.playsLive("opus_48000_64"))
-        // A finished raw take gets the file row that says it cannot play, not a broken player.
+        // A finished raw take goes to the shell's raw player, at the rate the run asked for.
         #expect(CreativeAudioResult(url: URL(fileURLWithPath: "take.pcm"), contentType: "audio/pcm").isRaw)
         #expect(CreativeAudioResult(url: URL(fileURLWithPath: "take.ulaw"), contentType: "application/octet-stream").isRaw)
         #expect(!CreativeAudioResult(url: URL(fileURLWithPath: "take.mp3"), contentType: "audio/mpeg").isRaw)
+        #expect(CreativeTimedPlayer.rawFormat(url: URL(fileURLWithPath: "take.pcm"), contentType: "audio/pcm", outputFormat: "pcm_22050")
+                == ElevenLabsRawAudio.Format(encoding: .pcm16, sampleRate: 22_050))
+        #expect(CreativeTimedPlayer.rawFormat(url: URL(fileURLWithPath: "take.ulaw"), contentType: "audio/basic", outputFormat: nil)
+                == ElevenLabsRawAudio.Format(encoding: .ulaw, sampleRate: 8_000))
+        #expect(CreativeTimedPlayer.rawFormat(url: URL(fileURLWithPath: "take.mp3"), contentType: "audio/mpeg", outputFormat: "mp3_44100_128") == nil)
     }
 
     // MARK: - Session
@@ -760,24 +761,31 @@ struct CreativeScreenTests {
         #expect(session.voices === first.elevenLabsPane.voices)
     }
 
+    /// The session lives in the pane's section store, so another account's client — a new key,
+    /// a region change — starts every creative screen over, and a disconnect drops it too.
     @Test func anotherAccountStartsTheScreensOver() {
-        let model = AppModel(settings: .init())
         let transport = FakeElevenLabsTransport(replies: [])
         func client() -> ElevenLabsClient {
             ElevenLabsClient(credentials: FakeCredentialSource(key: "k"), region: .global,
                              transport: transport, sink: TemporaryFileSink())
         }
-        let unlinked = CreativeSession.shared(for: model, client: nil)
-        let first = client()
-        let linked = CreativeSession.shared(for: model, client: first)
-        #expect(linked === unlinked, "the session made before a client existed is kept for it")
+        let holder = ClientHolder(client())
+        let pane = ElevenLabsPaneState(defaults: nil, client: { holder.client })
+        let context = ElevenLabsRunner.Context(client: { holder.client })
+        let linked = CreativeSession.shared(in: pane, context: context)
         linked.speech.text = "Mine"
-        #expect(CreativeSession.shared(for: model, client: first) === linked)
-        #expect(CreativeSession.shared(for: model, client: nil) === linked, "a moment without a client changes nothing")
-        let second = client()
-        let other = CreativeSession.shared(for: model, client: second)
+        #expect(CreativeSession.shared(in: pane, context: context) === linked)
+        holder.client = client()
+        let other = CreativeSession.shared(in: pane, context: context)
         #expect(other !== linked)
         #expect(other.speech.text.isEmpty)
+        pane.reset()
+        #expect(CreativeSession.shared(in: pane, context: context) !== other, "a disconnect drops it")
+    }
+
+    @MainActor final class ClientHolder {
+        var client: ElevenLabsClient?
+        init(_ client: ElevenLabsClient) { self.client = client }
     }
 
     // MARK: - Fixtures

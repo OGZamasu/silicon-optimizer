@@ -100,7 +100,10 @@ struct AlignmentScreen: View {
             } content: {
                 ElevenLabsTextArea(text: $screen.text, prompt: "The exact words spoken in the recording", minHeight: 120)
             }
-            CreativeRunRow(runner: screen.runner, title: "Align", problems: screen.problems) {
+            CreativeRunRow(
+                runner: screen.runner, title: "Align",
+                estimatedSeconds: screen.source.flatMap(CreativeMedia.duration(of:)), problems: screen.problems
+            ) {
                 Task { await screen.align() }
             }
             ElevenLabsRunnerOutput(runner: screen.runner, showsResult: false)

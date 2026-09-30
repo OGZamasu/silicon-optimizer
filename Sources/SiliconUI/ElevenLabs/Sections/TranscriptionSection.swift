@@ -406,10 +406,9 @@ struct TranscriptionScreen: View {
             }
             advanced
             CreativeRunRow(
-                runner: screen.runner, title: "Transcribe", problems: screen.problems,
-                note: screen.sourceKind == .file
-                    ? screen.source.flatMap(CreativeMedia.duration(of:)).map { "Billed by length: \(ElevenLabsAudioPlayerView.clock($0))." }
-                    : nil
+                runner: screen.runner, title: "Transcribe",
+                estimatedSeconds: screen.sourceKind == .file ? screen.source.flatMap(CreativeMedia.duration(of:)) : nil,
+                problems: screen.problems
             ) {
                 Task { await screen.transcribe() }
             }

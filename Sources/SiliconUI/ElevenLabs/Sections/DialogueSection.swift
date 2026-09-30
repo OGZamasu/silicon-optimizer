@@ -251,7 +251,7 @@ final class DialogueScreenModel: CreativeScreenModel {
         let names = lines.compactMap { session.voices.voice(id: $0.voiceID)?.name }
         var seen = Set<String>()
         let cast = names.filter { seen.insert($0).inserted }.joined(separator: ", ")
-        if let take = CreativeTake(result: result, title: "Dialogue — \(cast.isEmpty ? "\(lines.count) lines" : cast)") {
+        if let take = CreativeTake(result: result, title: "Dialogue — \(cast.isEmpty ? "\(lines.count) lines" : cast)", runner: runner) {
             takes.insert(take, at: 0)
         }
     }
@@ -425,7 +425,7 @@ struct DialogueScreen: View {
                     if screen.words.isEmpty {
                         CreativeAudioResult(take: take)
                     } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false, contentType: take.contentType)
+                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false, contentType: take.contentType, outputFormat: take.outputFormat)
                             .id(take.file)
                     }
                     if !screen.segments.isEmpty {

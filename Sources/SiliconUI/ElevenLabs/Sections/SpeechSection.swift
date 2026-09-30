@@ -215,7 +215,7 @@ final class SpeechScreenModel: CreativeScreenModel {
         lastRunner = runner
         guard let result = await runner.perform(arguments: arguments()) else { return }
         words = CreativeTimeline.words(fromCharacterAlignments: CreativeTimeline.characterAlignments(in: result))
-        if let take = CreativeTake(result: result, title: Self.takeTitle(text, voice: voiceName)) {
+        if let take = CreativeTake(result: result, title: Self.takeTitle(text, voice: voiceName), runner: runner) {
             takes.insert(take, at: 0)
         }
     }
@@ -373,7 +373,7 @@ struct SpeechScreen: View {
                     if screen.words.isEmpty {
                         CreativeAudioResult(take: take)
                     } else {
-                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false, contentType: take.contentType)
+                        CreativeTimedPlayer(url: take.file, words: screen.words, title: take.title, showsSpeakers: false, contentType: take.contentType, outputFormat: take.outputFormat)
                             .id(take.file)
                         subtitleExports
                     }

@@ -130,7 +130,7 @@ final class VoiceChangerScreenModel: CreativeScreenModel {
         lastRunner = runner
         guard let result = await runner.perform(arguments: arguments(), files: files()) else { return }
         let voiceName = session.voices.voice(id: voiceID)?.name ?? voiceID
-        if let take = CreativeTake(result: result, title: "\(source?.lastPathComponent ?? "Recording") as \(voiceName)") {
+        if let take = CreativeTake(result: result, title: "\(source?.lastPathComponent ?? "Recording") as \(voiceName)", runner: runner) {
             takes.insert(take, at: 0)
             sources[take.id] = source
         }
@@ -183,10 +183,8 @@ struct VoiceChangerScreen: View {
                 }
             }
             CreativeRunRow(
-                runner: screen.runner, title: "Change the voice", problems: screen.problems,
-                note: screen.source.flatMap(CreativeMedia.duration(of:)).map {
-                    "Billed by the recording's length: \(ElevenLabsAudioPlayerView.clock($0))."
-                }
+                runner: screen.runner, title: "Change the voice",
+                estimatedSeconds: screen.source.flatMap(CreativeMedia.duration(of:)), problems: screen.problems
             ) {
                 Task { await screen.generate() }
             }

@@ -548,76 +548,56 @@ enum CreativeOutputFormat {
         return pieces.joined(separator: " · ")
     }
 
-    /// Whether the app's player can play the answer as it is (raw PCM and telephone codecs
-    /// arrive without a header).
-    static func isPlayable(_ id: String) -> Bool {
-        !(id.hasPrefix("pcm_") || id.hasPrefix("ulaw_") || id.hasPrefix("alaw_"))
-    }
-
     /// Whether a stream in this format plays as it arrives: the shell's stream player decodes
     /// MP3 and raw PCM live; other formats are only kept.
     static func playsLive(_ id: String) -> Bool {
         id.hasPrefix("mp3_") || id.hasPrefix("pcm_") || id == "auto"
     }
-
-    /// Said under a format picker when the choice cannot be played in the app.
-    static func playabilityNote(_ id: String) -> String? {
-        guard !isPlayable(id) else { return nil }
-        return "\(title(id)) has no header: the file is kept, but the player here cannot open it"
-            + (id.hasPrefix("pcm_") ? " (streamed, it still plays as it arrives)." : ".")
-    }
 }
 
-/// A format picker with the note about raw formats under it.
+/// The output format picker: the operation's own formats, in words.
 struct CreativeOutputFormatPicker: View {
     @Binding var selection: String
     let choices: [String]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            CreativeChoicePicker(title: "Format", selection: $selection, choices: choices, label: CreativeOutputFormat.title)
-            if let note = CreativeOutputFormat.playabilityNote(selection) {
-                Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        CreativeChoicePicker(title: "Format", selection: $selection, choices: choices, label: CreativeOutputFormat.title)
     }
 }
 
 // MARK: - Timed text
 
 /// A player for a file with timed words under it: the word being heard is marked, and a
-/// line's time jumps there. Raw audio, which cannot play here, gets the words alone.
+/// line's time jumps there. Headerless audio plays at the rate the run asked for.
 struct CreativeTimedPlayer: View {
     let url: URL
     let words: [CreativeTimedWord]
     var title: String?
     var showsSpeakers = true
-    var contentType: String
 
     @State private var player: ElevenLabsAudioPlayer
 
     init(url: URL, words: [CreativeTimedWord], title: String? = nil, showsSpeakers: Bool = true,
-         contentType: String = "audio/mpeg") {
+         contentType: String = "audio/mpeg", outputFormat: String? = nil) {
         self.url = url
         self.words = words
         self.title = title
         self.showsSpeakers = showsSpeakers
-        self.contentType = contentType
-        _player = State(initialValue: ElevenLabsAudioPlayer(url: url))
+        _player = State(initialValue: ElevenLabsAudioPlayer(
+            url: url, raw: Self.rawFormat(url: url, contentType: contentType, outputFormat: outputFormat)
+        ))
+    }
+
+    /// How to read `url` when it has no header; nil when it has one.
+    static func rawFormat(url: URL, contentType: String, outputFormat: String?) -> ElevenLabsRawAudio.Format? {
+        guard let encoding = ElevenLabsRawAudio.encoding(url: url, contentType: contentType) else { return nil }
+        return ElevenLabsRawAudio.Format(
+            encoding: encoding,
+            sampleRate: ElevenLabsRawAudio.sampleRate(outputFormat: outputFormat) ?? encoding.fallbackRate
+        )
     }
 
     var body: some View {
-        if ElevenLabsFileResult.isRawAudio(url: url, contentType: contentType.lowercased()) {
-            VStack(alignment: .leading, spacing: 10) {
-                CreativeAudioResult(url: url, contentType: contentType, title: title)
-                CreativeTranscriptView(segments: CreativeTimeline.segments(words), showsSpeakers: showsSpeakers)
-            }
-        } else {
-            playing
-        }
-    }
-
-    private var playing: some View {
         VStack(alignment: .leading, spacing: 10) {
             CreativePlayerBar(player: player, title: title)
             CreativeTranscriptView(
@@ -753,26 +733,29 @@ struct CreativeTranscriptView: View {
 
 // MARK: - Takes
 
-/// A take's audio: a player, or — for raw PCM, μ-law or A-law, which has no header — the
-/// shell's file row that says so.
+/// A take's audio: a player — for raw PCM, μ-law or A-law, which has no header, the shell's
+/// raw player at the rate the run asked for.
 struct CreativeAudioResult: View {
     let url: URL
     let contentType: String
     var bytes: Int = 0
     var title: String?
+    var outputFormat: String?
 
     init(take: CreativeTake, title: String? = nil) {
         url = take.file
         contentType = take.contentType
         bytes = take.bytes
         self.title = title ?? take.title
+        outputFormat = take.outputFormat
     }
 
-    init(url: URL, contentType: String, bytes: Int = 0, title: String? = nil) {
+    init(url: URL, contentType: String, bytes: Int = 0, title: String? = nil, outputFormat: String? = nil) {
         self.url = url
         self.contentType = contentType
         self.bytes = bytes
         self.title = title
+        self.outputFormat = outputFormat
     }
 
     var isRaw: Bool { ElevenLabsFileResult.isRawAudio(url: url, contentType: contentType.lowercased()) }
@@ -781,7 +764,7 @@ struct CreativeAudioResult: View {
         if isRaw {
             VStack(alignment: .leading, spacing: 4) {
                 if let title { Text(title).font(.callout.weight(.medium)).lineLimit(1) }
-                ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes)
+                ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes, outputFormat: outputFormat)
             }
         } else {
             ElevenLabsAudioPlayerView(url: url, title: title).id(url)
@@ -799,9 +782,11 @@ struct CreativeTake: Identifiable, Hashable, Sendable {
     var bytes: Int
     var requestID: String?
     var characterCost: Int?
+    /// The `output_format` the run asked for: headerless audio's sample rate comes from it.
+    var outputFormat: String?
 
     /// Nil when the answer wrote no file.
-    init?(result: ElevenLabsResult, title: String, date: Date = Date()) {
+    init?(result: ElevenLabsResult, title: String, outputFormat: String? = nil, date: Date = Date()) {
         guard let file = CreativeResults.audioFile(in: result) else { return nil }
         self.title = title
         self.date = date
@@ -810,6 +795,13 @@ struct CreativeTake: Identifiable, Hashable, Sendable {
         bytes = file.bytes
         requestID = CreativeResults.requestID(of: result)
         characterCost = result.meta.characterCost
+        self.outputFormat = outputFormat
+    }
+
+    /// For a run's answer: the take, with the format the runner asked for.
+    @MainActor
+    init?(result: ElevenLabsResult, title: String, runner: ElevenLabsRunner) {
+        self.init(result: result, title: title, outputFormat: runner.arguments["output_format"]?.stringValue)
     }
 }
 

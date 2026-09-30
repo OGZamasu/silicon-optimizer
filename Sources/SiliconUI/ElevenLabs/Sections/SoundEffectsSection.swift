@@ -81,7 +81,7 @@ final class SoundEffectsScreenModel: CreativeScreenModel {
         var title = text.count > 60 ? String(text.prefix(59)) + "…" : text
         if !automaticDuration { title += String(format: " · %.1f s", duration) }
         if loop { title += " · loop" }
-        if let take = CreativeTake(result: result, title: title) { takes.insert(take, at: 0) }
+        if let take = CreativeTake(result: result, title: title, runner: runner) { takes.insert(take, at: 0) }
     }
 
     func removeTake(_ take: CreativeTake) {

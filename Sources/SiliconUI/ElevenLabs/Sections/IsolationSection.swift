@@ -118,7 +118,7 @@ final class IsolationScreenModel: CreativeScreenModel {
         runner.streamMode = delivery == .stream ? .play : .collect
         lastRunner = runner
         guard let result = await runner.perform(arguments: arguments(), files: files()) else { return }
-        if let take = CreativeTake(result: result, title: "Isolated — \(source?.lastPathComponent ?? "recording")") {
+        if let take = CreativeTake(result: result, title: "Isolated — \(source?.lastPathComponent ?? "recording")", runner: runner) {
             takes.insert(take, at: 0)
             sources[take.id] = source
         }
@@ -195,10 +195,8 @@ struct IsolationScreen: View {
                     .disabled(screen.pcmFormatValue == nil)
             }
             CreativeRunRow(
-                runner: screen.runner, title: "Isolate the voice", problems: screen.problems,
-                note: screen.source.flatMap(CreativeMedia.duration(of:)).map {
-                    "Billed by the recording's length: \(ElevenLabsAudioPlayerView.clock($0))."
-                }
+                runner: screen.runner, title: "Isolate the voice",
+                estimatedSeconds: screen.source.flatMap(CreativeMedia.duration(of:)), problems: screen.problems
             ) {
                 Task { await screen.isolate() }
             }
