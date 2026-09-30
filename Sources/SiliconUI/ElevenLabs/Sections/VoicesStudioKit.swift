@@ -626,6 +626,9 @@ struct VoicesStudioActivity: View {
     /// Whether the last action's result is drawn here too (off when the section draws it in
     /// its own way).
     var showsResult = false
+    /// The section shows a credential where it was made (a new key, a webhook secret), so the
+    /// foot does not show it a second time.
+    var credentialsInline = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -656,8 +659,14 @@ struct VoicesStudioActivity: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let runner = actions.last ?? fallback {
-                ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult && actions.last != nil)
-                    .id(runner.id)
+                if credentialsInline, runner.credential != nil {
+                    ElevenLabsAPICallDisclosure(runner: runner)
+                        .elevenLabsConfirmation(for: runner)
+                        .id(runner.id)
+                } else {
+                    ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult && actions.last != nil)
+                        .id(runner.id)
+                }
             }
         }
     }

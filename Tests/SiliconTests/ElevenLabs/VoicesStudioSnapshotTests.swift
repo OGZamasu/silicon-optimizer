@@ -303,6 +303,57 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("workspace-connections", height: 1200) { WorkspaceScreen(model: model) }
     }
 
+    // MARK: Usage, service accounts, webhooks
+
+    @Test func usageWithAChart() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = UsageSectionModel(environment: fixture.environment)
+        let days = (0..<14).flatMap { day -> [JSONValue] in
+            let date = String(format: "2026-09-%02d 00:00:00", 14 + day)
+            return [[.string(date), "tts", .number(Double(800 + day * 90 % 700))],
+                    [.string(date), "dubbing", .number(Double(day % 3 == 0 ? 400 : 120))]]
+        }
+        model.load(
+            account: UsageAccount(subscription: VoicesStudioAccountsTests.subscription,
+                                  user: ["first_name": "Alex", "seat_type": "workspace_admin"]),
+            usage: UsageTable(json: ["columns": ["time", "product_type", "credits"],
+                                     "column_types": ["DateTime", "String", "Float"],
+                                     "column_units": ["", "", "credits"], "rows": .array(days.map { $0 })]),
+            requests: UsageTable(json: ["columns": ["time", "endpoint", "status", "credits"],
+                                        "column_types": ["DateTime", "String", "Int", "Float"],
+                                        "column_units": ["", "", "", "credits"],
+                                        "rows": [["2026-09-27 10:12:03", "/v1/text-to-speech", 200, 42],
+                                                 ["2026-09-27 10:11:40", "/v2/voices", 200, 0]]])
+        )
+        try VoicesStudioSnapshots.render("usage", height: 1100) { UsageScreen(model: model) }
+    }
+
+    @Test func serviceAccountsWithKeys() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioAccountsTests.account))
+        model.load(accounts: [account], selected: account)
+        model.keyDraft.name = "Nightly renders"
+        try VoicesStudioSnapshots.render("service-accounts", height: 1300) { ServiceAccountsScreen(model: model) }
+    }
+
+    @Test func webhooks() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = WebhooksSectionModel(environment: fixture.environment)
+        model.load(webhooks: try [
+            ["name": "Ops", "webhook_id": "w1", "webhook_url": "https://example.com/hooks/elevenlabs",
+             "is_disabled": false, "is_auto_disabled": false, "created_at_unix": 1, "auth_type": "hmac",
+             "events": ["flows", "speech_to_text"]],
+            ["name": "Old CRM", "webhook_id": "w2", "webhook_url": "https://crm.example.com/in",
+             "is_disabled": true, "is_auto_disabled": true, "created_at_unix": 1, "auth_type": "hmac",
+             "most_recent_failure_error_code": 502, "most_recent_failure_timestamp": 1_780_000_000],
+        ].map { try #require(WorkspaceWebhook(json: $0)) })
+        try VoicesStudioSnapshots.render("webhooks", height: 1000) { WebhooksScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {

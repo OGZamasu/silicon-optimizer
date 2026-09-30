@@ -42,6 +42,15 @@ enum VoicesStudioCoverage {
         Entry(section: .workspace, controls: WorkspaceSectionModel.controls,
               callsWithoutControls: WorkspaceSectionModel.callsWithoutControls,
               explorerOnly: WorkspaceSectionModel.explorerOnly),
+        Entry(section: .usage, controls: UsageSectionModel.controls,
+              callsWithoutControls: UsageSectionModel.callsWithoutControls,
+              explorerOnly: UsageSectionModel.explorerOnly),
+        Entry(section: .serviceAccounts, controls: ServiceAccountsSectionModel.controls,
+              callsWithoutControls: ServiceAccountsSectionModel.callsWithoutControls,
+              explorerOnly: ServiceAccountsSectionModel.explorerOnly),
+        Entry(section: .webhooks, controls: WebhooksSectionModel.controls,
+              callsWithoutControls: WebhooksSectionModel.callsWithoutControls,
+              explorerOnly: WebhooksSectionModel.explorerOnly),
     ]
 
     @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }
