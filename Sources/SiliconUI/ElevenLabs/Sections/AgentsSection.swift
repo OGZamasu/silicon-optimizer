@@ -249,29 +249,31 @@ final class AgentsModel {
     /// Saves the changes. When they give the agent an MCP server or a webhook tool, asks first:
     /// that is the step that starts sending what callers say to that address.
     func save() async {
-        guard saveArguments() != nil else { return }
+        guard let agentID = selectedID, let arguments = saveArguments() else { return }
+        let saved = draft
+        let name = saved.name
         let outside = newOutsideConnections()
         guard !outside.isEmpty else {
-            await commitSave()
+            await commitSave(arguments, agentID: agentID, saved: saved)
             return
         }
         let what = outside.count == 1 ? outside[0].line : AgentsFormat.count(outside.count, "outside service")
         questions.ask(AgentsQuestion(
-            title: "Let “\(draft.name)” send callers' words to \(what)?",
+            title: "Let “\(name)” send callers' words to \(what)?",
             message: "From its next conversation the agent may call "
                 + ListFormatter.localizedString(byJoining: outside.map(\.line))
                 + ", passing on what callers say. Only connect services you trust.",
             confirmLabel: "Save and connect"
         )) { [weak self] in
-            await self?.commitSave()
+            await self?.commitSave(arguments, agentID: agentID, saved: saved)
         }
     }
 
-    private func commitSave() async {
-        guard let selectedID, let arguments = saveArguments() else { return }
+    /// Saves exactly the changes the question (if any) was about, to the agent they were made on.
+    private func commitSave(_ arguments: [String: JSONValue], agentID selectedID: String, saved: AgentsAgentDraft) async {
         let runner = calls.runner(AgentsOp.updateAgent, slot: selectedID)
         guard let json = await calls.json(AgentsOp.updateAgent, arguments, slot: selectedID,
-                                          title: "Saved agent “\(draft.name)”")
+                                          title: "Saved agent “\(saved.name)”")
         else { return }
         runner.dismissCredential()
         changeDescription = ""
@@ -279,7 +281,7 @@ final class AgentsModel {
         if json["agent_id"].stringValue != nil {
             apply(json)
         } else {
-            loaded = draft
+            loaded = saved
         }
     }
 
@@ -335,6 +337,7 @@ final class AgentsModel {
         ) != nil else { return }
         list.remove(selectedID)
         store.directory.agents.remove(selectedID)
+        guard self.selectedID == selectedID else { return }
         self.selectedID = nil
         loaded = nil
         detailJSON = .null
@@ -409,37 +412,42 @@ final class AgentsModel {
     /// When the draft newly gives the agent an MCP server or webhook tool, asks first, as Save
     /// does: the draft goes live the day it is merged or deployed.
     func saveAsDraft() async {
+        guard let agentID = selectedID, let branchID else { return }
+        let body: [String: JSONValue]
+        switch draftBody() {
+        case .failure(let refusal):
+            draftProblem = refusal.message
+            return
+        case .success(let built):
+            draftProblem = nil
+            body = built
+        }
+        var arguments = body
+        arguments["agent_id"] = .string(agentID)
+        arguments["branch_id"] = .string(branchID)
+        let name = draft.name
         let outside = newOutsideConnections()
         guard !outside.isEmpty else {
-            await commitDraft()
+            await commitDraft(arguments, agentID: agentID, name: name)
             return
         }
         let what = outside.count == 1 ? outside[0].line : AgentsFormat.count(outside.count, "outside service")
         questions.ask(AgentsQuestion(
-            title: "Keep a draft that lets “\(draft.name)” send callers' words to \(what)?",
+            title: "Keep a draft that lets “\(name)” send callers' words to \(what)?",
             message: "Once this draft is merged or deployed, the agent may call "
                 + ListFormatter.localizedString(byJoining: outside.map(\.line))
                 + ", passing on what callers say. Only connect services you trust.",
             confirmLabel: "Keep the draft"
         )) { [weak self] in
-            await self?.commitDraft()
+            await self?.commitDraft(arguments, agentID: agentID, name: name)
         }
     }
 
-    private func commitDraft() async {
-        guard let selectedID, let branchID else { return }
-        switch draftBody() {
-        case .failure(let refusal):
-            draftProblem = refusal.message
-        case .success(let body):
-            draftProblem = nil
-            var arguments = body
-            arguments["agent_id"] = .string(selectedID)
-            arguments["branch_id"] = .string(branchID)
-            guard await calls.json(AgentsOp.createDraft, arguments, slot: selectedID, title: "Draft of “\(draft.name)”") != nil
-            else { return }
-            await branches.load()
-        }
+    /// Keeps exactly the draft the question (if any) was about, on the agent and branch it was built for.
+    private func commitDraft(_ arguments: [String: JSONValue], agentID: String, name: String) async {
+        guard await calls.json(AgentsOp.createDraft, arguments, slot: agentID, title: "Draft of “\(name)”") != nil
+        else { return }
+        if selectedID == agentID { await branches.load() }
     }
 
     /// Shows this agent's conversations.
@@ -1244,6 +1252,8 @@ final class AgentsBranchesModel {
     private(set) var proposal: JSONValue = .null
     private(set) var procedures: [AgentsProcedure] = []
     private(set) var selectedProcedureID: String?
+    /// "branch/procedure" of the procedure whose fields the editor holds; nil for a new one or while loading.
+    private(set) var loadedProcedureKey: String?
     var procedureName = ""
     var procedureType = "free_form"
     var procedureTrigger = ""
@@ -1292,10 +1302,10 @@ final class AgentsBranchesModel {
 
     @discardableResult
     private func json(
-        _ operationID: String, _ arguments: [String: JSONValue] = [:], quiet: Bool = false, title: String? = nil,
-        subject: String? = nil, consequence: String? = nil
+        _ operationID: String, _ arguments: [String: JSONValue] = [:], slot explicit: String? = nil, quiet: Bool = false,
+        title: String? = nil, subject: String? = nil, consequence: String? = nil
     ) async -> JSONValue? {
-        await calls.json(operationID, arguments, slot: slot(for: operationID), quiet: quiet, title: title,
+        await calls.json(operationID, arguments, slot: explicit ?? slot(for: operationID), quiet: quiet, title: title,
                          subject: subject, consequence: consequence)
     }
 
@@ -1309,6 +1319,11 @@ final class AgentsBranchesModel {
         selectedProposalID = nil
         proposal = .null
         procedures = []
+        selectedProcedureID = nil
+        loadedProcedureKey = nil
+        procedureName = ""
+        procedureTrigger = ""
+        procedureContent = ""
         traffic = [:]
     }
 
@@ -1385,25 +1400,27 @@ final class AgentsBranchesModel {
     }
 
     /// Asks first: a merge into main changes what live callers hear from their next call.
+    /// The branches the question names are the ones merged: both are taken when it is asked.
     func requestMerge(agentName: String) {
-        guard let branch = selectedBranch, let target = mainBranch else { return }
+        guard let branch = selectedBranch, let target = mainBranch, branch.id != target.id else { return }
+        let agent = agentID
+        let archive = archiveSourceOnMerge
         questions.ask(AgentsQuestion(
             title: "Merge “\(branch.name)” into “\(target.name)” of “\(agentName)”?",
             message: "Callers of “\(agentName)” who reach “\(target.name)” hear the merged configuration from their next "
-                + "conversation." + (archiveSourceOnMerge ? " “\(branch.name)” is archived afterwards." : ""),
+                + "conversation." + (archive ? " “\(branch.name)” is archived afterwards." : ""),
             confirmLabel: "Merge"
         )) { [weak self] in
-            await self?.merge()
+            await self?.merge(branch, into: target, of: agent, archivingSource: archive)
         }
     }
 
-    func merge() async {
-        guard let branch = selectedBranch, let target = mainBranch else { return }
+    func merge(_ branch: AgentsBranch, into target: AgentsBranch, of agent: String, archivingSource archive: Bool) async {
         guard await json(AgentsOp.mergeBranch, [
-            "agent_id": .string(agentID), "source_branch_id": .string(branch.id),
-            "target_branch_id": .string(target.id), "archive_source_branch": .bool(archiveSourceOnMerge),
-        ], title: "Merged “\(branch.name)” into “\(target.name)”") != nil else { return }
-        await load()
+            "agent_id": .string(agent), "source_branch_id": .string(branch.id),
+            "target_branch_id": .string(target.id), "archive_source_branch": .bool(archive),
+        ], slot: "\(agent)/\(branch.id)", title: "Merged “\(branch.name)” into “\(target.name)”") != nil else { return }
+        if agentID == agent { await load() }
     }
 
     func previewRebase() async {
@@ -1438,29 +1455,31 @@ final class AgentsBranchesModel {
     }
 
     /// Asks first, naming each branch's share: a deployment moves live callers at once.
+    /// The split the question names is the split deployed: taken when it is asked.
     func requestDeploy(agentName: String) {
-        let split = branches.filter { !$0.isArchived }
-            .map { "\($0.name) \(Int(traffic[$0.id] ?? 0)) %" }
+        let shares = branches.filter { !$0.isArchived }.map { (branch: $0, share: traffic[$0.id] ?? 0) }
+        let split = shares.map { "\($0.branch.name) \(Int($0.share)) %" }
+        let requests: [JSONValue] = shares.map { entry in
+            [
+                "branch_id": .string(entry.branch.id),
+                "deployment_strategy": ["type": "percentage", "traffic_percentage": .number(entry.share)],
+            ]
+        }
+        let agent = agentID
         questions.ask(AgentsQuestion(
             title: "Send “\(agentName)”'s callers to " + ListFormatter.localizedString(byJoining: split) + "?",
             message: "New conversations with “\(agentName)” are shared out this way as soon as you confirm.",
             confirmLabel: "Deploy"
         )) { [weak self] in
-            await self?.deploy()
+            await self?.deploy(requests, to: agent)
         }
     }
 
-    func deploy() async {
-        let requests: [JSONValue] = branches.filter { !$0.isArchived }.map { branch in
-            [
-                "branch_id": .string(branch.id),
-                "deployment_strategy": ["type": "percentage", "traffic_percentage": .number(traffic[branch.id] ?? 0)],
-            ]
-        }
+    func deploy(_ requests: [JSONValue], to agent: String) async {
         guard await json(AgentsOp.createDeployment, [
-            "agent_id": .string(agentID), "deployment_request": ["requests": .array(requests)],
-        ], title: "Deployed the traffic split") != nil else { return }
-        await load()
+            "agent_id": .string(agent), "deployment_request": ["requests": .array(requests)],
+        ], slot: agent, title: "Deployed the traffic split") != nil else { return }
+        if agentID == agent { await load() }
     }
 
     func loadProcedures() async {
@@ -1475,19 +1494,36 @@ final class AgentsBranchesModel {
     func openProcedure(_ procedure: AgentsProcedure) async {
         guard let branch = selectedBranch else { return }
         selectedProcedureID = procedure.id
+        // The previous procedure's text never stands in for this one's.
+        loadedProcedureKey = nil
+        procedureName = procedure.name
+        procedureType = procedure.type
+        procedureTrigger = procedure.trigger
+        procedureContent = ""
         let arguments: [String: JSONValue] = [
             "agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(procedure.id),
         ]
         let operation = procedure.hasDraft ? AgentsOp.getProcedureDraft : AgentsOp.getProcedure
-        guard let json = await json(operation, arguments, quiet: true), selectedProcedureID == procedure.id else { return }
+        guard let json = await json(operation, arguments, quiet: true), selectedProcedureID == procedure.id,
+              selectedBranchID == branch.id else { return }
         procedureName = json["name"].stringValue ?? procedure.name
         procedureType = json["type"].stringValue ?? procedure.type
         procedureTrigger = json["trigger"].stringValue ?? procedure.trigger
         procedureContent = json["content"].stringValue ?? ""
+        loadedProcedureKey = "\(branch.id)/\(procedure.id)"
+    }
+
+    /// Whether the editor holds the open procedure of the selected branch (or a new one):
+    /// saving, discarding and removing wait for its text to arrive.
+    var procedureIsLoaded: Bool {
+        guard let selectedProcedureID else { return true }
+        guard let selectedBranchID, let loadedProcedureKey else { return false }
+        return loadedProcedureKey == "\(selectedBranchID)/\(selectedProcedureID)"
     }
 
     func newProcedure() {
         selectedProcedureID = nil
+        loadedProcedureKey = nil
         procedureName = ""
         procedureType = AgentsSchema.choices(AgentsOp.createProcedure, "type").first ?? "free_form"
         procedureTrigger = ""
@@ -1496,7 +1532,7 @@ final class AgentsBranchesModel {
 
     /// Creates the procedure, or saves the edits to the open one as its draft.
     func saveProcedure() async {
-        guard let branch = selectedBranch else { return }
+        guard procedureIsLoaded, let branch = selectedBranch else { return }
         var arguments: [String: JSONValue] = [
             "agent_id": .string(agentID), "branch_id": .string(branch.id),
             "name": .string(procedureName.trimmingCharacters(in: .whitespaces)), "type": .string(procedureType),
@@ -1510,13 +1546,16 @@ final class AgentsBranchesModel {
         } else {
             guard let json = await json(AgentsOp.createProcedure, arguments, title: "Procedure “\(procedureName)”")
             else { return }
-            selectedProcedureID = json["procedure_id"].stringValue
+            if selectedProcedureID == nil, selectedBranchID == branch.id, let id = json["procedure_id"].stringValue {
+                selectedProcedureID = id
+                loadedProcedureKey = "\(branch.id)/\(id)"
+            }
         }
         await loadProcedures()
     }
 
     func discardProcedureDraft() async {
-        guard let branch = selectedBranch, let id = selectedProcedureID else { return }
+        guard procedureIsLoaded, let branch = selectedBranch, let id = selectedProcedureID else { return }
         guard await json(
             AgentsOp.deleteProcedureDraft,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(id)],
@@ -1524,11 +1563,11 @@ final class AgentsBranchesModel {
             consequence: "The procedure goes back to its committed version on “\(branch.name)”."
         ) != nil else { return }
         await loadProcedures()
-        if let procedure = procedures.first(where: { $0.id == id }) { await openProcedure(procedure) }
+        if selectedProcedureID == id, let procedure = procedures.first(where: { $0.id == id }) { await openProcedure(procedure) }
     }
 
     func removeProcedure() async {
-        guard let branch = selectedBranch, let id = selectedProcedureID else { return }
+        guard procedureIsLoaded, let branch = selectedBranch, let id = selectedProcedureID else { return }
         guard await json(
             AgentsOp.removeProcedure,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(id)],
@@ -1536,7 +1575,10 @@ final class AgentsBranchesModel {
             consequence: "It leaves the branch's working set (a folder takes everything inside it along). "
                 + "ElevenLabs refuses if another procedure hands off to it."
         ) != nil else { return }
-        selectedProcedureID = nil
+        if selectedProcedureID == id {
+            selectedProcedureID = nil
+            loadedProcedureKey = nil
+        }
         await loadProcedures()
     }
 
@@ -1557,9 +1599,19 @@ final class AgentsBranchesModel {
 
     func openProposal(_ id: String) async {
         selectedProposalID = id
-        proposal = await json(
-            AgentsOp.getMergeProposal, ["agent_id": .string(agentID), "merge_proposal_id": .string(id)], quiet: true
-        ) ?? .null
+        if proposal["id"].stringValue != id { proposal = .null }
+        let fetched = await json(
+            AgentsOp.getMergeProposal, ["agent_id": .string(agentID), "merge_proposal_id": .string(id)],
+            slot: "\(agentID)/\(id)", quiet: true
+        )
+        // An older, slower fetch never replaces the proposal selected since.
+        guard selectedProposalID == id else { return }
+        proposal = fetched ?? .null
+    }
+
+    /// Whether the details on screen are the selected proposal's: acting waits for them.
+    var proposalIsLoaded: Bool {
+        selectedProposalID != nil && proposal["id"].stringValue == selectedProposalID
     }
 
     func propose() async {
@@ -1576,32 +1628,36 @@ final class AgentsBranchesModel {
     }
 
     func comment() async {
-        guard let id = selectedProposalID else { return }
+        guard proposalIsLoaded, let id = selectedProposalID else { return }
         guard await json(AgentsOp.commentMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id), "body": .string(proposalComment),
         ]) != nil else { return }
         proposalComment = ""
-        await openProposal(id)
+        if selectedProposalID == id { await openProposal(id) }
     }
 
     func review(approve: Bool) async {
-        guard let id = selectedProposalID else { return }
+        guard proposalIsLoaded, let id = selectedProposalID else { return }
         guard await json(AgentsOp.reviewMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id),
             "state": .string(approve ? "approved" : "changes_requested"), "comment": .string(reviewComment),
         ]) != nil else { return }
         reviewComment = ""
-        await openProposal(id)
+        if selectedProposalID == id { await openProposal(id) }
     }
 
     /// Asks first: merging a proposal changes its target branch — usually main, what live
     /// callers hear.
+    ///
+    /// The id merged and the names in the question come from the same, loaded proposal: while
+    /// another one's details are still arriving nothing is asked, and "yes" merges the proposal
+    /// the question named, whatever is selected by then.
     func requestAcceptProposal(agentName: String) {
-        guard let id = selectedProposalID else { return }
-        let listed = proposals.first { $0.id == id }
-        let title = proposal["title"].stringValue ?? listed?.title ?? "this proposal"
-        let sourceID = proposal["source_branch_id"].stringValue ?? listed?.sourceBranchID
-        let targetID = proposal["target_branch_id"].stringValue ?? listed?.targetBranchID
+        guard proposalIsLoaded, let id = proposal["id"].stringValue else { return }
+        let agent = agentID
+        let title = proposal["title"].stringValue ?? "this proposal"
+        let sourceID = proposal["source_branch_id"].stringValue
+        let targetID = proposal["target_branch_id"].stringValue
         let source = branches.first { $0.id == sourceID }?.name ?? sourceID ?? "its branch"
         let target = branches.first { $0.id == targetID }
         let targetName = target?.name ?? targetID ?? "its target"
@@ -1611,28 +1667,28 @@ final class AgentsBranchesModel {
             message: "Callers of “\(agentName)” who reach “\(targetName)” hear the merged configuration from their next "
                 + "conversation.\(live)" + (archiveSourceOnMerge ? " “\(source)” is archived afterwards." : ""),
             confirmLabel: "Merge"
-        )) { [weak self] in
-            await self?.acceptProposal()
+        )) { [weak self, archiveSourceOnMerge] in
+            await self?.acceptProposal(id: id, of: agent, archivingSource: archiveSourceOnMerge)
         }
     }
 
-    func acceptProposal() async {
-        guard let id = selectedProposalID else { return }
+    func acceptProposal(id: String, of agent: String, archivingSource archive: Bool) async {
         guard await json(AgentsOp.acceptMergeProposal, [
-            "agent_id": .string(agentID), "merge_proposal_id": .string(id),
-            "archive_source_branch": .bool(archiveSourceOnMerge),
-        ], title: "Merged a proposal") != nil else { return }
+            "agent_id": .string(agent), "merge_proposal_id": .string(id),
+            "archive_source_branch": .bool(archive),
+        ], slot: "\(agent)/\(id)", title: "Merged a proposal") != nil else { return }
+        guard agentID == agent else { return }
         await load()
-        await openProposal(id)
+        if selectedProposalID == id { await openProposal(id) }
     }
 
     func closeProposal() async {
-        guard let id = selectedProposalID else { return }
+        guard proposalIsLoaded, let id = selectedProposalID else { return }
         guard await json(AgentsOp.updateMergeProposal, [
             "agent_id": .string(agentID), "merge_proposal_id": .string(id), "close": true,
         ]) != nil else { return }
         await loadProposals()
-        await openProposal(id)
+        if selectedProposalID == id { await openProposal(id) }
     }
 
     static let arguments: [AgentsArgument] = [
@@ -1734,12 +1790,16 @@ private struct AgentsProceduresEditor: View {
             HStack {
                 let saveOperation = model.selectedProcedureID == nil ? AgentsOp.createProcedure : AgentsOp.updateProcedureDraft
                 AgentsRunButton(runner: model.runner(saveOperation), title: model.selectedProcedureID == nil ? "Create" : "Save draft",
-                                    disabled: model.procedureName.trimmingCharacters(in: .whitespaces).isEmpty) {
+                                    disabled: !model.procedureIsLoaded
+                                        || model.procedureName.trimmingCharacters(in: .whitespaces).isEmpty,
+                                    disabledReason: model.procedureIsLoaded ? nil : "Waiting for the procedure's text.") {
                     Task { await model.saveProcedure() }
                 }
                 if model.selectedProcedureID != nil {
                     Button("Discard draft…") { Task { await model.discardProcedureDraft() } }
+                        .disabled(!model.procedureIsLoaded)
                     Button("Remove…") { Task { await model.removeProcedure() } }
+                        .disabled(!model.procedureIsLoaded)
                 }
             }
             ForEach([AgentsOp.createProcedure, AgentsOp.updateProcedureDraft, AgentsOp.deleteProcedureDraft,
@@ -1967,7 +2027,8 @@ private struct AgentsBranchesTab: View {
                     Button("Request changes") { Task { await model.review(approve: false) } }
                 }
                 HStack {
-                    AgentsRunButton(runner: model.runner(AgentsOp.acceptMergeProposal), title: "Merge it…") {
+                    AgentsRunButton(runner: model.runner(AgentsOp.acceptMergeProposal), title: "Merge it…",
+                                    disabled: !model.proposalIsLoaded, disabledReason: "Waiting for the proposal's details.") {
                         model.requestAcceptProposal(agentName: agentName)
                     }
                     Button("Close proposal") { Task { await model.closeProposal() } }

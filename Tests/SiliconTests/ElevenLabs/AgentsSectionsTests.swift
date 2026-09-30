@@ -266,6 +266,105 @@ struct AgentsSectionsTests {
         #expect(rig.requests(AgentsOp.acceptMergeProposal).count == 1)
     }
 
+    /// A rig whose detail answers for `slowIDs` (by the last path component) take a while.
+    private func rigWithSlowDetails(_ operationID: String, _ slowIDs: Set<String>) -> AgentsFixtures.Rig {
+        AgentsFixtures.Rig { request in
+            var reply = try await AgentsFixtures.reply(request)
+            if request.operationID == operationID, slowIDs.contains(request.url.lastPathComponent) {
+                reply.delay = .milliseconds(300)
+            }
+            return reply
+        }
+    }
+
+    /// Round 3: "Merge it…" names and merges one and the same proposal. While another
+    /// proposal's details are on their way nothing is asked; once they are in, the question
+    /// names that proposal and "yes" merges it even if the selection has moved on since.
+    @Test func mergeItWaitsForTheProposalAndMergesTheOneItNamed() async throws {
+        let rig = rigWithSlowDetails(AgentsOp.getMergeProposal, ["mp_2"])
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        await branches.openProposal("mp_1")
+        #expect(branches.proposalIsLoaded)
+
+        let opening = Task { await branches.openProposal("mp_2") }
+        try await waitUntil { branches.selectedProposalID == "mp_2" }
+        #expect(!branches.proposalIsLoaded, "mp_1's details are not mp_2's")
+        #expect(branches.proposal == .null, "mp_1's details leave the screen")
+        branches.requestAcceptProposal(agentName: "Support")
+        #expect(model.questions.question == nil, "nothing is asked while the proposal loads")
+
+        await opening.value
+        #expect(branches.proposalIsLoaded)
+        branches.requestAcceptProposal(agentName: "Support")
+        let question = try #require(model.questions.question)
+        #expect(question.title == "Merge “Bring back the old greeting” (“Main”) into “Warmer tone” of “Support”?")
+
+        // The selection moves back to mp_1 before the answer: the proposal asked about is merged.
+        await branches.openProposal("mp_1")
+        await model.questions.answer(true)
+        let merged = try #require(rig.requests(AgentsOp.acceptMergeProposal).last)
+        #expect(merged.request.url.pathComponents.suffix(2) == ["mp_2", "merge"])
+        #expect(rig.requests(AgentsOp.acceptMergeProposal).count == 1)
+    }
+
+    /// Round 3: an older, slower proposal fetch never replaces the proposal selected since.
+    @Test func aSlowerProposalFetchNeverReplacesTheOneSelectedSince() async throws {
+        let rig = rigWithSlowDetails(AgentsOp.getMergeProposal, ["mp_2"])
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        let slow = Task { await branches.openProposal("mp_2") }
+        try await waitUntil { branches.selectedProposalID == "mp_2" }
+        await branches.openProposal("mp_1")
+        await slow.value
+        #expect(branches.selectedProposalID == "mp_1")
+        #expect(branches.proposal["id"] == "mp_1")
+        branches.requestAcceptProposal(agentName: "Support")
+        #expect(model.questions.question?.title == "Merge “Warmer greeting” (“Warmer tone”) into “Main” of “Support”?")
+    }
+
+    /// Round 3: Merge into main and Deploy send what their question named, whatever changes
+    /// on screen before the answer.
+    @Test func mergeAndDeploySendWhatTheQuestionNamed() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        branches.selectedBranchID = "agtbrch_tone"
+        branches.archiveSourceOnMerge = false
+        branches.requestMerge(agentName: "Support")
+        #expect(model.questions.question?.title == "Merge “Warmer tone” into “Main” of “Support”?")
+        branches.selectedBranchID = "agtbrch_main"
+        branches.archiveSourceOnMerge = true
+        await model.questions.answer(true)
+        // The source branch is in the path, the target in the query, the archive choice in the body.
+        let merge = try #require(rig.requests(AgentsOp.mergeBranch).last?.request.url)
+        #expect(merge.pathComponents.suffix(2) == ["agtbrch_tone", "merge"])
+        #expect(URLComponents(url: merge, resolvingAgainstBaseURL: false)?.queryItems?
+            .first { $0.name == "target_branch_id" }?.value == "agtbrch_main")
+        #expect(rig.body(AgentsOp.mergeBranch)?["archive_source_branch"] == false)
+
+        branches.traffic = ["agtbrch_main": 80, "agtbrch_tone": 20]
+        branches.requestDeploy(agentName: "Support")
+        #expect(model.questions.question?.title == "Send “Support”'s callers to Main 80 % and Warmer tone 20 %?")
+        branches.traffic = ["agtbrch_main": 0, "agtbrch_tone": 100]
+        await model.questions.answer(true)
+        let deployment = try #require(rig.body(AgentsOp.createDeployment))
+        let shares = (deployment["deployment_request"]["requests"].arrayValue ?? []).map {
+            ($0["branch_id"].stringValue ?? "", $0["deployment_strategy"]["traffic_percentage"].doubleValue ?? -1)
+        }
+        #expect(shares.map(\.0) == ["agtbrch_main", "agtbrch_tone"])
+        #expect(shares.map(\.1) == [80, 20])
+    }
+
     /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
     /// out, so Save asks first, naming where.
     @Test func savingAnAgentWithANewMCPServerOrWebhookToolAsksFirst() async throws {

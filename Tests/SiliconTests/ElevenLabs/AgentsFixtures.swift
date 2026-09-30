@@ -76,6 +76,9 @@ enum AgentsFixtures {
             return .audio(Data(repeating: 0xFF, count: 2_048))
         case AgentsOp.exportBatch:
             return .init(status: 200, headers: ["content-type": "text/csv"], body: Data("phone_number,status\n+15550111,completed\n".utf8))
+        case AgentsOp.getMergeProposal:
+            // The proposal asked for, by the last path component.
+            return .json(mergeProposal(request.url.lastPathComponent))
         default:
             return .json(answer(for: request.operationID))
         }
@@ -117,11 +120,7 @@ enum AgentsFixtures {
                     "version_description": "Shorter first message", "seq_no_in_branch": 7,
                     "time_committed_secs": 1_789_000_000, "parents": [:]]
         case AgentsOp.listMergeProposals:
-            return ["results": [["id": "mp_1", "agent_id": .string(agentID), "source_branch_id": "agtbrch_tone",
-                                 "target_branch_id": "agtbrch_main", "source_tip_version_id_at_creation": "agtvrsn_9",
-                                 "title": "Warmer greeting", "outcome": ["type": "open"], "created_at": 1_789_950_000,
-                                 "updated_at": 1_789_950_000]],
-                    "next_cursor": nil, "has_more": false]
+            return ["results": [mergeProposal("mp_1"), mergeProposal("mp_2")], "next_cursor": nil, "has_more": false]
         case AgentsOp.listProcedures:
             return ["procedures": [["procedure_id": "proc_refund", "name": "Refunds", "type": "free_form",
                                     "trigger": "The caller wants money back", "has_draft": true]]]
@@ -427,6 +426,17 @@ enum AgentsFixtures {
         ["phone_number_id": .string(id), "phone_number": .string(number), "label": .string(label), "provider": .string(provider),
          "supports_inbound": true, "supports_outbound": true,
          "assigned_agent": agent.map { ["agent_id": .string($0.0), "agent_name": .string($0.1)] } ?? .null]
+    }
+
+    /// Two open proposals: mp_1 takes "Warmer tone" into Main, mp_2 takes Main into "Warmer tone".
+    static func mergeProposal(_ id: String) -> JSONValue {
+        let second = id == "mp_2"
+        return ["id": .string(id), "agent_id": .string(agentID),
+                "source_branch_id": second ? "agtbrch_main" : "agtbrch_tone",
+                "target_branch_id": second ? "agtbrch_tone" : "agtbrch_main",
+                "source_tip_version_id_at_creation": "agtvrsn_9",
+                "title": second ? "Bring back the old greeting" : "Warmer greeting",
+                "outcome": ["type": "open"], "created_at": 1_789_950_000, "updated_at": 1_789_950_000]
     }
 
     static func batch(_ id: String, _ name: String, status: String) -> JSONValue {
