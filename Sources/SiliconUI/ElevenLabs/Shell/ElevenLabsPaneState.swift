@@ -53,6 +53,11 @@ final class ElevenLabsPaneState {
     /// Every voice the account can use, fetched once and shared by every picker.
     let voices: ElevenLabsVoiceDirectory
 
+    /// Settings → ElevenLabs's Connect, Remove and region state. Here, not in the view: a
+    /// Settings pane or tab switch rebuilds the view, and a check still running must keep the
+    /// picker and Remove locked, and its captured region, whatever is on screen.
+    let connection = ElevenLabsConnectionModel()
+
     /// The Explorer's filters and the operations opened in it, made when it is first shown.
     @ObservationIgnored private var explorerModel: ElevenLabsExplorerModel?
 

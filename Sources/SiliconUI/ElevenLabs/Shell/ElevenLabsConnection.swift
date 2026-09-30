@@ -33,6 +33,8 @@ final class ElevenLabsConnectionModel {
         "An ElevenLabs run that may be billed is still in progress. Wait for it to finish, or cancel it, first."
     /// Why the region cannot change while a key is being checked.
     static let verifyingMessage = "Wait for the key check to finish before changing region."
+    /// What a second Connect says while one is still checking.
+    static let alreadyCheckingMessage = "A key is already being checked; wait for it to finish."
     /// What a Connect says when Remove was pressed while it was checking.
     static let removedWhileCheckingMessage = "The key was removed while it was being checked, so it was not kept."
 
@@ -44,7 +46,11 @@ final class ElevenLabsConnectionModel {
     @discardableResult
     func connect(key: String, model: AppModel) async -> Bool {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty, !verifying else { return false }
+        guard !key.isEmpty else { return false }
+        guard !verifying, !model.elevenLabsLink.linking else {
+            failure = Self.alreadyCheckingMessage
+            return false
+        }
         // A new key for the same account while a billable request is in flight would hand
         // the owner fresh runners that could send it again.
         if model.elevenLabsLinked, model.elevenLabsPane.billableRunsInFlight > 0 {

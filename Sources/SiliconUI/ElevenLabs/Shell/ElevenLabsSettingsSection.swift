@@ -13,7 +13,8 @@ struct ElevenLabsSettingsSection: View {
     /// survive a trip to another pane and back.
     @Binding var draft: String
 
-    @State private var connection = ElevenLabsConnectionModel()
+    /// Held by the pane state, so a check in progress survives this view being rebuilt.
+    private var connection: ElevenLabsConnectionModel { model.elevenLabsPane.connection }
     @State private var confirmingRemove = false
     @FocusState private var keyFieldFocused: Bool
 

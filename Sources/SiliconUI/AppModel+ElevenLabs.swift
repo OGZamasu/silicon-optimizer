@@ -41,6 +41,10 @@ final class ElevenLabsLink {
     /// Bumped by every Remove. A Connect still checking its key when one happens stores
     /// nothing — or takes back what it stored — so a Remove pressed during Connect stands.
     @ObservationIgnored var linkGeneration = 0
+    /// A Connect is checking or storing a key. One at a time: a second, overlapping one could
+    /// store its key while the first takes its own back out, leaving "linked" with no key.
+    @ObservationIgnored var linking = false
+    static let linkInProgressMessage = "Another Connect is still checking a key; wait for it to finish."
 
     init(
         store: any ElevenLabsKeyStore, transport: any ElevenLabsTransport, persistsSettings: Bool,
@@ -162,6 +166,11 @@ extension AppModel {
         guard !key.contains(where: { $0.isWhitespace || $0.isNewline }) else {
             throw ElevenLabsError.invalidArguments(["A key has no spaces or line breaks in it."])
         }
+        guard !elevenLabsLink.linking else {
+            throw ElevenLabsError.invalidArguments([ElevenLabsLink.linkInProgressMessage])
+        }
+        elevenLabsLink.linking = true
+        defer { elevenLabsLink.linking = false }
         let region = region ?? settings.elevenLabsRegion
         let generation = elevenLabsLink.linkGeneration
         // Wait for a Remove still under way, so it cannot delete the key stored below.
@@ -176,7 +185,10 @@ extension AppModel {
             elevenLabsLink.lastError = failure.description
             throw failure
         }
-        // Removed while the key was being checked: the Remove stands.
+        // Removed while the key was being checked: the Remove stands. Any Remove's Keychain
+        // delete is let finish first, so it cannot land after the key stored below.
+        guard elevenLabsLink.linkGeneration == generation else { throw ElevenLabsError.cancelled }
+        await elevenLabsLink.pendingRemoval?.value
         guard elevenLabsLink.linkGeneration == generation else { throw ElevenLabsError.cancelled }
         do {
             try await elevenLabsLink.store.store(key)
