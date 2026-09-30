@@ -341,3 +341,52 @@ struct ShellExplorerTests {
         Issue.record("timed out waiting")
     }
 }
+
+/// The voices list every picker shares: fetched once, page by page, over the fake transport.
+@Suite("ElevenLabs voice directory")
+@MainActor
+struct ShellVoiceDirectoryTests {
+
+    @Test func theDirectoryFollowsPagesAndKeepsOnlyHTTPSPreviews() async throws {
+        let transport = FakeElevenLabsTransport { request in
+            let token = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "next_page_token" }?.value
+            if token == nil {
+                return .json(["voices": [
+                    ["voice_id": "v1", "name": "Narrator", "category": "premade",
+                     "labels": ["accent": "british", "age": "middle_aged"],
+                     "preview_url": "https://storage.example.com/v1.mp3"],
+                    ["voice_id": "v2", "name": "Plain", "preview_url": "http://storage.example.com/v2.mp3"],
+                ], "has_more": true, "next_page_token": "page-2"])
+            }
+            return .json(["voices": [["voice_id": "v3", "name": "Mine", "category": "cloned"]], "has_more": false])
+        }
+        let sink = TemporaryFileSink()
+        defer { transport.removeTemporaryFiles(); sink.removeAll() }
+        let client = ElevenLabsClient(
+            credentials: FakeCredentialSource(key: "fixture-key-voices-0001"), region: .global,
+            transport: transport, sink: sink
+        )
+        let directory = ElevenLabsVoiceDirectory(client: { client })
+        await directory.loadIfNeeded()
+        #expect(directory.voices.map(\.id) == ["v1", "v2", "v3"])
+        #expect(directory.voice(id: "v1")?.labelSummary == "british · middle aged")
+        #expect(directory.voice(id: "v1")?.previewURL?.absoluteString == "https://storage.example.com/v1.mp3")
+        #expect(directory.voice(id: "v2")?.previewURL == nil)
+        #expect(directory.error == nil)
+        let paths = transport.requests.map { $0.url.path }
+        #expect(paths == ["/v2/voices", "/v2/voices"])
+        #expect(transport.requests.allSatisfy { $0.url.query?.contains("page_size=100") == true })
+
+        // Once is enough: a second picker does not fetch again.
+        await directory.loadIfNeeded()
+        #expect(transport.requests.count == 2)
+    }
+
+    @Test func withNothingLinkedTheDirectorySaysSo() async {
+        let directory = ElevenLabsVoiceDirectory(client: { nil })
+        await directory.refresh()
+        #expect(directory.voices.isEmpty)
+        #expect(directory.error == ElevenLabsError.notLinked.description)
+    }
+}

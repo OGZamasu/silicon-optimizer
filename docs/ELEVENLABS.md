@@ -275,3 +275,82 @@ No test reaches ElevenLabs, the Keychain, the owner's Music folder or Applicatio
 2. It sends each through the client to the in-memory transport.
 3. It checks the method, path, query, headers and body against the raw spec, not the catalog,
    so a mistake in the generator shows up there too.
+
+## The pane, Settings and the Explorer
+
+The app's side of ElevenLabs lives under `Sources/SiliconUI/ElevenLabs/`: `Shell/` holds the
+pane, Settings, the shared parts every section builds with, and `Explorer/` the screen that
+reaches every operation. Each curated section is one file in `Sections/`.
+
+### Settings → ElevenLabs
+
+Settings has an ElevenLabs pane of its own.
+
+- **Connect** checks the key with the free account calls on the chosen region before anything is
+  stored. A refused key stores nothing; a network failure leaves an already linked key linked. The
+  text shown never contains the key, even one that does not look like one. The stored key is never
+  read back into the field, and a half-typed key survives a trip to another Settings pane.
+- **Region** lists every allowlisted host. Global and US only share one account and key. Each
+  data-residency region (EU, India, Singapore) is a workspace with its own key, so switching to or
+  from one while linked offers only "Remove key and enter a new one".
+- **Let agents run destructive and real-world ElevenLabs actions** is off by default. It governs
+  MCP and the control API only; the app itself always asks first.
+
+### The pane
+
+`AppModel.Tab.elevenLabs` is listed in the sidebar and the menu bar only while a key is linked.
+Nothing selects it otherwise, whether a restored launch or a route that names it. Removing the key
+while the pane is on screen moves the window to Settings.
+
+The pane lists its places on the left: the curated sections in five groups, each with how many
+operations it is built on, then the Explorer and this session's results. The search box filters
+the places and lists matching operations one click from the Explorer. The header shows the plan,
+the credits left, the reset date and the region, with Disconnect. Banners say when the key was
+refused (with Reconnect), when ElevenLabs cannot be reached, or when the Keychain would not hand
+the key over.
+
+Which operations a section is built on is decided by spec path prefix, and the longest match
+wins. Eleven operations belong to no section and are reached through the Explorer only: assets,
+speech engines, the single-use token and `/docs`.
+
+### The Explorer
+
+All 403 operations are listed by group, with search and filters for risk, credit use and
+deprecation. Each one gets a form built from its schema:
+
+- path, query and header parameters
+- typed editors for nested objects, lists, unions and choices
+- file pickers for uploads, including several files at once
+- a JSON editor per field, or for the whole body
+
+Required fields are marked, and the problems the form or the client finds appear under the field
+they name. **Run** asks first for destructive and real-world operations. Streaming operations can
+play as they arrive or be collected. **Copy as curl** leaves the key to `$ELEVENLABS_API_KEY`.
+
+### What every section builds with
+
+- **`ElevenLabsRunner`** runs one operation. It checks the arguments and asks for confirmation
+  (naming what the section says it acts on). It runs or streams with Cancel, and keeps the result
+  and the call it sent, without the key, for "Show API call". A secret in the answer is shown once
+  and never kept. Every result except a secret goes to the session's recent list.
+- **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
+  `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
+  `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.
+- **Result views** show JSON as a tree, audio as a player with a scrubber, images and video as
+  previews, and other files with Save… and Reveal in Finder.
+- **Streamed audio** plays as it arrives. MP3 is decoded packet by packet and `pcm_<rate>`
+  sample by sample, off the main thread, and the file is kept in the dated output folder.
+
+### Tests and pictures
+
+The shell's tests use the core's fakes only. They cover:
+
+- a form for every one of the 403 operations, with its required fields marked, and every form
+  drawing
+- the runner's confirmation, cancel, error sorting and show-once secrets
+- tab gating
+- Connect and region changes
+- the stream decoders, which open no audio device
+
+`ElevenLabsSnapshot` draws views light and dark, narrow and wide. Set
+`ELEVENLABS_SNAPSHOT_DIR` to a scratch folder outside the repository to get the PNGs.

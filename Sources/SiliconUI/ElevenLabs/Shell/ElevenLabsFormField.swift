@@ -155,7 +155,7 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
                 ?? raw["description"].stringValue ?? schema["description"].stringValue ?? "",
             required: required, nullable: nullable,
             deprecated: raw["deprecated"].boolValue == true || schema["deprecated"].boolValue == true,
-            defaultValue: defaultValue ?? nonNull(raw["default"]) ?? nonNull(schema["default"]),
+            defaultValue: defaultValue.flatMap(nonNull) ?? nonNull(raw["default"]) ?? nonNull(schema["default"]),
             examples: (schema["examples"].arrayValue ?? []) + [schema["example"]].filter { $0 != .null },
             kind: kind,
             constraints: Constraints(

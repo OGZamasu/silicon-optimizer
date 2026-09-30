@@ -49,6 +49,7 @@ struct ElevenLabsExplorer: View {
                     + "each one's schema. Anything that deletes or reaches the real world asks first."
                 )
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
