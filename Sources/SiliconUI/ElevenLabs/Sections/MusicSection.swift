@@ -338,22 +338,35 @@ final class MusicScreenModel: CreativeScreenModel {
         return value
     }
 
+    /// Arguments the spec's descriptions allow only with a prompt, with the words that say so.
+    static let promptOnly: [(argument: String, evidence: String)] = [
+        ("music_length_ms", "Used only in conjunction with `prompt`"),
+        ("force_instrumental", "Can only be used with `prompt`"),
+        ("generation_mode", "Can only be used with `prompt`"),
+    ]
+
+    /// Arguments the spec's descriptions allow only without one (with a composition plan).
+    static let planOnly: [(argument: String, evidence: String)] = [
+        ("seed", "Cannot be used in conjunction with prompt"),
+        ("respect_sections_durations", "Only used with `composition_plan`"),
+    ]
+
     func composeArguments() -> [String: JSONValue] {
         let id = composeOperationID
         var arguments: [String: JSONValue] = [:]
+        // What goes with which way of composing is the spec's (`promptOnly`, `planOnly`).
         if usesPlan, let plan = planJSONValue {
             // A plan replaces the prompt, and the options that only go with a prompt.
             arguments["composition_plan"] = plan
             if CreativeSpec.has(id, "respect_sections_durations"), respectSectionsDurations != (CreativeSpec.defaultBool(id, "respect_sections_durations") ?? true) {
                 arguments["respect_sections_durations"] = .bool(respectSectionsDurations)
             }
+            if let seed { arguments["seed"] = .number(Double(seed)) }
         } else {
             arguments["prompt"] = .string(prompt)
             if usesLength { arguments["music_length_ms"] = .number((lengthSeconds * 1000).rounded()) }
             if forceInstrumental { arguments["force_instrumental"] = true }
             if !generationMode.isEmpty { arguments["generation_mode"] = .string(generationMode) }
-            // The seed only goes with a prompt, as its description says.
-            if let seed { arguments["seed"] = .number(Double(seed)) }
         }
         if !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { arguments["lyrics_text"] = .string(lyrics) }
         if !modelID.isEmpty { arguments["model_id"] = .string(modelID) }
@@ -795,8 +808,12 @@ private struct MusicComposeTab: View {
         CreativeCard {
             DisclosureGroup("Advanced", isExpanded: $showsAdvanced) {
                 VStack(alignment: .leading, spacing: 10) {
-                    CreativeOptionalIntegerField(title: "Seed", value: $screen.seed, range: CreativeSpec.range(MusicScreenModel.compose, "seed"))
-                        .disabled(screen.usesPlan)
+                    VStack(alignment: .leading, spacing: 2) {
+                        CreativeOptionalIntegerField(title: "Seed", value: $screen.seed, range: CreativeSpec.range(MusicScreenModel.compose, "seed"))
+                            .disabled(!screen.usesPlan)
+                        Text("Only with a plan: ElevenLabs takes no seed with a prompt.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Toggle("Keep each section's length exactly (music_v1 plans)", isOn: $screen.respectSectionsDurations)
                         .disabled(!screen.usesPlan)
                     Toggle("Spell names phonetically in the lyrics", isOn: $screen.usePhoneticNames)

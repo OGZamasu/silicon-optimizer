@@ -300,12 +300,13 @@ struct CreativeScreenTests {
         #expect(arguments["prompt"] == "Lo-fi beat")
         #expect(arguments["music_length_ms"] == 90_000)
         #expect(arguments["composition_plan"] == nil)
+        #expect(arguments["seed"] == nil, "the spec takes no seed with a prompt")
 
         music.load(plan: Self.planJSON)
         music.usesPlan = true
         arguments = music.composeArguments()
         #expect(arguments["prompt"] == nil)
-        #expect(arguments["seed"] == nil)
+        #expect(arguments["seed"] == 3, "the seed goes with a plan")
         #expect(arguments["music_length_ms"] == nil)
         #expect(arguments["force_instrumental"] == nil)
         #expect(arguments["composition_plan"]?["sections"][0]["section_name"] == "Intro")
@@ -317,6 +318,44 @@ struct CreativeScreenTests {
             let arguments = music.composeArguments()
             #expect(CreativeSpec.unknownArguments(arguments, for: operation).isEmpty, "\(operation.id)")
             #expect(rig.client.validate(operation.id, arguments: arguments).isEmpty, "\(operation.id)")
+        }
+    }
+
+    /// Which options go with a prompt and which only with a plan is the spec's, in words: a
+    /// spec that changes them fails here, and the screen keeps to them in both ways of composing.
+    @Test func whatGoesWithAPromptOrAPlanIsWhatTheSpecSays() throws {
+        for id in MusicScreenModel.composeIDs {
+            for (argument, evidence) in MusicScreenModel.promptOnly + MusicScreenModel.planOnly
+            where CreativeSpec.has(id, argument) {
+                let schema = try #require(CreativeSpec.schema(id, argument))
+                let text = (schema["description"].stringValue ?? "") + " "
+                    + (CreativeSpec.normalized(schema)["description"].stringValue ?? "")
+                #expect(text.contains(evidence), "\(id).\(argument) no longer says “\(evidence)”")
+            }
+        }
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let music = rig.session.music
+        music.prompt = "Lo-fi"
+        music.usesLength = true
+        music.forceInstrumental = true
+        music.generationMode = "loop"
+        music.seed = 9
+        music.respectSectionsDurations = false
+        music.load(plan: Self.planJSON)
+        for usesPlan in [false, true] {
+            music.usesPlan = usesPlan
+            for delivery in MusicScreenModel.Delivery.allCases {
+                music.delivery = delivery
+                let arguments = music.composeArguments()
+                for (argument, _) in MusicScreenModel.promptOnly where usesPlan {
+                    #expect(arguments[argument] == nil, "\(argument) sent with a plan")
+                }
+                for (argument, _) in MusicScreenModel.planOnly where !usesPlan {
+                    #expect(arguments[argument] == nil, "\(argument) sent with a prompt")
+                }
+                #expect((arguments["prompt"] != nil) != usesPlan)
+            }
         }
     }
 
