@@ -174,6 +174,20 @@ public struct ElevenLabsRequest: Sendable, Hashable, CustomStringConvertible, Cu
     }
 }
 
+extension ElevenLabsRequest: CustomReflectable {
+    /// `dump` and `Mirror` walk stored properties, so without this they would print `headers`
+    /// — and with it the key. Reflect what `description` shows and nothing else.
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "operationID": operationID, "method": method, "url": url.absoluteString,
+            ],
+            displayStyle: .struct
+        )
+    }
+}
+
 /// A whole answer.
 public struct ElevenLabsResponse: Sendable {
     public enum Body: Sendable {

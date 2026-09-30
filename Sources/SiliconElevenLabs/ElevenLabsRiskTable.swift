@@ -390,7 +390,6 @@ enum ElevenLabsRiskTable {
         "add_documentation_to_knowledge_base",  // POST /v1/convai/knowledge-base
         "create_url_document_route",  // POST /v1/convai/knowledge-base/url
         "create_crawl_job_route",  // POST /v1/convai/knowledge-base/crawl
-        "cancel_crawl_job_route",  // POST /v1/convai/knowledge-base/crawl/{crawl_job_id}/cancel
         "create_file_document_route",  // POST /v1/convai/knowledge-base/file
         "create_text_document_route",  // POST /v1/convai/knowledge-base/text
         "create_folder_route",  // POST /v1/convai/knowledge-base/folder
@@ -401,8 +400,6 @@ enum ElevenLabsRiskTable {
         "rag_index_status",  // POST /v1/convai/knowledge-base/{documentation_id}/rag-index
         "post_knowledge_base_move_route",  // POST /v1/convai/knowledge-base/{document_id}/move
         "post_knowledge_base_bulk_move_route",  // POST /v1/convai/knowledge-base/bulk-move
-        "add_tool_route",  // POST /v1/convai/tools
-        "update_tool_route",  // PATCH /v1/convai/tools/{tool_id}
         "create_branch_route",  // POST /v1/convai/agents/{agent_id}/branches
         "update_branch_route",  // PATCH /v1/convai/agents/{agent_id}/branches/{branch_id}
         "merge_branch_into_target",  // POST /v1/convai/agents/{agent_id}/branches/{source_branch_id}/merge
@@ -419,8 +416,6 @@ enum ElevenLabsRiskTable {
         "create_procedure_route",  // POST /v1/convai/agents/{agent_id}/branches/{branch_id}/procedures
         "compile_procedures_route",  // POST /v1/convai/agents/{agent_id}/branches/{branch_id}/procedures/compile
         "update_procedure_draft_route",  // PATCH /v1/convai/agents/{agent_id}/branches/{branch_id}/procedures/{procedure_id}/draft
-        "create_environment_variable",  // POST /v1/convai/environment-variables
-        "update_environment_variable",  // PATCH /v1/convai/environment-variables/{env_var_id}
         "update_finetune",  // PATCH /v1/music/finetunes/{finetune_id}
         "public_create_order",  // POST /v1/productions/orders
         "public_update_order",  // PATCH /v1/productions/orders/{order_id}
@@ -437,8 +432,8 @@ enum ElevenLabsRiskTable {
         "upload_asset",  // POST /v1/assets
     ]
 
-    /// Deletes (every DELETE outside the real-world families) and the one bulk delete sent as a
-    /// POST.
+    /// Deletes (every DELETE outside the real-world families), the one bulk delete sent as a
+    /// POST, and cancelling a knowledge-base crawl, which removes every document the crawl made.
     static let destructive: [String] = [
         "delete_speech_history_item",  // DELETE /v1/history/{history_item_id}
         "delete_audio_isolation_history_item",  // DELETE /v1/audio-isolation/history/{history_item_id}
@@ -473,13 +468,16 @@ enum ElevenLabsRiskTable {
         "public_remove_order_item",  // DELETE /v1/productions/orders/{order_id}/items/{item_id}
         "delete_pvc_voice_sample",  // DELETE /v1/voices/pvc/{voice_id}/samples/{sample_id}
         "delete_asset_endpoint",  // DELETE /v1/assets/{asset_id}
+        "cancel_crawl_job_route",  // POST /v1/convai/knowledge-base/crawl/{crawl_job_id}/cancel
     ]
 
     /// Reaches outside the account, or hands out or changes access to it: outbound calls and
     /// messages (Twilio, Exotel, WhatsApp, SIP trunk), batch calling, phone numbers and WhatsApp
     /// accounts, secrets, MCP servers, Agents Platform workspace settings, workspace invites,
     /// members, groups, webhooks, auth connections and resource sharing, service accounts and API
-    /// keys (including disabling the key in use), single-use tokens, replicating a voice to another
+    /// keys (including disabling the key in use), agent tools and environment variables (a webhook
+    /// tool points an agent at an outside URL with headers, exactly as an MCP server does),
+    /// single-use tokens, replicating a voice to another
     /// data-residency workspace, and submitting a Productions order (which charges the workspace).
     static let realWorld: [String] = [
         "replicate_voice_to_isolated_environment",  // POST /v1/voices/{voice_id}/replicate-to-isolated-environment
@@ -534,5 +532,9 @@ enum ElevenLabsRiskTable {
         "update_whatsapp_account",  // PATCH /v1/convai/whatsapp-accounts/{phone_number_id}
         "delete_whatsapp_account",  // DELETE /v1/convai/whatsapp-accounts/{phone_number_id}
         "public_submit_order",  // POST /v1/productions/orders/{order_id}/submit
+        "add_tool_route",  // POST /v1/convai/tools
+        "update_tool_route",  // PATCH /v1/convai/tools/{tool_id}
+        "create_environment_variable",  // POST /v1/convai/environment-variables
+        "update_environment_variable",  // PATCH /v1/convai/environment-variables/{env_var_id}
     ]
 }
