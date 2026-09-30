@@ -1,0 +1,154 @@
+import Foundation
+import Observation
+import SiliconElevenLabs
+
+/// What Settings → ElevenLabs does, apart from drawing it: connect a key (verified first,
+/// stored only if it works), remove it, and change region without leaving a key pointed at a
+/// workspace it does not belong to.
+@MainActor
+@Observable
+final class ElevenLabsConnectionModel {
+
+    /// A region change waiting for the owner's answer, asked only while a key is linked.
+    struct RegionChange: Identifiable, Equatable {
+        let id = UUID()
+        var from: ElevenLabsRegion
+        var to: ElevenLabsRegion
+        /// Global and US-only are one account with one key; each residency region is a
+        /// workspace of its own whose keys work nowhere else.
+        var keyCarriesOver: Bool
+    }
+
+    private(set) var verifying = false
+    /// Why the last Connect failed, never containing the key.
+    private(set) var failure: String?
+    /// Set by a Connect that worked, for a line of thanks until the next action.
+    private(set) var connected = false
+    private(set) var pendingRegionChange: RegionChange?
+    /// Why a region change was not made, said under the picker.
+    private(set) var regionNotice: String?
+
+    /// Why the account cannot change while a run that is not a read is still on the wire.
+    static let busyAccountMessage =
+        "An ElevenLabs run that may be billed is still in progress. Wait for it to finish, or cancel it, first."
+    /// Why the region cannot change while a key is being checked.
+    static let verifyingMessage = "Wait for the key check to finish before changing region."
+    /// What a second Connect says while one is still checking.
+    static let alreadyCheckingMessage = "A key is already being checked; wait for it to finish."
+    /// What a Connect says when Remove was pressed while it was checking.
+    static let removedWhileCheckingMessage = "The key was removed while it was being checked, so it was not kept."
+
+    init() {}
+
+    /// Verifies `key` against the chosen region's free account call and stores it only if
+    /// that works. True when it did; the caller clears its draft then, and keeps it
+    /// otherwise, so a typo can be fixed rather than retyped.
+    @discardableResult
+    func connect(key: String, model: AppModel) async -> Bool {
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return false }
+        guard !verifying, !model.elevenLabsLink.linking else {
+            failure = Self.alreadyCheckingMessage
+            return false
+        }
+        // A new key for the same account while a billable request is in flight would hand
+        // the owner fresh runners that could send it again.
+        if model.elevenLabsLinked, model.elevenLabsPane.billableRunsInFlight > 0 {
+            failure = Self.busyAccountMessage
+            return false
+        }
+        // The region as it was when Connect was pressed: the key is checked there, stored for
+        // it, and any failure is worded for it. The picker is locked until the check ends.
+        let region = model.elevenLabsRegion
+        verifying = true
+        failure = nil
+        connected = false
+        regionNotice = nil
+        defer { verifying = false }
+        do {
+            _ = try await model.linkElevenLabs(key: key, region: region)
+            model.elevenLabsPane.reset()
+            connected = true
+            return true
+        } catch ElevenLabsError.cancelled {
+            failure = Self.removedWhileCheckingMessage
+            return false
+        } catch {
+            failure = Self.describe(error, key: key, region: region)
+            return false
+        }
+    }
+
+    /// Removes the key; the pane leaves the sidebar.
+    func remove(model: AppModel) {
+        failure = nil
+        connected = false
+        pendingRegionChange = nil
+        model.disconnectElevenLabs()
+    }
+
+    /// The region picker's setter. Unlinked, the region just changes. Linked, it asks first:
+    /// the stored key may not work on the new host.
+    func requestRegion(_ region: ElevenLabsRegion, model: AppModel) {
+        let current = model.elevenLabsRegion
+        regionNotice = nil
+        guard region != current else { return }
+        guard !verifying else {
+            regionNotice = Self.verifyingMessage
+            return
+        }
+        guard model.elevenLabsLinked else {
+            model.elevenLabsRegion = region
+            failure = nil
+            return
+        }
+        // Switching rebuilds every runner; one still sending a billable request would be
+        // replaced by an idle one that could send it again.
+        guard model.elevenLabsPane.billableRunsInFlight == 0 else {
+            regionNotice = Self.busyAccountMessage
+            return
+        }
+        pendingRegionChange = RegionChange(
+            from: current, to: region, keyCarriesOver: !current.isResidency && !region.isResidency
+        )
+    }
+
+    /// Switches with the same key — offered only between the regions that share one — and
+    /// checks the account again on the new host.
+    func switchRegionKeepingKey(model: AppModel) async {
+        guard let change = pendingRegionChange, change.keyCarriesOver else { return }
+        pendingRegionChange = nil
+        model.elevenLabsRegion = change.to
+        model.elevenLabsLink.account = nil
+        model.elevenLabsPane.reset()
+        await model.checkElevenLabsAccount()
+    }
+
+    /// Removes the key and switches, so the new region's own key can be entered.
+    func removeKeyAndSwitchRegion(model: AppModel) {
+        guard let change = pendingRegionChange else { return }
+        pendingRegionChange = nil
+        remove(model: model)
+        model.elevenLabsRegion = change.to
+    }
+
+    func cancelRegionChange() {
+        pendingRegionChange = nil
+    }
+
+    /// A failed Connect in words, the key taken out of anything that might echo it.
+    static func describe(_ error: any Error, key: String, region: ElevenLabsRegion) -> String {
+        let failure = ElevenLabsRunnerFailure(error)
+        let message: String
+        switch failure {
+        case .keyRejected(let answer), .forbidden(let answer):
+            message = "\(region.displayName) did not accept this key, so nothing was saved. "
+                + "A key works only in the region it was made for. (\(answer))"
+        case .offline(let why):
+            message = why + " Nothing was saved; a key already connected is still connected."
+        default:
+            message = failure.message
+        }
+        return ElevenLabsRedaction.redact(message, knownKey: key)
+    }
+}

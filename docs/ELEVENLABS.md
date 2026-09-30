@@ -282,6 +282,110 @@ No test reaches ElevenLabs, the Keychain, the owner's Music folder or Applicatio
 3. It checks the method, path, query, headers and body against the raw spec, not the catalog,
    so a mistake in the generator shows up there too.
 
+## The pane, Settings and the Explorer
+
+The app's side of ElevenLabs lives under `Sources/SiliconUI/ElevenLabs/`: `Shell/` holds the
+pane, Settings, the shared parts every section builds with, and `Explorer/` the screen that
+reaches every operation. Each curated section is one file in `Sections/`.
+
+### Settings → ElevenLabs
+
+Settings has an ElevenLabs pane of its own.
+
+- **Connect** checks the key with the free account calls on the chosen region before anything is
+  stored. A refused key stores nothing; a network failure leaves an already linked key linked. The
+  text shown never contains the key, even one that does not look like one. The stored key is never
+  read back into the field, and a half-typed key survives a trip to another Settings pane.
+- **Region** lists every allowlisted host. Global and US only share one account and key. Each
+  data-residency region (EU, India, Singapore) is a workspace with its own key, so switching to or
+  from one while linked offers only "Remove key and enter a new one".
+- **Let agents run destructive and real-world ElevenLabs actions** is off by default. It governs
+  MCP and the control API only; the app itself always asks first.
+
+### The pane
+
+`AppModel.Tab.elevenLabs` is listed in the sidebar and the menu bar only while a key is linked.
+Nothing selects it otherwise, whether a restored launch or a route that names it. Removing the key
+while the pane is on screen moves the window to Settings.
+
+The pane lists its places on the left: the curated sections in five groups, each with how many
+operations it is built on, then the Explorer and this session's results. The search box filters
+the places and lists matching operations one click from the Explorer. The header shows the plan,
+the credits left, the reset date and the region, with Disconnect. Banners say when the key was
+refused (with Reconnect), when ElevenLabs cannot be reached, or when the Keychain would not hand
+the key over.
+
+Which operations a section is built on is decided by spec path prefix, and the longest match
+wins. Eleven operations belong to no section and are reached through the Explorer only: assets,
+speech engines, the single-use token and `/docs`.
+
+### The Explorer
+
+All 403 operations are listed by group, with search and filters for risk, credit use and
+deprecation. Each one gets a form built from its schema:
+
+- path, query and header parameters
+- typed editors for nested objects, lists, unions and choices
+- file pickers for uploads, including several files at once
+- a JSON editor per field, or for the whole body
+
+Required fields are marked, and the problems the form or the client finds appear under the field
+they name. **Run** asks first for destructive and real-world operations. Streaming operations can
+play as they arrive or be collected. **Copy as curl** leaves the key to `$ELEVENLABS_API_KEY`.
+
+Secrets are never typed in the clear:
+- Password, token, client-secret and key fields are secure fields.
+- Header maps take a name and a hidden value per row.
+- "Show API call" and curl mask what was typed, because they come from the client's description.
+
+Path fields take an id, not a path. A "/", "\", "." or ".." there, or a value that still holds the
+`‹redacted›` mask from an answer, is named beside its field before anything is sent.
+
+In the app's own results, header values stay real (the owner's editor writes them back). The
+shown-once card lists only the credential fields the risk table names for that operation.
+
+### What every section builds with
+
+- **`ElevenLabsRunner`** runs one operation. It checks the arguments and asks for confirmation
+  (naming what the section says it acts on). It runs or streams with Cancel, and keeps the result
+  and the call it sent, without the key, for "Show API call". A secret in the answer is shown once
+  and never kept. Every result except a secret goes to the session's recent list.
+- **A runner does one run at a time.** A section's own busy guard is a second layer.
+  - **Reads** are replaced: a run started while a read is in flight cancels the old one and
+    starts clean, because restarting costs nothing.
+  - **Anything else** (generate, modify, destructive, real world) is refused while a run is in
+    flight or waiting for its confirmation. Nothing is sent, and `refusal` reads "A run is
+    already in progress — cancel it first, and note it may already have been billed." The
+    request in flight may already have been billed or acted on, and a second one would do it
+    again.
+  - **Cancel, then run again** is allowed for everything. Once a request that is not a read has
+    gone to the client, `cancellationNote` says it "may already have been billed or
+    performed".
+  - A cancelled or replaced run never touches the next run's state, even when its request
+    completes late. Each run and each Cancel takes a generation number, and only the current
+    one may change what the runner shows.
+- **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
+  `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
+  `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.
+- **Result views** show JSON as a tree, audio as a player with a scrubber, images and video as
+  previews, and other files with Save… and Reveal in Finder.
+- **Streamed audio** plays as it arrives. MP3 is decoded packet by packet and `pcm_<rate>`
+  sample by sample, off the main thread, and the file is kept in the dated output folder.
+
+### Tests and pictures
+
+The shell's tests use the core's fakes only. They cover:
+
+- a form for every one of the 403 operations, with its required fields marked (drawing every
+  form is opt-in with `ELEVENLABS_DRAW=1`, like the snapshots)
+- the runner's confirmation, cancel, error sorting and show-once secrets
+- tab gating
+- Connect and region changes
+- the stream decoders, which open no audio device
+
+`ElevenLabsSnapshot` draws views light and dark, narrow and wide. Set
+`ELEVENLABS_SNAPSHOT_DIR` to a scratch folder outside the repository to get the PNGs.
+
 ## Control API and MCP
 
 Agents reach ElevenLabs through the app, never directly: the MCP bridge (`silicon-mcp`) talks only

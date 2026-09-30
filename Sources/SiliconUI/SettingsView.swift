@@ -27,6 +27,8 @@ struct SettingsView: View {
     /// its views down with it.
     @State private var cloudKeyDrafts: [String: String] = [:]
     @State private var cloudModelSearch = ""
+    /// The ElevenLabs key being typed, held here for the same reason as `cloudKeyDrafts`.
+    @State private var elevenLabsKeyDraft = ""
 
     /// One group of settings, in the order the segmented control shows them.
     enum Pane: String, CaseIterable, Identifiable {
@@ -35,6 +37,7 @@ struct SettingsView: View {
         case chat = "Chat"
         case media = "Media"
         case devices = "Devices"
+        case elevenLabs = "ElevenLabs"
         case advanced = "Advanced"
 
         var id: String { rawValue }
@@ -101,6 +104,7 @@ struct SettingsView: View {
                 case .chat: chatPane
                 case .media: mediaPane
                 case .devices: devicesPane
+                case .elevenLabs: ElevenLabsSettingsSection(draft: $elevenLabsKeyDraft)
                 case .advanced: advancedPane
                 }
             }
