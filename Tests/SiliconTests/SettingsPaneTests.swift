@@ -70,7 +70,7 @@ struct SettingsPaneTests {
     /// matching the sidebar's — Cloud was not on it. Building it from `allCases` means a new
     /// tab appears in both, and this is what says so.
     @Test func theMenuBarOffersEveryPlaceExceptSettings() {
-        let menu = AppModel.Tab.menuOrder
+        let menu = AppModel.Tab.menuOrder(elevenLabsLinked: true)
         #expect(menu.first == .chat)
         #expect(!menu.contains(.settings))
         #expect(Set(menu) == Set(AppModel.Tab.allCases).subtracting([.settings]))

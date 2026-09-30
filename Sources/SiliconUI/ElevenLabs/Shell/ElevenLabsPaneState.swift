@@ -35,6 +35,9 @@ final class ElevenLabsPaneState {
     /// The search box above the section list: filters sections and operations.
     var search = ""
 
+    /// The session's recent results are on screen instead of a section.
+    private(set) var showsRecents = false
+
     /// The operation the Explorer shows, by id.
     var explorerSelection: String?
 
@@ -67,12 +70,18 @@ final class ElevenLabsPaneState {
     /// Shows `section`.
     func open(_ section: ElevenLabsSection) {
         self.section = section
+        showsRecents = false
     }
 
     /// Shows the Explorer with `operationID` selected.
     func openInExplorer(_ operationID: String) {
         explorerSelection = operationID
-        section = .explorer
+        open(.explorer)
+    }
+
+    /// Shows this session's results.
+    func showRecents() {
+        showsRecents = true
     }
 
     /// Adds a finished run to the session's list, unless its answer carried a credential:
@@ -116,6 +125,7 @@ final class ElevenLabsPaneState {
 
     /// Forgets everything tied to the account: on disconnect, or a region change.
     func reset() {
+        showsRecents = false
         recents.removeAll()
         connectionProblem = nil
         explorerSelection = nil

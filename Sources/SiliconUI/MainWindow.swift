@@ -15,7 +15,7 @@ public struct MainWindow: View {
 
         NavigationSplitView(columnVisibility: $model.chatColumnVisibility) {
             List(selection: $model.selectedTab) {
-                ForEach(AppModel.Tab.allCases) { tab in
+                ForEach(AppModel.Tab.sidebarOrder(elevenLabsLinked: model.elevenLabsLinked)) { tab in
                     Label(tab.rawValue, systemImage: tab.systemImage)
                         .tag(tab)
                 }
@@ -39,11 +39,15 @@ public struct MainWindow: View {
             case .video: VideoView()
             case .swarm: SwarmView()
             case .cloud: CloudView()
+            case .elevenLabs: ElevenLabsPane()
             case .decisions: DecisionsView()
             case .settings: SettingsView()
             }
         }
         .frame(minWidth: 940, minHeight: 620)
+        // Removing the ElevenLabs key takes its place out of the sidebar; a window showing it
+        // moves to Settings rather than keeping a selection nothing lists.
+        .onChange(of: model.elevenLabsLinked) { model.leaveHiddenTab() }
         .onChange(of: model.selectedTab) {
             // The expanded chat borrows the whole window; leaving the tab gives it back.
             if model.selectedTab != .chat {
