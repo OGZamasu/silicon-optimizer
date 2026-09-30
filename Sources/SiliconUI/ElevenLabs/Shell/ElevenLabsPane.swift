@@ -77,6 +77,7 @@ struct ElevenLabsPane: View {
         } actions: {
             Button("Open Settings", action: openSettings)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func openSettings() {
