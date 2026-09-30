@@ -13,7 +13,7 @@ struct CoreRiskTableTests {
         let listed = lists.flatMap { $0 }
         #expect(listed.count == Set(listed).count, "an operation is in two lists")
         #expect(Set(listed) == Set(ElevenLabsCatalog.all.map(\.id)))
-        #expect(lists.map(\.count) == [171, 52, 90, 34, 56])
+        #expect(lists.map(\.count) == [171, 52, 88, 34, 58])
     }
 
     @Test func theRulesHoldForEveryOperation() {
@@ -61,6 +61,8 @@ struct CoreRiskTableTests {
             // URL with headers, as an MCP server does
             "add_tool_route", "update_tool_route", "create_environment_variable",
             "update_environment_variable",
+            // Speech engines send ElevenLabs to an outside WebSocket URL with the owner's headers
+            "create_speech_engine", "update_speech_engine",
             "create_workspace_webhook_route", "edit_workspace_webhook_route",
             "delete_workspace_webhook_route", "create_auth_connection", "update_auth_connection",
             "delete_auth_connection",

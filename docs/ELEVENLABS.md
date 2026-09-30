@@ -77,9 +77,9 @@ Every operation has an explicit class in `ElevenLabsRiskTable.swift`:
 |---|---|---|---|
 | `read` | 171 | Every GET. Also the POSTs that only compute or download (usage queries, cost estimates, summaries, RAG retrieval, similar-voice search, history and Studio snapshot downloads) | Nothing |
 | `generate` | 52 | Billable creation: speech, dialogue, voice changer, sound effects, music, isolation, transcription, alignment, voice design, dubbing, Studio and Audio Native conversion, Flows, agent simulations and test runs | Nothing extra. The answer reports `character-cost` |
-| `modify` | 90 | Edits to the owner's own resources that cost nothing by themselves | Nothing extra |
+| `modify` | 88 | Edits to the owner's own resources that cost nothing by themselves | Nothing extra |
 | `destructive` | 34 | Deletes, the knowledge-base bulk delete (a POST), and cancelling a knowledge-base crawl (it removes the documents the crawl made) | In the app, a confirmation. Over MCP or control, `confirm: true` and the owner's switch |
-| `realWorld` | 56 | Reaches outside the account or changes who can get into it — including agent tools and environment variables, because a webhook tool points an agent at an outside URL with headers, as an MCP server does | Same as destructive |
+| `realWorld` | 58 | Reaches outside the account or changes who can get into it — including agent tools, environment variables and speech engines, because a webhook tool or a speech engine points ElevenLabs at an outside URL with the owner's headers, as an MCP server does | Same as destructive |
 
 The real-world families, by path: outbound calls and messages (`/v1/convai/twilio`, `exotel`,
 `whatsapp`, `sip-trunk`), batch calling, phone numbers, WhatsApp accounts, secrets, MCP
@@ -333,12 +333,37 @@ Required fields are marked, and the problems the form or the client finds appear
 they name. **Run** asks first for destructive and real-world operations. Streaming operations can
 play as they arrive or be collected. **Copy as curl** leaves the key to `$ELEVENLABS_API_KEY`.
 
+Secrets are never typed in the clear:
+- Password, token, client-secret and key fields are secure fields.
+- Header maps take a name and a hidden value per row.
+- "Show API call" and curl mask what was typed, because they come from the client's description.
+
+Path fields take an id, not a path. A "/", "\", "." or ".." there, or a value that still holds the
+`‹redacted›` mask from an answer, is named beside its field before anything is sent.
+
+In the app's own results, header values stay real (the owner's editor writes them back). The
+shown-once card lists only the credential fields the risk table names for that operation.
+
 ### What every section builds with
 
 - **`ElevenLabsRunner`** runs one operation. It checks the arguments and asks for confirmation
   (naming what the section says it acts on). It runs or streams with Cancel, and keeps the result
   and the call it sent, without the key, for "Show API call". A secret in the answer is shown once
   and never kept. Every result except a secret goes to the session's recent list.
+- **A runner does one run at a time.** A section's own busy guard is a second layer.
+  - **Reads** are replaced: a run started while a read is in flight cancels the old one and
+    starts clean, because restarting costs nothing.
+  - **Anything else** (generate, modify, destructive, real world) is refused while a run is in
+    flight or waiting for its confirmation. Nothing is sent, and `refusal` reads "A run is
+    already in progress — cancel it first, and note it may already have been billed." The
+    request in flight may already have been billed or acted on, and a second one would do it
+    again.
+  - **Cancel, then run again** is allowed for everything. Once a request that is not a read has
+    gone to the client, `cancellationNote` says it "may already have been billed or
+    performed".
+  - A cancelled or replaced run never touches the next run's state, even when its request
+    completes late. Each run and each Cancel takes a generation number, and only the current
+    one may change what the runner shows.
 - **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
   `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
   `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.
