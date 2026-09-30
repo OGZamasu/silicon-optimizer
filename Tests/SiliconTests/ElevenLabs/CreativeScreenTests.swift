@@ -675,6 +675,67 @@ struct CreativeScreenTests {
         #expect(rig.requests(TranscriptionScreenModel.delete).isEmpty)
     }
 
+    /// Every price the notes quote is the spec's, word for word, from the pinned snapshot (the
+    /// catalog shortens long descriptions): a price change in the spec fails here.
+    @Test func thePricesTheCostNotesQuoteAreTheSpecs() throws {
+        #expect(!CreativeRig.rawSpec.isEmpty, "the pinned spec could not be read")
+        for surcharge in TranscriptionScreenModel.surcharges {
+            let text = CreativeRig.rawBodyDescription(TranscriptionScreenModel.convert, surcharge.argument)
+            #expect(text.contains(surcharge.evidence), "\(surcharge.argument) no longer says “\(surcharge.evidence)”")
+            #expect(surcharge.evidence.contains("\(surcharge.percent)%"))
+        }
+        for rule in TranscriptionScreenModel.priceRules {
+            let text = CreativeRig.rawBodyDescription(TranscriptionScreenModel.convert, rule.argument)
+            #expect(text.contains(rule.evidence), "\(rule.argument) no longer says “\(rule.evidence)”")
+        }
+        #expect(TranscriptionScreenModel.priceRules.contains { $0.evidence.contains("maximum of \(TranscriptionScreenModel.maxChannels) channels") })
+        #expect(TranscriptionScreenModel.priceRules.contains {
+            $0.evidence.contains("more than \(TranscriptionScreenModel.keytermMinimumAbove) keyterms")
+                && $0.evidence.contains("\(TranscriptionScreenModel.keytermMinimumSeconds) seconds")
+        })
+        #expect(TranscriptionScreenModel.surcharges.contains { $0.evidence.contains("at least \(TranscriptionScreenModel.editMinimumSeconds) seconds") })
+        let upload = try #require(CreativeRig.rawOperation(MusicScreenModel.upload))
+        let uploadText = upload["description"] as? String ?? ""
+        for price in MusicScreenModel.uploadPrice {
+            #expect(uploadText.contains(price.evidence), "upload no longer says “\(price.evidence)”")
+        }
+    }
+
+    /// The transcription note follows the choices: each channel at full length with one speaker
+    /// per channel, then the surcharges that apply, with their minimums.
+    @Test func theTranscriptionCostNoteFollowsTheChoices() throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let stt = rig.session.transcription
+        stt.source = rig.wav(named: "call.wav", seconds: 2, channels: 2)
+        #expect(stt.costNote == nil)
+        #expect(stt.billedSeconds == 2)
+        stt.useMultiChannel = true
+        #expect(stt.billedChannels == 2)
+        #expect(stt.billedSeconds == 4)
+        #expect(stt.costNote?.contains("each of the 2 channels is billed at the full length") == true)
+        stt.useMultiChannel = false
+        stt.keyterms = ["Scribe"]
+        stt.entityDetection = ["pii"]
+        stt.entityRedaction = ["pii"]
+        #expect(stt.costNote == "On the base cost: +20% key terms, +30% entity detection, +30% redaction.")
+        stt.keyterms = (0...100).map { "term\($0)" }
+        #expect(stt.costNote?.contains("at least 20 s billed with over 100 terms") == true)
+        stt.keyterms = []
+        stt.entityDetection = []
+        stt.entityRedaction = []
+        stt.diarize = true
+        stt.detectSpeakerRoles = true
+        stt.transcriptEdit = "Fix names"
+        #expect(stt.costNote == "On the base cost: +10% speaker roles, +30% edit instruction (on at least 10 s).")
+        stt.sourceKind = .link
+        stt.sourceLink = "https://example.com/a.mp3"
+        stt.useMultiChannel = true
+        #expect(stt.billedSeconds == nil)
+        #expect(stt.costNote?.contains("each channel (up to 5) is billed at the full length") == true)
+        #expect(MusicScreenModel.uploadCostNote.hasPrefix("Costs as much as generating a song this long"))
+    }
+
     // MARK: - Alignment
 
     @Test func anAlignmentComesBackAsTimedWordsWithTheirFit() async throws {

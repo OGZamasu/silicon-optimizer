@@ -88,28 +88,61 @@ final class CreativeRig {
     }
 
     /// A short, valid, silent WAV file in the scratch folder: something every player opens.
-    func wav(named name: String = "clip.wav", seconds: Double = 1.5) -> URL {
+    func wav(named name: String = "clip.wav", seconds: Double = 1.5, channels: Int = 1) -> URL {
         let url = scratch.appendingPathComponent(name)
-        try? CreativeRig.wavData(seconds: seconds).write(to: url)
+        try? CreativeRig.wavData(seconds: seconds, channels: channels).write(to: url)
         return url
     }
 
-    /// 16-bit mono PCM at 16 kHz with a WAV header, with a soft tone so a waveform shows.
-    static func wavData(seconds: Double) -> Data {
+    /// 16-bit PCM at 16 kHz with a WAV header, with a soft tone so a waveform shows.
+    static func wavData(seconds: Double, channels: Int = 1) -> Data {
         let rate = 16_000
-        let samples = Int(Double(rate) * seconds)
+        let frames = Int(Double(rate) * seconds)
+        let bytes = frames * 2 * channels
         var data = Data()
         func append<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
-        data.append(contentsOf: Array("RIFF".utf8)); append(UInt32(36 + samples * 2))
+        data.append(contentsOf: Array("RIFF".utf8)); append(UInt32(36 + bytes))
         data.append(contentsOf: Array("WAVE".utf8)); data.append(contentsOf: Array("fmt ".utf8))
-        append(UInt32(16)); append(UInt16(1)); append(UInt16(1)); append(UInt32(rate))
-        append(UInt32(rate * 2)); append(UInt16(2)); append(UInt16(16))
-        data.append(contentsOf: Array("data".utf8)); append(UInt32(samples * 2))
-        for index in 0..<samples {
-            let value = sin(Double(index) * 2 * .pi * 220 / Double(rate)) * 1200
-            append(Int16(value))
+        append(UInt32(16)); append(UInt16(1)); append(UInt16(channels)); append(UInt32(rate))
+        append(UInt32(rate * 2 * channels)); append(UInt16(2 * channels)); append(UInt16(16))
+        data.append(contentsOf: Array("data".utf8)); append(UInt32(bytes))
+        for index in 0..<frames {
+            let value = Int16(sin(Double(index) * 2 * .pi * 220 / Double(rate)) * 1200)
+            for _ in 0..<channels { append(value) }
         }
         return data
+    }
+
+    /// The pinned OpenAPI snapshot, parsed — for the full text of descriptions the catalog
+    /// shortens (prices, limits).
+    static let rawSpec: [String: Any] = {
+        let url = CoreCatalogTests.repository.appendingPathComponent("Scripts/elevenlabs/openapi.json")
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return object
+    }()
+
+    /// An operation of the raw spec by id.
+    static func rawOperation(_ id: String) -> [String: Any]? {
+        for case let methods as [String: Any] in (rawSpec["paths"] as? [String: Any] ?? [:]).values {
+            for case let operation as [String: Any] in methods.values where operation["operationId"] as? String == id {
+                return operation
+            }
+        }
+        return nil
+    }
+
+    /// The full description of a body property of a raw-spec operation.
+    static func rawBodyDescription(_ id: String, _ property: String) -> String {
+        guard let content = (rawOperation(id)?["requestBody"] as? [String: Any])?["content"] as? [String: Any] else { return "" }
+        for case let media as [String: Any] in content.values {
+            guard let ref = (media["schema"] as? [String: Any])?["$ref"] as? String else { continue }
+            let name = String(ref.split(separator: "/").last ?? "")
+            let schemas = (rawSpec["components"] as? [String: Any])?["schemas"] as? [String: Any]
+            let properties = (schemas?[name] as? [String: Any])?["properties"] as? [String: Any]
+            if let text = (properties?[property] as? [String: Any])?["description"] as? String { return text }
+        }
+        return ""
     }
 
     /// Removes what this rig wrote: the sink's folder, the fake's, and its own scratch folder,

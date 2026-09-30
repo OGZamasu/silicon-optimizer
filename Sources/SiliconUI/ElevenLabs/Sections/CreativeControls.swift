@@ -509,6 +509,12 @@ enum CreativeMedia {
         return pieces.joined(separator: " · ")
     }
 
+    /// How many channels an audio file has, from its header.
+    static func channelCount(of url: URL) -> Int? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        return Int(file.fileFormat.channelCount)
+    }
+
     /// The length of an audio file, from its header.
     static func duration(of url: URL) -> Double? {
         guard let file = try? AVAudioFile(forReading: url) else { return nil }

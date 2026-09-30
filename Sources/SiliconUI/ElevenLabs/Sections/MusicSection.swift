@@ -559,6 +559,17 @@ final class MusicScreenModel: CreativeScreenModel {
     /// What `extract_composition_plan` takes besides true/false: the plan formats' models.
     var extractChoices: [String] { CreativeSpec.choices(Self.upload, "extract_composition_plan") }
 
+    /// Uploading's price as the spec states it, with its words.
+    static let uploadPrice: [(words: String, evidence: String)] = [
+        ("Costs as much as generating a song this long", "Price for uploading is the same as the one for song generation."),
+        ("half is still charged if copyrighted material is found", "If copyrighted content is detected, half of the request cost is still charged."),
+    ]
+
+    /// The note under Upload: what the upload costs, in the spec's terms.
+    static var uploadCostNote: String {
+        uploadPrice.map(\.words).joined(separator: "; ") + "."
+    }
+
     func uploadArguments() -> [String: JSONValue] {
         var arguments: [String: JSONValue] = [:]
         if !extractPlan.isEmpty { arguments["extract_composition_plan"] = .string(extractPlan) }
@@ -1010,7 +1021,11 @@ private struct MusicUploadTab: View {
             Toggle("Lyrics timings", isOn: $screen.uploadTimestamps)
             Toggle("Waveform", isOn: $screen.uploadWaveform)
         }
-        CreativeRunRow(runner: screen.uploadRunner, title: "Upload", problems: screen.uploadSource == nil ? ["Choose a song."] : []) {
+        CreativeRunRow(
+            runner: screen.uploadRunner, title: "Upload",
+            estimatedSeconds: screen.uploadSource.flatMap(CreativeMedia.duration(of:)),
+            problems: screen.uploadSource == nil ? ["Choose a song."] : [], note: MusicScreenModel.uploadCostNote
+        ) {
             Task { await screen.uploadSong() }
         }
         ElevenLabsRunnerOutput(runner: screen.uploadRunner, showsResult: false)

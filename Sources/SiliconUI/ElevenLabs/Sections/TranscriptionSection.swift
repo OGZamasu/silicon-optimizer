@@ -276,6 +276,92 @@ final class TranscriptionScreenModel: CreativeScreenModel {
         return arguments
     }
 
+    // MARK: - What it costs
+
+    /// A surcharge the spec states on the base transcription cost, with its words.
+    struct Surcharge: Sendable {
+        var argument: String
+        var label: String
+        var percent: Int
+        var evidence: String
+    }
+
+    /// The spec's surcharges, in the order the note lists them.
+    static let surcharges: [Surcharge] = [
+        Surcharge(argument: "keyterms", label: "key terms", percent: 20,
+                  evidence: "Usage of this parameter will incur an additional 20% surcharge on the base transcription cost."),
+        Surcharge(argument: "detect_speaker_roles", label: "speaker roles", percent: 10,
+                  evidence: "Usage incurs an additional 10% surcharge on base transcription cost."),
+        Surcharge(argument: "entity_detection", label: "entity detection", percent: 30,
+                  evidence: "Usage of this parameter will incur an additional 30% surcharge on the base transcription cost."),
+        Surcharge(argument: "entity_redaction", label: "redaction", percent: 30,
+                  evidence: "Usage of this parameter will incur an additional 30% surcharge on the base transcription cost."),
+        Surcharge(argument: "transcript_edit", label: "edit instruction", percent: 30,
+                  evidence: "Usage of this parameter will incur an additional 30% surcharge on the base transcription cost, billed for at least 10 seconds of audio."),
+    ]
+
+    /// Other prices the spec states, with the words that say so: (argument, evidence).
+    static let priceRules: [(argument: String, evidence: String)] = [
+        ("use_multi_channel", "Each channel is billed independently at the full audio duration"),
+        ("use_multi_channel", "A maximum of 5 channels is supported."),
+        ("keyterms", "When more than 100 keyterms are provided, a minimum billable duration of 20 seconds applies per request."),
+    ]
+
+    /// The most channels billed, from the spec.
+    static let maxChannels = 5
+    /// Past this many key terms, a request is billed for at least `keytermMinimumSeconds`.
+    static let keytermMinimumAbove = 100
+    static let keytermMinimumSeconds = 20
+    static let editMinimumSeconds = 10
+
+    /// The file's length, when it is a local file whose header says.
+    var sourceSeconds: Double? {
+        sourceKind == .file ? source.flatMap(CreativeMedia.duration(of:)) : nil
+    }
+
+    /// The channels billed: each channel at the full length with one speaker per channel, up to
+    /// the spec's maximum; nil when that is not known (a link, or an unreadable file).
+    var billedChannels: Int? {
+        guard useMultiChannel else { return 1 }
+        guard sourceKind == .file, let channels = source.flatMap(CreativeMedia.channelCount(of:)) else { return nil }
+        return min(max(channels, 1), Self.maxChannels)
+    }
+
+    /// The audio length billed at the base rate: the file's length, times its channels with
+    /// one speaker per channel.
+    var billedSeconds: Double? {
+        guard let seconds = sourceSeconds, let channels = billedChannels else { return nil }
+        return seconds * Double(channels)
+    }
+
+    /// What the choices add to the price, in the spec's terms: one line per rule that applies.
+    var costNote: String? {
+        var lines: [String] = []
+        if useMultiChannel {
+            if let channels = billedChannels, let seconds = sourceSeconds {
+                lines.append("One speaker per channel: each of the \(channels) channels is billed at the full length (\(ElevenLabsAudioPlayerView.clock(seconds)) × \(channels)).")
+            } else {
+                lines.append("One speaker per channel: each channel (up to \(Self.maxChannels)) is billed at the full length.")
+            }
+        }
+        let sent = arguments()
+        var added: [String] = []
+        for surcharge in Self.surcharges where sent[surcharge.argument] != nil {
+            var piece = "+\(surcharge.percent)% \(surcharge.label)"
+            if surcharge.argument == "keyterms", keyterms.count > Self.keytermMinimumAbove {
+                piece += " (at least \(Self.keytermMinimumSeconds) s billed with over \(Self.keytermMinimumAbove) terms)"
+            }
+            if surcharge.argument == "transcript_edit" {
+                piece += " (on at least \(Self.editMinimumSeconds) s)"
+            }
+            added.append(piece)
+        }
+        if !added.isEmpty {
+            lines.append("On the base cost: " + added.joined(separator: ", ") + ".")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
     /// One category as a string, several as a list, "all" alone when chosen.
     static func entitySelection(_ selection: Set<String>) -> JSONValue? {
         guard !selection.isEmpty else { return nil }
@@ -400,15 +486,14 @@ struct TranscriptionScreen: View {
                     CreativeChoicePicker(title: "Redaction style", selection: $screen.entityRedactionMode, choices: screen.redactionModes)
                 }
                 if !screen.entityDetection.isEmpty || !screen.entityRedaction.isEmpty {
-                    Text("Entity detection and redaction each add to the transcription's cost.")
+                    Text("Detection and redaction each add 30% to the transcription's cost.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
             advanced
             CreativeRunRow(
                 runner: screen.runner, title: "Transcribe",
-                estimatedSeconds: screen.sourceKind == .file ? screen.source.flatMap(CreativeMedia.duration(of:)) : nil,
-                problems: screen.problems
+                estimatedSeconds: screen.billedSeconds, problems: screen.problems, note: screen.costNote
             ) {
                 Task { await screen.transcribe() }
             }
@@ -518,7 +603,7 @@ struct TranscriptionScreen: View {
                     Toggle("The file is raw 16-bit, 16 kHz mono PCM", isOn: $screen.rawPCMInput)
                         .disabled(screen.sourceKind != .file || screen.pcmFormatValue == nil)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Edit the transcript afterwards (adds to the cost)").font(.callout)
+                        Text("Edit the transcript afterwards (+30%, on at least 10 s)").font(.callout)
                         TextField("Edit", text: $screen.transcriptEdit, prompt: Text("e.g. Fix product names and remove profanity"), axis: .vertical)
                             .textFieldStyle(.roundedBorder)
                             .lineLimit(1...4)
