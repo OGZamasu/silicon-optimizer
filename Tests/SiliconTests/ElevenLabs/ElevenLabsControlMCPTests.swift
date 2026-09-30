@@ -201,6 +201,76 @@ struct ElevenLabsControlMCPTests {
         }
     }
 
+    /// The app's own conformance, wired as it ships: its client, its dated output folder and
+    /// media table, its switch. Audio lands in the folder and the pane's recent outputs; a big
+    /// answer is saved whole beside it; the gate follows the switch as the owner flips it.
+    @MainActor
+    @Test func theAppRunsCallsIntoItsOwnOutputFolderAndFollowsItsSwitch() async throws {
+        var settings = Settings()
+        settings.elevenLabsLinked = true
+        let model = AppModel(settings: settings)
+        let transport = FakeElevenLabsTransport { request in
+            switch request.operationID {
+            case "text_to_speech_full":
+                return .audio(Data([0x49, 0x44, 0x33, 1]), headers: ["character-cost": "5", "request-id": "r1"])
+            case "get_speech_history":
+                return .json(["history": .array((0..<3_000).map {
+                    ["history_item_id": .string("h\($0)"), "text": .string(String(repeating: "x", count: 100))]
+                })])
+            default:
+                return .json([:])
+            }
+        }
+        model.elevenLabsLink.transport = transport
+        model.elevenLabsLink.store = FakeCredentialSource(key: Self.plantedKey)
+        model.elevenLabsLink.limits = CoreClientTests.fastLimits
+        let folder = model.elevenLabsOutputDirectory
+        try requireTemporaryDirectory(folder)
+        defer {
+            removeTemporaryDirectory(folder)
+            transport.removeTemporaryFiles()
+        }
+        func call(_ operation: String, _ arguments: [String: ELJSON] = [:], confirm: Bool? = nil) async throws -> (Int, ELJSON) {
+            var body: [String: ELJSON] = ["operation": .string(operation), "arguments": .object(arguments)]
+            if let confirm { body["confirm"] = .bool(confirm) }
+            let answer = await model.elevenLabs(.init(route: .call(body: ELJSON.object(body).encoded())))
+            return (answer.status, try ELJSON(data: answer.body))
+        }
+
+        let status = try JSONDecoder().decode(
+            ElevenLabsWire.Status.self, from: await model.elevenLabs(.init(route: .status)).body
+        )
+        #expect(status.linked && !status.agentsMayRunRiskyActions)
+
+        let (spokeStatus, spoken) = try await call("text_to_speech_full", ["voice_id": "v", "text": "Hi"])
+        #expect(spokeStatus == 200)
+        let file = try #require(spoken["file"].stringValue)
+        #expect(file.hasPrefix(folder.path))
+        #expect(spoken["characterCost"] == 5)
+        #expect(spoken["costNote"].stringValue?.contains("5 characters") == true)
+        #expect(model.elevenLabsRecentOutputs.contains { $0.url.path == file })
+
+        let (historyStatus, history) = try await call("get_speech_history")
+        #expect(historyStatus == 200)
+        #expect(history["truncated"] == true)
+        let whole = try #require(history["fullResult"]["file"].stringValue)
+        #expect(whole.hasPrefix(folder.path))
+        #expect(try ELJSON(data: Data(contentsOf: URL(fileURLWithPath: whole)))["history"].arrayValue?.count == 3_000)
+
+        let risky = try #require(ElevenLabsCatalog.all.first {
+            $0.risk == .destructive && $0.body == nil && $0.parameters.allSatisfy { $0.location == .path }
+        })
+        let arguments = Self.sampleArguments(risky)
+        let before = transport.recorded.count
+        #expect(try await call(risky.id, arguments, confirm: true).0 == 403)
+        #expect(transport.recorded.count == before)
+        model.elevenLabsAllowRiskyForAgents = true
+        #expect(try await call(risky.id, arguments, confirm: false).0 == 403)
+        #expect(try await call(risky.id, arguments, confirm: true).0 == 200)
+        #expect(transport.recorded.count == before + 1)
+        #expect(transport.recorded.last?.request.operationID == risky.id)
+    }
+
     // MARK: - Samples
 
     /// Arguments from the operation's own schemas: every path and query parameter, required

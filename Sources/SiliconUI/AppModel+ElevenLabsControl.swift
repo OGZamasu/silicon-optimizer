@@ -23,7 +23,10 @@ extension AppModel {
                 linked: elevenLabsLinked, region: elevenLabsRegion,
                 allowRiskyForAgents: elevenLabsAllowRiskyForAgents, account: elevenLabsAccount
             ),
-            backend: elevenLabsClient
+            backend: elevenLabsClient,
+            // The client's own dated folder, so a big answer saved whole lands beside the
+            // audio it came with, in the media table and the pane's recent outputs.
+            sink: elevenLabsSink()
         )
     }
 }
