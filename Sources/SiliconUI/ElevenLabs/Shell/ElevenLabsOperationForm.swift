@@ -96,6 +96,8 @@ struct ElevenLabsFormNodeView: View {
     let depth: Int
     /// A list item's remove button sits in its header.
     var onRemove: (() -> Void)?
+    /// Why a key or certificate file was not loaded.
+    @State private var fileProblem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -194,6 +196,9 @@ struct ElevenLabsFormNodeView: View {
         switch node.field.kind {
         case .text(let multiline, let format):
             if node.field.isSecret {
+                if let fileProblem {
+                    Text(fileProblem).font(.caption).foregroundStyle(.red)
+                }
                 HStack(spacing: 6) {
                     SecureField(node.field.title, text: $node.text, prompt: Text("Hidden while typed"))
                         .labelsHidden()
@@ -404,9 +409,19 @@ struct ElevenLabsFormNodeView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url,
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        node.text = text
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let node = node
+        Task {
+            // Read off the main actor: even a capped file should not stall the window.
+            let read = await Task.detached(priority: .userInitiated) { ElevenLabsSecretFile.read(url) }.value
+            switch read {
+            case .success(let text):
+                node.text = text
+                fileProblem = nil
+            case .failure(let problem):
+                fileProblem = problem.message
+            }
+        }
     }
 
     // MARK: Hints
@@ -560,5 +575,31 @@ struct ElevenLabsProblemList: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+/// Reads a key or certificate file for a secret field: a regular file (a named pipe would
+/// block the read forever), small enough to be one (256 KB), and text.
+enum ElevenLabsSecretFile {
+    static let sizeLimit = 256 * 1024
+
+    struct Problem: Error, Equatable {
+        var message: String
+    }
+
+    static func read(_ url: URL) -> Result<String, Problem> {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular else {
+            return .failure(Problem(message: "\(url.lastPathComponent) is not a regular file."))
+        }
+        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        guard size <= sizeLimit else {
+            return .failure(Problem(message: "\(url.lastPathComponent) is too big for a key or certificate (over 256 KB)."))
+        }
+        guard let data = try? Data(contentsOf: url), data.count <= sizeLimit,
+              let text = String(data: data, encoding: .utf8) else {
+            return .failure(Problem(message: "\(url.lastPathComponent) could not be read as text."))
+        }
+        return .success(text)
     }
 }

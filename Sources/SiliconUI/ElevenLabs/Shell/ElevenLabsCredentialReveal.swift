@@ -47,7 +47,7 @@ struct ElevenLabsRevealedCredential: Identifiable, Equatable, Sendable {
         case .json(let value, let meta):
             return .json(redacted(value, for: operation), meta)
         case .text(let text, let meta):
-            return .text(operation.returnsCredential ? ElevenLabsRedaction.placeholder : text, meta)
+            return .text(operation.returnsCredential ? ElevenLabsRedaction.placeholder : ElevenLabsRedaction.redact(text), meta)
         case .events(let events, let meta):
             return .events(events.map { redacted($0, for: operation) }, meta)
         case .parts(let parts, let meta):

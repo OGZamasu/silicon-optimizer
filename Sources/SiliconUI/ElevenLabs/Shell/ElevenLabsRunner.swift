@@ -251,10 +251,11 @@ final class ElevenLabsRunner: Identifiable {
                 return nil
             }
             // The answer was given for the account and host the question was asked on. If the
-            // session ended, the link went, or the region moved meanwhile, the same click would
-            // act on another account or host: send nothing.
+            // session ended, the link went, or the client changed meanwhile — another region, or
+            // another key on the same region — the same click would act elsewhere: send nothing.
+            // (A context's client closure hands back one client per account; the app's does.)
             let sessionEnded = context.pane.map { $0.epoch != runEpoch } ?? false
-            guard !sessionEnded, let now = context.client(), now.region == client.region else {
+            guard !sessionEnded, let now = context.client(), now === client, now.region == client.region else {
                 return fail(.other(Self.accountChangedMessage))
             }
         }
