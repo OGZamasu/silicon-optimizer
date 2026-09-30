@@ -344,4 +344,25 @@ struct CoreReviewFixesTests {
             "voice_id": "voice-1", "text": "Nothing is redacted here.",
         ]).isEmpty)
     }
+
+    // MARK: - The owner's switch reveals one operation's credential fields, not the vault
+
+    @Test func revealingCredentialFieldsShowsOnlyWhatTheOperationReturnsForTheOwner() throws {
+        let operation = try #require(ElevenLabsCatalog.operation("create_workspace_webhook_route"))
+        #expect(operation.returnsCredential)
+        let key = Self.key
+        let answer: JSONValue = [
+            "webhook_secret": "whsec-value-the-owner-asked-for",
+            "xi_api_key_preview": .string(key),
+            "settings": ["request_headers": ["Authorization": "Bearer literal-token-value"]],
+        ]
+        let masked = try ElevenLabsRedaction.redactCredentials(in: answer, for: operation).jsonString()
+        #expect(!masked.contains("whsec-value") && !masked.contains("literal-token-value"))
+
+        let revealed = try ElevenLabsRedaction.redactCredentials(
+            in: answer, for: operation, revealingCredentialFields: true).jsonString()
+        #expect(revealed.contains("whsec-value-the-owner-asked-for"), "the switch reveals the named field")
+        #expect(!revealed.contains(key), "but never a key")
+        #expect(!revealed.contains("literal-token-value"), "and never a literal header value")
+    }
 }

@@ -24,14 +24,19 @@ public enum ElevenLabsRedaction {
     /// the owner's switch lets agents see them. For a credential-returning operation that is
     /// the fields the risk table names for it; for every answer, the key preview `GET /v1/user`
     /// includes and any `sk_…` string.
+    ///
+    /// `revealingCredentialFields` is the owner's switch: it hands an agent the fields the risk
+    /// table names for this one operation (a new API key, a webhook secret, a signed URL) and
+    /// nothing else. The account's own key preview, any `sk_…` key and plain-string header values
+    /// stay masked either way — the switch allows the action, it does not open the vault.
     public static func redactCredentials(
-        in value: JSONValue, for operation: ElevenLabsOperation
+        in value: JSONValue, for operation: ElevenLabsOperation, revealingCredentialFields: Bool = false
     ) -> JSONValue {
-        let fields = ElevenLabsRiskTable.credentialFields[operation.id].map(Set.init)
+        let named = ElevenLabsRiskTable.credentialFields[operation.id].map(Set.init)
             ?? (operation.returnsCredential ? credentialFieldNames : [])
-        return redactFields(
-            fields.union(ElevenLabsRiskTable.alwaysRedactedFields), in: value, maskingHeaderValues: true
-        )
+        let fields = (revealingCredentialFields ? [] : named)
+            .union(ElevenLabsRiskTable.alwaysRedactedFields)
+        return redactFields(fields, in: value, maskingHeaderValues: true)
     }
 
     /// Maps of header name to header value, wherever a tool, MCP server, custom LLM, webhook
