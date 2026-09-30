@@ -258,8 +258,8 @@ struct ElevenLabsControlHandlerTests {
     }
 
     /// With the owner's switch on, a credential-returning operation's own credential field is
-    /// handed over — and nothing else: a key, the key preview and a literal header value in the
-    /// same answer stay masked.
+    /// handed over, and header values follow the switch (the core's rule, so an agent may send
+    /// a tool's config back) — and nothing else: a key and the key preview stay masked.
     @Test func theSwitchRevealsTheNamedCredentialAndNothingElse() async throws {
         let key = "sk_" + String(repeating: "c0ffee", count: 8)
         let answer: JSON = [
@@ -276,7 +276,8 @@ struct ElevenLabsControlHandlerTests {
             #expect((json["token"] == "shareable-agent-token") == allowed)
             #expect(!text.contains(key))
             #expect(json["xi_api_key_preview"] == .string(ElevenLabsRedaction.placeholder))
-            #expect(json["request_headers"]["Authorization"] == .string(ElevenLabsRedaction.placeholder))
+            #expect(json["request_headers"]["Authorization"]
+                == (allowed ? "Bearer literal-header-value" : .string(ElevenLabsRedaction.placeholder)))
             // A reference to a stored secret is not the secret: it stays.
             #expect(json["request_headers"]["X-Auth"] == ["secret_id": "s1"])
         }
@@ -337,13 +338,16 @@ struct ElevenLabsControlHandlerTests {
         }
     }
 
-    /// Any operation's answer: a string under a field named like a secret is masked while the
-    /// switch is off — but a pagination cursor, a count and an id are not secrets.
+    /// Any operation's answer: a string under a field named like a secret is masked — but a
+    /// pagination cursor, a count and an id are not secrets. The owner's switch does not change
+    /// that for an operation that returns no credential of its own: it reveals one operation's
+    /// named fields, not every secret-looking string in every answer.
     @Test func secretLookingFieldsAreMaskedButCursorsAndCountsAreNot() async throws {
         let answer: JSON = [
             "voices": [["voice_id": "v1", "webhook_secret": "whsec", "settings": ["accessToken": "at"]]],
             "next_page_token": "cursor-2", "token_count": 5, "signed_url": "https://x/signed",
             "api_key": "plain", "tokenizer": "bpe", "hmac_signature": "sig", "password": "pw",
+            "client_secret": "cs",
         ]
         let hidden = ElevenLabsRedaction.placeholder
         let masked = try ELFixture.json(await ELFixture.handler(
@@ -355,13 +359,36 @@ struct ElevenLabsControlHandlerTests {
         #expect(masked["next_page_token"] == "cursor-2")
         #expect(masked["token_count"] == 5)
         #expect(masked["tokenizer"] == "bpe")
-        for key in ["signed_url", "api_key", "hmac_signature", "password"] {
+        for key in ["signed_url", "api_key", "hmac_signature", "password", "client_secret"] {
             #expect(masked[key] == .string(hidden), "\(key)")
         }
-        let open = try ELFixture.json(await ELFixture.handler(
+        let switchOn = try ELFixture.json(await ELFixture.handler(
             backend: RecordingBackend(result: .json(answer, .init(status: 200))), allowRisky: true
         ).call(ELFixture.body("list_voices")))["json"]
-        #expect(open == answer)
+        #expect(switchOn == masked)
+    }
+
+    /// The switch reveals what the core reveals for this one operation, not what the control's
+    /// own field-name mask would hide anywhere else: in an operation that returns no credential,
+    /// a `client_secret`, a `password` and a signed URL stay masked with the switch on — nested,
+    /// in lists, and beside a header map whose values the switch does show.
+    @Test func theSwitchDoesNotOpenOtherOperationsSecrets() async throws {
+        let answer: JSON = [
+            "tools": [["name": "crm", "client_secret": "cs-1", "password": "pw-1",
+                       "auth": ["signed_url": "https://x/signed"],
+                       "request_headers": ["X-Team": "team-header"]]],
+        ]
+        let json = try ELFixture.json(await ELFixture.handler(
+            backend: RecordingBackend(result: .json(answer, .init(status: 200))), allowRisky: true
+        ).call(ELFixture.body("list_voices")))
+        let tool = json["json"]["tools"][0]
+        let hidden = JSON.string(ElevenLabsRedaction.placeholder)
+        #expect(tool["client_secret"] == hidden)
+        #expect(tool["password"] == hidden)
+        #expect(tool["auth"]["signed_url"] == hidden)
+        #expect(tool["name"] == "crm")
+        #expect(tool["request_headers"]["X-Team"] == "team-header")
+        #expect(json["redacted"] == true)
     }
 
     @Test func theKeyPreviewIsMaskedEvenWithTheSwitchOn() async throws {

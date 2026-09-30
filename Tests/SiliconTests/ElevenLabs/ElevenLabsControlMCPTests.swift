@@ -298,9 +298,9 @@ struct ElevenLabsControlMCPTests {
 
     /// Masking over the real catalog's credential fields and the real client: an agent's
     /// shareable token, a single-use token and a new service-account key are masked while
-    /// the switch is off (the last two are gated then anyway) and handed over once it is on —
-    /// and only they. The owner's own key in a webhook tool's headers, the key preview and any
-    /// other literal header value stay masked with the switch on.
+    /// the switch is off (the last two are gated then anyway) and handed over once it is on.
+    /// The owner's own key in a webhook tool's headers and the key preview stay masked with the
+    /// switch on; other literal header values follow the switch, as the core decides.
     @Test func realCredentialsAreMaskedUntilTheOwnerAllowsThem() async throws {
         let planted = "planted-" + UUID().uuidString
         let reply: @Sendable (ElevenLabsRequest) -> FakeElevenLabsTransport.Reply = { request in
@@ -336,10 +336,10 @@ struct ElevenLabsControlMCPTests {
                     #expect(answer.status == 200, "\(id): \(text.prefix(200))")
                     #expect(text.contains(planted) == allowRisky, "\(id) with the switch \(allowRisky ? "on" : "off")")
                     if id == "get_agent_route" {
-                        // Whatever the switch: never a key, never the preview, never a header value.
+                        // Whatever the switch: never a key, never the preview.
                         #expect(!text.contains(Self.plantedKey), "\(id)")
                         #expect(!text.contains("sk_ab"), "\(id)")
-                        #expect(!text.contains("literal-header-value"), "\(id)")
+                        #expect(text.contains("literal-header-value") == allowRisky, "\(id)")
                         #expect(text.contains("X-Team"), "\(id): the header's name stays")
                     } else {
                         #expect(text.contains(ElevenLabsRedaction.placeholder) == !allowRisky, "\(id)")

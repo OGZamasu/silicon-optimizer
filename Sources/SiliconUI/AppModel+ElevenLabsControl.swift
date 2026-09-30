@@ -901,8 +901,9 @@ struct ElevenLabsControlHandler: Sendable {
 
     var redactionNote: String {
         state.allowRiskyForAgents
-            ? "Key material in this answer was masked: keys, the key preview and header values "
-                + "never reach agents, whatever the switch."
+            ? "Key material in this answer was masked: keys and the key preview never reach "
+                + "agents, whatever the switch, and the switch reveals only this operation's own "
+                + "credential fields and header values."
             : "Credentials in this answer were masked. The owner can let agents see this "
                 + "operation's own credential fields with \"\(ElevenLabsControl.riskySwitch)\" in "
                 + "\(ElevenLabsControl.riskySwitchLocation); the app shows them either way."
@@ -912,18 +913,22 @@ struct ElevenLabsControlHandler: Sendable {
 
     /// An answer as an agent may see it.
     ///
-    /// Always through the core's `redactCredentials`: the key preview `GET /v1/user` carries,
-    /// every `sk_…` key and every plain-string header value are masked whatever the switch
-    /// says. The owner's switch reveals exactly one thing more — the credential fields the risk
-    /// table names for this operation (a webhook secret, a signed URL, a shareable token). While
-    /// it is off, those are masked too, and so is any other string whose field name says it is
-    /// a secret.
+    /// Always through the core's `redactCredentials`: the key preview `GET /v1/user` carries and
+    /// every `sk_…` key are masked whatever the switch says. While the owner's switch is off, the
+    /// credential fields the risk table names for this operation, plain-string header values, and
+    /// any other string whose field name says it is a secret are masked too.
+    ///
+    /// The switch reveals exactly what the core reveals for it — this operation's own credential
+    /// fields, and header values (so an agent may send a tool's config back) — and nothing more:
+    /// a `password` or `client_secret` anywhere else stays masked. Which fields those are is
+    /// read off the core's two answers, masked and revealed, rather than from its private table.
     func redacted(_ value: ElevenLabsJSON, for operation: ElevenLabsOperation) -> ElevenLabsJSON {
-        let revealing = state.allowRiskyForAgents
-        let core = ElevenLabsRedaction.redactCredentials(
-            in: value, for: operation, revealingCredentialFields: revealing
+        let masked = ElevenLabsRedaction.redactCredentials(in: value, for: operation)
+        guard state.allowRiskyForAgents else { return Self.maskSecretFields(masked) }
+        let revealed = ElevenLabsRedaction.redactCredentials(
+            in: value, for: operation, revealingCredentialFields: true
         )
-        return revealing ? core : Self.maskSecretFields(core)
+        return Self.maskSecretFields(revealed, sparing: masked)
     }
 
     /// Text answers carry no named fields, so there is nothing for the switch to reveal.
@@ -931,18 +936,32 @@ struct ElevenLabsControlHandler: Sendable {
         ElevenLabsRedaction.redact(text)
     }
 
-    /// Every string under a field whose name says it holds a secret.
-    static func maskSecretFields(_ value: ElevenLabsJSON) -> ElevenLabsJSON {
+    /// Every string under a field whose name says it holds a secret — except, when `masked` is
+    /// given, a field the core masks there and did not mask in `value`: that is one the owner's
+    /// switch revealed, and the switch is the owner's to give.
+    static func maskSecretFields(
+        _ value: ElevenLabsJSON, sparing masked: ElevenLabsJSON? = nil
+    ) -> ElevenLabsJSON {
         switch value {
         case .object(let object):
             return .object(Dictionary(uniqueKeysWithValues: object.map { key, inner in
+                let reference = masked?.objectValue?[key]
+                if let reference, reference == .string(ElevenLabsRedaction.placeholder), inner != reference {
+                    return (key, inner)
+                }
                 if case .string = inner, looksLikeSecret(key) {
                     return (key, .string(ElevenLabsRedaction.placeholder))
                 }
-                return (key, maskSecretFields(inner))
+                return (key, maskSecretFields(inner, sparing: reference))
             }))
         case .array(let array):
-            return .array(array.map(maskSecretFields))
+            let references = masked?.arrayValue
+            return .array(array.enumerated().map { index, element in
+                maskSecretFields(
+                    element,
+                    sparing: references.flatMap { $0.indices.contains(index) ? $0[index] : nil }
+                )
+            })
         case .null, .bool, .number, .string:
             return value
         }
