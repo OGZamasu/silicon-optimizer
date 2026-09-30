@@ -37,6 +37,9 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
         case variants([Variant])
         /// A file upload (multipart); several when `multiple`.
         case file(multiple: Bool)
+        /// A map of header name to value (`request_headers`, `custom_headers`…): rows of a name
+        /// and a value typed into a secure field, since the values are often `Authorization`.
+        case headerMap
         /// Anything the typed editors do not cover — a map, a shape nested too deep, a schema
         /// the catalog cut short — edited as JSON text.
         case json
@@ -75,6 +78,32 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
     var examples: [JSONValue]
     var kind: Kind
     var constraints: Constraints
+    /// A password, token, client secret or key: typed into a secure field. Its value is never
+    /// shown back — "Show API call" and curl come from the client's description, which masks it.
+    var isSecret: Bool = false
+
+    // MARK: - Secrets
+
+    /// Request fields that carry a secret, by name — every one the spec's request schemas use
+    /// (a test walks them), and the ones the core masks in what it shows.
+    static let secretFieldNames: Set<String> = [
+        "api_key", "api_token", "token", "password", "client_secret", "secret_key", "secret_token",
+        "account_auth_token", "auth_token", "authorization", "webhook_secret", "hmac_secret",
+        "access_token", "refresh_token", "shareable_token", "client_key", "key_passphrase",
+        "passphrase", "private_key",
+    ]
+
+    /// Maps of header name to value; plain-string values in them are secrets.
+    static let headerMapFieldNames: Set<String> = ["request_headers", "custom_headers", "custom_sip_headers", "headers"]
+
+    /// Whether a field named `name` in `operation` holds a secret. A secret's own `value` is
+    /// one too (`/v1/convai/secrets`).
+    static func isSecretField(_ name: String, in operationPath: String? = nil) -> Bool {
+        let lowered = name.lowercased()
+        if secretFieldNames.contains(lowered) { return true }
+        if lowered == "value", let operationPath, operationPath.hasPrefix("/v1/convai/secrets") { return true }
+        return false
+    }
 
     // MARK: - Building
 
@@ -105,7 +134,29 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
         if let body = operation.body {
             fields += bodyFields(body)
         }
-        return fields
+        return fields.map { markingSecrets($0, operationPath: operation.path) }
+    }
+
+    /// `field` and everything inside it, with secret text fields marked.
+    static func markingSecrets(_ field: ElevenLabsFormField, operationPath: String) -> ElevenLabsFormField {
+        var field = field
+        switch field.kind {
+        case .text:
+            field.isSecret = isSecretField(field.name, in: operationPath)
+        case .object(let children):
+            field.kind = .object(children.map { markingSecrets($0, operationPath: operationPath) })
+        case .list(let item):
+            field.kind = .list(markingSecrets(item, operationPath: operationPath))
+        case .variants(let variants):
+            field.kind = .variants(variants.map {
+                Variant(title: $0.title, field: markingSecrets($0.field, operationPath: operationPath))
+            })
+        case .headerMap:
+            field.isSecret = true
+        case .integer, .number, .boolean, .choice, .constant, .file, .json:
+            break
+        }
+        return field
     }
 
     static func bodyFields(_ body: ElevenLabsBody) -> [ElevenLabsFormField] {
@@ -221,6 +272,10 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
                 description: nil, defaultValue: nil, depth: depth + 1, fileFields: []
             ))
         case "object", nil:
+            if headerMapFieldNames.contains(id.split(separator: ".").last.map(String.init) ?? ""),
+               schema["properties"].objectValue?.isEmpty ?? true {
+                return .headerMap
+            }
             guard let properties = schema["properties"].objectValue, !properties.isEmpty,
                   depth < typedDepthLimit
             else { return .json }
