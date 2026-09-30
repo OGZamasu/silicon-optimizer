@@ -29,38 +29,16 @@ struct VoicesStudioEnvironment {
     }
 }
 
-/// Section models kept for as long as the app model lives, so work in progress — voice
-/// previews that already cost credits, a half-filled form, the project on screen — survives a
-/// trip to another section and back. The main window draws one section at a time behind a
-/// `switch`, so a model held in the view's `@State` would be thrown away on every trip.
-///
-/// Dropped when the link changes (disconnect, another region), so one account's projects are
-/// never shown under another's.
+/// Section models kept in the pane's section state, so work in progress — voice previews that
+/// already cost credits, a half-filled form, the project on screen — survives a trip to another
+/// section and back (the main window draws one section at a time behind a `switch`), and is
+/// dropped with the rest of the pane's state when the account's client changes.
 @MainActor
 enum VoicesStudioModels {
-    final class Box {
-        var signature: String
-        var models: [ObjectIdentifier: AnyObject] = [:]
-        init(signature: String) { self.signature = signature }
-    }
-
-    private static let table = NSMapTable<AppModel, Box>.weakToStrongObjects()
-
     static func model<Model: AnyObject>(
         _ type: Model.Type, for app: AppModel, make: (VoicesStudioEnvironment) -> Model
     ) -> Model {
-        let signature = "\(app.elevenLabsLinked)|\(app.elevenLabsRegion.rawValue)"
-        let box: Box
-        if let existing = table.object(forKey: app), existing.signature == signature {
-            box = existing
-        } else {
-            box = Box(signature: signature)
-            table.setObject(box, forKey: app)
-        }
-        if let existing = box.models[ObjectIdentifier(type)] as? Model { return existing }
-        let made = make(.app(app))
-        box.models[ObjectIdentifier(type)] = made
-        return made
+        app.elevenLabsPane.state(key: "voices-studio." + String(describing: type)) { make(.app(app)) }
     }
 }
 
@@ -118,9 +96,11 @@ final class VoicesStudioActions {
     }
 
     /// Whether `runner` may not start now because another billable call is under way.
+    ///
+    /// The runner itself counts too: the shell's runner abandons a run in flight when it is
+    /// started again, and a billable request already sent would still be billed.
     func isBlocked(_ runner: ElevenLabsRunner) -> Bool {
-        guard runner.operation.billable, let busy = billableInFlight else { return false }
-        return busy !== runner
+        runner.operation.billable && billableInFlight != nil
     }
 
     /// Why the last attempt was refused without sending anything.
@@ -661,7 +641,7 @@ struct VoicesStudioActivity: View {
             if let runner = actions.last ?? fallback {
                 if credentialsInline, runner.credential != nil {
                     ElevenLabsAPICallDisclosure(runner: runner)
-                        .elevenLabsConfirmation(for: runner)
+                        .elevenLabsConfirmation(for: runner, when: runner.presentsOwnConfirmation)
                         .id(runner.id)
                 } else {
                     ElevenLabsRunnerOutput(runner: runner, showsResult: showsResult && actions.last != nil)
@@ -689,7 +669,7 @@ struct VoicesStudioRunButton: View {
                 runner: runner, title: title, estimatedCharacters: estimatedCharacters,
                 disabled: disabled || actions.isBlocked(runner), action: action
             )
-            if actions.isBlocked(runner), let busy = actions.billableInFlight {
+            if actions.isBlocked(runner), let busy = actions.billableInFlight, busy !== runner {
                 Text("Waiting for “\(busy.title ?? busy.operation.summary)” to finish — cancel it below to start this.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
