@@ -13,7 +13,7 @@ struct CoreRiskTableTests {
         let listed = lists.flatMap { $0 }
         #expect(listed.count == Set(listed).count, "an operation is in two lists")
         #expect(Set(listed) == Set(ElevenLabsCatalog.all.map(\.id)))
-        #expect(lists.map(\.count) == [171, 52, 95, 33, 52])
+        #expect(lists.map(\.count) == [171, 52, 90, 34, 56])
     }
 
     @Test func theRulesHoldForEveryOperation() {
@@ -57,6 +57,10 @@ struct CoreRiskTableTests {
             // Workspace membership, sharing, webhooks, auth connections
             "invite_user", "invite_users_bulk", "delete_invite", "update_workspace_member",
             "add_member", "remove_member", "share_resource_endpoint", "unshare_resource_endpoint",
+            // Agent tools and environment variables: a webhook tool points an agent at an outside
+            // URL with headers, as an MCP server does
+            "add_tool_route", "update_tool_route", "create_environment_variable",
+            "update_environment_variable",
             "create_workspace_webhook_route", "edit_workspace_webhook_route",
             "delete_workspace_webhook_route", "create_auth_connection", "update_auth_connection",
             "delete_auth_connection",
@@ -210,5 +214,12 @@ struct CoreRiskTableTests {
             names.insert(name)
             collectFieldNames(property, schemas: schemas, seen: seen, into: &names)
         }
+    }
+
+    /// Cancelling a crawl deletes every document it created, so it asks first like a delete.
+    @Test func cancellingACrawlIsDestructive() throws {
+        let operation = try #require(ElevenLabsCatalog.operation("cancel_crawl_job_route"))
+        #expect(operation.risk == .destructive)
+        #expect(operation.risk.requiresConfirmation)
     }
 }

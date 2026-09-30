@@ -171,6 +171,13 @@ public final class URLSessionTransport: ElevenLabsTransport, @unchecked Sendable
     }
 
     private func isAllowed(_ url: URL) -> Bool {
+        Self.isAllowed(url, allowedHosts: allowedHosts, loopbackPort: loopbackPort)
+    }
+
+    /// Whether a request to `url` may leave this Mac with the key in it. A pure function of the
+    /// URL, so the negative cases — every way a URL can look like an ElevenLabs host and not be
+    /// one — are tested without opening a socket.
+    static func isAllowed(_ url: URL, allowedHosts: Set<String>, loopbackPort: Int?) -> Bool {
         guard let host = url.host else { return false }
         if url.scheme == "https", allowedHosts.contains(host), url.port == nil || url.port == 443 {
             return true
