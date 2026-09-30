@@ -290,7 +290,8 @@ final class ElevenLabsRunner: Identifiable {
     private func succeed(_ answer: ElevenLabsResult) -> ElevenLabsResult {
         var shown = answer
         if operation.returnsCredential {
-            credential = ElevenLabsRevealedCredential(operation: operation, result: answer)
+            let revealed = ElevenLabsRevealedCredential(operation: operation, result: answer)
+            credential = revealed.fields.isEmpty ? nil : revealed
             shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         }
         result = shown

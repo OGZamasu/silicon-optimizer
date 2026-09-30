@@ -17,17 +17,16 @@ struct ElevenLabsRevealedCredential: Identifiable, Equatable, Sendable {
     var operationID: String
     var fields: [Field]
 
-    /// The secret fields of a credential-returning answer. When none of the known names is
-    /// there, the whole answer is treated as the secret rather than guessed about.
+    /// The secret fields of a credential-returning answer: exactly the ones the core's
+    /// redaction masks for this operation (its reviewed field list), found by comparing the
+    /// answer with its redacted copy — so what is shown once here is what MCP never sees.
     init(operation: ElevenLabsOperation, result: ElevenLabsResult) {
         operationID = operation.id
         var found: [Field] = []
         switch result {
         case .json(let value, _):
-            Self.collect(value, path: "", into: &found)
-            if found.isEmpty, value != .null {
-                found = [Field(path: "answer", value: value.jsonString(pretty: true))]
-            }
+            Self.collect(value, masked: ElevenLabsRedaction.redactCredentials(in: value, for: operation),
+                         path: "", into: &found)
         case .text(let text, _):
             found = [Field(path: "answer", value: text)]
         case .events, .file, .parts:
@@ -48,24 +47,22 @@ struct ElevenLabsRevealedCredential: Identifiable, Equatable, Sendable {
         }
     }
 
-    private static func collect(_ value: JSONValue, path: String, into found: inout [Field]) {
-        switch value {
-        case .object(let object):
+    private static func collect(_ value: JSONValue, masked: JSONValue, path: String, into found: inout [Field]) {
+        if value != masked, masked == .string(ElevenLabsRedaction.placeholder) {
+            found.append(Field(path: path.isEmpty ? "answer" : path, value: value.stringValue ?? value.jsonString()))
+            return
+        }
+        switch (value, masked) {
+        case (.object(let object), .object(let maskedObject)):
             for key in object.keys.sorted() {
-                let inner = object[key] ?? .null
-                let innerPath = path.isEmpty ? key : "\(path).\(key)"
-                if ElevenLabsRedaction.credentialFieldNames.contains(key.lowercased()),
-                   let text = inner.stringValue, !text.isEmpty {
-                    found.append(Field(path: innerPath, value: text))
-                } else {
-                    collect(inner, path: innerPath, into: &found)
-                }
+                collect(object[key] ?? .null, masked: maskedObject[key] ?? .null,
+                        path: path.isEmpty ? key : "\(path).\(key)", into: &found)
             }
-        case .array(let array):
-            for (index, inner) in array.enumerated() {
-                collect(inner, path: "\(path)[\(index)]", into: &found)
+        case (.array(let array), .array(let maskedArray)) where array.count == maskedArray.count:
+            for index in array.indices {
+                collect(array[index], masked: maskedArray[index], path: "\(path)[\(index)]", into: &found)
             }
-        case .null, .bool, .number, .string:
+        default:
             break
         }
     }
