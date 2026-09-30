@@ -333,6 +333,17 @@ Required fields are marked, and the problems the form or the client finds appear
 they name. **Run** asks first for destructive and real-world operations. Streaming operations can
 play as they arrive or be collected. **Copy as curl** leaves the key to `$ELEVENLABS_API_KEY`.
 
+Secrets are never typed in the clear:
+- Password, token, client-secret and key fields are secure fields.
+- Header maps take a name and a hidden value per row.
+- "Show API call" and curl mask what was typed, because they come from the client's description.
+
+Path fields take an id, not a path. A "/", "\", "." or ".." there, or a value that still holds the
+`‹redacted›` mask from an answer, is named beside its field before anything is sent.
+
+In the app's own results, header values stay real (the owner's editor writes them back). The
+shown-once card lists only the credential fields the risk table names for that operation.
+
 ### What every section builds with
 
 - **`ElevenLabsRunner`** runs one operation. It checks the arguments and asks for confirmation
