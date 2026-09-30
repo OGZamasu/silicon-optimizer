@@ -129,8 +129,11 @@ struct CoreWireTests {
         for address in refused {
             var request = Self.request(server, "/v1/user")
             request.url = URL(string: address)!
-            await #expect(throws: ElevenLabsError.self) { try await testing.send(request) }
-            await #expect(throws: ElevenLabsError.self) { try await testing.stream(request) }
+            // Exactly `refusedHost`: any other error (a refused connection is `.network`) would
+            // mean the request had been sent, and this test would pass for the wrong reason.
+            let host = try #require(request.url.host)
+            await #expect(throws: ElevenLabsError.refusedHost(host)) { try await testing.send(request) }
+            await #expect(throws: ElevenLabsError.refusedHost(host)) { try await testing.stream(request) }
         }
         // The production transport has no loopback allowance at all.
         await #expect(throws: ElevenLabsError.refusedHost("127.0.0.1")) {
