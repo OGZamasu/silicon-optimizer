@@ -29,14 +29,24 @@ public enum ElevenLabsRedaction {
     /// table names for this one operation (a new API key, a webhook secret, a signed URL) and
     /// nothing else. The account's own key preview, any `sk_…` key and plain-string header values
     /// stay masked either way — the switch allows the action, it does not open the vault.
+    ///
+    /// Plain-string header values (`Authorization: Bearer …` in a tool, MCP server or webhook)
+    /// follow the same switch by default: masked unless the owner let agents see credentials,
+    /// because an agent that edits a tool must send its whole `tool_config` back, headers
+    /// included, and a masked value cannot be sent back. `maskingHeaderValues` overrides that:
+    /// the app's own runner passes `false`, because the owner's editor needs the real config to
+    /// write back and the header values are not credentials the API "will not show again".
     public static func redactCredentials(
-        in value: JSONValue, for operation: ElevenLabsOperation, revealingCredentialFields: Bool = false
+        in value: JSONValue, for operation: ElevenLabsOperation,
+        revealingCredentialFields: Bool = false, maskingHeaderValues: Bool? = nil
     ) -> JSONValue {
         let named = ElevenLabsRiskTable.credentialFields[operation.id].map(Set.init)
             ?? (operation.returnsCredential ? credentialFieldNames : [])
         let fields = (revealingCredentialFields ? [] : named)
             .union(ElevenLabsRiskTable.alwaysRedactedFields)
-        return redactFields(fields, in: value, maskingHeaderValues: true)
+        return redactFields(
+            fields, in: value, maskingHeaderValues: maskingHeaderValues ?? !revealingCredentialFields
+        )
     }
 
     /// Maps of header name to header value, wherever a tool, MCP server, custom LLM, webhook
@@ -50,11 +60,23 @@ public enum ElevenLabsRedaction {
 
     /// `map` with every plain-string value replaced and every reference kept.
     static func maskHeaderValues(_ map: JSONValue) -> JSONValue {
-        guard case .object(let entries) = map else { return map }
-        return .object(entries.mapValues { entry in
-            if case .string(let text) = entry, !text.isEmpty { return .string(placeholder) }
-            return entry
-        })
+        switch map {
+        case .object(let entries):
+            return .object(entries.mapValues { entry in
+                if case .string(let text) = entry, !text.isEmpty { return .string(placeholder) }
+                return entry
+            })
+        case .array(let items):
+            // `custom_sip_headers` is a list of {type, key, value}: the value is the secret.
+            return .array(items.map { item in
+                guard case .object(var fields) = item, case .string(let text)? = fields["value"], !text.isEmpty
+                else { return item }
+                fields["value"] = .string(placeholder)
+                return .object(fields)
+            })
+        default:
+            return map
+        }
     }
 
     /// Field names whose string values are secrets wherever they appear in a request the owner

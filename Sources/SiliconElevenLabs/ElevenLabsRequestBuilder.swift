@@ -86,8 +86,8 @@ enum ElevenLabsRequestBuilder {
         for name in arguments.keys.sorted() where containsRedactionPlaceholder(arguments[name] ?? .null) {
             problems.append(
                 "\"\(name)\" contains \"\(ElevenLabsRedaction.placeholder)\", the mask an earlier answer put "
-                + "over a secret. Sending it would overwrite the real value: leave the field out to keep "
-                + "what is stored, or send the real value."
+                + "over a secret. Sending it would overwrite the real value: send the real value, or leave "
+                + "the field out if this operation accepts a partial update."
             )
         }
 

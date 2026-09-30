@@ -363,6 +363,24 @@ struct CoreReviewFixesTests {
             in: answer, for: operation, revealingCredentialFields: true).jsonString()
         #expect(revealed.contains("whsec-value-the-owner-asked-for"), "the switch reveals the named field")
         #expect(!revealed.contains(key), "but never a key")
-        #expect(!revealed.contains("literal-token-value"), "and never a literal header value")
+        #expect(revealed.contains("literal-token-value"),
+                "and header values, so an agent that may edit a tool can write its whole config back")
+
+        // The app's own runner: named credential fields masked (they are shown once), header
+        // values left for the owner's editor to write back.
+        let forTheOwner = try ElevenLabsRedaction.redactCredentials(
+            in: answer, for: operation, maskingHeaderValues: false).jsonString()
+        #expect(!forTheOwner.contains("whsec-value") && !forTheOwner.contains(key))
+        #expect(forTheOwner.contains("literal-token-value"))
+    }
+
+    @Test func aListOfSIPHeadersHasItsValuesMasked() throws {
+        let operation = try #require(ElevenLabsCatalog.operation("get_tool_route"))
+        let answer: JSONValue = ["params": ["transfers": [[
+            "custom_sip_headers": [["type": "static", "key": "X-Auth", "value": "sip-secret-value"]],
+        ]]]]
+        let text = try ElevenLabsRedaction.redactCredentials(in: answer, for: operation).jsonString()
+        #expect(!text.contains("sip-secret-value"))
+        #expect(text.contains("X-Auth"))
     }
 }
