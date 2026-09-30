@@ -229,7 +229,9 @@ enum ElevenLabsStreamCollector {
                     suggestedName: "\(operation.id).\(fileExtension(for: contentType))",
                     contentType: contentType
                 )
-                FileManager.default.createFile(atPath: url.path, contents: nil)
+                // Created only if nothing is there: another stream given the same name at the
+                // same moment must not have its file truncated.
+                try Data().write(to: url, options: .withoutOverwriting)
                 file = (url, try FileHandle(forWritingTo: url), contentType)
             }
             try file?.handle.write(contentsOf: data)

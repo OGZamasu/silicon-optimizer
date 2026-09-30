@@ -101,6 +101,12 @@ struct ElevenLabsFormNodeView: View {
         VStack(alignment: .leading, spacing: 5) {
             header
             if node.editsAsJSON {
+                if ElevenLabsFormField.containsSecret(node.field), !node.text.isEmpty {
+                    Label("This JSON shows secrets as typed. Show API call and curl never do.",
+                          systemImage: "eye.trianglebadge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 ElevenLabsJSONEditor(text: $node.text, minHeight: 80)
             } else {
                 control
@@ -188,9 +194,16 @@ struct ElevenLabsFormNodeView: View {
         switch node.field.kind {
         case .text(let multiline, let format):
             if node.field.isSecret {
-                SecureField(node.field.title, text: $node.text, prompt: Text("Hidden while typed"))
-                    .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 6) {
+                    SecureField(node.field.title, text: $node.text, prompt: Text("Hidden while typed"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                    if ElevenLabsFormField.pemFieldNames.contains(node.field.name.lowercased()) {
+                        // A pasted PEM loses its line breaks in a one-line field.
+                        Button("Load from file…") { loadSecretFromFile() }
+                            .controlSize(.small)
+                    }
+                }
             } else if multiline {
                 ElevenLabsTextArea(text: $node.text, prompt: hint)
             } else {
@@ -303,10 +316,12 @@ struct ElevenLabsFormNodeView: View {
     }
 
     private var headerMapControl: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let environments = node.field.name == "values"
+        return VStack(alignment: .leading, spacing: 6) {
             ForEach($node.headerEntries) { $entry in
                 HStack(spacing: 6) {
-                    TextField("Header", text: $entry.name, prompt: Text("Authorization"))
+                    TextField(environments ? "Environment" : "Header", text: $entry.name,
+                              prompt: Text(environments ? "production" : "Authorization"))
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 200)
@@ -325,10 +340,11 @@ struct ElevenLabsFormNodeView: View {
             Button {
                 node.addHeader()
             } label: {
-                Label(node.headerEntries.isEmpty ? "Add a header" : "Add another", systemImage: "plus")
+                Label(node.headerEntries.isEmpty ? (environments ? "Add an environment" : "Add a header") : "Add another",
+                      systemImage: "plus")
             }
             .controlSize(.small)
-            Text("Values are typed hidden. A value that refers to a stored secret (secret_id) needs the JSON editor.")
+            Text("Values are typed hidden. A value that refers to a stored secret or connection needs the JSON editor.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -381,6 +397,16 @@ struct ElevenLabsFormNodeView: View {
                     }
             }
         }
+    }
+
+    private func loadSecretFromFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        node.text = text
     }
 
     // MARK: Hints

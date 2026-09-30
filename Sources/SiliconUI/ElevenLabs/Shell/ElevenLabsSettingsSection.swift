@@ -79,7 +79,7 @@ struct ElevenLabsSettingsSection: View {
                 SecureField(
                     "API key",
                     text: $draft,
-                    prompt: Text(model.elevenLabsLinked ? "Paste a new key to replace it" : "xi-api-key")
+                    prompt: Text(model.elevenLabsLinked ? "Paste a new key to replace it" : "Paste your API key")
                 )
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)

@@ -376,8 +376,8 @@ shown-once card lists only the credential fields the risk table names for that o
 
 The shell's tests use the core's fakes only. They cover:
 
-- a form for every one of the 403 operations, with its required fields marked, and every form
-  drawing
+- a form for every one of the 403 operations, with its required fields marked (drawing every
+  form is opt-in with `ELEVENLABS_DRAW=1`, like the snapshots)
 - the runner's confirmation, cancel, error sorting and show-once secrets
 - tab gating
 - Connect and region changes

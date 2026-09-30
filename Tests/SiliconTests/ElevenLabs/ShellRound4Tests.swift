@@ -128,3 +128,53 @@ struct ShellRound4Tests {
         #expect(command.contains("-F 'file=@/tmp/take.mp3'"))
     }
 }
+
+/// The shell critic's cheaper nits: a missing key says so, labels are short, the session's
+/// files are the session's, and environment-variable values are typed hidden.
+@Suite("ElevenLabs shell nits")
+@MainActor
+struct ShellNitTests {
+
+    @Test func aKeyMissingFromTheKeychainSaysSo() {
+        let pane = ElevenLabsPaneState(defaults: nil, client: { nil })
+        pane.noteFailure(ElevenLabsError.notLinked)
+        #expect(pane.connectionProblem == .keyMissing)
+    }
+
+    @Test func sentenceLongSpecTitlesGiveWayToTheFieldName() throws {
+        let tts = try #require(ElevenLabsCatalog.operation("text_to_speech_full"))
+        let latency = try #require(ElevenLabsFormField.fields(for: tts).first { $0.name == "optimize_streaming_latency" })
+        #expect(latency.title == "Optimize streaming latency")
+        #expect(ElevenLabsFormField.shortTitle("Voice Id") == "Voice Id")
+        #expect(ElevenLabsFormField.shortTitle(String(repeating: "x", count: 41)) == nil)
+        #expect(ElevenLabsFormField.shortTitle("DEPRECATED. Old") == nil)
+    }
+
+    @Test func filesWrittenThisSessionAreThisAccountSessions() {
+        let start = Date()
+        let before = ElevenLabsOutput(url: URL(fileURLWithPath: "/tmp/a.mp3"), contentType: "audio/mpeg",
+                                      operationID: "x", mediaID: nil, createdAt: start.addingTimeInterval(-10))
+        let after = ElevenLabsOutput(url: URL(fileURLWithPath: "/tmp/b.mp3"), contentType: "audio/mpeg",
+                                     operationID: "x", mediaID: nil, createdAt: start.addingTimeInterval(1))
+        #expect(ElevenLabsRecentResultsView.outputs([after, before], since: start).map(\.url.lastPathComponent) == ["b.mp3"])
+        let pane = ElevenLabsPaneState(defaults: nil, client: { nil })
+        let first = pane.sessionStarted
+        pane.reset()
+        #expect(pane.sessionStarted >= first)
+    }
+
+    @Test func environmentVariableValuesAreTypedHidden() throws {
+        for id in ["create_environment_variable", "update_environment_variable"] {
+            let operation = try #require(ElevenLabsCatalog.operation(id))
+            let values = ShellSecretsTests.allFields(ElevenLabsFormField.fields(for: operation)).filter { $0.name == "values" }
+            #expect(!values.isEmpty, "\(id)")
+            for field in values {
+                #expect(field.kind == .headerMap && field.isSecret, "\(id): \(field.id)")
+            }
+            let body = try #require(ElevenLabsFormField.fields(for: operation).first { $0.location == .body })
+            #expect(ElevenLabsFormField.containsSecret(body), "\(id)")
+        }
+        let tts = try #require(ElevenLabsCatalog.operation("text_to_speech_full"))
+        #expect(!ElevenLabsFormField.fields(for: tts).contains(where: ElevenLabsFormField.containsSecret))
+    }
+}
