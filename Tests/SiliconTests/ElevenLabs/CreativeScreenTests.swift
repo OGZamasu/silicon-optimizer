@@ -441,6 +441,201 @@ struct CreativeScreenTests {
                                     files: ["files": music.newFiles.map { ElevenLabsFile(url: $0) }]).isEmpty)
     }
 
+    // MARK: - Isolation
+
+    @Test func isolationPagesItsHistoryOnlyWithASearchAndConfirmsDeletes() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(IsolationScreenModel.history, .json(["items": [
+            ["id": "iso1", "title": "Interview", "created_at_unix": 1_790_000_000, "format": "mp3", "duration_seconds": 64,
+             "download_url": nil, "icon_url": nil, "source_video_url": nil, "supports_video": false, "processing": false,
+             "video_processing_failed": false, "preview_b64": nil],
+        ], "has_more": true]))
+        let isolation = rig.session.isolation
+        #expect(isolation.historyArguments(page: 3) == ["page_size": 50])
+        isolation.search = "inter"
+        #expect(isolation.historyArguments(page: 3) == ["page_size": 50, "search": "inter", "page": 3])
+        isolation.search = ""
+        await isolation.refreshHistory()
+        #expect(isolation.items.map(\.title) == ["Interview"])
+        #expect(isolation.hasMore)
+        await isolation.loadMoreHistory()
+        #expect(isolation.pageSize == 100, "without a search, more means a bigger first page")
+
+        let deleting = Task { await isolation.delete(isolation.items[0]) }
+        try await CreativeRig.waitUntil { isolation.deleteRunner.phase == .awaitingConfirmation }
+        #expect(isolation.deleteRunner.confirmation?.title == "Delete the isolation “Interview”?")
+        isolation.deleteRunner.decline()
+        await deleting.value
+        #expect(rig.requests(IsolationScreenModel.delete).isEmpty)
+        #expect(isolation.items.count == 1)
+    }
+
+    @Test func anIsolationKeepsTheRecordingItCameFrom() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(IsolationScreenModel.full, .audio(CreativeRig.wavData(seconds: 0.5), contentType: "audio/wav"))
+        let isolation = rig.session.isolation
+        isolation.source = rig.wav(named: "noisy.wav")
+        await isolation.isolate()
+        let take = try #require(isolation.takes.first)
+        #expect(isolation.sources[take.id]?.lastPathComponent == "noisy.wav")
+        #expect(rig.lastMultipart(IsolationScreenModel.full)?.contains(#"name="audio"; filename="noisy.wav""#) == true)
+    }
+
+    // MARK: - Transcription
+
+    @Test func transcriptionChecksTheRulesItsArgumentsState() {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let stt = rig.session.transcription
+        #expect(stt.modelID == "scribe_v2")
+        #expect(stt.problems == ["Choose a file to transcribe."])
+        stt.sourceKind = .link
+        stt.sourceLink = "http://example.com/a.mp3"
+        #expect(stt.problems == ["Paste an https link to the audio or video."])
+        stt.sourceLink = "https://example.com/a.mp3"
+        stt.detectSpeakerRoles = true
+        #expect(stt.problems.contains("Speaker roles need “Who is speaking” on."))
+        stt.diarize = true
+        stt.entityRedaction = ["pii"]
+        #expect(stt.problems.contains { $0.hasPrefix("Only detected entities") })
+        stt.entityDetection = ["pii", "pci"]
+        stt.transcriptEdit = "Fix names"
+        #expect(stt.problems.contains { $0.hasPrefix("An edit instruction cannot") })
+        stt.transcriptEdit = ""
+        stt.webhookMetadata = "[1]"
+        #expect(stt.problems.contains("Webhook metadata must be a JSON object."))
+        stt.webhookMetadata = #"{"job": 1}"#
+        #expect(stt.problems.isEmpty)
+    }
+
+    @Test func transcriptionWithEveryOptionSendsOnlyWhatTheOperationTakes() throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let stt = rig.session.transcription
+        stt.source = rig.wav()
+        stt.languageCode = "en"
+        stt.tagAudioEvents = false
+        stt.timestampsGranularity = "character"
+        stt.diarize = true
+        stt.usesDiarizationThreshold = true
+        stt.useSpeakerLibrary = true
+        stt.keyterms = ["ElevenLabs", "Scribe"]
+        stt.entityDetection = ["pii", "phi"]
+        stt.entityRedaction = ["pii"]
+        stt.entityRedactionMode = "redacted"
+        stt.additionalFormats = ["srt", "pdf"]
+        stt.usesTemperature = true
+        stt.temperature = 0.5
+        stt.seed = 1
+        stt.noVerbatim = true
+        stt.rawPCMInput = true
+        stt.sendsToWebhook = true
+        stt.webhookID = "wh1"
+        stt.webhookMetadata = #"{"job": 1}"#
+        stt.enableLogging = false
+        let arguments = stt.arguments()
+        #expect(arguments["entity_detection"] == ["phi", "pii"])
+        #expect(arguments["entity_redaction"] == "pii")
+        #expect(arguments["diarization_threshold"] != nil)
+        #expect(arguments["additional_formats"]?.arrayValue?.count == 2)
+        #expect(arguments["webhook_metadata"] == .string(#"{"job": 1}"#))
+        let operation = try #require(ElevenLabsCatalog.operation(TranscriptionScreenModel.convert))
+        #expect(CreativeSpec.unknownArguments(arguments, for: operation).isEmpty)
+        #expect(rig.client.validate(operation.id, arguments: arguments, files: stt.files()).isEmpty)
+        stt.numSpeakers = 3
+        #expect(stt.arguments()["diarization_threshold"] == nil, "the threshold only goes with an open speaker count")
+        #expect(TranscriptionScreenModel.entitySelection(["all", "pii"]) == "all")
+    }
+
+    @Test func aTranscriptIsShownWithSpeakersEntitiesAndExports() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(TranscriptionScreenModel.convert, .json([
+            "language_code": "en", "language_probability": 0.98, "text": "Hi Ann. Hello.",
+            "transcription_id": "tr-1", "audio_duration_secs": 2,
+            "words": [
+                ["text": "Hi", "start": 0.0, "end": 0.2, "type": "word", "speaker_id": "speaker_0", "logprob": 0],
+                ["text": "Ann.", "start": 0.3, "end": 0.6, "type": "word", "speaker_id": "speaker_0", "logprob": 0],
+                ["text": "Hello.", "start": 1.0, "end": 1.4, "type": "word", "speaker_id": "speaker_1", "logprob": 0],
+            ],
+            "entities": [["text": "Ann", "entity_type": "person_name", "start_char": 3, "end_char": 6]],
+            "additional_formats": [["requested_format": "srt", "file_extension": "srt", "content_type": "text/srt",
+                                    "is_base64_encoded": true, "content": .string(Data("1\n".utf8).base64EncodedString())]],
+        ]))
+        let stt = rig.session.transcription
+        stt.source = rig.wav(named: "call.wav")
+        stt.diarize = true
+        await stt.transcribe()
+        #expect(stt.runner.phase == .succeeded, "\(stt.runner.errorMessage ?? "")")
+        #expect(stt.words.map(\.speaker) == ["speaker_0", "speaker_0", "speaker_1"])
+        #expect(stt.entities == [TranscriptEntity(text: "Ann", type: "person_name", start: 3, end: 6)])
+        #expect(stt.exports.first?.data == Data("1\n".utf8))
+        #expect(stt.records.map(\.id) == ["tr-1"])
+        #expect(stt.transcriptAudio?.lastPathComponent == "call.wav")
+        #expect(stt.fullText == "Hi Ann. Hello.")
+        #expect(rig.lastMultipart(TranscriptionScreenModel.convert)?.contains(#"name="diarize""#) == true)
+    }
+
+    @Test func aTranscriptSentToAWebhookIsKeptToFetchLater() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(TranscriptionScreenModel.convert, .json(["message": "Accepted", "request_id": "r", "transcription_id": "tr-2"]))
+        rig.always(TranscriptionScreenModel.get, .json(["language_code": "en", "language_probability": 1, "text": "Later.",
+                                                        "words": [], "transcription_id": "tr-2"]))
+        let stt = rig.session.transcription
+        stt.sourceKind = .link
+        stt.sourceLink = "https://example.com/talk.mp3"
+        stt.sendsToWebhook = true
+        await stt.transcribe()
+        #expect(stt.records.first?.pending == true)
+        #expect(stt.transcript == nil)
+        await stt.open("tr-2")
+        #expect(stt.fullText == "Later.")
+        #expect(stt.records.first?.pending == false)
+        #expect(rig.requests(TranscriptionScreenModel.get).first?.request.url.path == "/v1/speech-to-text/transcripts/tr-2")
+
+        let deleting = Task { await stt.delete(stt.records[0]) }
+        try await CreativeRig.waitUntil { stt.deleteRunner.phase == .awaitingConfirmation }
+        #expect(stt.deleteRunner.confirmation?.title == "Delete the transcript “https://example.com/talk.mp3”?")
+        stt.deleteRunner.decline()
+        await deleting.value
+        #expect(rig.requests(TranscriptionScreenModel.delete).isEmpty)
+    }
+
+    // MARK: - Alignment
+
+    @Test func anAlignmentComesBackAsTimedWordsWithTheirFit() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(AlignmentScreenModel.align, .json(["loss": 0.12, "characters": [["text": "H", "start": 0, "end": 0.1]], "words": [
+            ["text": "Hello", "start": 0.1, "end": 0.5, "loss": 0.05],
+            ["text": "world", "start": 0.6, "end": 1.0, "loss": 0.3],
+        ]]))
+        let alignment = rig.session.alignment
+        #expect(alignment.problems.count == 2)
+        alignment.source = rig.wav(named: "read.wav")
+        alignment.text = "Hello world"
+        await alignment.align()
+        #expect(alignment.words.map(\.text) == ["Hello", "world"])
+        #expect(alignment.loss == 0.12)
+        #expect(alignment.weakestWords.first?.text == "world")
+        #expect(alignment.alignedAudio?.lastPathComponent == "read.wav")
+        let body = try #require(rig.lastMultipart(AlignmentScreenModel.align))
+        #expect(body.contains(#"name="text""#) && body.contains("Hello world"))
+    }
+
+    @Test func alignmentCanTakeTheTranscriptOnScreen() {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let audio = rig.wav()
+        rig.session.transcription.show(["text": "From Scribe.", "words": []], title: "t", audio: audio)
+        rig.session.alignment.useTranscriptionText()
+        #expect(rig.session.alignment.text == "From Scribe.")
+        #expect(rig.session.alignment.source == audio)
+    }
+
     // MARK: - Controls
 
     @Test func finelySteppedSlidersRoundInsteadOfDrawingTicks() {
