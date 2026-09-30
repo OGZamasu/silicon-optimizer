@@ -288,18 +288,11 @@ struct ElevenLabsFileResult: View {
                 )
             } else if type.hasPrefix("audio/") {
                 ElevenLabsAudioPlayerView(url: url, title: url.lastPathComponent).id(url)
-            } else if type.hasPrefix("image/"), let image = NSImage(contentsOf: url) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 480, maxHeight: 360)
-                    .clipShape(.rect(cornerRadius: 8))
+            } else if type.hasPrefix("image/") {
+                ElevenLabsImagePreview(url: url).id(url)
                 fileRow
             } else if type.hasPrefix("video/") {
-                VideoPlayer(player: AVPlayer(url: url))
-                    .frame(minHeight: 220, maxHeight: 360)
-                    .clipShape(.rect(cornerRadius: 8))
-                    .id(url)
+                ElevenLabsVideoPreview(url: url).id(url)
                 fileRow
             } else {
                 fileRow
@@ -362,5 +355,40 @@ struct ElevenLabsFileActions: View {
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         try? FileManager.default.removeItem(at: destination)
         try? FileManager.default.copyItem(at: url, to: destination)
+    }
+}
+
+/// An image result, read from disk once per file rather than on every redraw.
+struct ElevenLabsImagePreview: View {
+    @State private var image: NSImage?
+
+    init(url: URL) {
+        _image = State(initialValue: NSImage(contentsOf: url))
+    }
+
+    var body: some View {
+        if let image {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 480, maxHeight: 360)
+                .clipShape(.rect(cornerRadius: 8))
+        }
+    }
+}
+
+/// A video result, with one player per file: a redraw of the page must not restart it.
+struct ElevenLabsVideoPreview: View {
+    @State private var player: AVPlayer
+
+    init(url: URL) {
+        _player = State(initialValue: AVPlayer(url: url))
+    }
+
+    var body: some View {
+        VideoPlayer(player: player)
+            .frame(minHeight: 220, maxHeight: 360)
+            .clipShape(.rect(cornerRadius: 8))
+            .onDisappear { player.pause() }
     }
 }

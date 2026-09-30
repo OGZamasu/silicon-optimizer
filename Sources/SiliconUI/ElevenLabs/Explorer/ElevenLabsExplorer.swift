@@ -258,7 +258,8 @@ struct ElevenLabsExplorerDetail: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            ElevenLabsRunButton(runner: session.runner, title: "Run") { explorer.run(session) }
+            // The Explorer's Run is the page's one action: Return may press it, for reads only.
+            ElevenLabsRunButton(runner: session.runner, title: "Run", respondsToReturn: true) { explorer.run(session) }
             Button(copiedCurl ? "Copied" : "Copy as curl") { copyCurl() }
                 .help("The command without your key: it reads $ELEVENLABS_API_KEY")
             Button("Reset form") {

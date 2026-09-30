@@ -15,20 +15,44 @@ struct ElevenLabsRunButton: View {
     var disabled = false
     /// Why the button is disabled, said beside it — "Choose a voice first".
     var disabledReason: String?
+    /// The section's own words for what running costs ("Charges $120.00 to your workspace"),
+    /// in place of the generated note.
+    var costNote: String?
+    /// Whether Return presses it. Off unless asked for, and never for anything but a read: a
+    /// page with several Run buttons, or a Return meant for a text field, must not start
+    /// something billable.
+    var respondsToReturn: Bool
     let action: () -> Void
 
     init(
         runner: ElevenLabsRunner, title: String = "Run", estimatedCharacters: Int? = nil,
         estimatedSeconds: Double? = nil, disabled: Bool = false, disabledReason: String? = nil,
-        action: @escaping () -> Void
+        costNote: String? = nil, respondsToReturn: Bool = false, action: @escaping () -> Void
     ) {
+        self.respondsToReturn = respondsToReturn
         self.runner = runner
         self.title = title
         self.estimatedCharacters = estimatedCharacters
         self.estimatedSeconds = estimatedSeconds
         self.disabled = disabled
         self.disabledReason = disabledReason
+        self.costNote = costNote
         self.action = action
+    }
+
+    /// Whether Return presses this button: asked for, and a read.
+    var usesReturnKey: Bool {
+        respondsToReturn && runner.operation.risk == .read
+    }
+
+    /// Whether the risk capsule is shown. "Uses credits" is said once: by the cost note when
+    /// it is showing, by the capsule when a reason stands in its place.
+    var showsRiskBadge: Bool {
+        switch runner.operation.risk {
+        case .read: false
+        case .generate: blocker != nil
+        case .modify, .destructive, .realWorld: true
+        }
     }
 
     /// What stops a run, in words: the section's reason while disabled, otherwise the first
@@ -55,10 +79,10 @@ struct ElevenLabsRunButton: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(runner.operation.requiresConfirmation ? .orange : .accentColor)
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(usesReturnKey ? .defaultAction : nil)
                 .disabled(disabled || runner.isAwaitingConfirmation)
                 .help(blocker ?? "")
-                if runner.operation.risk != .read {
+                if showsRiskBadge {
                     ElevenLabsRiskBadge(risk: runner.operation.risk)
                 }
                 if let blocker {
@@ -67,7 +91,8 @@ struct ElevenLabsRunButton: View {
                         .foregroundStyle(disabled ? .secondary : Color.red)
                         .lineLimit(2)
                 } else if let note = ElevenLabsCostNote.text(
-                    for: runner.operation, characters: estimatedCharacters, seconds: estimatedSeconds
+                    for: runner.operation, characters: estimatedCharacters, seconds: estimatedSeconds,
+                    message: costNote
                 ) {
                     Text(note)
                         .font(.caption)
@@ -152,6 +177,8 @@ struct ElevenLabsRunnerOutput: View {
             }
             if let credential = runner.credential {
                 ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
+                    // Shown once means once: leaving the screen forgets it.
+                    .onDisappear { runner.dismissCredential() }
             }
             if showsResult, let result = runner.result {
                 ElevenLabsResultView(
@@ -248,10 +275,12 @@ enum ElevenLabsCurl {
                 lines.append("  --data-raw \(quoted(body.jsonString()))")
             }
         } else {
+            // --form-string, not -F: curl reads a local file for an -F value that starts with
+            // "@" or "<", and a text field's value is the owner's text, not a path.
             for (key, value) in (call.body?.objectValue ?? [:]).sorted(by: { $0.key < $1.key })
             where files[key] == nil {
                 let text = value.stringValue ?? value.jsonString()
-                lines.append("  -F \(quoted("\(key)=\(text)"))")
+                lines.append("  --form-string \(quoted("\(key)=\(text)"))")
             }
             for name in files.keys.sorted() {
                 for file in files[name] ?? [] {

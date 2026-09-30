@@ -87,14 +87,23 @@ final class ElevenLabsFormModel {
         self.problems = problems
     }
 
-    /// The problems that name `node`'s field.
+    /// The problems that name `node`'s field — its own name, or a path inside it
+    /// (`voice_settings.stability`, `files[0]`), bare at the start or quoted anywhere, as the
+    /// form and the client word them.
     func problems(for node: ElevenLabsFormNode) -> [String] {
         let name = node.field.name
         return problems.filter { problem in
-            problem.hasPrefix(name + " ") || problem.hasPrefix(name + ".") || problem.hasPrefix(name + ":")
-                || problem.contains("`\(name)`") || problem.contains("\"\(name)\"")
-                || problem.contains("“\(name)”") || problem.contains("'\(name)'")
+            for suffix in [" ", ".", ":", "["] where problem.hasPrefix(name + suffix) { return true }
+            for (open, close) in [("`", "`"), ("\"", "\""), ("“", "”"), ("'", "'")] {
+                for end in [close, ".", "["] where problem.contains(open + name + end) { return true }
+            }
+            return false
         }
+    }
+
+    /// Whether any secret field holds something typed — the whole-body JSON view shows it.
+    var hasTypedSecrets: Bool {
+        nodes.contains { $0.holdsTypedSecret }
     }
 
     /// Switches the body to one JSON editor, starting from what the fields hold now.
@@ -174,6 +183,8 @@ final class ElevenLabsFormNode: Identifiable {
     private(set) var variantNodes: [ElevenLabsFormNode] = []
     /// Chosen files, for upload fields.
     var files: [URL] = []
+    /// Rows of a header map.
+    var headerEntries: [ElevenLabsHeaderEntry] = []
     /// An object, list or union edited as JSON text instead (the raw fallback).
     private(set) var editsAsJSON = false
 
@@ -189,7 +200,7 @@ final class ElevenLabsFormNode: Identifiable {
             children = properties.map { ElevenLabsFormNode(field: $0) }
         case .variants(let variants):
             variantNodes = variants.map { ElevenLabsFormNode(field: $0.field) }
-        case .text, .integer, .number, .boolean, .choice, .constant, .list, .file, .json:
+        case .text, .integer, .number, .boolean, .choice, .constant, .list, .file, .json, .headerMap:
             break
         }
     }
@@ -205,6 +216,7 @@ final class ElevenLabsFormNode: Identifiable {
         items = []
         variant = 0
         files = []
+        headerEntries = []
         editsAsJSON = field.kind == .json
         for child in children { child.reset() }
         for node in variantNodes { node.reset() }
@@ -212,6 +224,24 @@ final class ElevenLabsFormNode: Identifiable {
         if field.required, case .choice(let values) = field.kind, choice == nil, values.count == 1 {
             choice = 0
         }
+    }
+
+    // MARK: - Header maps
+
+    func addHeader() {
+        headerEntries.append(ElevenLabsHeaderEntry())
+        included = true
+    }
+
+    func removeHeader(_ id: ElevenLabsHeaderEntry.ID) {
+        headerEntries.removeAll { $0.id == id }
+    }
+
+    /// Whether this field, or one inside it, is a secret with something typed into it.
+    var holdsTypedSecret: Bool {
+        if field.isSecret, !text.isEmpty || headerEntries.contains(where: { !$0.value.isEmpty }) { return true }
+        return children.contains { $0.holdsTypedSecret } || items.contains { $0.holdsTypedSecret }
+            || variantNodes.contains { $0.holdsTypedSecret }
     }
 
     // MARK: - Lists
@@ -279,6 +309,12 @@ final class ElevenLabsFormNode: Identifiable {
         switch field.kind {
         case .text:
             guard !text.isEmpty else { return missing(path, &problems) }
+            if field.location == .path, text == "." || text == ".." || text.contains(where: { "/\\\u{0}".contains($0) }) {
+                problems.append("\(path) is an id: it may not contain “/”, “\\” or a NUL, or be “.” or “..”.")
+            }
+            if text.contains(ElevenLabsRedaction.placeholder) {
+                problems.append("\(path) still holds “\(ElevenLabsRedaction.placeholder)”, the mask an answer showed — type the real value.")
+            }
             if let min = field.constraints.minLength, text.count < min {
                 problems.append("\(path) needs at least \(min) characters.")
             }
@@ -346,6 +382,20 @@ final class ElevenLabsFormNode: Identifiable {
             return node.value(path: path, problems: &problems)
         case .file:
             return nil
+        case .headerMap:
+            let named = headerEntries.filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
+            guard included || field.required || !named.isEmpty else { return nil }
+            if named.isEmpty, !field.required { return nil }
+            var map: [String: JSONValue] = [:]
+            for entry in named {
+                let name = entry.name.trimmingCharacters(in: .whitespaces)
+                if map[name] != nil { problems.append("\(path) has the header “\(name)” twice.") }
+                if entry.value.contains(ElevenLabsRedaction.placeholder) {
+                    problems.append("\(path).\(name) still holds “\(ElevenLabsRedaction.placeholder)” — type the real value.")
+                }
+                map[name] = .string(entry.value)
+            }
+            return .object(map)
         case .json:
             return jsonTextValue(path: path, problems: &problems)
         }
@@ -394,6 +444,9 @@ final class ElevenLabsFormNode: Identifiable {
             choice = values.firstIndex(of: value)
         case (.constant, _):
             break
+        case (.headerMap, .object(let map)) where map.values.allSatisfy({ $0.stringValue != nil }):
+            headerEntries = map.keys.sorted().map { ElevenLabsHeaderEntry(name: $0, value: map[$0]?.stringValue ?? "") }
+            included = true
         case (.list(let template), .array(let array)):
             items = array.map { element in
                 let item = ElevenLabsFormNode(field: template)
@@ -424,4 +477,11 @@ final class ElevenLabsFormNode: Identifiable {
             editsAsJSON = true
         }
     }
+}
+
+/// One header of a header map: a name, and a value typed into a secure field.
+struct ElevenLabsHeaderEntry: Identifiable, Hashable, Sendable {
+    let id = UUID()
+    var name = ""
+    var value = ""
 }

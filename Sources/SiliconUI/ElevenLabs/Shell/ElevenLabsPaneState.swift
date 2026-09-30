@@ -22,6 +22,9 @@ final class ElevenLabsPaneState {
         case offline(String)
         /// The Keychain would not hand the key over (locked, or its dialog dismissed).
         case credentialUnavailable(String)
+        /// Settings says linked, but the Keychain holds no key: deleted, or settings copied
+        /// from another Mac.
+        case keyMissing
     }
 
     /// The section on screen. Remembered across launches in the running app.
@@ -50,6 +53,11 @@ final class ElevenLabsPaneState {
     /// Every voice the account can use, fetched once and shared by every picker.
     let voices: ElevenLabsVoiceDirectory
 
+    /// Settings → ElevenLabs's Connect, Remove and region state. Here, not in the view: a
+    /// Settings pane or tab switch rebuilds the view, and a check still running must keep the
+    /// picker and Remove locked, and its captured region, whatever is on screen.
+    let connection = ElevenLabsConnectionModel()
+
     /// The Explorer's filters and the operations opened in it, made when it is first shown.
     @ObservationIgnored private var explorerModel: ElevenLabsExplorerModel?
 
@@ -63,11 +71,43 @@ final class ElevenLabsPaneState {
     private(set) var confirming: ElevenLabsRunner?
     @ObservationIgnored private var waiting: [ElevenLabsRunner] = []
 
+    /// Which account session this is. `reset()` starts a new one; whatever a run started in an
+    /// older session reports afterwards — a result, a refused key — is dropped, so one
+    /// account's answers never land in another's list or banner.
+    @ObservationIgnored private(set) var epoch = 0
+    /// Requests that are not reads, handed to the client and not finished — counted across
+    /// sessions, because a reset does not take them back off the wire. While any is in
+    /// flight, a region switch or a new key is refused: a fresh runner on the same account
+    /// could send it a second time.
+    private(set) var billableRunsInFlight = 0
+    /// Every runner that has run with this pane, weakly, so a reset can reach the ones still
+    /// asking or running.
+    @ObservationIgnored private var runners: [WeakRunner] = []
+    /// Runners with a shown-once secret on screen: forgotten when the owner leaves.
+    @ObservationIgnored private var credentialHolders: [WeakRunner] = []
+
+    private struct WeakRunner {
+        weak var runner: ElevenLabsRunner?
+    }
+
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
-    /// Each section's state for the session, and the client it was made for.
+    /// Each section's state for the session, and the client it was made for — held weakly and
+    /// compared by identity: an address can be reused by the next client once the old one is
+    /// freed, which would make another account look like the same one.
     @ObservationIgnored private var states: [String: AnyObject] = [:]
-    @ObservationIgnored private var statesClient: ObjectIdentifier?
+    @ObservationIgnored private weak var statesClient: ElevenLabsClient?
+    @ObservationIgnored private var statesBound = false
+
+    /// When this account session began: "Files written this session" lists only files made
+    /// since, not the previous account's.
+    private(set) var sessionStarted = Date()
+
+    /// Said in the pane after an account change cut off a request that may cost money or
+    /// act — its answer will never be shown, so the owner has to look for themselves.
+    var previousAccountNotice: String?
+    static let previousAccountMessage =
+        "A request to the previous account may already have gone out — check it on elevenlabs.io."
 
     /// - Parameters:
     ///   - defaults: Where the section is remembered; nil under a test, which must not write
@@ -104,17 +144,54 @@ final class ElevenLabsPaneState {
         return made
     }
 
-    /// Forgets every section's state now.
+    /// Forgets every section's state now — and, since that state belonged to the account,
+    /// declines its questions and cancels its runs too.
     func dropSectionStates() {
+        endAccountWork()
         states.removeAll()
         statesClient = nil
+        statesBound = false
     }
 
     private func dropStatesIfTheAccountChanged() {
-        let current = client().map(ObjectIdentifier.init)
-        guard current != statesClient else { return }
-        states.removeAll()
-        statesClient = current
+        let current = client()
+        if statesBound {
+            // Same account only while it is the very client the states were made for.
+            guard let current, current === statesClient else {
+                dropSectionStates()
+                bindStates(to: current)
+                return
+            }
+        } else {
+            // First use, or after a disconnect: nothing made yet belongs to another account.
+            bindStates(to: current)
+        }
+    }
+
+    private func bindStates(to client: ElevenLabsClient?) {
+        statesClient = client
+        statesBound = client != nil
+    }
+
+    /// Ends what the old account left going. Every question asked or waiting is declined —
+    /// confirmed later it would run against the next account, with its key or its host — and
+    /// every run is cancelled. A request that is not a read cut off this way leaves a notice
+    /// in the pane, because its answer will never be shown. Late reports from before are
+    /// dropped by the new epoch.
+    private func endAccountWork() {
+        epoch += 1
+        sessionStarted = Date()
+        forgetCredentials()
+        let asking = [confirming].compactMap { $0 } + waiting
+        confirming = nil
+        waiting = []
+        for runner in asking { runner.decline() }
+        var cutOff = billableRunsInFlight > 0
+        for runner in runners.compactMap(\.runner) {
+            if runner.isRunning, runner.operation.risk != .read { cutOff = true }
+            runner.cancel()
+        }
+        if cutOff { previousAccountNotice = Self.previousAccountMessage }
     }
 
     // MARK: - Confirmation
@@ -131,8 +208,9 @@ final class ElevenLabsPaneState {
         confirming = waiting.isEmpty ? nil : waiting.removeFirst()
     }
 
-    /// Shows `section`.
+    /// Shows `section`. Leaving one forgets any secret it showed once.
     func open(_ section: ElevenLabsSection) {
+        if section != self.section || showsRecents { forgetCredentials() }
         self.section = section
         showsRecents = false
     }
@@ -145,7 +223,22 @@ final class ElevenLabsPaneState {
 
     /// Shows this session's results.
     func showRecents() {
+        forgetCredentials()
         showsRecents = true
+    }
+
+    /// `runner` is showing a secret once; it is forgotten when the owner leaves.
+    func holdCredential(_ runner: ElevenLabsRunner) {
+        credentialHolders.removeAll { $0.runner == nil }
+        if !credentialHolders.contains(where: { $0.runner === runner }) {
+            credentialHolders.append(WeakRunner(runner: runner))
+        }
+    }
+
+    /// Forgets every secret shown once: they are for the moment they were asked for.
+    func forgetCredentials() {
+        for runner in credentialHolders.compactMap(\.runner) { runner.dismissCredential() }
+        credentialHolders.removeAll()
     }
 
     /// The Explorer's model, made on first use with `context`.
@@ -185,6 +278,9 @@ final class ElevenLabsPaneState {
             connectionProblem = .offline(why)
         case .credentialUnavailable(let why):
             connectionProblem = .credentialUnavailable(why)
+        case .notLinked:
+            // The client exists, so Settings says linked; the key it asked for was not there.
+            connectionProblem = .keyMissing
         default:
             break
         }
@@ -195,8 +291,30 @@ final class ElevenLabsPaneState {
         connectionProblem = nil
     }
 
-    /// Forgets everything tied to the account: on disconnect, or a region change.
+    // MARK: - Runs
+
+    /// A runner is about to run with this pane.
+    func track(_ runner: ElevenLabsRunner) {
+        runners.removeAll { $0.runner == nil }
+        if !runners.contains(where: { $0.runner === runner }) { runners.append(WeakRunner(runner: runner)) }
+    }
+
+    func billableRunStarted() {
+        billableRunsInFlight += 1
+    }
+
+    func billableRunEnded() {
+        billableRunsInFlight = max(0, billableRunsInFlight - 1)
+    }
+
+    /// Forgets everything tied to the account: on disconnect, a new key, or a region change.
+    ///
+    /// Every question still asked is declined — confirming one later would run it against the
+    /// next account — and every run still going is cancelled, so its runner says it may
+    /// already have been billed and refuses nothing it should not. Late answers from before
+    /// are dropped by the epoch.
     func reset() {
+        endAccountWork()
         showsRecents = false
         recents.removeAll()
         connectionProblem = nil

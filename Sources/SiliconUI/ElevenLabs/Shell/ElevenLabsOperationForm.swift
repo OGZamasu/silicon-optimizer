@@ -31,6 +31,12 @@ struct ElevenLabsOperationForm: View {
                     VStack(alignment: .leading, spacing: 12) {
                         if showsHeadings { heading(location) }
                         if location == .body, form.editsBodyAsJSON {
+                            if form.hasTypedSecrets {
+                                Label("This JSON shows what was typed into secret fields. Show API call and curl never do.",
+                                      systemImage: "eye.trianglebadge.exclamationmark")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
                             ElevenLabsJSONEditor(text: $form.bodyJSON, minHeight: 180)
                             // Upload fields stay pickers even while the rest is JSON.
                             ForEach(nodes.filter { if case .file = $0.field.kind { true } else { false } }) { node in
@@ -90,11 +96,19 @@ struct ElevenLabsFormNodeView: View {
     let depth: Int
     /// A list item's remove button sits in its header.
     var onRemove: (() -> Void)?
+    /// Why a key or certificate file was not loaded.
+    @State private var fileProblem: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             header
             if node.editsAsJSON {
+                if ElevenLabsFormField.containsSecret(node.field), !node.text.isEmpty {
+                    Label("This JSON shows secrets as typed. Show API call and curl never do.",
+                          systemImage: "eye.trianglebadge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 ElevenLabsJSONEditor(text: $node.text, minHeight: 80)
             } else {
                 control
@@ -135,6 +149,13 @@ struct ElevenLabsFormNodeView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.tertiary)
             }
+            if node.field.isSecret {
+                Image(systemName: "lock.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("A secret: typed hidden, masked in Show API call and curl")
+                    .accessibilityLabel("secret")
+            }
             if node.field.deprecated {
                 Text("Deprecated")
                     .font(.caption2)
@@ -163,7 +184,7 @@ struct ElevenLabsFormNodeView: View {
 
     private var canEditAsJSON: Bool {
         switch node.field.kind {
-        case .object, .list, .variants: true
+        case .object, .list, .variants, .headerMap: true
         default: false
         }
     }
@@ -174,12 +195,31 @@ struct ElevenLabsFormNodeView: View {
     private var control: some View {
         switch node.field.kind {
         case .text(let multiline, let format):
-            if multiline {
+            if node.field.isSecret {
+                if let fileProblem {
+                    Text(fileProblem).font(.caption).foregroundStyle(.red)
+                }
+                HStack(spacing: 6) {
+                    SecureField(node.field.title, text: $node.text, prompt: Text("Hidden while typed"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                    if ElevenLabsFormField.pemFieldNames.contains(node.field.name.lowercased()) {
+                        // A pasted PEM loses its line breaks in a one-line field.
+                        Button("Load from file…") { loadSecretFromFile() }
+                            .controlSize(.small)
+                    }
+                }
+            } else if multiline {
                 ElevenLabsTextArea(text: $node.text, prompt: hint)
             } else {
                 TextField(node.field.title, text: $node.text, prompt: Text(hint ?? format ?? ""))
                     .labelsHidden()
                     .textFieldStyle(.roundedBorder)
+                if node.field.location == .path, depth == 0 {
+                    Text("An id, not a path: no “/”, “\\” or “..”.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         case .integer, .number:
             numberControl
@@ -206,6 +246,8 @@ struct ElevenLabsFormNodeView: View {
             variantsControl(variants)
         case .file(let multiple):
             ElevenLabsFilePickerField(files: $node.files, multiple: multiple)
+        case .headerMap:
+            headerMapControl
         case .json:
             ElevenLabsJSONEditor(text: $node.text, minHeight: 80)
         }
@@ -278,6 +320,41 @@ struct ElevenLabsFormNodeView: View {
         }
     }
 
+    private var headerMapControl: some View {
+        let environments = node.field.name == "values"
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach($node.headerEntries) { $entry in
+                HStack(spacing: 6) {
+                    TextField(environments ? "Environment" : "Header", text: $entry.name,
+                              prompt: Text(environments ? "production" : "Authorization"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                    SecureField("Value", text: $entry.value, prompt: Text("Hidden while typed"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        node.removeHeader(entry.id)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove header")
+                }
+            }
+            Button {
+                node.addHeader()
+            } label: {
+                Label(node.headerEntries.isEmpty ? (environments ? "Add an environment" : "Add a header") : "Add another",
+                      systemImage: "plus")
+            }
+            .controlSize(.small)
+            Text("Values are typed hidden. A value that refers to a stored secret or connection needs the JSON editor.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
     @ViewBuilder
     private var objectControl: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -323,6 +400,26 @@ struct ElevenLabsFormNodeView: View {
                     .overlay(alignment: .leading) {
                         Rectangle().fill(.separator).frame(width: 1)
                     }
+            }
+        }
+    }
+
+    private func loadSecretFromFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let node = node
+        Task {
+            // Read off the main actor: even a capped file should not stall the window.
+            let read = await Task.detached(priority: .userInitiated) { ElevenLabsSecretFile.read(url) }.value
+            switch read {
+            case .success(let text):
+                node.text = text
+                fileProblem = nil
+            case .failure(let problem):
+                fileProblem = problem.message
             }
         }
     }
@@ -478,5 +575,31 @@ struct ElevenLabsProblemList: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+/// Reads a key or certificate file for a secret field: a regular file (a named pipe would
+/// block the read forever), small enough to be one (256 KB), and text.
+enum ElevenLabsSecretFile {
+    static let sizeLimit = 256 * 1024
+
+    struct Problem: Error, Equatable {
+        var message: String
+    }
+
+    static func read(_ url: URL) -> Result<String, Problem> {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular else {
+            return .failure(Problem(message: "\(url.lastPathComponent) is not a regular file."))
+        }
+        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        guard size <= sizeLimit else {
+            return .failure(Problem(message: "\(url.lastPathComponent) is too big for a key or certificate (over 256 KB)."))
+        }
+        guard let data = try? Data(contentsOf: url), data.count <= sizeLimit,
+              let text = String(data: data, encoding: .utf8) else {
+            return .failure(Problem(message: "\(url.lastPathComponent) could not be read as text."))
+        }
+        return .success(text)
     }
 }
