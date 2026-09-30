@@ -237,6 +237,29 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("flows-template", height: 1100) { FlowsScreen(model: model) }
     }
 
+    // MARK: Pronunciation
+
+    @Test func aPronunciationDictionary() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let rules: [JSONValue] = [
+            ["string_to_replace": "Leicester", "type": "alias", "alias": "Lester", "case_sensitive": true, "word_boundaries": true],
+            ["string_to_replace": "Edinburgh", "type": "phoneme", "phoneme": "ˈɛdɪnbərə", "alphabet": "ipa",
+             "case_sensitive": false, "word_boundaries": true],
+        ]
+        let dictionary = try #require(PronunciationDictionary(json: VoicesStudioPronunciationTests.dictionary("d1", rules: rules)))
+        var other = try #require(PronunciationDictionary(json: VoicesStudioPronunciationTests.dictionary("d2")))
+        other.name = "Product terms"
+        other.archivedAt = 1_780_000_100
+        model.load(dictionaries: [dictionary, other], selected: dictionary)
+        var rule = PronunciationRule()
+        rule.stringToReplace = "Worcestershire"
+        rule.alias = "Wooster-sheer"
+        model.rules = [rule]
+        try VoicesStudioSnapshots.render("pronunciation", height: 1200) { PronunciationScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {
