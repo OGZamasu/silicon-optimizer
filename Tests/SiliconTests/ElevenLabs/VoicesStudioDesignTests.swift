@@ -134,6 +134,11 @@ struct VoicesStudioConcurrencyTests {
         let design = Task { await model.generate() }
         try await voicesStudioWait { model.actions.isRunning("text_to_voice_design") }
 
+        // Starting the same design again would abandon the one already sent (and billed).
+        await model.generate()
+        #expect(fixture.sent("text_to_voice_design").count == 1)
+        #expect(model.actions.isRunning("text_to_voice_design"))
+
         model.mode = .remix
         model.remixVoiceID = "v1"
         model.voiceDescription = "Brighter, please."
