@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 import Testing
-import SiliconElevenLabs
+@testable import SiliconElevenLabs
 @testable import SiliconUI
 
 /// The pane, Settings and the Explorer drawn with made-up data, light and dark, narrow and
@@ -103,6 +103,27 @@ struct ShellSnapshotTests {
             .padding(20)
         }
         try Self.both(view, name: "results", height: 640)
+    }
+
+    @Test func headerlessAudioAndARunButtonThatSaysWhyNot() throws {
+        // A second of silence as raw PCM, in a scratch folder removed at the end.
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-snapshot-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let pcm = folder.appendingPathComponent("text_to_speech_full.pcm")
+        try Data(count: 48_000).write(to: pcm)
+        let runner = try #require(ElevenLabsRunner(operationID: "speech_to_text", context: .init(client: { nil })))
+        let view = VStack(alignment: .leading, spacing: 20) {
+            ElevenLabsResultView(result: .file(pcm, contentType: "audio/pcm", bytes: 48_000,
+                                               ElevenLabsMeta(status: 200, headers: ["history-item-id": "hist-9"])))
+            ElevenLabsResultView(result: .file(pcm, contentType: "audio/pcm", bytes: 48_000, ElevenLabsMeta(status: 200)),
+                                 outputFormat: "pcm_24000")
+            ElevenLabsRunButton(runner: runner, title: "Transcribe", disabled: true, disabledReason: "Choose a file first") {}
+            ElevenLabsRunButton(runner: runner, title: "Transcribe", estimatedSeconds: 200) {}
+        }
+        .padding(20)
+        try Self.both(view, name: "raw-audio-and-run-button", height: 420)
     }
 
     // MARK: - Helpers
