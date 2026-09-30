@@ -140,6 +140,52 @@ public enum ElevenLabsResponseKind: Sendable, Codable, Hashable {
     /// `multipart/mixed`: a JSON part and an audio part.
     case multipartMixed
 
+    // Coded as `{"kind": "binary", "contentType": "application/zip"}`: the shape the
+    // generator writes and the control routes send, rather than the synthesized
+    // `{"binary": {"_0": …}}`.
+    private enum CodingKeys: String, CodingKey { case kind, contentType }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "json": self = .json
+        case "audio": self = .audio
+        case "text": self = .text
+        case "events": self = .events
+        case "multipartMixed": self = .multipartMixed
+        case "binary":
+            self = .binary(
+                try container.decodeIfPresent(String.self, forKey: .contentType)
+                    ?? "application/octet-stream"
+            )
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container, debugDescription: "Unknown response kind \(kind)"
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .kind)
+        if case .binary(let contentType) = self {
+            try container.encode(contentType, forKey: .contentType)
+        }
+    }
+
+    /// `json`, `audio`, `binary`, `text`, `events` or `multipartMixed`.
+    public var name: String {
+        switch self {
+        case .json: "json"
+        case .audio: "audio"
+        case .binary: "binary"
+        case .text: "text"
+        case .events: "events"
+        case .multipartMixed: "multipartMixed"
+        }
+    }
+
     /// Whether the body belongs on disk rather than in memory.
     public var isFile: Bool {
         switch self {

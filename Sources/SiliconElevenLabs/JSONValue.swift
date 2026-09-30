@@ -99,6 +99,28 @@ public indirect enum JSONValue: Codable, Hashable, Sendable {
         self = try JSONDecoder().decode(JSONValue.self, from: data)
     }
 
+    /// A value from `JSONSerialization`. Anything that is not JSON becomes `.null`.
+    public init(foundation value: Any) {
+        switch value {
+        case let number as NSNumber:
+            // JSONSerialization hands booleans over as NSNumber too; only their type says so.
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                self = .bool(number.boolValue)
+            } else {
+                self = .number(number.doubleValue)
+            }
+        case let string as String: self = .string(string)
+        case let array as [Any]: self = .array(array.map(JSONValue.init(foundation:)))
+        case let object as [String: Any]: self = .object(object.mapValues(JSONValue.init(foundation:)))
+        default: self = .null
+        }
+    }
+
+    /// Parses JSON text quickly (through `JSONSerialization`). Fragments are accepted.
+    public static func parse(_ data: Data) throws -> JSONValue {
+        JSONValue(foundation: try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]))
+    }
+
     /// Compact JSON with sorted keys, so the same value always produces the same bytes.
     public func encoded(pretty: Bool = false) -> Data {
         let encoder = JSONEncoder()
