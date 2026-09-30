@@ -377,12 +377,14 @@ final class ElevenLabsRunner: Identifiable {
     }
 
     private func succeed(_ answer: ElevenLabsResult) -> ElevenLabsResult {
-        var shown = answer
+        // Every answer is shown masked: a credential operation's named fields, and in any
+        // answer the account's key preview and `sk_…` keys. Only a credential operation's
+        // fields go on the shown-once card.
         if operation.returnsCredential {
             let revealed = ElevenLabsRevealedCredential(operation: operation, result: answer)
             credential = revealed.fields.isEmpty ? nil : revealed
-            shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         }
+        let shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         result = shown
         refusal = nil
         phase = .succeeded
