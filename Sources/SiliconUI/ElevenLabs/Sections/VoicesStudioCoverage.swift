@@ -1,0 +1,66 @@
+import SiliconElevenLabs
+
+/// What the voices-and-studio sections reach natively, and what they leave to the Explorer
+/// with a reason — held to the catalog by `VoicesStudioSpecTests`, so every operation in these
+/// sections is accounted for and a spec refresh that adds one fails a test until it is placed.
+enum VoicesStudioCoverage {
+    struct Entry {
+        var section: ElevenLabsSection
+        var controls: [VoicesStudioControl]
+        var callsWithoutControls: Set<String>
+        var explorerOnly: [String: String]
+    }
+
+    @MainActor static let entries: [Entry] = [
+        Entry(section: .voices, controls: VoicesSectionModel.controls,
+              callsWithoutControls: VoicesSectionModel.callsWithoutControls,
+              explorerOnly: VoicesSectionModel.explorerOnly),
+        Entry(section: .voiceDesign, controls: VoiceDesignSectionModel.controls,
+              callsWithoutControls: VoiceDesignSectionModel.callsWithoutControls,
+              explorerOnly: VoiceDesignSectionModel.explorerOnly),
+        Entry(section: .voiceLibrary, controls: VoiceLibrarySectionModel.controls,
+              callsWithoutControls: VoiceLibrarySectionModel.callsWithoutControls,
+              explorerOnly: VoiceLibrarySectionModel.explorerOnly),
+        Entry(section: .dubbing, controls: DubbingSectionModel.controls,
+              callsWithoutControls: DubbingSectionModel.callsWithoutControls,
+              explorerOnly: DubbingSectionModel.explorerOnly),
+        Entry(section: .studio, controls: StudioSectionModel.controls,
+              callsWithoutControls: StudioSectionModel.callsWithoutControls,
+              explorerOnly: StudioSectionModel.explorerOnly),
+        Entry(section: .productions, controls: ProductionsSectionModel.controls,
+              callsWithoutControls: ProductionsSectionModel.callsWithoutControls,
+              explorerOnly: ProductionsSectionModel.explorerOnly),
+        Entry(section: .flows, controls: FlowsSectionModel.controls,
+              callsWithoutControls: FlowsSectionModel.callsWithoutControls,
+              explorerOnly: FlowsSectionModel.explorerOnly),
+        Entry(section: .pronunciation, controls: PronunciationSectionModel.controls,
+              callsWithoutControls: PronunciationSectionModel.callsWithoutControls,
+              explorerOnly: PronunciationSectionModel.explorerOnly),
+        Entry(section: .audioNative, controls: AudioNativeSectionModel.controls,
+              callsWithoutControls: AudioNativeSectionModel.callsWithoutControls,
+              explorerOnly: AudioNativeSectionModel.explorerOnly),
+        Entry(section: .workspace, controls: WorkspaceSectionModel.controls,
+              callsWithoutControls: WorkspaceSectionModel.callsWithoutControls,
+              explorerOnly: WorkspaceSectionModel.explorerOnly),
+        Entry(section: .usage, controls: UsageSectionModel.controls,
+              callsWithoutControls: UsageSectionModel.callsWithoutControls,
+              explorerOnly: UsageSectionModel.explorerOnly),
+        Entry(section: .serviceAccounts, controls: ServiceAccountsSectionModel.controls,
+              callsWithoutControls: ServiceAccountsSectionModel.callsWithoutControls,
+              explorerOnly: ServiceAccountsSectionModel.explorerOnly),
+        Entry(section: .webhooks, controls: WebhooksSectionModel.controls,
+              callsWithoutControls: WebhooksSectionModel.callsWithoutControls,
+              explorerOnly: WebhooksSectionModel.explorerOnly),
+    ]
+
+    @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }
+
+    /// Every operation some screen of these sections calls.
+    @MainActor static var native: Set<String> {
+        Set(entries.flatMap { $0.controls.map(\.operationID) + $0.callsWithoutControls })
+    }
+
+    @MainActor static var explorerOnly: [String: String] {
+        entries.reduce(into: [:]) { $0.merge($1.explorerOnly) { first, _ in first } }
+    }
+}
