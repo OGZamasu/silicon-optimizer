@@ -374,10 +374,9 @@ final class MusicScreenModel: CreativeScreenModel {
     var isDetailed: Bool { delivery == .detailed || delivery == .detailedStream }
     var isStreamed: Bool { delivery == .stream || delivery == .detailedStream }
 
-    /// A plain streamed song plays as it arrives; a detailed one is collected, because the
-    /// shell's live collector keeps an event stream's audio under the stream's own type until
-    /// its fix lands (the client names it from `output_format`).
-    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream ? .play : .collect }
+    /// A streamed song plays as it arrives, detailed or not: the shell keeps an event stream's
+    /// audio as the format asked for.
+    var streamMode: ElevenLabsRunner.StreamMode { isStreamed ? .play : .collect }
 
     /// The chosen format, or the operation's default when it does not take the chosen one.
     var effectiveOutputFormat: String? {
@@ -893,10 +892,7 @@ private struct MusicComposeTab: View {
             }
             .pickerStyle(.segmented)
             .disabled(screen.busyRunner != nil)
-            if screen.delivery == .detailedStream {
-                Text("With details the stream is collected, then played when it is done.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else if screen.isStreamed, !screen.streamsLive {
+            if screen.isStreamed, !screen.streamsLive {
                 Text("\(CreativeOutputFormat.title(screen.effectiveOutputFormat ?? "")) is not played as it arrives; the whole song is kept and plays when it is done.")
                     .font(.caption).foregroundStyle(.secondary)
             }

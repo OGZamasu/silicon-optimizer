@@ -123,9 +123,8 @@ struct CreativeScreenTests {
         #expect(speech.arguments()["previous_request_ids"] == ["req-1"])
     }
 
-    /// A streamed take with word timings is kept as audio: those streams are collected (the
-    /// client names the audio from `output_format`) rather than played live, whose collector
-    /// would keep the stream's JSON type.
+    /// A streamed take with word timings, played as it arrives, is kept as audio with its
+    /// words — not as the stream's JSON (the shell names the file from `output_format`).
     @Test func aStreamedTakeWithTimingsIsKeptAsAudio() async throws {
         let rig = CreativeRig()
         defer { rig.clean() }
@@ -139,24 +138,23 @@ struct CreativeScreenTests {
         speech.voiceID = "voice-rachel"
         speech.text = "Hi there."
         speech.delivery = .stream
-        #expect(speech.streamMode == .play)
         speech.timestamps = true
-        #expect(speech.streamMode == .collect)
+        #expect(speech.streamMode == .play)
         await speech.generate()
         #expect(speech.lastRunner.phase == .succeeded, "\(speech.lastRunner.errorMessage ?? "")")
         let take = try #require(speech.takes.first)
         #expect(take.contentType.hasPrefix("audio/"), "kept as \(take.contentType)")
         #expect(take.file.pathExtension != "json")
         #expect(speech.words.map(\.text) == ["Hi", "there."])
+        #expect(speech.lastRunner.streamPlayer != nil || speech.lastRunner.phase == .succeeded)
         let dialogue = rig.session.dialogue
         dialogue.delivery = .stream
-        #expect(dialogue.streamMode == .play)
         dialogue.timestamps = true
-        #expect(dialogue.streamMode == .collect)
+        #expect(dialogue.streamMode == .play)
         let music = rig.session.music
-        music.delivery = .stream
-        #expect(music.streamMode == .play)
         music.delivery = .detailedStream
+        #expect(music.streamMode == .play)
+        music.delivery = .detailed
         #expect(music.streamMode == .collect)
     }
 

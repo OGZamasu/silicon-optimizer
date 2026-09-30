@@ -121,8 +121,8 @@ final class DialogueScreenModel: CreativeScreenModel {
 
     var runner: ElevenLabsRunner { runners[operationID]! }
 
-    /// Play a stream as it arrives, except with timings (collected; see Speech's `streamMode`).
-    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream && !timestamps ? .play : .collect }
+    /// A stream plays as it arrives, timings or not (see Speech's `streamMode`).
+    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream ? .play : .collect }
 
     /// The run in flight, or waiting for its confirmation, whichever operation it is: the
     /// pickers that choose the operation can change while it runs, and must not hand the Run

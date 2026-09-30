@@ -131,10 +131,9 @@ final class SpeechScreenModel: CreativeScreenModel {
 
     var runner: ElevenLabsRunner { runners[operationID]! }
 
-    /// Play a stream as it arrives, except with word timings: the shell's live collector keeps
-    /// a timings stream as its JSON type rather than as audio, so those are collected (the
-    /// client names the audio from `output_format`) until the shell's fix lands.
-    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream && !timestamps ? .play : .collect }
+    /// A stream plays as it arrives, word timings or not: the shell keeps a timings stream's
+    /// audio as the format asked for, not as the stream's JSON.
+    var streamMode: ElevenLabsRunner.StreamMode { delivery == .stream ? .play : .collect }
 
     /// The run in flight, or waiting for its confirmation, whichever operation it is: the
     /// pickers that choose the operation can change while it runs, and must not hand the Run
@@ -268,9 +267,7 @@ struct SpeechScreen: View {
             CreativeRunRow(
                 runner: screen.activeRunner, title: "Generate speech",
                 estimatedCharacters: screen.estimatedCharacters, problems: screen.problems,
-                note: screen.delivery == .stream && screen.timestamps
-                    ? "With word timings the stream is collected, then played when it is done."
-                    : screen.delivery == .stream && !CreativeOutputFormat.playsLive(screen.effectiveOutputFormat)
+                note: screen.delivery == .stream && !CreativeOutputFormat.playsLive(screen.effectiveOutputFormat)
                     ? "\(CreativeOutputFormat.title(screen.effectiveOutputFormat)) is not played as it arrives; the whole answer is kept and plays when it is done."
                     : nil
             ) {
