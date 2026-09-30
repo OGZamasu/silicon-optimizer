@@ -113,6 +113,9 @@ final class ElevenLabsRunner: Identifiable {
     static let busyMessage = "A run is already in progress — cancel it first, and note it may already have been billed."
     /// What a Cancel says once a request that is not a read may have gone out.
     static let cancelledAfterSendingMessage = "Cancelled. The request may already have been billed or performed."
+    /// What a confirmed question says when the account or region changed while it was open.
+    static let accountChangedMessage =
+        "The ElevenLabs account or region changed while this question was open, so nothing was sent. Run it again to be asked anew."
     /// Plays a stream as it arrives; nil when not playing one.
     private(set) var streamPlayer: ElevenLabsStreamPlayer?
 
@@ -124,6 +127,9 @@ final class ElevenLabsRunner: Identifiable {
     /// under another number touches nothing, so it can never mark a newer run cancelled,
     /// failed or done.
     @ObservationIgnored private var generation = 0
+    /// The pane session the current run started in; its reports reach the pane only while
+    /// that session lasts.
+    @ObservationIgnored private var runEpoch: Int?
 
     init(operation: ElevenLabsOperation, context: Context) {
         self.operation = operation
@@ -155,9 +161,15 @@ final class ElevenLabsRunner: Identifiable {
     /// to a run already in flight.
     func run(
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
-        subject: String? = nil, consequence: String? = nil
+        subject: String? = nil, consequence: String? = nil,
+        title: String? = nil, confirmLabel: String? = nil, warning: String? = nil
     ) {
-        Task { await perform(arguments: arguments, files: files, subject: subject, consequence: consequence) }
+        Task {
+            await perform(
+                arguments: arguments, files: files, subject: subject, consequence: consequence,
+                title: title, confirmLabel: confirmLabel, warning: warning
+            )
+        }
     }
 
     /// Checks `arguments`, asks for confirmation when the operation's risk calls for it,
@@ -180,10 +192,14 @@ final class ElevenLabsRunner: Identifiable {
     ///     numbers"), for the confirmation's title.
     ///   - consequence: What will happen, when the section knows better than the generic
     ///     sentence built from the operation.
+    ///   - title: The whole question, worded by the section ("Stop the batch “Monday”?").
+    ///   - confirmLabel: The confirming button's verb ("Stop calls", "Submit order").
+    ///   - warning: One more line on the question, set apart: money, what else stops working.
     @discardableResult
     func perform(
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
-        subject: String? = nil, consequence: String? = nil
+        subject: String? = nil, consequence: String? = nil,
+        title: String? = nil, confirmLabel: String? = nil, warning: String? = nil
     ) async -> ElevenLabsResult? {
         if phase == .running || phase == .awaitingConfirmation {
             guard operation.risk == .read else {
@@ -196,6 +212,11 @@ final class ElevenLabsRunner: Identifiable {
         let run = generation
         refusal = nil
         cancellationNote = nil
+        // A run that stops early (bad arguments, not linked) must not leave the last run's
+        // call in "Show API call".
+        apiCall = nil
+        context.pane?.track(self)
+        runEpoch = context.pane?.epoch
         self.arguments = arguments
         self.files = files
         problems = []
@@ -220,13 +241,22 @@ final class ElevenLabsRunner: Identifiable {
 
         if operation.requiresConfirmation {
             let request = ElevenLabsConfirmationRequest.make(
-                for: operation, subject: subject, consequence: consequence, call: apiCall
+                for: operation, subject: subject, consequence: consequence, call: apiCall,
+                title: title, confirmLabel: confirmLabel, warning: warning
             )
             let answer = await askForConfirmation(request, run: run)
             guard run == generation else { return nil }
             guard answer else {
                 phase = .idle
                 return nil
+            }
+            // The answer was given for the account and host the question was asked on. If the
+            // session ended, the link went, or the client changed meanwhile — another region, or
+            // another key on the same region — the same click would act elsewhere: send nothing.
+            // (A context's client closure hands back one client per account; the app's does.)
+            let sessionEnded = context.pane.map { $0.epoch != runEpoch } ?? false
+            guard !sessionEnded, let now = context.client(), now === client, now.region == client.region else {
+                return fail(.other(Self.accountChangedMessage))
             }
         }
 
@@ -256,6 +286,12 @@ final class ElevenLabsRunner: Identifiable {
             task = Task { try await client.call(operation, arguments: arguments, files: files) }
         }
         self.task = task
+        // Counted until the request itself ends, whatever becomes of this run meanwhile: a
+        // cancelled request may still be on the wire.
+        let billable = operation.risk != .read
+        let pane = context.pane
+        if billable { pane?.billableRunStarted() }
+        defer { if billable { pane?.billableRunEnded() } }
 
         do {
             let answer = try await task.value
@@ -279,8 +315,14 @@ final class ElevenLabsRunner: Identifiable {
         resolveConfirmation(true)
     }
 
-    /// Answers the confirmation on screen with no: nothing is sent.
+    /// Answers the confirmation on screen with no: nothing is sent. The runner is idle at
+    /// once, so Run pressed straight after asks again rather than being refused as busy.
     func decline() {
+        if phase == .awaitingConfirmation {
+            phase = .idle
+            confirmation = nil
+            context.pane?.dismissConfirmation(of: self)
+        }
         resolveConfirmation(false)
     }
 
@@ -366,20 +408,23 @@ final class ElevenLabsRunner: Identifiable {
     }
 
     private func succeed(_ answer: ElevenLabsResult) -> ElevenLabsResult {
-        var shown = answer
+        // Every answer is shown masked: a credential operation's named fields, and in any
+        // answer the account's key preview and `sk_…` keys. Only a credential operation's
+        // fields go on the shown-once card.
         if operation.returnsCredential {
             let revealed = ElevenLabsRevealedCredential(operation: operation, result: answer)
             credential = revealed.fields.isEmpty ? nil : revealed
-            shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
+            if credential != nil { currentPane?.holdCredential(self) }
         }
+        let shown = ElevenLabsRevealedCredential.masked(answer, for: operation)
         result = shown
         refusal = nil
         phase = .succeeded
         finishedAt = Date()
         streamPlayer?.finish()
-        context.pane?.noteSuccess()
-        if recordsResults {
-            context.pane?.record(shown, operation: operation, title: title)
+        if let pane = currentPane {
+            pane.noteSuccess()
+            if recordsResults { pane.record(shown, operation: operation, title: title) }
         }
         return shown
     }
@@ -392,8 +437,14 @@ final class ElevenLabsRunner: Identifiable {
         phase = .failed
         finishedAt = Date()
         stopStreamPlayer()
-        if let error { context.pane?.noteFailure(error) }
+        if let error { currentPane?.noteFailure(error) }
         return nil
+    }
+
+    /// The pane, while it is still in the session this run started in.
+    private var currentPane: ElevenLabsPaneState? {
+        guard let pane = context.pane, pane.epoch == runEpoch else { return nil }
+        return pane
     }
 
     private func stopStreamPlayer() {

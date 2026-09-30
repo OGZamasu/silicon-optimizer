@@ -15,18 +15,29 @@ struct ElevenLabsConfirmationRequest: Identifiable, Equatable, Sendable {
     var call: String?
     /// The confirming button's label: a verb, never "OK".
     var confirmLabel: String
+    /// One more line, set apart — "Charges $120.00 to your workspace", "Every agent using this
+    /// secret stops working".
+    var warning: String?
 
     /// The question for `operation`, naming `subject` when the section knows it.
     ///
     /// `subject` is a noun phrase: "the voice “Narrator”", "12 phone calls with “Front desk”".
+    ///
+    /// - Parameters:
+    ///   - title: The whole question, when the section words it itself ("Stop the batch
+    ///     “Monday”?"); otherwise built from the operation and `subject`.
+    ///   - confirmLabel: The confirming button's verb ("Stop calls", "Submit order"); otherwise
+    ///     chosen by what the operation does.
+    ///   - warning: One more line, set apart — money, or what else stops working.
     static func make(
         for operation: ElevenLabsOperation, subject: String? = nil, consequence: String? = nil,
-        call: ElevenLabsCallDescription? = nil
+        call: ElevenLabsCallDescription? = nil, title: String? = nil, confirmLabel: String? = nil,
+        warning: String? = nil
     ) -> ElevenLabsConfirmationRequest {
         let action = Action(operation)
         let trimmed = operation.summary.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
         let summary = trimmed.isEmpty ? operation.id : sentenceCase(trimmed)
-        let title: String = if let subject, !subject.isEmpty {
+        let built: String = if let subject, !subject.isEmpty {
             action.titleVerb.map { "\($0) \(subject)?" } ?? "\(summary): \(subject)?"
         } else {
             "\(summary)?"
@@ -34,10 +45,11 @@ struct ElevenLabsConfirmationRequest: Identifiable, Equatable, Sendable {
         return ElevenLabsConfirmationRequest(
             operationID: operation.id,
             risk: operation.risk,
-            title: title,
+            title: title.flatMap { $0.isEmpty ? nil : $0 } ?? built,
             consequence: consequence ?? defaultConsequence(for: operation, summary: summary),
             call: call.map { "\($0.method) \($0.url)" } ?? "\(operation.method) \(operation.path)",
-            confirmLabel: action.buttonLabel
+            confirmLabel: confirmLabel.flatMap { $0.isEmpty ? nil : $0 } ?? action.buttonLabel,
+            warning: warning.flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -95,12 +107,20 @@ struct ElevenLabsConfirmationRequest: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// Words written one way whatever case the spec gives them ("Mcp" → "MCP").
+    static let canonicalWords: [String: String] = Dictionary(uniqueKeysWithValues: [
+        "MCP", "API", "URL", "SIP", "CSV", "PVC", "LLM", "RAG", "TTS", "STT", "SSE", "JSON", "PLS", "ID", "IDs",
+        "WhatsApp", "ElevenLabs", "Twilio", "Exotel", "Scribe", "LiveKit", "OAuth", "mTLS",
+    ].map { ($0.lowercased(), $0) })
+
     /// The spec's Title Case summaries ("Delete Voice") as a sentence ("Delete voice"),
-    /// leaving acronyms, mixed-case names and a few proper nouns alone.
+    /// with acronyms and names as they are written ("Create Mcp Server" → "Create MCP
+    /// server").
     static func sentenceCase(_ text: String) -> String {
-        let keep: Set<String> = ["ElevenLabs", "Twilio", "Exotel", "WhatsApp", "Scribe", "Studio", "Audio", "Native"]
+        let keep: Set<String> = ["Studio", "Audio", "Native"]
         let words = text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         return words.enumerated().map { index, word in
+            if let canonical = canonicalWords[word.lowercased()] { return canonical }
             guard index > 0, word.count > 1 || word == "A", !keep.contains(word),
                   let first = word.first, first.isUppercase,
                   word.dropFirst().allSatisfy({ !$0.isUppercase })
@@ -130,6 +150,12 @@ struct ElevenLabsRiskConfirmation: View {
             Text(request.consequence)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
+            if let warning = request.warning {
+                Label(warning, systemImage: "exclamationmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let call = request.call {
                 Text(call)
                     .font(.caption.monospaced())

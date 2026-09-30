@@ -47,7 +47,8 @@ struct ShellSnapshotTests {
         pane.record(.text("WEBVTT\n\n00:00.000 --> 00:02.000\nHello there.", ElevenLabsMeta(status: 200, characterCost: 42)),
                     operation: try #require(ElevenLabsCatalog.operation("get_models")), title: "Subtitles")
         pane.showRecents()
-        pane.connectionProblem = .keyRejected("ElevenLabs answered 401 (invalid_api_key): Invalid API key")
+        pane.connectionProblem = .keyMissing
+        pane.previousAccountNotice = ElevenLabsPaneState.previousAccountMessage
         try Self.both(ElevenLabsPane().environment(model), name: "pane-recents-refused")
     }
 
@@ -72,7 +73,8 @@ struct ShellSnapshotTests {
         let calls = try #require(ElevenLabsCatalog.operation("create_batch_call"))
         let realWorld = ElevenLabsConfirmationRequest.make(
             for: calls, subject: "12 phone calls with “Front desk”",
-            consequence: "ElevenLabs will call 12 numbers now, with the agent “Front desk”. Each call is billed."
+            consequence: "ElevenLabs will call 12 numbers now, with the agent “Front desk”. Each call is billed.",
+            warning: "Calls start at once and cannot be taken back."
         )
         let sheets = VStack(alignment: .leading, spacing: 20) {
             ElevenLabsRiskConfirmation(request: request, onConfirm: {}, onCancel: {})

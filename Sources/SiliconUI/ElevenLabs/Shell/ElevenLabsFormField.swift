@@ -93,6 +93,21 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
         "passphrase", "private_key",
     ]
 
+    /// Whether `field` is, or holds anywhere inside it, a secret — its JSON view would show it.
+    static func containsSecret(_ field: ElevenLabsFormField) -> Bool {
+        if field.isSecret { return true }
+        switch field.kind {
+        case .object(let children): return children.contains(where: containsSecret)
+        case .list(let item): return containsSecret(item)
+        case .variants(let variants): return variants.contains { containsSecret($0.field) }
+        default: return false
+        }
+    }
+
+    /// Fields that take a key or certificate in PEM form, which is several lines: typed hidden,
+    /// or loaded from a file so the line breaks survive.
+    static let pemFieldNames: Set<String> = ["client_key", "private_key", "client_certificate", "certificate"]
+
     /// Maps of header name to value; plain-string values in them are secrets.
     static let headerMapFieldNames: Set<String> = ["request_headers", "custom_headers", "custom_sip_headers", "headers"]
 
@@ -153,6 +168,11 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
             })
         case .headerMap:
             field.isSecret = true
+        case .json where field.name == "values" && operationPath.hasPrefix("/v1/convai/environment-variables"):
+            // An environment variable's values, by environment ("production": …): the core
+            // treats them as secrets, so they get the hidden-value rows too.
+            field.kind = .headerMap
+            field.isSecret = true
         case .integer, .number, .boolean, .choice, .constant, .file, .json:
             break
         }
@@ -201,7 +221,7 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
         }
         return ElevenLabsFormField(
             id: id, name: name, location: location,
-            title: schema["title"].stringValue ?? raw["title"].stringValue ?? humanized(name),
+            title: shortTitle(schema["title"].stringValue ?? raw["title"].stringValue) ?? humanized(name),
             description: description.flatMap { $0.isEmpty ? nil : $0 }
                 ?? raw["description"].stringValue ?? schema["description"].stringValue ?? "",
             required: required, nullable: nullable,
@@ -334,6 +354,14 @@ struct ElevenLabsFormField: Identifiable, Hashable, Sendable {
         }
         if let type = variant["type"].stringValue { return type }
         return "Option \(index + 1)"
+    }
+
+    /// A spec title fit for a label: many are a whole sentence ("DEPRECATED. How much we should
+    /// optimize…"), which the description already says; those give way to the field's name.
+    static func shortTitle(_ title: String?) -> String? {
+        guard let title = title?.trimmingCharacters(in: .whitespaces), !title.isEmpty,
+              title.count <= 40, !title.uppercased().hasPrefix("DEPRECATED") else { return nil }
+        return title
     }
 
     /// `voice_settings` → "Voice settings".
