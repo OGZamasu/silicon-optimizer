@@ -64,6 +64,23 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("voices-professional", height: 2100) { VoicesScreen(model: model) }
     }
 
+    // MARK: Voice design
+
+    @Test func voiceDesignWithPreviews() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = VoiceDesignSectionModel(environment: fixture.environment)
+        model.voiceDescription = "A calm, low-pitched narrator in their fifties with a warm Scottish accent."
+        model.load(previews: [
+            VoiceDesignPreview(generatedVoiceID: "g1", durationSecs: 6.2, language: "en"),
+            VoiceDesignPreview(generatedVoiceID: "g2", durationSecs: 5.8, language: "en"),
+            VoiceDesignPreview(generatedVoiceID: "g3", durationSecs: 6.0, language: "en"),
+        ], text: "The glen was quiet that morning, and the mist sat low over the water.")
+        model.saveName = "Glen narrator"
+        model.saveDescription = model.voiceDescription
+        try VoicesStudioSnapshots.render("voice-design", height: 1300) { VoiceDesignScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {
