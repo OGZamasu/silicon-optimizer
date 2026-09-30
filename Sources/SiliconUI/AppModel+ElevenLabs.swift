@@ -56,15 +56,19 @@ final class ElevenLabsLink {
                        persistsSettings: true, registry: registry)
     }
 
-    /// An app model built with injected settings (tests, previews): nothing real reachable.
+    /// An app model built with injected settings (tests, previews): nothing real reachable,
+    /// and retry waits short enough that a read refused by the inert transport fails at once.
     static func inert() -> ElevenLabsLink {
-        ElevenLabsLink(
+        let link = ElevenLabsLink(
             store: FakeCredentialSource(), transport: UnavailableElevenLabsTransport(),
             persistsSettings: false,
             outputRootOverride: FileManager.default.temporaryDirectory
                 .appendingPathComponent("elevenlabs-app-\(UUID().uuidString)", isDirectory: true),
             registry: MediaRegistry(url: nil)
         )
+        link.limits.firstBackoff = 0.01
+        link.limits.longestRetryWait = 0.05
+        return link
     }
 
     /// At most this many recent outputs are listed.

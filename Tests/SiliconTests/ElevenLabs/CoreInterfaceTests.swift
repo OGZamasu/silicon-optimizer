@@ -121,6 +121,13 @@ struct CoreInterfaceTests {
         #expect(!model.elevenLabsLink.persistsSettings)
         #expect(!model.elevenLabsLinked)
         #expect(model.elevenLabsClient == nil)
+
+        // Connect against the inert transport fails fast and stores nothing.
+        let started = ContinuousClock.now
+        await #expect(throws: ElevenLabsError.self) { try await model.linkElevenLabs(key: "sk_inert_0000000000") }
+        #expect(ContinuousClock.now - started < .seconds(2))
+        #expect(!model.elevenLabsLinked)
+        TemporaryFileSink.removeScratch(model.elevenLabsOutputDirectory)
     }
 
     static func request(_ path: String, handling: ElevenLabsRequest.ResponseHandling) -> ElevenLabsRequest {
