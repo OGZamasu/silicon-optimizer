@@ -161,9 +161,15 @@ final class ElevenLabsRunner: Identifiable {
     /// to a run already in flight.
     func run(
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
-        subject: String? = nil, consequence: String? = nil
+        subject: String? = nil, consequence: String? = nil,
+        title: String? = nil, confirmLabel: String? = nil, warning: String? = nil
     ) {
-        Task { await perform(arguments: arguments, files: files, subject: subject, consequence: consequence) }
+        Task {
+            await perform(
+                arguments: arguments, files: files, subject: subject, consequence: consequence,
+                title: title, confirmLabel: confirmLabel, warning: warning
+            )
+        }
     }
 
     /// Checks `arguments`, asks for confirmation when the operation's risk calls for it,
@@ -186,10 +192,14 @@ final class ElevenLabsRunner: Identifiable {
     ///     numbers"), for the confirmation's title.
     ///   - consequence: What will happen, when the section knows better than the generic
     ///     sentence built from the operation.
+    ///   - title: The whole question, worded by the section ("Stop the batch “Monday”?").
+    ///   - confirmLabel: The confirming button's verb ("Stop calls", "Submit order").
+    ///   - warning: One more line on the question, set apart: money, what else stops working.
     @discardableResult
     func perform(
         arguments: [String: JSONValue], files: [String: [ElevenLabsFile]] = [:],
-        subject: String? = nil, consequence: String? = nil
+        subject: String? = nil, consequence: String? = nil,
+        title: String? = nil, confirmLabel: String? = nil, warning: String? = nil
     ) async -> ElevenLabsResult? {
         if phase == .running || phase == .awaitingConfirmation {
             guard operation.risk == .read else {
@@ -228,7 +238,8 @@ final class ElevenLabsRunner: Identifiable {
 
         if operation.requiresConfirmation {
             let request = ElevenLabsConfirmationRequest.make(
-                for: operation, subject: subject, consequence: consequence, call: apiCall
+                for: operation, subject: subject, consequence: consequence, call: apiCall,
+                title: title, confirmLabel: confirmLabel, warning: warning
             )
             let answer = await askForConfirmation(request, run: run)
             guard run == generation else { return nil }
