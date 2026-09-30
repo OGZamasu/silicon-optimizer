@@ -17,14 +17,17 @@ struct ElevenLabsConfirmationRequest: Identifiable, Equatable, Sendable {
     var confirmLabel: String
 
     /// The question for `operation`, naming `subject` when the section knows it.
+    ///
+    /// `subject` is a noun phrase: "the voice “Narrator”", "12 phone calls with “Front desk”".
     static func make(
         for operation: ElevenLabsOperation, subject: String? = nil, consequence: String? = nil,
         call: ElevenLabsCallDescription? = nil
     ) -> ElevenLabsConfirmationRequest {
-        let verb = confirmVerb(for: operation)
-        let summary = operation.summary.isEmpty ? operation.id : operation.summary
+        let action = Action(operation)
+        let trimmed = operation.summary.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        let summary = trimmed.isEmpty ? operation.id : sentenceCase(trimmed)
         let title: String = if let subject, !subject.isEmpty {
-            "\(verb) \(subject)?"
+            action.titleVerb.map { "\($0) \(subject)?" } ?? "\(summary): \(subject)?"
         } else {
             "\(summary)?"
         }
@@ -34,44 +37,76 @@ struct ElevenLabsConfirmationRequest: Identifiable, Equatable, Sendable {
             title: title,
             consequence: consequence ?? defaultConsequence(for: operation, summary: summary),
             call: call.map { "\($0.method) \($0.url)" } ?? "\(operation.method) \(operation.path)",
-            confirmLabel: verb
+            confirmLabel: action.buttonLabel
         )
     }
 
-    static func confirmVerb(for operation: ElevenLabsOperation) -> String {
-        if operation.method == "DELETE" { return "Delete" }
-        switch operation.risk {
-        case .destructive: return "Run"
-        case .realWorld:
-            let words = (operation.summary + " " + operation.path).lowercased()
-            if words.contains("call") { return "Place the call" }
-            if words.contains("invite") { return "Send the invite" }
-            if words.contains("message") { return "Send" }
-            return "Run"
-        case .read, .generate, .modify: return "Run"
+    /// What kind of thing the operation does, for the words on the question and its button.
+    enum Action: Equatable {
+        case delete, call, invite, message, other
+
+        init(_ operation: ElevenLabsOperation) {
+            let path = operation.path.lowercased()
+            if operation.method == "DELETE" {
+                self = .delete
+            } else if path.contains("outbound-call") || path.contains("register-call")
+                        || (path.contains("batch-calling") && (path.hasSuffix("/submit") || path.hasSuffix("/retry"))) {
+                self = .call
+            } else if path.contains("invite") {
+                self = .invite
+            } else if path.contains("outbound-message") {
+                self = .message
+            } else {
+                self = .other
+            }
+        }
+
+        /// The verb a title starts with before the subject; nil puts the summary first.
+        var titleVerb: String? {
+            switch self {
+            case .delete: "Delete"
+            case .call: "Place"
+            case .invite, .message: "Send"
+            case .other: nil
+            }
+        }
+
+        /// The confirming button: a verb, never "OK".
+        var buttonLabel: String {
+            switch self {
+            case .delete: "Delete"
+            case .call: "Call now"
+            case .invite: "Send invite"
+            case .message: "Send message"
+            case .other: "Run"
+            }
         }
     }
 
     static func defaultConsequence(for operation: ElevenLabsOperation, summary: String) -> String {
         switch operation.risk {
         case .destructive:
-            return "ElevenLabs will \(lowercasedFirst(summary)) on your account. "
-                + "This cannot be undone from here."
+            "“\(summary)” runs on your ElevenLabs account and cannot be undone from here."
         case .realWorld:
-            return "ElevenLabs will \(lowercasedFirst(summary)). This reaches outside your "
-                + "account — people, phone numbers, keys or other services may be affected."
+            "“\(summary)” reaches outside your account: people, phone numbers, keys or other "
+                + "services may be affected, and it may cost money."
         case .read, .generate, .modify:
-            return "ElevenLabs will \(lowercasedFirst(summary))."
+            "“\(summary)” runs on your ElevenLabs account."
         }
     }
 
-    private static func lowercasedFirst(_ text: String) -> String {
-        guard let first = text.first else { return text }
-        // Leave acronyms ("MCP", "PVC") alone: only a capital followed by a lower-case letter
-        // is a sentence's capital.
-        let rest = text.dropFirst()
-        if let second = rest.first, second.isUppercase { return text }
-        return first.lowercased() + rest
+    /// The spec's Title Case summaries ("Delete Voice") as a sentence ("Delete voice"),
+    /// leaving acronyms, mixed-case names and a few proper nouns alone.
+    static func sentenceCase(_ text: String) -> String {
+        let keep: Set<String> = ["ElevenLabs", "Twilio", "Exotel", "WhatsApp", "Scribe", "Studio", "Audio", "Native"]
+        let words = text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        return words.enumerated().map { index, word in
+            guard index > 0, word.count > 1 || word == "A", !keep.contains(word),
+                  let first = word.first, first.isUppercase,
+                  word.dropFirst().allSatisfy({ !$0.isUppercase })
+            else { return word }
+            return word.lowercased()
+        }.joined(separator: " ")
     }
 }
 
@@ -120,14 +155,34 @@ struct ElevenLabsRiskConfirmation: View {
 }
 
 extension View {
-    /// Presents `runner`'s confirmation while it waits for one.
-    func elevenLabsConfirmation(for runner: ElevenLabsRunner) -> some View {
+    /// Presents `runner`'s confirmation while it waits for one. The ElevenLabs pane already
+    /// presents every runner made with its context (`.app(model)`); this is for a runner
+    /// without one.
+    ///
+    /// - Parameter when: Off leaves presenting to someone else, so one question never gets
+    ///   two sheets.
+    func elevenLabsConfirmation(for runner: ElevenLabsRunner, when enabled: Bool = true) -> some View {
         sheet(item: Binding(
-            get: { runner.confirmation },
-            set: { if $0 == nil { runner.decline() } }
+            get: { enabled ? runner.confirmation : nil },
+            set: { if $0 == nil, enabled { runner.decline() } }
         )) { request in
             ElevenLabsRiskConfirmation(
                 request: request, onConfirm: { runner.confirm() }, onCancel: { runner.decline() }
+            )
+        }
+    }
+
+    /// Presents whichever runner's confirmation the pane has on screen. The pane hangs this
+    /// once, so every section's risky runs ask, whatever that section draws.
+    func elevenLabsConfirmations(of pane: ElevenLabsPaneState) -> some View {
+        sheet(item: Binding(
+            get: { pane.confirming?.confirmation },
+            set: { if $0 == nil { pane.confirming?.decline() } }
+        )) { request in
+            ElevenLabsRiskConfirmation(
+                request: request,
+                onConfirm: { pane.confirming?.confirm() },
+                onCancel: { pane.confirming?.decline() }
             )
         }
     }

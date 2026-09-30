@@ -36,7 +36,7 @@ struct ElevenLabsPane: View {
                     ElevenLabsConnectionBanner(
                         problem: problem,
                         onReconnect: openSettings,
-                        onRetry: { Task { await model.refreshElevenLabsBalance() } }
+                        onRetry: { Task { await model.checkElevenLabsAccount() } }
                     )
                 }
                 Divider()
@@ -52,9 +52,10 @@ struct ElevenLabsPane: View {
             }
         }
         .navigationTitle("ElevenLabs")
+        .elevenLabsConfirmations(of: pane)
         .task {
             // Free, and what the header shows; the key is read lazily, off the main actor.
-            if model.elevenLabsAccount == nil { await model.refreshElevenLabsBalance() }
+            if model.elevenLabsAccount == nil { await model.checkElevenLabsAccount() }
         }
         .confirmationDialog(
             "Disconnect ElevenLabs?", isPresented: $confirmingDisconnect, titleVisibility: .visible
@@ -77,6 +78,7 @@ struct ElevenLabsPane: View {
         } actions: {
             Button("Open Settings", action: openSettings)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func openSettings() {
@@ -263,6 +265,7 @@ struct ElevenLabsConnectionBanner: View {
 /// This session's results, newest first: each one's result as it was, with Save and Reveal
 /// for files. Nothing here is written anywhere the output folder does not already hold.
 struct ElevenLabsRecentResultsView: View {
+    @Environment(AppModel.self) private var model
     let pane: ElevenLabsPaneState
     @State private var expanded: Set<ElevenLabsRecentResult.ID> = []
 
@@ -281,13 +284,39 @@ struct ElevenLabsRecentResultsView: View {
                         Button("Clear list") { pane.clearRecents() }
                     }
                 }
-                if pane.recents.isEmpty {
+                if pane.recents.isEmpty, model.elevenLabsRecentOutputs.isEmpty {
                     Text("Nothing yet. Results from every section and the Explorer appear here.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
                 ForEach(pane.recents) { recent in
                     recentRow(recent)
+                }
+                let outputs = model.elevenLabsRecentOutputs
+                if !outputs.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Files written this session")
+                            .font(.headline)
+                            .padding(.top, 8)
+                        Text("Everything ElevenLabs saved to the output folder — from this pane and from agents over MCP.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(outputs) { output in
+                            HStack(spacing: 8) {
+                                Image(systemName: output.contentType.hasPrefix("audio/") ? "waveform" : "doc")
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(output.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                                    Text("\(output.operationID) · \(output.createdAt.formatted(date: .omitted, time: .shortened))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 6)
+                                ElevenLabsFileActions(url: output.url)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
                 }
             }
             .padding(20)

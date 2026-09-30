@@ -81,6 +81,7 @@ struct ElevenLabsSettingsSection: View {
                     text: $draft,
                     prompt: Text(model.elevenLabsLinked ? "Paste a new key to replace it" : "xi-api-key")
                 )
+                .labelsHidden()
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 200)
                 .focused($keyFieldFocused)
@@ -135,17 +136,13 @@ struct ElevenLabsSettingsSection: View {
             }
         } else {
             LabeledContent("Plan") {
-                Button("Check") { Task { await model.refreshElevenLabsBalance() } }
+                Button("Check") { Task { await model.checkElevenLabsAccount() } }
             }
         }
-        HStack {
-            if connection.connected {
-                Text("Connected. The ElevenLabs pane is in the sidebar.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
+        LabeledContent {
             Button("Open ElevenLabs") { model.selectedTab = .elevenLabs }
+        } label: {
+            Text(connection.connected ? "Connected. The pane is in the sidebar." : "Everything ElevenLabs does is in its own pane.")
         }
     }
 

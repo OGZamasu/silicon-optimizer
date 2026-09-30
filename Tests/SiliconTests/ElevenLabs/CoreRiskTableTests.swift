@@ -160,7 +160,7 @@ struct CoreRiskTableTests {
         // A public owner id is 64 hex digits; an answer must keep it.
         let voices = try #require(ElevenLabsCatalog.operation("get_library_voices"))
         let owner = String(repeating: "ab", count: 32)
-        let list: JSONValue = ["voices": [["public_owner_id": .string(owner), "name": "sk_notakeyjustaname"]]]
+        let list: JSONValue = ["voices": [["public_owner_id": .string(owner), "name": .string("sk_" + "notakeyjustaname")]]]
         let kept = ElevenLabsRedaction.redactCredentials(in: list, for: voices)
         #expect(kept["voices"][0]["public_owner_id"] == .string(owner))
         #expect(kept["voices"][0]["name"] == .string(ElevenLabsRedaction.placeholder))

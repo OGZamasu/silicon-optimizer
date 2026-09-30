@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import SiliconElevenLabs
+@testable import SiliconElevenLabs
 @testable import SiliconUI
 
 /// Settings → ElevenLabs: its own pane, a region change that never leaves a key pointed at a
@@ -60,13 +60,84 @@ struct ShellSettingsTests {
         }
     }
 
-    @Test func removingTheKeyToSwitchRegionEndsOnTheNewRegion() {
-        let (model, _) = Self.linkedModel()
+    @Test func removingTheKeyToSwitchRegionRemovesItAndEndsOnTheNewRegion() async {
+        let (model, store) = Self.linkedModel()
         let connection = ElevenLabsConnectionModel()
         connection.requestRegion(.eu, model: model)
         connection.removeKeyAndSwitchRegion(model: model)
         #expect(model.elevenLabsRegion == .eu)
+        #expect(!model.elevenLabsLinked)
         #expect(connection.pendingRegionChange == nil)
+        await model.elevenLabsLink.pendingRemoval?.value
+        #expect(store.key == nil)
+    }
+
+    // MARK: - Connect
+
+    /// A key ElevenLabs refuses is not stored, the pane stays hidden, and the words shown do
+    /// not include it.
+    @Test func aRejectedKeyStoresNothing() async {
+        let (model, transport, store) = Self.model(linkedKey: nil) { _ in
+            .jsonText(#"{"detail":{"status":"invalid_api_key","message":"Invalid API key"}}"#, status: 401)
+        }
+        defer { Self.clean(model, transport) }
+        let connection = ElevenLabsConnectionModel()
+        let key = Self.candidate
+        #expect(await connection.connect(key: key, model: model) == false)
+        #expect(store.writes == 0)
+        #expect(store.key == nil)
+        #expect(!model.elevenLabsLinked)
+        #expect(connection.failure?.contains("did not accept this key") == true)
+        #expect(!(connection.failure ?? "").contains(key))
+        #expect(transport.requests.first?.url.host == "api.elevenlabs.io")
+        #expect(transport.requests.first?.header("xi-api-key") == key)
+    }
+
+    /// No network while replacing a key: the one already linked stays linked and stored.
+    @Test func aNetworkFailureKeepsTheKeyAlreadyLinked() async {
+        let (model, transport, store) = Self.model(linkedKey: Self.key) { _ in
+            throw ElevenLabsError.network("The Internet connection appears to be offline.")
+        }
+        defer { Self.clean(model, transport) }
+        let connection = ElevenLabsConnectionModel()
+        #expect(await connection.connect(key: Self.candidate, model: model) == false)
+        #expect(store.key == Self.key)
+        #expect(store.writes == 0)
+        #expect(model.elevenLabsLinked)
+        #expect(connection.failure?.contains("still connected") == true)
+    }
+
+    /// Connect verifies against the region chosen in the picker, stores the key only then,
+    /// and starts the pane fresh for the account.
+    @Test func aGoodKeyIsVerifiedOnTheChosenRegionThenStored() async {
+        let (model, transport, store) = Self.model(linkedKey: nil, handler: Self.accountAnswer)
+        defer { Self.clean(model, transport) }
+        let connection = ElevenLabsConnectionModel()
+        connection.requestRegion(.eu, model: model)
+        model.elevenLabsPane.record(.json(["old": true], ElevenLabsMeta(status: 200)),
+                                    operation: ShellInterfaceTests.operation(id: "old"))
+        #expect(await connection.connect(key: "  \(Self.candidate)\n", model: model))
+        #expect(store.key == Self.candidate)
+        #expect(model.elevenLabsLinked)
+        #expect(model.elevenLabsRegion == .eu)
+        #expect(model.elevenLabsAccount?.tier == "creator")
+        #expect(Set(transport.requests.compactMap(\.url.host)) == ["api.eu.residency.elevenlabs.io"])
+        #expect(model.elevenLabsPane.recents.isEmpty)
+        #expect(connection.connected)
+        #expect(connection.failure == nil)
+    }
+
+    @Test func disconnectingWhileOnThePaneMovesToSettingsAndForgetsTheSession() async {
+        let (model, store) = Self.linkedModel()
+        model.selectedTab = .elevenLabs
+        model.elevenLabsPane.record(.json(["x": 1], ElevenLabsMeta(status: 200)),
+                                    operation: ShellInterfaceTests.operation(id: "x"))
+        ElevenLabsConnectionModel().remove(model: model)
+        #expect(model.selectedTab == .settings)
+        #expect(!model.elevenLabsLinked)
+        #expect(model.elevenLabsPane.recents.isEmpty)
+        await model.elevenLabsLink.pendingRemoval?.value
+        #expect(store.key == nil)
     }
 
     @Test func pickingTheSameRegionAsksNothing() {
@@ -108,6 +179,36 @@ struct ShellSettingsTests {
     }
 
     static let key = "fixture-key-not-real-0001"
+    static let candidate = "fixture-key-candidate-0002"
+
+    /// An app model with a fake transport answering through `handler` and an in-memory key
+    /// store; its output folder is the scratch one every test model gets.
+    static func model(
+        linkedKey: String?, handler: @escaping @Sendable (ElevenLabsRequest) async throws -> FakeElevenLabsTransport.Reply
+    ) -> (AppModel, FakeElevenLabsTransport, FakeCredentialSource) {
+        var settings = Settings()
+        settings.elevenLabsLinked = linkedKey != nil
+        let model = AppModel(settings: settings)
+        let transport = FakeElevenLabsTransport(handler: handler)
+        let store = FakeCredentialSource(key: linkedKey)
+        model.elevenLabsLink.transport = transport
+        model.elevenLabsLink.store = store
+        return (model, transport, store)
+    }
+
+    nonisolated static func accountAnswer(_ request: ElevenLabsRequest) -> FakeElevenLabsTransport.Reply {
+        switch request.url.path {
+        case "/v1/user": .json(["user_id": "user-1", "subscription": ["tier": "creator"]])
+        case "/v1/user/subscription":
+            .json(["tier": "creator", "character_count": 10, "character_limit": 100_000, "status": "active"])
+        default: .jsonText(#"{"detail":"unexpected"}"#, status: 404)
+        }
+    }
+
+    static func clean(_ model: AppModel, _ transport: FakeElevenLabsTransport) {
+        TemporaryFileSink.removeScratch(model.elevenLabsOutputDirectory)
+        transport.removeTemporaryFiles()
+    }
 
     static func linkedModel(region: ElevenLabsRegion = .global) -> (AppModel, FakeCredentialSource) {
         var settings = Settings()

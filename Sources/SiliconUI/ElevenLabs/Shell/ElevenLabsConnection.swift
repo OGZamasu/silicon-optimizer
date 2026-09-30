@@ -81,7 +81,7 @@ final class ElevenLabsConnectionModel {
         model.elevenLabsRegion = change.to
         model.elevenLabsLink.account = nil
         model.elevenLabsPane.reset()
-        await model.refreshElevenLabsBalance()
+        await model.checkElevenLabsAccount()
     }
 
     /// Removes the key and switches, so the new region's own key can be entered.

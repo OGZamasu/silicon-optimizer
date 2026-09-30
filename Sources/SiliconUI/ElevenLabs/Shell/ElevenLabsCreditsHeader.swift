@@ -56,6 +56,8 @@ struct ElevenLabsCreditsHeader: View {
             VStack(alignment: .trailing, spacing: 3) {
                 Text("\(account.remainingCharacters.formatted()) of \(account.characterLimit.formatted()) credits left")
                     .font(.callout.monospacedDigit())
+                    .lineLimit(1)
+                    .fixedSize()
                 ProgressView(value: Self.usedFraction(account))
                     .progressViewStyle(.linear)
                     .tint(Palette.pressure(Self.usedFraction(account)))
@@ -79,7 +81,7 @@ struct ElevenLabsCreditsHeader: View {
             Button {
                 refreshing = true
                 Task {
-                    await model.refreshElevenLabsBalance()
+                    await model.checkElevenLabsAccount()
                     refreshing = false
                 }
             } label: {
