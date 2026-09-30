@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import SiliconElevenLabs
 @testable import SiliconUI
+import class SiliconRuntime.VideoBatchQueue
 
 // Shared by the voices-and-studio section tests. Nothing here reaches the network, the
 // Keychain or the owner's files: the client runs over the in-memory transport with a fake
@@ -186,9 +187,20 @@ enum VoicesStudioSnapshots {
         return keep ? written : []
     }
 
+    /// An app model for the environment — the shell's voice picker reads one even when it is
+    /// handed a directory — built with injected settings (an inert ElevenLabs link) and a video
+    /// queue in a scratch directory, so nothing of the owner's is read.
+    static let app: AppModel = {
+        let queue = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-voices-studio-app-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("video-queue.json")
+        return AppModel(videoQueue: VideoBatchQueue(storeURL: queue), settings: .init())
+    }()
+
     static func png<Content: View>(_ content: Content, width: CGFloat, height: CGFloat, dark: Bool) throws -> Data {
         let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         let root = content
+            .environment(app)
             .environment(\.colorScheme, dark ? .dark : .light)
             .frame(width: width, height: height, alignment: .top)
             .background(Color(nsColor: .windowBackgroundColor))

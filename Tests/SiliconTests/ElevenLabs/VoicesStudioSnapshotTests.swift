@@ -142,6 +142,40 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("dubbing-project", height: 1700) { DubbingScreen(model: model) }
     }
 
+    // MARK: Studio
+
+    @Test func aStudioProjectWithAChapterOpen() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let chapters = [
+            VoicesStudioStudioTests.chapter("c1", name: "Chapter 1 — Leaving", blocks: [
+                ["block_id": "b1", "nodes": [["type": "tts_node", "text": "It was late when we left the city.", "voice_id": "v2"]]],
+                ["block_id": "b2", "nodes": [["type": "tts_node", "text": "The road went north, into the hills.", "voice_id": "v2"]]],
+            ]),
+            VoicesStudioStudioTests.chapter("c2", name: "Chapter 2 — The Pass", credits: 2_310),
+        ]
+        let project = try #require(StudioProject(json: VoicesStudioStudioTests.project("p1", chapters: chapters)))
+        let other = try #require(StudioProject(json: VoicesStudioStudioTests.project("p2", name: "Quarterly report")))
+        let snapshot = try #require(StudioSnapshot(json: ["project_snapshot_id": "s1", "name": "First full pass",
+                                                          "created_at_unix": 1_780_000_500]))
+        model.load(projects: [project, other], selected: project, snapshots: [snapshot],
+                   chapter: try #require(StudioChapter(json: chapters[0])),
+                   dictionaries: [StudioDictionary(id: "d1", name: "Place names", latestVersionID: "ver1")],
+                   models: [VoicesStudioSpeechModel(id: "eleven_multilingual_v2", name: "Eleven Multilingual v2")])
+        try VoicesStudioSnapshots.render("studio-project", height: 1900) { StudioScreen(model: model) }
+    }
+
+    @Test func aNewPodcast() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        model.load(projects: [], models: [VoicesStudioSpeechModel(id: "eleven_multilingual_v2", name: "Eleven Multilingual v2")])
+        model.mode = .podcast
+        model.podcast.text = "Why the road is long: a conversation about travel, maps and patience."
+        try VoicesStudioSnapshots.render("studio-podcast", height: 900) { StudioScreen(model: model) }
+    }
+
     // MARK: Fakes
 
     static func voices() throws -> [VoicesVoice] {

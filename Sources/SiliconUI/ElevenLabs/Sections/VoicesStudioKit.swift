@@ -137,6 +137,31 @@ final class VoicesStudioActions {
     }
 }
 
+/// A model that speaks text, as `GET /v1/models` lists it — for the sections whose projects
+/// name a speech model (Studio, podcasts, Audio Native).
+struct VoicesStudioSpeechModel: Identifiable, Hashable, Sendable {
+    var id: String
+    var name: String
+
+    /// The speech models in a `GET /v1/models` answer, in its order.
+    static func speechModels(in json: JSONValue) -> [VoicesStudioSpeechModel] {
+        (json.arrayValue ?? []).compactMap { entry in
+            guard let id = entry["model_id"].stringValue, entry["can_do_text_to_speech"].boolValue != false
+            else { return nil }
+            return VoicesStudioSpeechModel(id: id, name: entry["name"].stringValue ?? id)
+        }
+    }
+}
+
+extension VoicesStudioActions {
+    /// The account's speech models; empty when they could not be fetched (the picker then
+    /// leaves the model to ElevenLabs' default).
+    func speechModels() async -> [VoicesStudioSpeechModel] {
+        guard let json = await perform("get_models", quietly: true)?.voicesStudioJSON else { return [] }
+        return VoicesStudioSpeechModel.speechModels(in: json)
+    }
+}
+
 // MARK: - Results
 
 extension ElevenLabsResult {
@@ -412,7 +437,8 @@ struct VoicesStudioStatusBadge: View {
     let status: String
 
     var body: some View {
-        Badge(text: VoicesStudioFormat.words(status), tint: Self.tint(status))
+        // Studio calls an idle project "default"; to the owner it is ready.
+        Badge(text: status == "default" ? "Ready" : VoicesStudioFormat.words(status), tint: Self.tint(status))
     }
 
     static func tint(_ status: String) -> Color {

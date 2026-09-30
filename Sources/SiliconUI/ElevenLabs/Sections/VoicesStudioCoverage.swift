@@ -24,6 +24,9 @@ enum VoicesStudioCoverage {
         Entry(section: .dubbing, controls: DubbingSectionModel.controls,
               callsWithoutControls: DubbingSectionModel.callsWithoutControls,
               explorerOnly: DubbingSectionModel.explorerOnly),
+        Entry(section: .studio, controls: StudioSectionModel.controls,
+              callsWithoutControls: StudioSectionModel.callsWithoutControls,
+              explorerOnly: StudioSectionModel.explorerOnly),
     ]
 
     @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }
