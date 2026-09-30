@@ -81,6 +81,15 @@ final class DialogueScreenModel: CreativeScreenModel {
     private(set) var lastRunner: ElevenLabsRunner
     @ObservationIgnored private let runners: [String: ElevenLabsRunner]
 
+    /// The on-screen line each input of the last run came from (blank lines are not sent, so
+    /// the answer's input index is not the line number).
+    private(set) var sentLines: [Int] = []
+
+    /// The on-screen line (from 0) a segment of the newest take belongs to.
+    func screenLine(of segment: VoiceSegmentTiming) -> Int {
+        sentLines.indices.contains(segment.line) ? sentLines[segment.line] : segment.line
+    }
+
     struct VoiceSegmentTiming: Hashable, Sendable {
         var line: Int
         var voiceID: String
@@ -261,7 +270,9 @@ final class DialogueScreenModel: CreativeScreenModel {
         guard CreativeRunGate.isKnown(runner) else { return }
         runner.streamMode = streamMode
         lastRunner = runner
+        let sent = lines.indices.filter { !lines[$0].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard let result = await runner.perform(arguments: arguments()) else { return }
+        sentLines = sent
         words = CreativeTimeline.words(fromCharacterAlignments: CreativeTimeline.characterAlignments(in: result))
         segments = Self.voiceSegments(in: result)
         let names = lines.compactMap { session.voices.voice(id: $0.voiceID)?.name }
@@ -450,7 +461,7 @@ struct DialogueScreen: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Who speaks when").font(.caption.weight(.semibold))
                             ForEach(Array(screen.segments.enumerated()), id: \.offset) { _, segment in
-                                Text("\(CreativeTimeline.clock(segment.start))–\(CreativeTimeline.clock(segment.end))  line \(segment.line + 1) · \(screen.session.voices.voice(id: segment.voiceID)?.name ?? segment.voiceID)")
+                                Text("\(CreativeTimeline.clock(segment.start))–\(CreativeTimeline.clock(segment.end))  line \(screen.screenLine(of: segment) + 1) · \(screen.session.voices.voice(id: segment.voiceID)?.name ?? segment.voiceID)")
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }

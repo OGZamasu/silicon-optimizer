@@ -174,6 +174,41 @@ struct CreativeScreenTests {
         #expect(rig.requests("get_voice_settings").first?.request.url.path == "/v1/voices/voice-adam/settings")
     }
 
+    /// A rule only the screen knows — the chosen model's per-request limit — stops the run
+    /// before anything is sent (the client could not know it).
+    @Test func textOverTheModelsLimitIsNotSent() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.session.models.set(CreativeRig.modelsJSON.arrayValue!.compactMap(CreativeModel.init(json:)))
+        let speech = rig.session.speech
+        speech.voiceID = "voice-rachel"
+        speech.modelID = "eleven_multilingual_v2"
+        speech.text = String(repeating: "a", count: 10_001)
+        #expect(rig.client.validate(speech.operationID, arguments: speech.arguments()).isEmpty,
+                "the client alone would send it")
+        await speech.generate()
+        #expect(rig.transport.requests.isEmpty)
+        // A model reporting a 0 limit (speech-to-speech ones do) sets none.
+        speech.modelID = "eleven_english_sts_v2"
+        #expect(speech.characterLimit == nil)
+    }
+
+    @Test func deprecatedControlsSaySo() throws {
+        #expect(CreativeSpec.isDeprecated(SpeechScreenModel.full, "optimize_streaming_latency"))
+        #expect(CreativeSpec.isDeprecated(VoiceChangerScreenModel.full, "optimize_streaming_latency"))
+        #expect(!CreativeSpec.isDeprecated(SpeechScreenModel.full, "seed"))
+        #expect(MusicScreenModel.modelTitle("music_v1") == "Music v1 (deprecated)")
+        #expect(MusicScreenModel.modelTitle("music_v2") == "Music v2")
+        // The catalog drops `x-fern-enum`, so the pinned spec is the evidence.
+        let schemas = (CreativeRig.rawSpec["components"] as? [String: Any])?["schemas"] as? [String: Any]
+        for (schema, values) in CreativeSpec.deprecatedValues {
+            let marks = (schemas?[schema] as? [String: Any])?["x-fern-enum"] as? [String: Any]
+            for value in values {
+                #expect((marks?[value] as? [String: Any])?["deprecated"] as? Bool == true, "\(schema).\(value) is no longer deprecated")
+            }
+        }
+    }
+
     @Test func withNothingToSayNothingIsSent() async {
         let rig = CreativeRig()
         defer { rig.clean() }
@@ -244,11 +279,14 @@ struct CreativeScreenTests {
             ],
         ]))
         let dialogue = rig.session.dialogue
-        dialogue.lines = [DialogueLine(voiceID: "voice-rachel", text: "Hi!"), DialogueLine(voiceID: "voice-adam", text: "Hello.")]
+        // A blank line between them is not sent, so the answer's input 1 is screen line 3.
+        dialogue.lines = [DialogueLine(voiceID: "voice-rachel", text: "Hi!"), DialogueLine(voiceID: "", text: " "),
+                          DialogueLine(voiceID: "voice-adam", text: "Hello.")]
         dialogue.timestamps = true
         await dialogue.generate()
         #expect(dialogue.lastRunner.phase == .succeeded, "\(dialogue.lastRunner.errorMessage ?? "")")
         #expect(dialogue.segments.map(\.line) == [0, 1])
+        #expect(dialogue.segments.map(dialogue.screenLine(of:)) == [0, 2])
         #expect(dialogue.words.map(\.text) == ["Hi!", "Hello."])
         #expect(dialogue.takes.count == 1)
     }

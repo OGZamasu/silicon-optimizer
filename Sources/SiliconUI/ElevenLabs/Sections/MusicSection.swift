@@ -798,6 +798,11 @@ final class MusicScreenModel: CreativeScreenModel {
         takeDetails[take.id] = nil
     }
 
+    /// A music model in words, "(deprecated)" where the spec marks it so.
+    static func modelTitle(_ id: String) -> String {
+        CreativeSpec.choiceTitle(id, schemaTitle: "MusicModelID")
+    }
+
     static func excerpt(_ text: String) -> String {
         let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
         return flat.count > 60 ? String(flat.prefix(59)) + "…" : flat
@@ -865,7 +870,8 @@ private struct MusicComposeTab: View {
             }
         }
         CreativeCard("Model and output", systemImage: "waveform") {
-            CreativeChoicePicker(title: "Model", selection: $screen.modelID, choices: screen.models)
+            CreativeChoicePicker(title: "Model", selection: $screen.modelID, choices: screen.models,
+                                 label: MusicScreenModel.modelTitle)
             Picker("Fine-tune", selection: $screen.finetuneID) {
                 Text("None").tag("")
                 ForEach(screen.finetunes.filter { $0.status == nil || $0.status == "completed" }) { Text($0.name).tag($0.id) }
@@ -984,7 +990,7 @@ private struct MusicPlanTab: View {
                                format: { ElevenLabsAudioPlayerView.clock($0) })
             }
             CreativeChoicePicker(title: "Model", selection: $screen.planModelID,
-                                 choices: CreativeSpec.choices(MusicScreenModel.plan, "model_id"))
+                                 choices: CreativeSpec.choices(MusicScreenModel.plan, "model_id"), label: MusicScreenModel.modelTitle)
             Toggle("Start from the plan below", isOn: $screen.planFromCurrent)
                 .disabled(screen.planJSONValue == nil)
         }
@@ -1046,7 +1052,7 @@ private struct MusicVideoTab: View {
             CreativeTagField(title: "Style tags", tags: $screen.videoTags, prompt: "upbeat, cinematic…",
                              maxItems: CreativeSpec.maxItems(MusicScreenModel.videoToMusic, "tags"))
             CreativeChoicePicker(title: "Model", selection: $screen.videoModelID,
-                                 choices: CreativeSpec.choices(MusicScreenModel.videoToMusic, "model_id"))
+                                 choices: CreativeSpec.choices(MusicScreenModel.videoToMusic, "model_id"), label: MusicScreenModel.modelTitle)
             CreativeOutputFormatPicker(selection: $screen.videoFormat, choices: CreativeSpec.choices(MusicScreenModel.videoToMusic, "output_format"))
             Toggle("Sign with C2PA (MP3 only)", isOn: $screen.videoC2PA)
         }
@@ -1229,7 +1235,7 @@ private struct MusicFinetunesTab: View {
             CreativeTagField(title: "Tags", tags: $screen.newTags)
             CreativeChoicePicker(title: "Visibility", selection: $screen.newVisibility, choices: screen.settableVisibilities)
             CreativeChoicePicker(title: "Base model", selection: $screen.newModelID,
-                                 choices: CreativeSpec.choices(MusicScreenModel.createFinetune, "model_id"))
+                                 choices: CreativeSpec.choices(MusicScreenModel.createFinetune, "model_id"), label: MusicScreenModel.modelTitle)
             CreativeRunRow(runner: screen.runner(MusicScreenModel.createFinetune), title: "Train", problems: screen.createProblems) {
                 Task { await screen.createNewFinetune() }
             }

@@ -164,7 +164,10 @@ final class SpeechScreenModel: CreativeScreenModel {
 
     /// The most text the chosen model takes in one request, when the models list says.
     var characterLimit: Int? {
-        selectedModel.flatMap { $0.maximumTextLengthPerRequest ?? $0.maxCharactersSubscribedUser }
+        guard let model = selectedModel else { return nil }
+        // A model that reports 0 (speech-to-speech models do) sets no limit on text.
+        return [model.maximumTextLengthPerRequest, model.maxCharactersSubscribedUser]
+            .compactMap { $0 }.first { $0 > 0 }
     }
 
     /// What the text is likely to cost, by the model's rate when known.
@@ -365,7 +368,7 @@ struct SpeechScreen: View {
                     )
                     Toggle("Use a professional voice's instant version", isOn: $screen.usePVCAsIVC)
                     Toggle("Keep in history (off is zero-retention, enterprise only)", isOn: $screen.enableLogging)
-                    Picker("Latency optimization", selection: $screen.latencyOptimization) {
+                    Picker(CreativeSpec.isDeprecated(SpeechScreenModel.full, "optimize_streaming_latency") ? "Latency optimization (deprecated)" : "Latency optimization", selection: $screen.latencyOptimization) {
                         Text("Default").tag(Int?.none)
                         ForEach(0...4, id: \.self) { level in Text("\(level)").tag(Int?.some(level)) }
                     }

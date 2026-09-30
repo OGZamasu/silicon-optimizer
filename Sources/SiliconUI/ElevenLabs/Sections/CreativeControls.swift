@@ -511,15 +511,32 @@ enum CreativeMedia {
 
     /// How many channels an audio file has, from its header.
     static func channelCount(of url: URL) -> Int? {
-        guard let file = try? AVAudioFile(forReading: url) else { return nil }
-        return Int(file.fileFormat.channelCount)
+        header(of: url)?.channels
     }
 
     /// The length of an audio file, from its header.
     static func duration(of url: URL) -> Double? {
-        guard let file = try? AVAudioFile(forReading: url) else { return nil }
-        let rate = file.processingFormat.sampleRate
-        return rate > 0 ? Double(file.length) / rate : nil
+        header(of: url)?.seconds
+    }
+
+    private struct Header {
+        var seconds: Double?
+        var channels: Int
+    }
+
+    /// Headers read so far, by file and its modification date: views ask on every draw.
+    private static var headers: [URL: (modified: Date?, header: Header?)] = [:]
+
+    private static func header(of url: URL) -> Header? {
+        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let cached = headers[url], cached.modified == modified { return cached.header }
+        let header = (try? AVAudioFile(forReading: url)).map { file -> Header in
+            let rate = file.processingFormat.sampleRate
+            return Header(seconds: rate > 0 ? Double(file.length) / rate : nil, channels: Int(file.fileFormat.channelCount))
+        }
+        if headers.count > 200 { headers.removeAll() }
+        headers[url] = (modified, header)
+        return header
     }
 }
 

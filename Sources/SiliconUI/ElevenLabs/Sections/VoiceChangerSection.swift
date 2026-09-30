@@ -186,7 +186,7 @@ struct VoiceChangerScreen: View {
                             .disabled(screen.pcmFormatValue == nil)
                         CreativeOptionalIntegerField(title: "Seed", value: $screen.seed, range: CreativeSpec.range(screen.operationID, "seed"))
                         Toggle("Keep in history (off is zero-retention, enterprise only)", isOn: $screen.enableLogging)
-                        Picker("Latency optimization", selection: $screen.latencyOptimization) {
+                        Picker(CreativeSpec.isDeprecated(VoiceChangerScreenModel.full, "optimize_streaming_latency") ? "Latency optimization (deprecated)" : "Latency optimization", selection: $screen.latencyOptimization) {
                             Text("Default").tag(Int?.none)
                             ForEach(0...4, id: \.self) { level in Text("\(level)").tag(Int?.some(level)) }
                         }

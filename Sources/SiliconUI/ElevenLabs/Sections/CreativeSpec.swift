@@ -159,6 +159,25 @@ enum CreativeSpec {
         return listed + [normalized["example"].stringValue].compactMap { $0 }
     }
 
+    /// Whether the spec marks the argument deprecated.
+    static func isDeprecated(_ operationID: String, _ path: String) -> Bool {
+        guard let schema = schema(operationID, path) else { return false }
+        return schema["deprecated"].boolValue == true || normalized(schema)["deprecated"].boolValue == true
+    }
+
+    /// Enum values the spec marks deprecated where the catalog cannot say (the raw spec keeps
+    /// them in an `x-fern-enum` extension the catalog leaves out). A test holds this to the
+    /// pinned spec.
+    static let deprecatedValues: [String: Set<String>] = [
+        "MusicModelID": ["music_v1"],
+    ]
+
+    /// `value` in words for a picker, with "(deprecated)" when the spec says so.
+    static func choiceTitle(_ value: String, schemaTitle: String) -> String {
+        let title = ElevenLabsFormField.humanized(value)
+        return deprecatedValues[schemaTitle]?.contains(value) == true ? title + " (deprecated)" : title
+    }
+
     static func maxLength(_ operationID: String, _ path: String) -> Int? {
         schema(operationID, path).flatMap { normalized($0)["maxLength"].intValue }
     }
