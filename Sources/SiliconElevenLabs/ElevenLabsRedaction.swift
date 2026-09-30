@@ -20,48 +20,54 @@ public enum ElevenLabsRedaction {
         return result
     }
 
-    /// A credential-returning operation's answer with its secret fields replaced — what MCP and
-    /// control output carry unless the owner's switch lets agents see them. Other operations'
-    /// answers pass through, with only key-shaped strings redacted.
+    /// An answer with its credential fields replaced — what MCP and control output carry unless
+    /// the owner's switch lets agents see them. For a credential-returning operation that is
+    /// the fields the risk table names for it; for every answer, the key preview `GET /v1/user`
+    /// includes and any `sk_…` string.
     public static func redactCredentials(
         in value: JSONValue, for operation: ElevenLabsOperation
     ) -> JSONValue {
-        guard operation.returnsCredential else { return redactStrings(in: value) }
-        return redactFields(in: value)
+        let fields = ElevenLabsRiskTable.credentialFields[operation.id].map(Set.init)
+            ?? (operation.returnsCredential ? credentialFieldNames : [])
+        return redactFields(fields.union(ElevenLabsRiskTable.alwaysRedactedFields), in: value)
     }
 
-    /// Field names that carry a secret in ElevenLabs answers.
+    /// Field names redacted from a credential-returning operation the risk table has no field
+    /// list for (one a spec refresh added).
     public static let credentialFieldNames: Set<String> = [
         "xi-api-key", "xi_api_key", "api_key", "key", "secret", "value", "token",
         "signed_url", "webhook_secret", "hmac_secret", "client_secret", "access_token",
         "refresh_token", "password", "conversation_token",
     ]
 
-    static func redactFields(in value: JSONValue) -> JSONValue {
+    /// `value` with every field named in `fields` (at any depth) replaced, and `sk_…` keys
+    /// in any string redacted. Other hex runs are left alone here: ElevenLabs' public user and
+    /// owner ids are 64 hex digits, and an answer that lost them would be useless — unlike an
+    /// error message, which loses nothing by it.
+    static func redactFields(_ fields: Set<String>, in value: JSONValue) -> JSONValue {
         switch value {
         case .object(let object):
             return .object(Dictionary(uniqueKeysWithValues: object.map { key, inner in
-                if credentialFieldNames.contains(key.lowercased()), inner != .null {
+                if fields.contains(key), inner != .null {
                     return (key, .string(placeholder))
                 }
-                return (key, redactFields(in: inner))
+                return (key, redactFields(fields, in: inner))
             }))
         case .array(let array):
-            return .array(array.map(redactFields(in:)))
+            return .array(array.map { redactFields(fields, in: $0) })
         case .string(let text):
-            return .string(redact(text))
+            return .string(redactKeys(text))
         case .null, .bool, .number:
             return value
         }
     }
 
-    static func redactStrings(in value: JSONValue) -> JSONValue {
-        switch value {
-        case .object(let object): .object(object.mapValues(redactStrings(in:)))
-        case .array(let array): .array(array.map(redactStrings(in:)))
-        case .string(let text): .string(redact(text))
-        case .null, .bool, .number: value
-        }
+    /// Only `sk_…` keys: what a JSON answer is scrubbed of.
+    static func redactKeys(_ text: String) -> String {
+        guard text.contains("sk_") else { return text }
+        return patterns[0].stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: placeholder
+        )
     }
 
     private static let patterns: [NSRegularExpression] = [
