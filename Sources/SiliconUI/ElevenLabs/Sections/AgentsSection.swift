@@ -1640,10 +1640,10 @@ private struct AgentsBranchesTab: View {
                         }
                     }
                     .fixedSize()
-                    if branch.draftExists {
-                        ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteDraft), title: "Discard draft…") {
-                            Task { await model.deleteDraft(agentName: agentName) }
-                        }
+                }
+                if branch.draftExists {
+                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.deleteDraft), title: "Discard the draft…") {
+                        Task { await model.deleteDraft(agentName: agentName) }
                     }
                 }
                 AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.updateBranch), showsResult: false)
@@ -1718,10 +1718,10 @@ private struct AgentsBranchesTab: View {
                 HStack {
                     TextField("Title", text: $model.proposalTitle).textFieldStyle(.roundedBorder)
                     TextField("Description", text: $model.proposalDescription).textFieldStyle(.roundedBorder)
-                    ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.createMergeProposal), title: "Propose merge",
-                                        disabled: model.proposalTitle.trimmingCharacters(in: .whitespaces).isEmpty) {
-                        Task { await model.propose() }
-                    }
+                }
+                ElevenLabsRunButton(runner: model.calls.runner(AgentsOp.createMergeProposal), title: "Propose the merge",
+                                    disabled: model.proposalTitle.trimmingCharacters(in: .whitespaces).isEmpty) {
+                    Task { await model.propose() }
                 }
                 AgentsRunnerOutput(runner: model.calls.runner(AgentsOp.createMergeProposal), showsResult: false)
             }
