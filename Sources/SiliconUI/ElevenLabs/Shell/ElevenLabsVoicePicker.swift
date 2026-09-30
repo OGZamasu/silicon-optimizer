@@ -62,6 +62,9 @@ final class ElevenLabsVoiceDirectory {
     static let pageLimit = 10
 
     @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
+    /// The client the list was fetched with: another one (a new key, another region) means
+    /// another account's voices.
+    @ObservationIgnored private var loadedFor: ObjectIdentifier?
     @ObservationIgnored private var previewPlayer: AVPlayer?
     @ObservationIgnored private var previewEnd: (any NSObjectProtocol)?
 
@@ -74,6 +77,7 @@ final class ElevenLabsVoiceDirectory {
     }
 
     func loadIfNeeded() async {
+        if loaded, loadedFor != client().map(ObjectIdentifier.init) { reset() }
         guard !loaded, !loading else { return }
         await refresh()
     }
@@ -90,6 +94,7 @@ final class ElevenLabsVoiceDirectory {
         do {
             voices = try await Self.fetch(with: client)
             loaded = true
+            loadedFor = ObjectIdentifier(client)
             error = nil
         } catch {
             self.error = ElevenLabsRunnerFailure(error).message
@@ -100,6 +105,7 @@ final class ElevenLabsVoiceDirectory {
     func set(_ voices: [ElevenLabsVoice]) {
         self.voices = voices
         loaded = true
+        loadedFor = client().map(ObjectIdentifier.init)
         error = nil
     }
 
@@ -107,6 +113,7 @@ final class ElevenLabsVoiceDirectory {
         stopPreview()
         voices = []
         loaded = false
+        loadedFor = nil
         error = nil
     }
 

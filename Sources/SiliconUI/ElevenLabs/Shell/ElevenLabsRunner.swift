@@ -277,10 +277,16 @@ final class ElevenLabsRunner: Identifiable {
     private func askForConfirmation(_ request: ElevenLabsConfirmationRequest) async -> Bool {
         confirmation = request
         phase = .awaitingConfirmation
+        context.pane?.present(self)
         let answer = await withCheckedContinuation { pendingConfirmation = $0 }
         confirmation = nil
+        context.pane?.dismissConfirmation(of: self)
         return answer
     }
+
+    /// Whether this runner's host must show its confirmation itself: only when there is no
+    /// pane to do it (a runner built for a test, or outside the ElevenLabs pane).
+    var presentsOwnConfirmation: Bool { context.pane == nil }
 
     private func resolveConfirmation(_ answer: Bool) {
         guard let continuation = pendingConfirmation else { return }

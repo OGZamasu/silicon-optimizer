@@ -125,13 +125,16 @@ struct ElevenLabsRunnerOutput: View {
                 ElevenLabsCredentialReveal(credential: credential) { runner.dismissCredential() }
             }
             if showsResult, let result = runner.result {
-                ElevenLabsResultView(result: result, operation: runner.operation)
+                ElevenLabsResultView(
+                    result: result, operation: runner.operation,
+                    outputFormat: runner.arguments["output_format"]?.stringValue
+                )
             }
             if runner.apiCall != nil || runner.phase != .idle {
                 ElevenLabsAPICallDisclosure(runner: runner)
             }
         }
-        .elevenLabsConfirmation(for: runner)
+        .elevenLabsConfirmation(for: runner, when: runner.presentsOwnConfirmation)
     }
 
     @ViewBuilder

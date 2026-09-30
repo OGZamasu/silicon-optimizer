@@ -58,7 +58,16 @@ final class ElevenLabsPaneState {
     static let recentLimit = 50
     static let sectionKey = "dev.siliconoptimizer.elevenlabs.section"
 
+    /// The runner whose confirmation is on screen; others wait their turn in `waiting`.
+    /// The pane presents it, so no section can forget to host the sheet.
+    private(set) var confirming: ElevenLabsRunner?
+    @ObservationIgnored private var waiting: [ElevenLabsRunner] = []
+
     @ObservationIgnored private let defaults: UserDefaults?
+    @ObservationIgnored private let client: @MainActor () -> ElevenLabsClient?
+    /// Each section's state for the session, and the client it was made for.
+    @ObservationIgnored private var states: [String: AnyObject] = [:]
+    @ObservationIgnored private var statesClient: ObjectIdentifier?
 
     /// - Parameters:
     ///   - defaults: Where the section is remembered; nil under a test, which must not write
@@ -66,8 +75,60 @@ final class ElevenLabsPaneState {
     ///   - client: The linked account's client, read at the moment it is needed.
     init(defaults: UserDefaults?, client: @escaping @MainActor () -> ElevenLabsClient?) {
         self.defaults = defaults
+        self.client = client
         section = ElevenLabsSection.resolve(remembered: defaults?.string(forKey: Self.sectionKey) ?? "")
         voices = ElevenLabsVoiceDirectory(client: client)
+    }
+
+    // MARK: - Section state
+
+    /// The state `section` keeps for the session — its view-model, typed text, the list it
+    /// loaded — made by `make` on first use and handed back after that, so a trip to another
+    /// section or tab loses nothing.
+    ///
+    /// It is dropped, with every other section's, when the account's client changes: a
+    /// disconnect, a new key, a region change. Nothing made for one key or region survives
+    /// into another.
+    ///
+    ///     let screen = model.elevenLabsPane.state(for: .speech) { SpeechScreenModel(model: model) }
+    func state<State: AnyObject>(for section: ElevenLabsSection, make: () -> State) -> State {
+        state(key: "section." + section.rawValue, make: make)
+    }
+
+    /// `state(for:make:)` under any key — for state several sections share.
+    func state<State: AnyObject>(key: String, make: () -> State) -> State {
+        dropStatesIfTheAccountChanged()
+        if let existing = states[key] as? State { return existing }
+        let made = make()
+        states[key] = made
+        return made
+    }
+
+    /// Forgets every section's state now.
+    func dropSectionStates() {
+        states.removeAll()
+        statesClient = nil
+    }
+
+    private func dropStatesIfTheAccountChanged() {
+        let current = client().map(ObjectIdentifier.init)
+        guard current != statesClient else { return }
+        states.removeAll()
+        statesClient = current
+    }
+
+    // MARK: - Confirmation
+
+    /// Puts `runner`'s question on screen, after any already there.
+    func present(_ runner: ElevenLabsRunner) {
+        if confirming == nil { confirming = runner } else if !waiting.contains(where: { $0 === runner }) { waiting.append(runner) }
+    }
+
+    /// Takes `runner`'s question off screen, and shows the next one waiting.
+    func dismissConfirmation(of runner: ElevenLabsRunner) {
+        waiting.removeAll { $0 === runner }
+        guard confirming === runner else { return }
+        confirming = waiting.isEmpty ? nil : waiting.removeFirst()
     }
 
     /// Shows `section`.
@@ -141,6 +202,7 @@ final class ElevenLabsPaneState {
         connectionProblem = nil
         explorerSelection = nil
         explorerModel = nil
+        dropSectionStates()
         voices.reset()
     }
 }

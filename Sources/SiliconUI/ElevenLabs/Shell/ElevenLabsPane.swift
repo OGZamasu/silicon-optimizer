@@ -52,6 +52,7 @@ struct ElevenLabsPane: View {
             }
         }
         .navigationTitle("ElevenLabs")
+        .elevenLabsConfirmations(of: pane)
         .task {
             // Free, and what the header shows; the key is read lazily, off the main actor.
             if model.elevenLabsAccount == nil { await model.checkElevenLabsAccount() }
