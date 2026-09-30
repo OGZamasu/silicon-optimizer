@@ -126,6 +126,14 @@ public enum ElevenLabsError: Error, Sendable, Equatable, LocalizedError, CustomS
     public var errorDescription: String? { description }
 }
 
+extension ElevenLabsError {
+    /// Any error as an `ElevenLabsError` — cancellation as `.cancelled`, URL errors as
+    /// `.network` — with `key` and anything key-shaped redacted from its text.
+    public init(wrapping error: any Error, redactingKey key: String? = nil) {
+        self = ElevenLabsClient.normalized(error, key: key)
+    }
+}
+
 /// The linked account at a glance: what Settings and the pane's header show.
 public struct ElevenLabsAccount: Sendable, Codable, Hashable {
     public var userID: String
