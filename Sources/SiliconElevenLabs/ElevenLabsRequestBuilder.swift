@@ -25,7 +25,7 @@ struct PreparedCall: Sendable {
             break
         case .json(let value):
             shown["Content-Type"] = "application/json"
-            bodyDescription = value
+            bodyDescription = ElevenLabsRedaction.maskingRequestSecrets(in: value, operationID: operation.id)
         case .multipart(let parts):
             shown["Content-Type"] = "multipart/form-data"
             var fields: [String: JSONValue] = [:]
@@ -45,7 +45,9 @@ struct PreparedCall: Sendable {
                     fields[part.name] = entry
                 }
             }
-            bodyDescription = .object(fields)
+            bodyDescription = ElevenLabsRedaction.maskingRequestSecrets(
+                in: .object(fields), operationID: operation.id
+            )
         }
         return ElevenLabsCallDescription(
             operationID: operation.id, method: operation.method, url: url.absoluteString,

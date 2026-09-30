@@ -139,7 +139,13 @@ Before anything is sent, the client checks:
 
 It reports every problem at once, as `ElevenLabsError.invalidArguments`. An invalid call sends
 nothing and does not read the key. `validate` returns the same list without calling. `describe`
-returns what would be sent, for Show API call, with the key shown as `‹redacted›`.
+returns what would be sent, for Show API call, with the key shown as `‹redacted›`, and with the
+secrets the owner typed masked too: a secret's value, provider tokens (Twilio, Exotel), SIP
+passwords, and plain-string header values such as a literal `Authorization` (references to
+secrets stay). Which request fields are masked is checked against every request schema in the
+pinned spec, so a spec refresh that adds a secret-looking field fails a test until it is
+classified. Answers get the same header rule: a tool, MCP server or webhook whose header holds a
+literal token comes back with the token masked.
 
 How a call goes out:
 
