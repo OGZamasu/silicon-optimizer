@@ -22,6 +22,9 @@ final class ElevenLabsPaneState {
         case offline(String)
         /// The Keychain would not hand the key over (locked, or its dialog dismissed).
         case credentialUnavailable(String)
+        /// Settings says linked, but the Keychain holds no key: deleted, or settings copied
+        /// from another Mac.
+        case keyMissing
     }
 
     /// The section on screen. Remembered across launches in the running app.
@@ -49,6 +52,11 @@ final class ElevenLabsPaneState {
 
     /// Every voice the account can use, fetched once and shared by every picker.
     let voices: ElevenLabsVoiceDirectory
+
+    /// Settings → ElevenLabs's Connect, Remove and region state. Here, not in the view: a
+    /// Settings pane or tab switch rebuilds the view, and a check still running must keep the
+    /// picker and Remove locked, and its captured region, whatever is on screen.
+    let connection = ElevenLabsConnectionModel()
 
     /// The Explorer's filters and the operations opened in it, made when it is first shown.
     @ObservationIgnored private var explorerModel: ElevenLabsExplorerModel?
@@ -90,6 +98,10 @@ final class ElevenLabsPaneState {
     @ObservationIgnored private var states: [String: AnyObject] = [:]
     @ObservationIgnored private weak var statesClient: ElevenLabsClient?
     @ObservationIgnored private var statesBound = false
+
+    /// When this account session began: "Files written this session" lists only files made
+    /// since, not the previous account's.
+    private(set) var sessionStarted = Date()
 
     /// Said in the pane after an account change cut off a request that may cost money or
     /// act — its answer will never be shown, so the owner has to look for themselves.
@@ -168,6 +180,7 @@ final class ElevenLabsPaneState {
     /// dropped by the new epoch.
     private func endAccountWork() {
         epoch += 1
+        sessionStarted = Date()
         forgetCredentials()
         let asking = [confirming].compactMap { $0 } + waiting
         confirming = nil
@@ -265,6 +278,9 @@ final class ElevenLabsPaneState {
             connectionProblem = .offline(why)
         case .credentialUnavailable(let why):
             connectionProblem = .credentialUnavailable(why)
+        case .notLinked:
+            // The client exists, so Settings says linked; the key it asked for was not there.
+            connectionProblem = .keyMissing
         default:
             break
         }

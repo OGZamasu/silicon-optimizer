@@ -275,10 +275,12 @@ enum ElevenLabsCurl {
                 lines.append("  --data-raw \(quoted(body.jsonString()))")
             }
         } else {
+            // --form-string, not -F: curl reads a local file for an -F value that starts with
+            // "@" or "<", and a text field's value is the owner's text, not a path.
             for (key, value) in (call.body?.objectValue ?? [:]).sorted(by: { $0.key < $1.key })
             where files[key] == nil {
                 let text = value.stringValue ?? value.jsonString()
-                lines.append("  -F \(quoted("\(key)=\(text)"))")
+                lines.append("  --form-string \(quoted("\(key)=\(text)"))")
             }
             for name in files.keys.sorted() {
                 for file in files[name] ?? [] {

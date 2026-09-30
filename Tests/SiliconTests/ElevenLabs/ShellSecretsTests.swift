@@ -47,7 +47,9 @@ struct ShellSecretsTests {
                 }
                 if case .headerMap = field.kind {
                     headerMaps += 1
-                    #expect(ElevenLabsFormField.headerMapFieldNames.contains(field.name))
+                    // Header maps by name, and an environment variable's values by environment.
+                    #expect(ElevenLabsFormField.headerMapFieldNames.contains(field.name)
+                            || (field.name == "values" && operation.path.hasPrefix("/v1/convai/environment-variables")))
                 }
             }
         }

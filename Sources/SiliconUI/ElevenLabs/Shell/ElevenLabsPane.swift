@@ -245,8 +245,11 @@ struct ElevenLabsConnectionBanner: View {
                     .textSelection(.enabled)
             }
             Spacer(minLength: 8)
-            if case .keyRejected = problem {
+            switch problem {
+            case .keyRejected, .keyMissing:
                 Button("Reconnect…", action: onReconnect)
+            case .offline, .credentialUnavailable:
+                EmptyView()
             }
             Button("Try again", action: onRetry)
         }
@@ -260,6 +263,7 @@ struct ElevenLabsConnectionBanner: View {
         case .keyRejected: "key.slash"
         case .offline: "wifi.slash"
         case .credentialUnavailable: "lock"
+        case .keyMissing: "key"
         }
     }
 
@@ -268,6 +272,7 @@ struct ElevenLabsConnectionBanner: View {
         case .keyRejected: "ElevenLabs refused the key"
         case .offline: "ElevenLabs cannot be reached"
         case .credentialUnavailable: "The key could not be read from the Keychain"
+        case .keyMissing: "The key is missing from this Mac's Keychain"
         }
     }
 
@@ -279,6 +284,8 @@ struct ElevenLabsConnectionBanner: View {
             "Check the connection; nothing was charged. \(message)"
         case .credentialUnavailable(let message):
             "Unlock the Keychain or allow access when macOS asks. \(message)"
+        case .keyMissing:
+            "Settings says ElevenLabs is connected, but no key is stored here — it was deleted, or the settings came from another Mac. Reconnect to add it again."
         }
     }
 }
@@ -305,7 +312,7 @@ struct ElevenLabsRecentResultsView: View {
                         Button("Clear list") { pane.clearRecents() }
                     }
                 }
-                if pane.recents.isEmpty, model.elevenLabsRecentOutputs.isEmpty {
+                if pane.recents.isEmpty, Self.outputs(model.elevenLabsRecentOutputs, since: pane.sessionStarted).isEmpty {
                     Text("Nothing yet. Results from every section and the Explorer appear here.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -313,7 +320,7 @@ struct ElevenLabsRecentResultsView: View {
                 ForEach(pane.recents) { recent in
                     recentRow(recent)
                 }
-                let outputs = model.elevenLabsRecentOutputs
+                let outputs = Self.outputs(model.elevenLabsRecentOutputs, since: pane.sessionStarted)
                 if !outputs.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Files written this session")
@@ -344,6 +351,12 @@ struct ElevenLabsRecentResultsView: View {
             .frame(maxWidth: 880, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    /// The files written in this account session: the core's list spans the whole launch,
+    /// and a previous account's files do not belong under the next one.
+    static func outputs(_ all: [ElevenLabsOutput], since start: Date) -> [ElevenLabsOutput] {
+        all.filter { $0.createdAt >= start }
     }
 
     private func recentRow(_ recent: ElevenLabsRecentResult) -> some View {

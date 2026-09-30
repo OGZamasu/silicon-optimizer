@@ -376,8 +376,8 @@ shown-once card lists only the credential fields the risk table names for that o
 
 The shell's tests use the core's fakes only. They cover:
 
-- a form for every one of the 403 operations, with its required fields marked, and every form
-  drawing
+- a form for every one of the 403 operations, with its required fields marked (drawing every
+  form is opt-in with `ELEVENLABS_DRAW=1`, like the snapshots)
 - the runner's confirmation, cancel, error sorting and show-once secrets
 - tab gating
 - Connect and region changes
@@ -385,3 +385,174 @@ The shell's tests use the core's fakes only. They cover:
 
 `ElevenLabsSnapshot` draws views light and dark, narrow and wide. Set
 `ELEVENLABS_SNAPSHOT_DIR` to a scratch folder outside the repository to get the PNGs.
+
+## Control API and MCP
+
+Agents reach ElevenLabs through the app, never directly: the MCP bridge (`silicon-mcp`) talks only
+to the app's control API on loopback, and the app holds the key. Everything below goes through one
+handler in the app (`Sources/SiliconUI/AppModel+ElevenLabsControl.swift`), so the same rules apply
+to a script with `curl` and to Claude or ChatGPT.
+
+### Who may call it
+
+Only this Mac's own control token, on the loopback listener. ElevenLabs spends the owner's credits
+and some operations place real phone calls, so every other caller is refused with one sentence —
+"ElevenLabs spends the owner's credits, so only this Mac's own control token can use it." — and
+that includes a phone paired with **full** control, a chat-only phone, and swarm peers, on either
+listener. The refusal is decided on the request's headers, before its body is read, and before
+the app is asked anything. On loopback a phone's token is not a credential at all (401), and on the
+tailnet the control token is not one either (401). A browser's `Host` or `Origin` on loopback is
+refused too.
+
+### Routes
+
+| Route | What it answers |
+|---|---|
+| `GET /elevenlabs/status` | `linked`, `region`, `regionName`, `agentsMayRunRiskyActions`, `riskySwitch`, `operations`, the last `account` balance the app checked (never fetched by this route), and a `note` |
+| `GET /elevenlabs/operations?q=&group=&risk=&limit=` | `total`, `returned`, `operations` (id, method, path, group, summary, risk, billable, returnsCredential, requiresConfirmation, deprecated, supportsStreaming, fileFields), and every `group` with its count. `q`: every word must appear in the id, path, method, summary or group. `limit`: 1–500, default 50. A bad filter is a 400 naming every problem |
+| `GET /elevenlabs/operations/{id}` | Everything needed to call it: `parameters` (name, in, required, description, schema, default), `body` (contentType, required, schema, fileFields, multipleFileFields), `response` (kind and what the call returns), `risk` and `riskDescription`, `costNote`, `credentialNote`, `confirmationNote`, an `example` call with placeholders, and `vendorDescription` — ElevenLabs's own text, returned as data and labelled so. `elevenlabs_describe_operation` prints every piece of ElevenLabs's text — summary, description, parameter descriptions and schemas, the body schema with its field and enum descriptions — inside one fence whose boundary is random per call and whose every line starts with `│`, so no text in the spec can close it early. Unknown id: 404 with `closeMatches` |
+| `POST /elevenlabs/call` | Runs one operation: `{"operation": id, "arguments": {…}, "files": [{"field", "path"}], "confirm": false}` |
+
+Every refusal is `{"error": "…"}` — what every control client already reads — plus, where they
+apply, `operation`, `risk`, `summary`, `setting`, `closeMatches`, `problems`, `upstreamStatus`,
+`requestID`, `retryAfterSeconds`.
+
+### What a call goes through, in order
+
+1. **The request.** Every problem is named at once; unknown fields are refused (`argumnets` is an
+   error, not a call without its arguments).
+2. **The operation.** Unknown: 404 with close matches.
+3. **The risk gate.** `read`, `generate` and `modify` run. `destructive` and `realWorld` run only
+   with `confirm: true` **and** the owner's Settings switch **"Let agents run destructive and
+   real-world ElevenLabs actions"** (Settings → ElevenLabs, off by default). Otherwise 403, naming
+   the operation, its method and path, what it does, its class, the switch, and which of the two
+   is missing. Nothing is read or sent.
+4. **The link.** No key linked: 409 "ElevenLabs is not connected."
+5. **Uploads.** Each `files` entry must name one of the operation's multipart file fields (one file
+   where the schema takes one). Nothing under `/dev` is accepted, by any spelling that resolves
+   there (`/dev/fd/N` would open a descriptor the app already holds). Each path is opened on the
+   Mac without following a final symbolic link or waiting on a pipe, must be the same file the
+   path named a moment before (device and inode), must be a regular file of this user's, and all
+   of a call's uploads together must fit in 3 GiB (413 past it). It is copied through that same descriptor into a
+   private folder — a clone where the volume allows — and the copy is what is sent, under the
+   file's own name; the folder is removed when the call ends. Problems are named by position and
+   field (`files[1] (audio)`), never by path, and no path ever appears in an answer.
+6. **The call**, through the same client the pane uses.
+
+Client errors become statuses a caller can act on: invalid arguments 400 with every problem;
+ElevenLabs's 404/409/413 as they are and 422 as 400; a refused key, a permission error or an
+ElevenLabs outage 502 with `upstreamStatus`; rate limits 429 with `retryAfterSeconds`; an unreadable
+Keychain 503; a call cut short because its caller went away 499, saying ElevenLabs may have done
+(and billed) the work anyway. Every message is redacted of anything key-shaped and of every upload
+path. A value an earlier answer masked (`‹redacted›`) is refused if an agent sends it back.
+
+### What a call answers
+
+`operation`, `method`, `path`, `risk`, `status`, `requestID`, `characterCost` (when ElevenLabs sends
+`character-cost`), the allowlisted `headers`, and for billable operations a `costNote` saying what
+was spent and that the balance is one free call away (`get_user_subscription_info`). Then, by
+`kind`:
+
+- `json`: the answer in `json`.
+- `file`: `file` (its path on this Mac, in `<voice output folder>/ElevenLabs/<date>/`),
+  `contentType`, `bytes`. Streamed answers are collected into a file.
+- `text`, `events`: inline.
+- `parts`: `multipart/mixed` answers, and JSON whose base64 audio the client moved into files.
+
+JSON, text and events past 256 KB come back shortened — lists cut to their first items and long
+strings cut, by the gentlest step that fits — with `truncated: true`, a `note` saying what was cut,
+and the whole answer saved as `fullResult` `{file, contentType, bytes}`.
+
+**Redaction.** Always, whatever the switch: the key preview `GET /v1/user` carries and any `sk_…`
+string are masked — the owner's own key typed into an agent's tool never reaches another agent.
+**A newly created API key is never shown over MCP or the control API, even with the switch on:
+make it in the app.** While the owner's switch is off, the credential fields of the operations
+that return one (webhook secrets, single-use tokens, signed conversation URLs, shareable agent
+tokens), every plain-string header value (a webhook tool's `request_headers`, custom headers),
+and any string under a field whose name says it is a secret (`api_key`, `*token*`, `*secret*`,
+`signature`, `password`, `signed_url` — but not a pagination cursor like `next_page_token` or an
+identifier like `secret_id`) are masked. Turning the switch on reveals exactly what it is for:
+that one operation's named credential fields, and header values (so an agent allowed to edit a
+tool can send its config back). A `password` or `client_secret` anywhere else stays masked. A
+masked answer says so in `redacted` and `redactionNote`; the saved `fullResult` is the masked
+answer too. The app's own pane shows everything.
+
+`confirm: true` is the agent's own statement that the user agreed; nothing can check it. The
+owner's switch, off by default, is the real lock.
+
+### MCP tools
+
+| Tool | Operation | Cost |
+|---|---|---|
+| `elevenlabs_account` | `GET /elevenlabs/status`, then `get_user_subscription_info` when connected | free |
+| `elevenlabs_list_voices` | `get_user_voices_v2` | free |
+| `elevenlabs_speak` | `text_to_speech_full` | credits, per character |
+| `elevenlabs_sound_effect` | `sound_generation` | credits |
+| `elevenlabs_music` | `generate` (`POST /v1/music`) | credits |
+| `elevenlabs_transcribe` | `speech_to_text` (`model_id` defaults to `scribe_v2`, the spec's example) | credits, per minute |
+| `elevenlabs_isolate_audio` | `audio_isolation` | credits, per minute |
+| `elevenlabs_change_voice` | `speech_to_speech_full` | credits, per minute |
+| `elevenlabs_dub` | `create_dubbing` (then `get_dubbed_metadata`, `get_dubbed_file` through `elevenlabs_call`) | credits, per minute |
+| `elevenlabs_clone_voice` | `add_voice` | a voice slot |
+| `elevenlabs_design_voice` | `text_to_voice_design` (keep one with `create_voice`) | credits |
+| `elevenlabs_search_operations` | `GET /elevenlabs/operations` | free |
+| `elevenlabs_describe_operation` | `GET /elevenlabs/operations/{id}` | free |
+| `elevenlabs_call` | `POST /elevenlabs/call`, any operation | per operation |
+
+Argument names are the spec's, and so are their JSON types: `elevenlabs_change_voice`'s
+`voice_settings` is JSON text because the spec's multipart field is a string (an object is encoded
+into one). Upload arguments (`file`, `audio`, `files`) take absolute paths on this Mac. The bridge checks arguments before sending anything — types, the spec's ranges, whole
+numbers without overflow, absolute paths, unknown arguments — and names every problem at once.
+None of the curated tools maps to a gated operation; if one ever were refused by the gate, the tool
+error says to use `elevenlabs_call` with `confirm: true` once the user agrees.
+
+### From search to call
+
+An agent asked to "list my dubbing projects and delete the test one" goes:
+
+1. `elevenlabs_search_operations {"query": "dubbing"}` — the ids, each with its class:
+   `list_dubs … [read]`, `delete_dubbing … [destructive; needs confirm]`.
+2. `elevenlabs_describe_operation {"operation": "delete_dubbing"}` — its `dubbing_id` path
+   parameter, that it is destructive, and the call to start from.
+3. `elevenlabs_call {"operation": "list_dubs"}` — runs; it is a read.
+4. `elevenlabs_call {"operation": "delete_dubbing", "arguments": {"dubbing_id": "…"}}` — refused:
+   no `confirm`, and (by default) the switch is off. The agent asks the user; the owner turns the
+   switch on in Settings → ElevenLabs if they want agents to do this at all.
+5. `elevenlabs_call {"operation": "delete_dubbing", "arguments": {"dubbing_id": "…"}, "confirm": true}`.
+
+The same over HTTP, from this Mac only:
+
+```sh
+T=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/Library/Application Support/SiliconOptimizer/control.json")))["token"])')
+P=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/Library/Application Support/SiliconOptimizer/control.json")))["port"])')
+curl -s -H "Authorization: Bearer $T" "http://127.0.0.1:$P/elevenlabs/operations?q=dubbing&limit=5"
+curl -s -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+  -d '{"operation":"text_to_speech_full","arguments":{"voice_id":"<voice_id>","text":"Hello."}}' \
+  "http://127.0.0.1:$P/elevenlabs/call"
+```
+
+### What is refused, and why
+
+| Refused | Status | Why |
+|---|---|---|
+| Any caller but this Mac's control token on loopback — full-scope and chat phones, swarm peers | 403 (401 where the token is not a credential on that listener) | Credits and phone calls are the owner's decision at the Mac |
+| A browser `Host`/`Origin` on loopback | 403 | A page that rebinds its name to 127.0.0.1 is still a page |
+| `destructive` / `realWorld` without `confirm: true` and the switch | 403 | Deleting, calling, inviting, minting keys need the user's yes and the owner's leave |
+| Nothing linked | 409 | |
+| An upload that is not a regular file of this user's, anything under `/dev`, a relative path, an unknown file field | 400 | The Mac reads the owner's disk only for what the call is meant to send |
+| Uploads over 3 GiB in all | 413 | |
+
+### Tests
+
+`Tests/SiliconTests/ElevenLabs/ElevenLabsControl*` and `Tests/SiliconMCPTests/ElevenLabsToolsTests.swift`,
+all hermetic (the in-memory transport, a fake credential with a planted key, temporary folders):
+
+- the caller policy: every caller class on both listeners on every route, the one sentence, and a
+  phone or peer refused before its declared body arrives, with the app never asked;
+- the routes and the envelope; the handler's status, search, describe, gate (five classes ×
+  confirm × switch), order of checks, error mapping, redaction and a planted key; big answers;
+  uploads (symlinks, folders, a pipe, `/dev/null`, caps, cleanup, scrubbed errors);
+- the MCP tools' schemas, what they send, what they refuse, and how answers read;
+- end to end — MCP tool, HTTP, the real server and policy, the handler, the real client, the
+  in-memory transport — for **every one of the 403 operations** through `elevenlabs_call`, and
+  `elevenlabs_describe_operation` returning the body schema of every operation that has one.

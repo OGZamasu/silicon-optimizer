@@ -13,7 +13,8 @@ struct ElevenLabsSettingsSection: View {
     /// survive a trip to another pane and back.
     @Binding var draft: String
 
-    @State private var connection = ElevenLabsConnectionModel()
+    /// Held by the pane state, so a check in progress survives this view being rebuilt.
+    private var connection: ElevenLabsConnectionModel { model.elevenLabsPane.connection }
     @State private var confirmingRemove = false
     @FocusState private var keyFieldFocused: Bool
 
@@ -79,7 +80,7 @@ struct ElevenLabsSettingsSection: View {
                 SecureField(
                     "API key",
                     text: $draft,
-                    prompt: Text(model.elevenLabsLinked ? "Paste a new key to replace it" : "xi-api-key")
+                    prompt: Text(model.elevenLabsLinked ? "Paste a new key to replace it" : "Paste your API key")
                 )
                 .labelsHidden()
                 .textFieldStyle(.roundedBorder)
