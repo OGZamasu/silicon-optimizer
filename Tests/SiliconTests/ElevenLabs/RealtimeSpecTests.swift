@@ -79,6 +79,117 @@ struct RealtimeSpecTests {
         #expect(!result.output.contains("asyncapi"))
     }
 
+    // MARK: - Fidelity: the sessions speak the pinned spec
+
+    /// Every query parameter a session can send is one the pinned AsyncAPI names for that socket,
+    /// so a refresh that renames one fails here rather than at the owner's.
+    @Test func everyQueryParameterTheSessionsSendIsInThePinnedSpec() throws {
+        var speech = ElevenLabsSpeechStreamConfig(
+            voiceID: "v", modelID: "m", outputFormat: "pcm_16000", languageCode: "en", inactivityTimeout: 30,
+            syncAlignment: true, autoMode: true, applyTextNormalization: "auto", seed: 1, enableSSMLParsing: true,
+            enableLogging: false
+        )
+        speech.voiceSettings = .init(stability: 0.5)
+        let speechNames = Set(speech.queryItems().map(\.name))
+        #expect(speechNames.count == 10)
+        #expect(speechNames.isSubset(of: try Self.queryNames("tts-stream-input", "/v1/text-to-speech/{voice_id}/stream-input")))
+        #expect(speechNames.isSubset(of: try Self.queryNames("tts-multi-stream-input", "/v1/text-to-speech/{voice_id}/multi-stream-input")))
+
+        var transcription = ElevenLabsTranscriptionStreamConfig()
+        transcription.commitStrategy = .vad
+        transcription.vadSilenceThresholdSeconds = 1
+        transcription.vadThreshold = 0.5
+        transcription.minSpeechDurationMs = 100
+        transcription.minSilenceDurationMs = 100
+        transcription.languageCode = "en"
+        transcription.secondaryLanguages = ["de"]
+        transcription.includeTimestamps = true
+        transcription.includeLanguageDetection = true
+        transcription.keyterms = ["x"]
+        transcription.noVerbatim = true
+        transcription.transcriptEdit = "y"
+        transcription.filterBackgroundAudio = false
+        transcription.enableLogging = true
+        let transcriptionNames = Set(transcription.queryItems().map(\.name))
+        #expect(transcriptionNames.count == 16)
+        #expect(transcriptionNames.isSubset(of: try Self.queryNames("stt-realtime", "/v1/speech-to-text/realtime")))
+        #expect(try Self.queryNames("stt-realtime", "/v1/speech-to-text/realtime").contains("entity_detection"))
+
+        #expect(try Self.queryNames("agents-conversation", "/v1/convai/conversation") == ["agent_id"])
+    }
+
+    /// The bounds and lists the sessions check against are the pinned spec's own.
+    @Test func theBoundsAndListsAreThePinnedSpecs() throws {
+        let tts = try Self.outline("tts-stream-input")
+        #expect(tts.contains("channels./v1/text-to-speech/{voice_id}/stream-input.bindings.ws.query.properties.inactivity_timeout.maximum = 180"))
+        #expect(tts.contains("channels./v1/text-to-speech/{voice_id}/stream-input.bindings.ws.headers.properties.xi-api-key.type = string"))
+        let stt = try Self.outline("stt-realtime")
+        let formats = Set(stt.compactMap { $0.hasPrefix("components.schemas.AudioFormatEnum.enum[] = ") ? $0.components(separatedBy: " = ").last : nil })
+        #expect(formats == Set(ElevenLabsTranscriptionStreamConfig.audioFormats.map(\.name)))
+        #expect(stt.contains("components.schemas._v1_speech-to-text_realtime_model_id.enum[] = scribe_v2_realtime"))
+        let agents = try Self.outline("agents-conversation")
+        let outputs = Set(agents.compactMap {
+            $0.hasPrefix("components.schemas.ConversationInitiationMetadataConversationInitiationMetadataEventAgentOutputAudioFormat.enum[] = ")
+                ? $0.components(separatedBy: " = ").last : nil
+        })
+        #expect(!outputs.isEmpty)
+        #expect(outputs.allSatisfy { ElevenLabsAudioEncoding(name: $0) != nil }, "every negotiated format decodes: \(outputs)")
+    }
+
+    /// Every message type the pinned specs name is one the sessions decode (server side) or
+    /// send (client side) — a new event in a refresh fails here until it is handled.
+    @Test func everyMessageTypeInThePinnedSpecsIsHandled() throws {
+        let clientTypes: Set<String> = [
+            "conversation_initiation_client_data", "user_message", "contextual_update", "user_activity", "pong",
+            "client_tool_result", "mcp_tool_approval_result", "feedback", "multimodal_message", "file_input",
+        ]
+        let agentTypes = Set(try Self.outline("agents-conversation").compactMap { line -> String? in
+            guard line.contains(".properties.type.enum[] = ") else { return nil }
+            return line.components(separatedBy: " = ").last
+        })
+        #expect(agentTypes.isSuperset(of: clientTypes.subtracting(["file_input"])))
+        for type in agentTypes.subtracting(clientTypes) {
+            let decoded = ElevenLabsAgentEvent.decode(["type": .string(type)])
+            if case .unknown = decoded { Issue.record("the agent event \(type) is in the spec but not decoded") }
+        }
+        let sttTypes = Set(try Self.outline("stt-realtime").compactMap { line -> String? in
+            guard line.contains(".properties.message_type.enum[] = ") else { return nil }
+            return line.components(separatedBy: " = ").last
+        })
+        #expect(sttTypes.contains("input_audio_chunk"))
+        for type in sttTypes.subtracting(["input_audio_chunk"]) {
+            let decoded = ElevenLabsTranscriptionStreamEvent.decode(["message_type": .string(type), "error": "e"])
+            if case .unknown = decoded { Issue.record("the transcription message \(type) is in the spec but not decoded") }
+        }
+        #expect(sttTypes.subtracting(["input_audio_chunk", "session_started", "partial_transcript", "committed_transcript",
+                                      "committed_transcript_with_timestamps", "committed_transcript_entities", "warning",
+                                      "edited_transcript"])
+            .isSubset(of: ElevenLabsTranscriptionStreamEvent.errorTypes))
+    }
+
+    /// The transcription cost notes quote ElevenLabs: the same premiums the pinned REST spec states
+    /// for file transcription, so a price change there fails here.
+    @Test func theTranscriptionCostNotesHaveTheirEvidence() throws {
+        let repository = Self.repository
+        // The pinned spec itself: the catalog keeps descriptions short.
+        let spec = try JSONValue.parse(Data(contentsOf: repository.appendingPathComponent("Scripts/elevenlabs/openapi.json")))
+        let body = spec["paths"]["/v1/speech-to-text"]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]
+        let name = try #require(body["$ref"].stringValue?.components(separatedBy: "/").last)
+        let properties = spec["components"]["schemas"][name]["properties"]
+        let keyterms = properties["keyterms"]["description"].stringValue ?? ""
+        let edit = properties["transcript_edit"]["description"].stringValue ?? ""
+        #expect(keyterms.contains("20% surcharge"), "\(keyterms)")
+        #expect(edit.contains("30% surcharge") && edit.contains("at least 10 seconds"), "\(edit)")
+    }
+
+    static func queryNames(_ name: String, _ channel: String) throws -> Set<String> {
+        let prefix = "channels.\(channel).bindings.ws.query.properties."
+        return Set(try outline(name).compactMap { line -> String? in
+            guard line.hasPrefix(prefix) else { return nil }
+            return line.dropFirst(prefix.count).split(separator: ".").first.map(String.init)
+        })
+    }
+
     // MARK: - Helpers
 
     static func scratch() throws -> URL {
