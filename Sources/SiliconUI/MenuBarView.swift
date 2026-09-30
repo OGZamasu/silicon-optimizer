@@ -356,7 +356,7 @@ struct MenuBarView: View {
         VStack(spacing: 0) {
             // Driven by `Tab.menuOrder` rather than written out: the list this replaced
             // had drifted, and Cloud had been unreachable from the menu bar for a while.
-            ForEach(AppModel.Tab.menuOrder) { tab in
+            ForEach(AppModel.Tab.menuOrder(elevenLabsLinked: model.elevenLabsLinked)) { tab in
                 menuButton(tab == .chat ? "Open Chat" : tab.rawValue,
                            systemImage: tab.systemImage) {
                     model.selectedTab = tab

@@ -342,9 +342,16 @@ public final class AppModel {
     /// where the work was left.
     public var selectedTab: Tab = .dashboard {
         didSet {
+            // A place that is not listed cannot be selected — not by a restored launch, a
+            // link or a route that names it — so the selection stays where it was.
+            if !selectedTab.isOffered(elevenLabsLinked: elevenLabsLinked) {
+                selectedTab = oldValue.isOffered(elevenLabsLinked: elevenLabsLinked) ? oldValue : .settings
+                return
+            }
             guard selectedTab != oldValue, settings.lastTab != selectedTab.rawValue else { return }
             settings.lastTab = selectedTab.rawValue
-            settings.save()
+            // Only the running app's: a model built for a test must not write preferences.
+            if readsCredentialsFromKeychain { settings.save() }
         }
     }
     public var alert: AlertContent?
@@ -362,6 +369,8 @@ public final class AppModel {
         case video = "Video"
         case swarm = "Swarm"
         case cloud = "Cloud"
+        /// Listed only while an ElevenLabs key is linked: see `isOffered`.
+        case elevenLabs = "ElevenLabs"
         case decisions = "Decisions"
         case settings = "Settings"
 
@@ -373,8 +382,23 @@ public final class AppModel {
         ///
         /// Built from `allCases` rather than written out, because the hand-written version
         /// of this list was already missing Cloud by the time anyone looked.
-        public static var menuOrder: [Tab] {
-            [.chat] + allCases.filter { $0 != .chat && $0 != .settings }
+        ///
+        /// ElevenLabs is left out while no key is linked, as it is from the sidebar.
+        public static func menuOrder(elevenLabsLinked: Bool) -> [Tab] {
+            [.chat] + sidebarOrder(elevenLabsLinked: elevenLabsLinked)
+                .filter { $0 != .chat && $0 != .settings }
+        }
+
+        /// The places the sidebar lists: every case, less the ones not on offer. Anything
+        /// that lists places builds from this rather than from `allCases`.
+        public static func sidebarOrder(elevenLabsLinked: Bool) -> [Tab] {
+            allCases.filter { $0.isOffered(elevenLabsLinked: elevenLabsLinked) }
+        }
+
+        /// Whether this place exists right now. The ElevenLabs pane is only a place while a
+        /// key is linked; without one, Settings is where it is connected.
+        public func isOffered(elevenLabsLinked: Bool) -> Bool {
+            self != .elevenLabs || elevenLabsLinked
         }
 
         public var systemImage: String {
@@ -388,6 +412,7 @@ public final class AppModel {
             case .video: "film"
             case .swarm: "point.3.connected.trianglepath.dotted"
             case .cloud: "cloud"
+            case .elevenLabs: "waveform.and.mic"
             case .decisions: "arrow.triangle.branch"
             case .settings: "gearshape"
             }

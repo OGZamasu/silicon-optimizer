@@ -265,8 +265,15 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     /// The operations this section is built on, in catalog order. The Explorer's are all of
     /// them.
     var operations: [ElevenLabsOperation] {
-        operations(in: ElevenLabsCatalog.all)
+        self == .explorer ? ElevenLabsCatalog.all : Self.catalogIndex[self] ?? []
     }
+
+    /// Every catalog operation by the section it belongs to, worked out once: the pane's list
+    /// shows a count per section on every draw.
+    static let catalogIndex: [ElevenLabsSection: [ElevenLabsOperation]] =
+        Dictionary(grouping: ElevenLabsCatalog.all.compactMap { operation in
+            section(for: operation).map { (section: $0, operation: operation) }
+        }, by: \.section).mapValues { $0.map(\.operation) }
 
     /// `operations`, from a given list — what tests and the search box use.
     func operations(in catalog: [ElevenLabsOperation]) -> [ElevenLabsOperation] {
