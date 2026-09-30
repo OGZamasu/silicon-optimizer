@@ -47,11 +47,16 @@ struct CoreWireTests {
         #expect(parts[1].headers["content-disposition"] == #"form-data; name="files"; filename="sample.mp3""#)
     }
 
+    /// The server sends the first chunk and then holds the rest until the client says it has
+    /// those bytes (or ten seconds pass). A transport that buffered the whole body would never
+    /// say so, and the server would give up waiting — which is what this checks, rather than a
+    /// timing a busy machine could miss.
     @Test func aChunkedAnswerStreamsAsItArrives() async throws {
-        let chunks = (0..<6).map { Data(repeating: UInt8($0), count: 1_000) }
+        let chunks = (0..<4).map { Data(repeating: UInt8($0), count: 1_000) }
+        let firstSeen = LoopbackServer.Gate()
         let server = try LoopbackServer { _ in
             .chunked(status: 200, headers: ["Content-Type": "audio/mpeg", "character-cost": "9"],
-                     chunks: chunks, gap: .milliseconds(200))
+                     chunks: chunks, gap: .milliseconds(20), holdAfterFirst: firstSeen)
         }
         defer { server.stop() }
         let transport = URLSessionTransport.loopbackForTesting(port: Int(server.port))
@@ -59,15 +64,12 @@ struct CoreWireTests {
         #expect(response.status == 200)
         #expect(response.headers["character-cost"] == "9")
         var received = Data()
-        var sentWhenFirstArrived: Int?
         for try await chunk in response.body {
-            if sentWhenFirstArrived == nil { sentWhenFirstArrived = server.chunksSent }
             received.append(chunk)
+            if received.count >= chunks[0].count { firstSeen.open() }
         }
         #expect(received == chunks.reduce(Data(), +))
-        // Counted on the server's side, so a busy machine cannot fake it: the first bytes
-        // were in hand while most of the answer had not been sent yet.
-        #expect(try #require(sentWhenFirstArrived) < chunks.count)
+        #expect(!firstSeen.timedOut, "the first chunk did not reach the caller until the whole answer had")
     }
 
     @Test func redirectsAreAnsweredNotFollowed() async throws {
@@ -224,7 +226,9 @@ final class LoopbackServer: @unchecked Sendable {
 
     enum Reply {
         case whole(status: Int, headers: [String: String], body: Data)
-        case chunked(status: Int, headers: [String: String], chunks: [Data], gap: Duration)
+        /// `holdAfterFirst`: after the first chunk, wait for the gate to open (or ten seconds).
+        case chunked(status: Int, headers: [String: String], chunks: [Data], gap: Duration,
+                     holdAfterFirst: Gate? = nil)
         case hang
     }
 
@@ -234,14 +238,21 @@ final class LoopbackServer: @unchecked Sendable {
     private let handler: @Sendable (Request) -> Reply
     private var recorded: [Request] = []
     private var closed = 0
-    private var sentChunks = 0
     private var connections: [NWConnection] = []
     private(set) var port: UInt16 = 0
 
     var requests: [Request] { lock.withLock { recorded } }
     var closedConnections: Int { lock.withLock { closed } }
-    /// Chunks of a chunked answer written so far, across connections.
-    var chunksSent: Int { lock.withLock { sentChunks } }
+    /// A one-way signal from the test to the server.
+    final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isOpen = false
+        private var gaveUp = false
+        func open() { lock.withLock { isOpen = true } }
+        var opened: Bool { lock.withLock { isOpen } }
+        var timedOut: Bool { lock.withLock { gaveUp } }
+        func giveUp() { lock.withLock { gaveUp = true } }
+    }
 
     init(handler: @escaping @Sendable (Request) -> Reply) throws {
         self.handler = handler
@@ -355,18 +366,31 @@ final class LoopbackServer: @unchecked Sendable {
             var bytes = Data((head + "\r\n").utf8)
             bytes.append(body)
             connection.send(content: bytes, completion: .contentProcessed { _ in })
-        case .chunked(let status, let headers, let chunks, let gap):
+        case .chunked(let status, let headers, let chunks, let gap, let hold):
             var head = "HTTP/1.1 \(status) Scripted\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n"
             for (name, value) in headers.sorted(by: { $0.key < $1.key }) { head += "\(name): \(value)\r\n" }
             connection.send(content: Data((head + "\r\n").utf8), completion: .contentProcessed { _ in })
             let milliseconds = Int(gap.components.seconds * 1_000 + gap.components.attoseconds / 1_000_000_000_000_000)
             queue.asyncAfter(deadline: .now() + .milliseconds(milliseconds)) { [weak self] in
-                self?.sendChunk(0, of: chunks, gap: milliseconds, on: connection)
+                self?.sendChunk(0, of: chunks, gap: milliseconds, hold: hold, on: connection)
             }
         }
     }
 
-    private func sendChunk(_ index: Int, of chunks: [Data], gap milliseconds: Int, on connection: NWConnection) {
+    private func sendChunk(
+        _ index: Int, of chunks: [Data], gap milliseconds: Int, hold: Gate?, on connection: NWConnection,
+        waited: Int = 0
+    ) {
+        if index == 1, let hold, !hold.opened {
+            guard waited < 10_000 else {
+                hold.giveUp()
+                return sendChunk(index, of: chunks, gap: milliseconds, hold: nil, on: connection)
+            }
+            queue.asyncAfter(deadline: .now() + .milliseconds(10)) { [weak self] in
+                self?.sendChunk(index, of: chunks, gap: milliseconds, hold: hold, on: connection, waited: waited + 10)
+            }
+            return
+        }
         guard index < chunks.count else {
             connection.send(content: Data("0\r\n\r\n".utf8), completion: .contentProcessed { _ in })
             return
@@ -376,9 +400,8 @@ final class LoopbackServer: @unchecked Sendable {
         frame.append(Data("\r\n".utf8))
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard error == nil, let self else { connection.cancel(); return }
-            self.lock.withLock { self.sentChunks += 1 }
             self.queue.asyncAfter(deadline: .now() + .milliseconds(milliseconds)) { [weak self] in
-                self?.sendChunk(index + 1, of: chunks, gap: milliseconds, on: connection)
+                self?.sendChunk(index + 1, of: chunks, gap: milliseconds, hold: hold, on: connection)
             }
         })
     }
