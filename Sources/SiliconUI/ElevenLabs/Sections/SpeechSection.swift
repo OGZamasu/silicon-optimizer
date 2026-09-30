@@ -402,7 +402,7 @@ struct SpeechScreen: View {
                             .id(take.file)
                         subtitleExports
                     }
-                    if let meta = runner.result?.meta {
+                    if let meta = take.meta {
                         ElevenLabsMetaLine(meta: meta)
                     }
                 }

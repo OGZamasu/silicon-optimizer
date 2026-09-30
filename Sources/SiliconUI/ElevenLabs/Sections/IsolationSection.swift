@@ -245,7 +245,7 @@ struct IsolationScreen: View {
                         }
                     }
                     .controlSize(.small)
-                    if let meta = runner.result?.meta { ElevenLabsMetaLine(meta: meta) }
+                    if let meta = take.meta { ElevenLabsMetaLine(meta: meta) }
                 }
                 ElevenLabsRunnerOutput(runner: runner, showsResult: false)
             }

@@ -526,8 +526,38 @@ final class MusicScreenModel: CreativeScreenModel {
 
     func makePlan() async {
         guard planProblems.isEmpty, CreativeRunGate.isKnown(planOperationRunner) else { return }
+        let editorBefore = planEditorState
         guard case .json(let value, _)? = await planOperationRunner.perform(arguments: planArguments()) else { return }
-        load(plan: value)
+        offer(plan: value, editorBefore: editorBefore)
+    }
+
+    /// A plan that answered while the owner was editing the one on screen: kept aside to use
+    /// or drop, rather than replacing the edits.
+    private(set) var arrivedPlan: JSONValue?
+
+    /// What the plan editor holds, to tell whether it changed during a call.
+    private var planEditorState: (plan: MusicPlan?, json: String) { (plan, planJSON) }
+
+    /// Puts an answer's plan in the editor — unless the editor changed since the call started,
+    /// in which case it waits in `arrivedPlan`.
+    private func offer(plan value: JSONValue, editorBefore: (plan: MusicPlan?, json: String)) {
+        if plan == editorBefore.plan, planJSON == editorBefore.json {
+            load(plan: value)
+            arrivedPlan = nil
+        } else {
+            arrivedPlan = value
+        }
+    }
+
+    /// Replaces the editor's plan with the one that arrived.
+    func useArrivedPlan() {
+        guard let arrivedPlan else { return }
+        load(plan: arrivedPlan)
+        self.arrivedPlan = nil
+    }
+
+    func dropArrivedPlan() {
+        arrivedPlan = nil
     }
 
     /// Puts a plan in the editor: typed when it is the sections shape, JSON otherwise.
@@ -631,13 +661,14 @@ final class MusicScreenModel: CreativeScreenModel {
 
     func uploadSong() async {
         guard let uploadSource, CreativeRunGate.isKnown(uploadRunner) else { return }
+        let editorBefore = planEditorState
         guard let result = await uploadRunner.perform(
             arguments: uploadArguments(), files: ["file": [ElevenLabsFile(url: uploadSource)]]
         ), let value = CreativeResults.json(in: result) else { return }
         uploadedSongID = value["song_id"].stringValue
         uploadDetails = MusicDetails(result: result)
         let plan = value["composition_plan"]
-        if plan != .null { load(plan: plan) }
+        if plan != .null { offer(plan: plan, editorBefore: editorBefore) }
     }
 
     // MARK: - Fine-tunes
@@ -684,24 +715,38 @@ final class MusicScreenModel: CreativeScreenModel {
         fillEdit(from: finetune)
         let runner = runner(Self.getFinetune)
         guard CreativeRunGate.isKnown(runner) else { return }
+        let savesBefore = saves[finetune.id, default: 0]
         guard case .json(let value, _)? = await runner.perform(arguments: ["finetune_id": .string(finetune.id)]),
               let fresh = MusicFinetune(json: value), fresh.id == finetune.id else { return }
+        // A save that answered meanwhile is newer than these details, asked before it.
+        guard saves[finetune.id, default: 0] == savesBefore else { return }
         replace(fresh)
         // Another fine-tune may have been chosen while this one's details were on their way.
         guard selectedFinetune?.id == fresh.id else { return }
         selectedFinetune = fresh
-        // Edits typed while they were on their way are kept.
-        if editsUntouched { fillEdit(from: fresh) }
+        mergeEdit(from: fresh)
+    }
+
+    /// Saves answered, by fine-tune: details asked before a save are older than it.
+    @ObservationIgnored private var saves: [String: Int] = [:]
+
+    /// Field by field: one still holding what it was filled with takes the fresh value; one
+    /// the owner typed in keeps what was typed. Save then sends only the typed fields — an
+    /// untouched field never carries the list's older value over the server's.
+    private func mergeEdit(from fresh: MusicFinetune) {
+        guard let base = editBaseline else {
+            fillEdit(from: fresh)
+            return
+        }
+        if editName == base.name { editName = fresh.name }
+        if editGenre == base.genre { editGenre = fresh.primaryGenre ?? "" }
+        if editTags == base.tags { editTags = fresh.tags }
+        if editVisibility == base.visibility { editVisibility = fresh.visibility ?? "" }
+        editBaseline = (fresh.name, fresh.primaryGenre ?? "", fresh.tags, fresh.visibility ?? "")
     }
 
     /// What the edit fields were filled with, to tell the owner's typing from the fill.
     @ObservationIgnored private var editBaseline: (name: String, genre: String, tags: [String], visibility: String)?
-
-    /// Whether the edit fields still hold what they were filled with.
-    private var editsUntouched: Bool {
-        guard let base = editBaseline else { return true }
-        return base.name == editName && base.genre == editGenre && base.tags == editTags && base.visibility == editVisibility
-    }
 
     private func fillEdit(from finetune: MusicFinetune) {
         editName = finetune.name
@@ -751,6 +796,7 @@ final class MusicScreenModel: CreativeScreenModel {
         guard let id = arguments["finetune_id"]?.stringValue,
               case .json(let value, _)? = await runner.perform(arguments: arguments),
               let updated = MusicFinetune(json: value), updated.id == id else { return }
+        saves[id, default: 0] += 1
         replace(updated)
         // Only the fine-tune still on screen takes the answer; another may be chosen by now.
         guard selectedFinetune?.id == id else { return }
@@ -981,7 +1027,7 @@ private struct MusicResultCard: View {
                     if let waveform = details?.waveform, !waveform.isEmpty { MusicWaveform(samples: waveform) }
                     // The shell's meta line names the song of the run on screen; an older take's
                     // id is said here.
-                    if let songID = details?.songID, runner.result?.meta.headers["song-id"] != songID {
+                    if let songID = details?.songID, take.meta?.headers["song-id"] != songID {
                         Text("Song \(songID)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     if let metadata = details?.metadata {
@@ -993,7 +1039,7 @@ private struct MusicResultCard: View {
                             Button("Edit this plan") { screen.editReturnedPlan(of: take) }.controlSize(.small)
                         }
                     }
-                    if let meta = runner.result?.meta { ElevenLabsMetaLine(meta: meta) }
+                    if let meta = take.meta { ElevenLabsMetaLine(meta: meta) }
                 }
                 ElevenLabsRunnerOutput(runner: runner, showsResult: false)
             }
@@ -1021,6 +1067,18 @@ private struct MusicPlanTab: View {
             Task { await screen.makePlan() }
         }
         ElevenLabsRunnerOutput(runner: screen.planOperationRunner, showsResult: false)
+        if screen.arrivedPlan != nil {
+            CreativeCard {
+                HStack(spacing: 8) {
+                    Label("A new plan arrived while you were editing this one.", systemImage: "tray.and.arrow.down")
+                        .font(.callout)
+                    Spacer()
+                    Button("Keep mine") { screen.dropArrivedPlan() }
+                    Button("Use the new plan") { screen.useArrivedPlan() }.buttonStyle(.borderedProminent)
+                }
+                .controlSize(.small)
+            }
+        }
         if screen.plan != nil || !screen.planJSON.isEmpty {
             CreativeCard("The plan", systemImage: "music.quarternote.3") {
                 Button("Compose this") { screen.composeFromPlan() }

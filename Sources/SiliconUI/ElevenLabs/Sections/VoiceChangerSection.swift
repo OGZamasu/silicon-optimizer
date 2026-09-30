@@ -221,7 +221,7 @@ struct VoiceChangerScreen: View {
                         ElevenLabsAudioPlayerView(url: original, title: "Before — \(original.lastPathComponent)").id(original)
                     }
                     CreativeAudioResult(take: take, title: "After — \(take.title)")
-                    if let meta = runner.result?.meta { ElevenLabsMetaLine(meta: meta) }
+                    if let meta = take.meta { ElevenLabsMetaLine(meta: meta) }
                 }
                 ElevenLabsRunnerOutput(runner: runner, showsResult: false)
             }

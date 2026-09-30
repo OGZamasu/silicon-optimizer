@@ -330,7 +330,7 @@ final class TranscriptionScreenModel: CreativeScreenModel {
     /// The audio length billed at the base rate: the file's length, times its channels with
     /// one speaker per channel.
     var billedSeconds: Double? {
-        guard let seconds = sourceSeconds, let channels = billedChannels else { return nil }
+        guard let seconds = sourceSeconds, let channels = billedChannels, channels <= Self.maxChannels else { return nil }
         return seconds * Double(channels)
     }
 

@@ -117,6 +117,7 @@ struct CreativeScreenTests {
         #expect(take.requestID == "req-1")
         #expect(take.characterCost == 12)
         #expect(take.outputFormat == "wav_44100", "the take keeps the format the run asked for")
+        #expect(take.meta?.requestID == "req-1", "the take keeps its own answer's meta line")
         #expect(FileManager.default.fileExists(atPath: take.file.path))
 
         speech.continueFromLastTake = true
@@ -659,6 +660,27 @@ struct CreativeScreenTests {
         #expect(isolation.items.count == 1)
     }
 
+    /// Whether a history page was a search is judged by what was sent: a search cleared while
+    /// it loads still pages by search, where "more" means a next page.
+    @Test func isolationJudgesASearchByWhatWasSent() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let page: JSONValue = ["items": [], "has_more": true]
+        rig.always(IsolationScreenModel.history, .json(page))
+        let isolation = rig.session.isolation
+        // Without a search, "more" asks for a bigger page, up to the spec's maximum.
+        await isolation.refreshHistory()
+        while isolation.hasMore { await isolation.loadMoreHistory() }
+        #expect(isolation.pageSize == Int(IsolationScreenModel.pageSizeRange.upperBound))
+        isolation.search = "interview"
+        rig.always(IsolationScreenModel.history, Self.late(page))
+        let loading = Task { await isolation.refreshHistory() }
+        try await CreativeRig.waitUntil { rig.requests(IsolationScreenModel.history).last?.request.url.query?.contains("search=interview") == true }
+        isolation.search = ""
+        await loading.value
+        #expect(isolation.hasMore, "the page sent was a search, so its next page is still there")
+    }
+
     @Test func anIsolationKeepsTheRecordingItCameFrom() async throws {
         let rig = CreativeRig()
         defer { rig.clean() }
@@ -1052,9 +1074,79 @@ struct CreativeScreenTests {
 
     // MARK: - Answers that arrive late
 
-    static func finetuneJSON(_ id: String, _ name: String) -> JSONValue {
-        ["id": .string(id), "name": .string(name), "tags": [], "model_id": "music_v1", "created_at": "2026-09-01T00:00:00Z",
-         "visibility": "private", "created_by": "self", "status": "completed", "training_progress": 1]
+    static func finetuneJSON(_ id: String, _ name: String, tags: [String] = [], genre: String? = nil) -> JSONValue {
+        var object: [String: JSONValue] = [
+            "id": .string(id), "name": .string(name), "tags": .array(tags.map(JSONValue.string)), "model_id": "music_v1",
+            "created_at": "2026-09-01T00:00:00Z", "visibility": "private", "created_by": "self", "status": "completed",
+            "training_progress": 1,
+        ]
+        if let genre { object["primary_genre"] = .string(genre) }
+        return .object(object)
+    }
+
+    /// Details that arrive after the owner typed in one field: that field keeps what was
+    /// typed, every other field takes the fresh value, and Save sends only what was typed — an
+    /// untouched field never carries the list's older value over the server's.
+    @Test func keptEditsDoNotSaveStaleUntouchedFields() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.listFinetunes, .json(["finetunes": [Self.finetuneJSON("A", "Alpha", tags: ["old"], genre: "house")],
+                                                          "has_more": false]))
+        rig.always(MusicScreenModel.getFinetune, Self.late(Self.finetuneJSON("A", "Alpha", tags: ["new"], genre: "techno")))
+        let music = rig.session.music
+        await music.refreshFinetunes()
+        let selecting = Task { await music.select(music.finetunes[0]) }
+        try await CreativeRig.waitUntil { !rig.requests(MusicScreenModel.getFinetune).isEmpty }
+        music.editName = "Alpha 2"
+        await selecting.value
+        #expect(music.editName == "Alpha 2")
+        #expect(music.editTags == ["new"])
+        #expect(music.editGenre == "techno")
+        #expect(music.updateArguments() == ["finetune_id": "A", "name": "Alpha 2"])
+    }
+
+    /// Details asked before a save that answered first are older than it: they do not put the
+    /// old name back in the list, the selection or the field.
+    @Test func lateDetailsDoNotUndoASaveThatLandedFirst() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.listFinetunes, .json(["finetunes": [Self.finetuneJSON("A", "Alpha")], "has_more": false]))
+        rig.always(MusicScreenModel.getFinetune, Self.late(Self.finetuneJSON("A", "Alpha"), .milliseconds(600)))
+        rig.always(MusicScreenModel.updateFinetune, .json(Self.finetuneJSON("A", "Alpha renamed")))
+        let music = rig.session.music
+        await music.refreshFinetunes()
+        let selecting = Task { await music.select(music.finetunes[0]) }
+        try await CreativeRig.waitUntil { !rig.requests(MusicScreenModel.getFinetune).isEmpty }
+        music.editName = "Alpha renamed"
+        await music.saveFinetune()
+        await selecting.value
+        #expect(music.selectedFinetune?.name == "Alpha renamed")
+        #expect(music.finetunes.first?.name == "Alpha renamed")
+        #expect(music.editName == "Alpha renamed")
+    }
+
+    /// A plan that answers while the owner edits the one on screen waits to be used, rather
+    /// than replacing the edits.
+    @Test func aPlanThatArrivesDuringEditsWaitsToBeUsed() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        rig.always(MusicScreenModel.plan, Self.late(Self.planJSON))
+        let music = rig.session.music
+        music.load(plan: Self.planJSON)
+        music.planPrompt = "Another take"
+        let making = Task { await music.makePlan() }
+        try await CreativeRig.waitUntil { !rig.requests(MusicScreenModel.plan).isEmpty }
+        music.plan?.sections[0].name = "My intro"
+        await making.value
+        #expect(music.plan?.sections[0].name == "My intro", "the edit made during the call is kept")
+        #expect(music.arrivedPlan != nil)
+        music.useArrivedPlan()
+        #expect(music.plan?.sections[0].name == "Intro")
+        #expect(music.arrivedPlan == nil)
+        // Untouched during the call, the answer goes straight in.
+        rig.always(MusicScreenModel.plan, .json(["chunks": []]))
+        await music.makePlan()
+        #expect(music.plan == nil && music.planJSON.contains("chunks"))
     }
 
     static func late(_ value: JSONValue, _ delay: Duration = .milliseconds(400)) -> FakeElevenLabsTransport.Reply {
@@ -1215,6 +1307,7 @@ struct CreativeScreenTests {
         stt.useMultiChannel = true
         #expect(stt.billedChannels == 6)
         #expect(stt.costNote?.contains("more than 5 are not supported") == true)
+        #expect(stt.billedSeconds == nil, "no cost is stated for a file the spec does not support")
     }
 
     // MARK: - Controls

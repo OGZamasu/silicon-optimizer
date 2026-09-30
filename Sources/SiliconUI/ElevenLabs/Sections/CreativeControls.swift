@@ -809,6 +809,9 @@ struct CreativeTake: Identifiable, Hashable, Sendable {
     var characterCost: Int?
     /// The `output_format` the run asked for: headerless audio's sample rate comes from it.
     var outputFormat: String?
+    /// Status, request id and cost of the answer that made it — drawn with the take, so a
+    /// newer run's (or a failed run's) state never shows under it.
+    var meta: ElevenLabsMeta?
 
     /// Nil when the answer wrote no file.
     init?(result: ElevenLabsResult, title: String, outputFormat: String? = nil, date: Date = Date()) {
@@ -821,6 +824,7 @@ struct CreativeTake: Identifiable, Hashable, Sendable {
         requestID = CreativeResults.requestID(of: result)
         characterCost = result.meta.characterCost
         self.outputFormat = outputFormat
+        meta = result.meta
     }
 
     /// For a run's answer: the take, with the format the runner asked for.
