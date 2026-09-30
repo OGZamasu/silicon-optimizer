@@ -60,8 +60,9 @@ struct AgentBatchCallsScreen: View {
                 if let batch = model.batch {
                     AgentBatchDetail(model: model, batch: batch)
                 } else if model.selectedID != nil {
-                    AgentsCard("Loading the batch…") {
-                        AgentsRunnerError(runner: model.calls.runner(AgentsOp.getBatch, slot: model.selectedID ?? ""))
+                    let load = model.batchLoad
+                    AgentsCard(load == .loading ? "Loading the batch…" : "Could not load the batch") {
+                        AgentsDetailLoadProblem(load: load)
                     }
                 } else {
                     AgentsCard("No batch selected") {
@@ -275,6 +276,11 @@ final class AgentBatchCallsModel {
     var detailsLoaded: Bool {
         guard let selectedID else { return false }
         return batch?.id == selectedID && loadedBatchID == selectedID
+    }
+
+    /// The selected batch's recipients: in, on their way, or not coming (the error, and how to retry).
+    var batchLoad: AgentsDetailLoad {
+        .of(loaded: detailsLoaded, runner: selectedID.map { calls.runner(AgentsOp.getBatch, slot: $0) })
     }
 
     // Composer
@@ -693,13 +699,13 @@ private struct AgentBatchDetail: View {
                 AgentsFact(label: "Starts", value: AgentsFormat.date(batch.scheduledAt))
                 AgentsFact(label: "Progress", value: "\(batch.dispatched) placed, \(batch.finished) finished, of \(batch.scheduled)")
                 ProgressView(value: Double(batch.finished), total: Double(max(batch.scheduled, 1)))
-                AgentsRunnerError(runner: calls.runner(AgentsOp.getBatch, slot: batch.id))
+                AgentsDetailLoadProblem(load: model.batchLoad)
             }
             AgentsCard("Actions") {
                 VStack(alignment: .leading, spacing: 10) {
                     if batch.isActive {
                         AgentsRunButton(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id), title: "Stop the batch…",
-                                        disabled: !model.detailsLoaded, disabledReason: "Waiting for the batch's recipients.") {
+                                        disabled: !model.detailsLoaded, disabledReason: model.batchLoad.reason(waiting: "Waiting for the batch's recipients.")) {
                             Task { await model.cancel() }
                         }
                         AgentsRunnerOutput(runner: calls.runner(AgentsOp.cancelBatch, slot: batch.id))
@@ -709,7 +715,7 @@ private struct AgentBatchDetail: View {
                                      title: "Call \(AgentsFormat.count(model.retryCount, "recipient")) again…",
                                      disabled: !model.detailsLoaded || model.retryCount == 0 || batch.isActive,
                                      disabledReason: batch.isActive ? "The batch is still running."
-                                         : model.detailsLoaded ? nil : "Waiting for the batch's recipients.") {
+                                         : model.batchLoad.reason(waiting: "Waiting for the batch's recipients.")) {
                         Task { await model.retry() }
                     }
                     Text("Retry calls the recipients whose calls failed or went unanswered.")
@@ -752,7 +758,7 @@ private struct AgentBatchDetail: View {
             }
             AgentsCard("Delete") {
                 AgentsRunButton(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id), title: "Delete the batch…",
-                                disabled: !model.detailsLoaded, disabledReason: "Waiting for the batch's recipients.") {
+                                disabled: !model.detailsLoaded, disabledReason: model.batchLoad.reason(waiting: "Waiting for the batch's recipients.")) {
                     Task { await model.delete() }
                 }
                 AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteBatch, slot: batch.id))

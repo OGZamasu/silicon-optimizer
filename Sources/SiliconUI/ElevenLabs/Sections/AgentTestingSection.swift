@@ -304,6 +304,23 @@ final class AgentTestingModel {
     /// Whether the selected test's details are still on their way: Save and Delete wait for them.
     var isLoadingTest: Bool { selectedID != nil && loadedTestID != selectedID }
 
+    /// The selected test's fields: in (or a new test), on their way, or not coming (the error,
+    /// and how to retry).
+    var testLoad: AgentsDetailLoad {
+        guard let selectedID else { return .loaded }
+        return .of(loaded: !isLoadingTest, runner: calls.runner(AgentsOp.getTest, slot: selectedID))
+    }
+
+    /// The editor card's title: the test's name once it is in, else where its fetch stands.
+    var editorTitle: String {
+        guard selectedID != nil else { return "New test" }
+        switch testLoad {
+        case .loaded: return draft.name
+        case .loading: return "Loading the test…"
+        case .failed: return "Could not load the test"
+        }
+    }
+
     func select(_ id: String) async {
         editing = true
         selectedID = id
@@ -550,10 +567,11 @@ private struct AgentTestEditor: View {
         let runner = model.selectedID.map { model.calls.runner(AgentsOp.updateTest, slot: $0) }
             ?? model.calls.runner(AgentsOp.createTest)
         VStack(alignment: .leading, spacing: 14) {
-            AgentsCard(model.selectedID == nil ? "New test" : model.isLoadingTest ? "Loading the test…" : model.draft.name) {
+            let load = model.testLoad
+            AgentsCard(model.editorTitle) {
                 if let id = model.selectedID {
                     AgentsFact(label: "ID", value: id, monospaced: true)
-                    AgentsRunnerError(runner: model.calls.runner(AgentsOp.getTest, slot: id))
+                    AgentsDetailLoadProblem(load: load)
                 }
                 Form {
                     TextField("Name", text: $model.draft.name, prompt: Text("Refund request is escalated"))
@@ -623,16 +641,19 @@ private struct AgentTestEditor: View {
                 }
             }
             AgentsCard("Save") {
-                ElevenLabsProblemList(problems: model.draft.problems)
+                if load.isLoaded {
+                    ElevenLabsProblemList(problems: model.draft.problems)
+                }
                 HStack {
                     AgentsRunButton(runner: runner, title: model.selectedID == nil ? "Create test" : "Save test",
-                                        disabled: model.isLoadingTest || !model.draft.problems.isEmpty
-                                            || (model.selectedID != nil && !model.isDirty)) {
+                                        disabled: !load.isLoaded || !model.draft.problems.isEmpty
+                                            || (model.selectedID != nil && !model.isDirty),
+                                        disabledReason: load.reason(waiting: "Waiting for the test.")) {
                         Task { await model.save() }
                     }
                     if model.selectedID != nil {
                         AgentsRunButton(runner: model.calls.runner(AgentsOp.deleteTest, slot: model.selectedID ?? ""), title: "Delete…",
-                                        disabled: model.isLoadingTest) {
+                                        disabled: !load.isLoaded, disabledReason: load.reason(waiting: "Waiting for the test.")) {
                             Task { await model.delete() }
                         }
                     }

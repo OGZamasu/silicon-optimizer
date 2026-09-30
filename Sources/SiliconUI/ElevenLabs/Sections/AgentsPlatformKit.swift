@@ -1473,6 +1473,61 @@ struct AgentsSendButton: View {
 }
 
 /// A run's error in one line, for reads that fill a list or a detail.
+/// Where the selected item's details are: in, on their way, or not coming — the fetch failed.
+enum AgentsDetailLoad: Equatable {
+    case loaded, loading
+    /// The fetch failed; ElevenLabs' answer (or the reason it never came).
+    case failed(String)
+
+    static let retryHint = "Could not load it — select it again to retry."
+
+    /// From whether the details on screen are the selected item's and the runner that fetches
+    /// them: a failure stands until the item is selected again (a new fetch clears it).
+    @MainActor
+    static func of(loaded: Bool, runner: ElevenLabsRunner?) -> AgentsDetailLoad {
+        if let runner, !runner.isRunning, let failure = runner.failure { return .failed(failure.message) }
+        return loaded ? .loaded : .loading
+    }
+
+    var isLoaded: Bool { self == .loaded }
+
+    /// Why an action on the item waits: `waiting` while the details are on their way, the retry
+    /// hint once their fetch failed; nil when they are in.
+    func reason(waiting: String) -> String? {
+        switch self {
+        case .loaded: nil
+        case .loading: waiting
+        case .failed: Self.retryHint
+        }
+    }
+
+    /// The lines drawn under the selected item: the error and the retry hint once the fetch failed.
+    var problemLines: [String] {
+        if case .failed(let message) = self { [message, Self.retryHint] } else { [] }
+    }
+}
+
+/// A failed fetch of the selected item: ElevenLabs' answer and how to try again.
+struct AgentsDetailLoadProblem: View {
+    let load: AgentsDetailLoad
+
+    var body: some View {
+        let lines = load.problemLines
+        if let message = lines.first {
+            VStack(alignment: .leading, spacing: 2) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(lines.dropFirst(), id: \.self) { line in
+                    Text(line).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
 struct AgentsRunnerError: View {
     let runner: ElevenLabsRunner
 

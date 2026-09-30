@@ -1254,6 +1254,8 @@ final class AgentsBranchesModel {
     private(set) var selectedProcedureID: String?
     /// "branch/procedure" of the procedure whose fields the editor holds; nil for a new one or while loading.
     private(set) var loadedProcedureKey: String?
+    /// The operation that fetches the open procedure (its draft, or the committed version).
+    private(set) var procedureFetchOperation: String?
     var procedureName = ""
     var procedureType = "free_form"
     var procedureTrigger = ""
@@ -1504,6 +1506,7 @@ final class AgentsBranchesModel {
             "agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(procedure.id),
         ]
         let operation = procedure.hasDraft ? AgentsOp.getProcedureDraft : AgentsOp.getProcedure
+        procedureFetchOperation = operation
         guard let json = await json(operation, arguments, quiet: true), selectedProcedureID == procedure.id,
               selectedBranchID == branch.id else { return }
         procedureName = json["name"].stringValue ?? procedure.name
@@ -1521,6 +1524,13 @@ final class AgentsBranchesModel {
         return loadedProcedureKey == "\(selectedBranchID)/\(selectedProcedureID)"
     }
 
+    /// The open procedure's text: in (or a new procedure), on its way, or not coming (the error,
+    /// and how to retry).
+    var procedureLoad: AgentsDetailLoad {
+        guard selectedProcedureID != nil else { return .loaded }
+        return .of(loaded: procedureIsLoaded, runner: procedureFetchOperation.map { runner($0) })
+    }
+
     func newProcedure() {
         selectedProcedureID = nil
         loadedProcedureKey = nil
@@ -1532,7 +1542,7 @@ final class AgentsBranchesModel {
 
     /// Creates the procedure, or saves the edits to the open one as its draft.
     func saveProcedure() async {
-        guard procedureIsLoaded, let branch = selectedBranch else { return }
+        guard procedureLoad.isLoaded, let branch = selectedBranch else { return }
         var arguments: [String: JSONValue] = [
             "agent_id": .string(agentID), "branch_id": .string(branch.id),
             "name": .string(procedureName.trimmingCharacters(in: .whitespaces)), "type": .string(procedureType),
@@ -1555,7 +1565,7 @@ final class AgentsBranchesModel {
     }
 
     func discardProcedureDraft() async {
-        guard procedureIsLoaded, let branch = selectedBranch, let id = selectedProcedureID else { return }
+        guard procedureLoad.isLoaded, let branch = selectedBranch, let id = selectedProcedureID else { return }
         guard await json(
             AgentsOp.deleteProcedureDraft,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(id)],
@@ -1567,7 +1577,7 @@ final class AgentsBranchesModel {
     }
 
     func removeProcedure() async {
-        guard procedureIsLoaded, let branch = selectedBranch, let id = selectedProcedureID else { return }
+        guard procedureLoad.isLoaded, let branch = selectedBranch, let id = selectedProcedureID else { return }
         guard await json(
             AgentsOp.removeProcedure,
             ["agent_id": .string(agentID), "branch_id": .string(branch.id), "procedure_id": .string(id)],
@@ -1612,6 +1622,11 @@ final class AgentsBranchesModel {
     /// Whether the details on screen are the selected proposal's: acting waits for them.
     var proposalIsLoaded: Bool {
         selectedProposalID != nil && proposal["id"].stringValue == selectedProposalID
+    }
+
+    /// The selected proposal's details: in, on their way, or not coming (the error, and how to retry).
+    var proposalLoad: AgentsDetailLoad {
+        .of(loaded: proposalIsLoaded, runner: selectedProposalID.map { _ in runner(AgentsOp.getMergeProposal) })
     }
 
     func propose() async {
@@ -1783,6 +1798,7 @@ private struct AgentsProceduresEditor: View {
             }
             TextField("When it applies", text: $model.procedureTrigger, prompt: Text("The caller wants a refund"))
                 .textFieldStyle(.roundedBorder)
+            AgentsDetailLoadProblem(load: model.procedureLoad)
             TextEditor(text: $model.procedureContent)
                 .font(.callout)
                 .frame(minHeight: 100)
@@ -1790,16 +1806,16 @@ private struct AgentsProceduresEditor: View {
             HStack {
                 let saveOperation = model.selectedProcedureID == nil ? AgentsOp.createProcedure : AgentsOp.updateProcedureDraft
                 AgentsRunButton(runner: model.runner(saveOperation), title: model.selectedProcedureID == nil ? "Create" : "Save draft",
-                                    disabled: !model.procedureIsLoaded
+                                    disabled: !model.procedureLoad.isLoaded
                                         || model.procedureName.trimmingCharacters(in: .whitespaces).isEmpty,
-                                    disabledReason: model.procedureIsLoaded ? nil : "Waiting for the procedure's text.") {
+                                    disabledReason: model.procedureLoad.reason(waiting: "Waiting for the procedure's text.")) {
                     Task { await model.saveProcedure() }
                 }
                 if model.selectedProcedureID != nil {
                     Button("Discard draft…") { Task { await model.discardProcedureDraft() } }
-                        .disabled(!model.procedureIsLoaded)
+                        .disabled(!model.procedureLoad.isLoaded)
                     Button("Remove…") { Task { await model.removeProcedure() } }
-                        .disabled(!model.procedureIsLoaded)
+                        .disabled(!model.procedureLoad.isLoaded)
                 }
             }
             ForEach([AgentsOp.createProcedure, AgentsOp.updateProcedureDraft, AgentsOp.deleteProcedureDraft,
@@ -2002,6 +2018,14 @@ private struct AgentsBranchesTab: View {
                 }
                 AgentsRunnerOutput(runner: model.runner(AgentsOp.createMergeProposal), showsResult: false)
             }
+            if model.selectedProposalID != nil, !model.proposalIsLoaded {
+                Divider()
+                let load = model.proposalLoad
+                if load == .loading {
+                    Text("Loading the proposal…").font(.caption).foregroundStyle(.secondary)
+                }
+                AgentsDetailLoadProblem(load: load)
+            }
             if model.proposal != .null {
                 Divider()
                 let proposal = model.proposal
@@ -2028,7 +2052,8 @@ private struct AgentsBranchesTab: View {
                 }
                 HStack {
                     AgentsRunButton(runner: model.runner(AgentsOp.acceptMergeProposal), title: "Merge it…",
-                                    disabled: !model.proposalIsLoaded, disabledReason: "Waiting for the proposal's details.") {
+                                    disabled: !model.proposalIsLoaded,
+                                    disabledReason: model.proposalLoad.reason(waiting: "Waiting for the proposal's details.")) {
                         model.requestAcceptProposal(agentName: agentName)
                     }
                     Button("Close proposal") { Task { await model.closeProposal() } }

@@ -488,6 +488,143 @@ struct AgentsSectionsTests {
         #expect(wording.subject == "1 call again to recipients of “September survey” with “Support”")
     }
 
+    // MARK: - A selected item whose details never come
+
+    /// A rig where ElevenLabs answers 404 for `operationID` — for the ids in `ids` (by the last
+    /// path component), or for every call to it when `ids` is nil.
+    private func rigNotFound(_ operationID: String, _ ids: Set<String>? = nil) -> AgentsFixtures.Rig {
+        AgentsFixtures.Rig { request in
+            if request.operationID == operationID, ids.map({ $0.contains(request.url.lastPathComponent) }) ?? true {
+                return .init(status: 404, headers: ["content-type": "application/json"],
+                             body: Data(#"{"detail":{"status":"not_found","message":"Not found"}}"#.utf8))
+            }
+            return try await AgentsFixtures.reply(request)
+        }
+    }
+
+    /// What a screen draws under an item whose fetch failed: ElevenLabs' answer, then the retry hint.
+    private func expectNotFound(_ load: AgentsDetailLoad, waiting: String,
+                                sourceLocation: SourceLocation = #_sourceLocation) {
+        guard case .failed(let message) = load else {
+            Issue.record("expected a failed load, got \(load)", sourceLocation: sourceLocation)
+            return
+        }
+        #expect(message.contains("404"), "\(message)", sourceLocation: sourceLocation)
+        #expect(load.problemLines == [message, "Could not load it — select it again to retry."], sourceLocation: sourceLocation)
+        #expect(load.reason(waiting: waiting) == "Could not load it — select it again to retry.", sourceLocation: sourceLocation)
+        #expect(!load.isLoaded, sourceLocation: sourceLocation)
+    }
+
+    /// Round 4: an environment variable that cannot be fetched says why, and Save stays off.
+    @Test func aVariableThatCannotBeLoadedSaysWhyAndCannotBeSaved() async throws {
+        let rig = rigNotFound(AgentsOp.getEnvironmentVariable, ["env_2"])
+        defer { rig.clean() }
+        let model = rig.store.secrets
+        await model.variables.refresh()
+        await model.selectVariable("env_2")
+        expectNotFound(model.variableLoad, waiting: "Waiting for the variable's values.")
+        await model.saveVariable()
+        #expect(rig.requests(AgentsOp.updateEnvironmentVariable).isEmpty)
+        await model.selectVariable("env_1")
+        #expect(model.variableLoad == .loaded, "another variable loads as before")
+    }
+
+    /// Round 4: a merge proposal that cannot be fetched says why, and nothing about it is asked.
+    @Test func aProposalThatCannotBeLoadedSaysWhyAndCannotBeMerged() async throws {
+        let rig = rigNotFound(AgentsOp.getMergeProposal, ["mp_2"])
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        await branches.openProposal("mp_2")
+        expectNotFound(branches.proposalLoad, waiting: "Waiting for the proposal's details.")
+        branches.requestAcceptProposal(agentName: "Support")
+        #expect(model.questions.question == nil)
+        await branches.openProposal("mp_1")
+        #expect(branches.proposalLoad == .loaded)
+    }
+
+    /// Round 4: a procedure whose text cannot be fetched says why; Save, Discard and Remove stay off.
+    @Test func aProcedureThatCannotBeLoadedSaysWhyAndIsNotChanged() async throws {
+        let rig = rigNotFound(AgentsOp.getProcedureDraft)
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let branches = model.branches
+        await branches.load()
+        await branches.loadProcedures()
+        let procedure = try #require(branches.procedures.first)
+        #expect(procedure.hasDraft, "the fixture's procedure is fetched as its draft")
+        await branches.openProcedure(procedure)
+        expectNotFound(branches.procedureLoad, waiting: "Waiting for the procedure's text.")
+        await branches.saveProcedure()
+        let discarding = Task { await branches.discardProcedureDraft() }
+        let removing = Task { await branches.removeProcedure() }
+        try await Task.sleep(for: .milliseconds(50))
+        let asked = [AgentsOp.deleteProcedureDraft, AgentsOp.removeProcedure].map { branches.runner($0) }.filter(\.isAwaitingConfirmation)
+        asked.forEach { $0.decline() }
+        await discarding.value
+        await removing.value
+        #expect(asked.isEmpty)
+        #expect(rig.requests(AgentsOp.updateProcedureDraft).isEmpty)
+    }
+
+    /// Round 4: a tag that cannot be fetched says why (it said nothing), and Save stays off.
+    @Test func aTagThatCannotBeLoadedSaysWhyAndCannotBeSaved() async throws {
+        let rig = rigNotFound(AgentsOp.getTag, ["tag_gone"])
+        defer { rig.clean() }
+        let model = rig.store.analytics
+        await model.tags.refresh()
+        await model.selectTag("tag_gone")
+        expectNotFound(model.tagLoad, waiting: "Waiting for the tag's title.")
+        await model.saveTag()
+        #expect(rig.requests(AgentsOp.updateTag).isEmpty)
+        await model.selectTag("tag_refund")
+        #expect(model.tagLoad == .loaded)
+    }
+
+    /// Round 4: a test that cannot be fetched no longer reads "Loading the test…" for ever.
+    @Test func aTestThatCannotBeLoadedSaysSoAndCannotBeSavedOrDeleted() async throws {
+        let rig = rigNotFound(AgentsOp.getTest, ["test_sim02"])
+        defer { rig.clean() }
+        let model = rig.store.testing
+        await model.select("test_sim02")
+        #expect(model.editorTitle == "Could not load the test")
+        expectNotFound(model.testLoad, waiting: "Waiting for the test.")
+        await model.save()
+        let deleteRunner = rig.store.calls.runner(AgentsOp.deleteTest, slot: "test_sim02")
+        let deleting = Task { await model.delete() }
+        try await Task.sleep(for: .milliseconds(50))
+        let asked = deleteRunner.isAwaitingConfirmation
+        if asked { deleteRunner.decline() }
+        await deleting.value
+        #expect(!asked)
+        #expect(rig.requests(AgentsOp.updateTest).isEmpty)
+        await model.select(AgentsFixtures.testID)
+        #expect(model.editorTitle == "Refund request is escalated")
+    }
+
+    /// Round 4: a batch whose recipients cannot be fetched says why instead of "Waiting for the
+    /// batch's recipients.", and Stop, Retry and Delete stay off.
+    @Test func aBatchThatCannotBeLoadedSaysWhyAndIsNotActedOn() async throws {
+        let rig = rigNotFound(AgentsOp.getBatch, ["btcal_sep02"])
+        defer { rig.clean() }
+        let model = rig.store.batchCalls
+        await model.list.refresh()
+        await model.select("btcal_sep02")
+        #expect(model.batch?.name == "September survey")
+        expectNotFound(model.batchLoad, waiting: "Waiting for the batch's recipients.")
+        let runners = [AgentsOp.cancelBatch, AgentsOp.retryBatch, AgentsOp.deleteBatch]
+            .map { rig.store.calls.runner($0, slot: "btcal_sep02") }
+        let early = [Task { await model.cancel() }, Task { await model.retry() }, Task { await model.delete() }]
+        try await Task.sleep(for: .milliseconds(50))
+        let asked = runners.filter(\.isAwaitingConfirmation)
+        asked.forEach { $0.decline() }
+        for task in early { await task.value }
+        #expect(asked.isEmpty)
+    }
+
     /// Review M-5: giving an agent an MCP server or a webhook tool starts sending callers' words
     /// out, so Save asks first, naming where.
     @Test func savingAnAgentWithANewMCPServerOrWebhookToolAsksFirst() async throws {

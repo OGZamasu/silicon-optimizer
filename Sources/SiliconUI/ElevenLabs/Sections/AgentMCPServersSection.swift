@@ -50,8 +50,9 @@ struct AgentMCPServersScreen: View {
                 if let server = model.server {
                     AgentMCPServerDetail(model: model, server: server)
                 } else if let id = model.selectedID {
-                    AgentsCard("Loading the server…") {
-                        AgentsRunnerError(runner: model.calls.runner(AgentsOp.getMCPServer, slot: id))
+                    let load = AgentsDetailLoad.of(loaded: false, runner: model.calls.runner(AgentsOp.getMCPServer, slot: id))
+                    AgentsCard(load == .loading ? "Loading the server…" : "Could not load the server") {
+                        AgentsDetailLoadProblem(load: load)
                     }
                 } else {
                     AgentsCard("No server selected") {

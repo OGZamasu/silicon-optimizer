@@ -95,6 +95,12 @@ final class AgentSecretsModel {
     /// Whether the values on screen are the selected variable's: saving waits for them.
     var variableIsLoaded: Bool { selectedVariableID != nil && loadedVariableID == selectedVariableID }
 
+    /// The selected variable's values: in, on their way, or not coming (the error, and how to retry).
+    var variableLoad: AgentsDetailLoad {
+        .of(loaded: variableIsLoaded,
+            runner: selectedVariableID.map { calls.runner(AgentsOp.getEnvironmentVariable, slot: $0) })
+    }
+
     init(store: AgentsPlatformStore) {
         self.store = store
         let box = AgentsWeakBox<AgentSecretsModel>()
@@ -298,7 +304,7 @@ final class AgentSecretsModel {
     }
 
     func saveVariable() async {
-        guard variableIsLoaded, let variable = selectedVariable else { return }
+        guard variableLoad.isLoaded, let variable = selectedVariable else { return }
         let removed = originalEnvironments.filter { environment in
             environment != "production" && !editedValues.contains { $0.environment == environment && !$0.value.isEmpty }
         }.sorted()
@@ -428,9 +434,11 @@ private struct AgentEnvironmentVariablesCard: View {
                     if let variable = model.selectedVariable {
                         Divider()
                         Text("“\(variable.label)” by environment").font(.subheadline.weight(.medium))
+                        let load = model.variableLoad
+                        AgentsDetailLoadProblem(load: load)
                         valuesEditor($model.editedValues, type: variable.type)
                         AgentsRunButton(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id), title: "Save values…",
-                                        disabled: !model.variableIsLoaded, disabledReason: "Waiting for the variable's values.") {
+                                        disabled: !load.isLoaded, disabledReason: load.reason(waiting: "Waiting for the variable's values.")) {
                             Task { await model.saveVariable() }
                         }
                         AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateEnvironmentVariable, slot: variable.id))

@@ -84,6 +84,13 @@ final class AgentAnalyticsModel {
     private(set) var selectedTagID: String?
     /// The tag whose title and description the fields hold; nil while the selected one's are on their way.
     private(set) var loadedTagID: String?
+
+    /// The selected tag's title and description: in, on their way, or not coming (the error, and
+    /// how to retry).
+    var tagLoad: AgentsDetailLoad {
+        .of(loaded: selectedTagID != nil && loadedTagID == selectedTagID,
+            runner: selectedTagID.map { calls.runner(AgentsOp.getTag, slot: $0) })
+    }
     var editTagTitle = ""
     var editTagDescription = ""
 
@@ -292,7 +299,7 @@ final class AgentAnalyticsModel {
     }
 
     func saveTag() async {
-        guard let selectedTagID, loadedTagID == selectedTagID else { return }
+        guard tagLoad.isLoaded, let selectedTagID else { return }
         guard let json = await calls.json(AgentsOp.updateTag, [
             "tag_id": .string(selectedTagID), "title": .string(editTagTitle), "description": .string(editTagDescription),
         ], slot: selectedTagID) else { return }
@@ -607,11 +614,16 @@ private struct AgentTagsCard: View {
                     TextField("Title", text: $model.editTagTitle).textFieldStyle(.roundedBorder)
                     TextField("Description", text: $model.editTagDescription).textFieldStyle(.roundedBorder)
                     Button("Save") { Task { await model.saveTag() } }
-                        .disabled(model.loadedTagID != model.selectedTagID)
+                        .disabled(!model.tagLoad.isLoaded)
                     AgentsRunButton(runner: calls.runner(AgentsOp.deleteTag, slot: model.selectedTagID ?? ""), title: "Delete…") {
                         Task { await model.deleteTag() }
                     }
                 }
+                let load = model.tagLoad
+                if let waiting = load.reason(waiting: "Waiting for the tag's title."), load == .loading {
+                    Label(waiting, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.secondary)
+                }
+                AgentsDetailLoadProblem(load: load)
                 AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateTag, slot: model.selectedTagID ?? ""))
                 AgentsRunnerOutput(runner: calls.runner(AgentsOp.deleteTag, slot: model.selectedTagID ?? ""))
             }
