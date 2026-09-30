@@ -48,27 +48,26 @@ struct CoreWireTests {
     }
 
     @Test func aChunkedAnswerStreamsAsItArrives() async throws {
-        let chunks = (0..<5).map { Data(repeating: UInt8($0), count: 1_000) }
+        let chunks = (0..<6).map { Data(repeating: UInt8($0), count: 1_000) }
         let server = try LoopbackServer { _ in
             .chunked(status: 200, headers: ["Content-Type": "audio/mpeg", "character-cost": "9"],
-                     chunks: chunks, gap: .milliseconds(150))
+                     chunks: chunks, gap: .milliseconds(200))
         }
         defer { server.stop() }
         let transport = URLSessionTransport.loopbackForTesting(port: Int(server.port))
-        let started = ContinuousClock.now
         let response = try await transport.stream(Self.request(server, "/v1/text-to-speech/v/stream", method: "POST"))
         #expect(response.status == 200)
         #expect(response.headers["character-cost"] == "9")
         var received = Data()
-        var firstAt: Duration?
+        var sentWhenFirstArrived: Int?
         for try await chunk in response.body {
-            if firstAt == nil { firstAt = ContinuousClock.now - started }
+            if sentWhenFirstArrived == nil { sentWhenFirstArrived = server.chunksSent }
             received.append(chunk)
         }
-        let total = ContinuousClock.now - started
         #expect(received == chunks.reduce(Data(), +))
-        // The first bytes came long before the last were sent.
-        #expect(try #require(firstAt) < total - .milliseconds(300))
+        // Counted on the server's side, so a busy machine cannot fake it: the first bytes
+        // were in hand while most of the answer had not been sent yet.
+        #expect(try #require(sentWhenFirstArrived) < chunks.count)
     }
 
     @Test func redirectsAreAnsweredNotFollowed() async throws {
@@ -235,11 +234,14 @@ final class LoopbackServer: @unchecked Sendable {
     private let handler: @Sendable (Request) -> Reply
     private var recorded: [Request] = []
     private var closed = 0
+    private var sentChunks = 0
     private var connections: [NWConnection] = []
     private(set) var port: UInt16 = 0
 
     var requests: [Request] { lock.withLock { recorded } }
     var closedConnections: Int { lock.withLock { closed } }
+    /// Chunks of a chunked answer written so far, across connections.
+    var chunksSent: Int { lock.withLock { sentChunks } }
 
     init(handler: @escaping @Sendable (Request) -> Reply) throws {
         self.handler = handler
@@ -374,6 +376,7 @@ final class LoopbackServer: @unchecked Sendable {
         frame.append(Data("\r\n".utf8))
         connection.send(content: frame, completion: .contentProcessed { [weak self] error in
             guard error == nil, let self else { connection.cancel(); return }
+            self.lock.withLock { self.sentChunks += 1 }
             self.queue.asyncAfter(deadline: .now() + .milliseconds(milliseconds)) { [weak self] in
                 self?.sendChunk(index + 1, of: chunks, gap: milliseconds, on: connection)
             }
