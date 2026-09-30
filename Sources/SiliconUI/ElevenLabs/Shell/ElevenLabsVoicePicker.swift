@@ -167,7 +167,8 @@ final class ElevenLabsVoiceDirectory {
 /// Picks a voice: a button naming the chosen one, opening a searchable list grouped by kind,
 /// each with its sample to play.
 struct ElevenLabsVoicePicker: View {
-    @Environment(AppModel.self) private var model
+    /// Optional: a picker handed its own `directory` needs no app model (previews, tests).
+    @Environment(AppModel.self) private var model: AppModel?
     @Binding var selection: String
     var title: String
     /// Which voices to offer; all of them when nil.
@@ -193,7 +194,12 @@ struct ElevenLabsVoicePicker: View {
         self.noneTitle = noneTitle
     }
 
-    private var voices: ElevenLabsVoiceDirectory { directory ?? model.elevenLabsPane.voices }
+    /// The directory to show: the one given, else the pane's. With neither, an empty one.
+    private var voices: ElevenLabsVoiceDirectory {
+        directory ?? model?.elevenLabsPane.voices ?? Self.empty
+    }
+
+    @MainActor private static let empty = ElevenLabsVoiceDirectory(client: { nil })
 
     var body: some View {
         let voices = voices

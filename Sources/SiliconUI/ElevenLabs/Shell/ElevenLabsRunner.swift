@@ -463,6 +463,8 @@ enum ElevenLabsCostNote {
         case characters
         /// The length of the audio sent or made, in the words for it ("audio", "song"…).
         case length(of: String)
+        /// Money charged to the workspace rather than credits: a Productions order.
+        case money
         /// Something else, or not known.
         case other
     }
@@ -478,6 +480,7 @@ enum ElevenLabsCostNote {
         if under("/v1/dubbing") { return .length(of: "source") }
         if under("/v1/music") { return .length(of: "music") }
         if under("/v1/sound-generation") { return .length(of: "sound") }
+        if under("/v1/productions/orders"), path.hasSuffix("/submit") { return .money }
         return .other
     }
 
@@ -486,9 +489,16 @@ enum ElevenLabsCostNote {
     /// - Parameters:
     ///   - characters: The text's length, when the section knows it.
     ///   - seconds: The audio's length — sent or asked for — when the section knows it.
-    static func text(for operation: ElevenLabsOperation, characters: Int? = nil, seconds: Double? = nil) -> String? {
+    ///   - message: The section's own words — a quote's price, say — used instead, whether or
+    ///     not the operation is marked billable.
+    static func text(
+        for operation: ElevenLabsOperation, characters: Int? = nil, seconds: Double? = nil, message: String? = nil
+    ) -> String? {
+        if let message, !message.isEmpty { return message }
         guard operation.billable else { return nil }
         switch measure(of: operation) {
+        case .money:
+            return "Charges money to your workspace — not credits."
         case .characters:
             if let characters, characters > 0 {
                 return "Uses credits — about \(characters.formatted()) characters' worth."

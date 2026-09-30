@@ -15,12 +15,15 @@ struct ElevenLabsRunButton: View {
     var disabled = false
     /// Why the button is disabled, said beside it — "Choose a voice first".
     var disabledReason: String?
+    /// The section's own words for what running costs ("Charges $120.00 to your workspace"),
+    /// in place of the generated note.
+    var costNote: String?
     let action: () -> Void
 
     init(
         runner: ElevenLabsRunner, title: String = "Run", estimatedCharacters: Int? = nil,
         estimatedSeconds: Double? = nil, disabled: Bool = false, disabledReason: String? = nil,
-        action: @escaping () -> Void
+        costNote: String? = nil, action: @escaping () -> Void
     ) {
         self.runner = runner
         self.title = title
@@ -28,6 +31,7 @@ struct ElevenLabsRunButton: View {
         self.estimatedSeconds = estimatedSeconds
         self.disabled = disabled
         self.disabledReason = disabledReason
+        self.costNote = costNote
         self.action = action
     }
 
@@ -67,7 +71,8 @@ struct ElevenLabsRunButton: View {
                         .foregroundStyle(disabled ? .secondary : Color.red)
                         .lineLimit(2)
                 } else if let note = ElevenLabsCostNote.text(
-                    for: runner.operation, characters: estimatedCharacters, seconds: estimatedSeconds
+                    for: runner.operation, characters: estimatedCharacters, seconds: estimatedSeconds,
+                    message: costNote
                 ) {
                     Text(note)
                         .font(.caption)
