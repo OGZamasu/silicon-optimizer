@@ -196,7 +196,7 @@ final class ElevenLabsRunner: Identifiable {
         let operation = operation
         let task: Task<ElevenLabsResult, any Error>
         if playing, let sink = context.sink() {
-            let player = ElevenLabsStreamPlayer()
+            let player = ElevenLabsStreamPlayer(outputFormat: arguments["output_format"]?.stringValue)
             streamPlayer = player
             task = Task { [weak self] in
                 try await ElevenLabsStreamCollector.collect(
