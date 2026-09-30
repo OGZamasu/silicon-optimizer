@@ -32,6 +32,20 @@ struct ElevenLabsPane: View {
             Divider()
             VStack(spacing: 0) {
                 ElevenLabsCreditsHeader(onDisconnect: { confirmingDisconnect = true })
+                if let notice = pane.previousAccountNotice {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
+                            .foregroundStyle(.orange)
+                        Text(notice)
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button("Dismiss") { pane.previousAccountNotice = nil }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.orange.opacity(0.1))
+                }
                 if let problem = pane.connectionProblem {
                     ElevenLabsConnectionBanner(
                         problem: problem,
@@ -74,7 +88,14 @@ struct ElevenLabsPane: View {
         ContentUnavailableView {
             Label("ElevenLabs is not connected", systemImage: "waveform.and.mic")
         } description: {
-            Text("Add an API key in Settings → ElevenLabs to use it here.")
+            VStack(spacing: 6) {
+                Text("Add an API key in Settings → ElevenLabs to use it here.")
+                if let problem = model.elevenLabsLastError {
+                    Label(problem, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         } actions: {
             Button("Open Settings", action: openSettings)
         }

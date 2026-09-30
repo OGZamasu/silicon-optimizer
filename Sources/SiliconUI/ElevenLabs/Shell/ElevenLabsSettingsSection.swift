@@ -30,7 +30,7 @@ struct ElevenLabsSettingsSection: View {
             .foregroundStyle(.secondary)
 
             keyRow
-            if let failure = connection.failure {
+            if let failure = Self.errorToShow(connectionFailure: connection.failure, lastError: model.elevenLabsLastError) {
                 Label(failure, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -93,6 +93,7 @@ struct ElevenLabsSettingsSection: View {
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || connection.verifying)
                 if model.elevenLabsLinked {
                     Button("Remove key…") { confirmingRemove = true }
+                        .disabled(connection.verifying)
                 } else {
                     Button("Get a key") {
                         NSWorkspace.shared.open(URL(string: "https://elevenlabs.io/app/settings/api-keys")!)
@@ -107,6 +108,12 @@ struct ElevenLabsSettingsSection: View {
         } message: {
             Text("It is deleted from this Mac's Keychain and the ElevenLabs pane leaves the sidebar. The key itself keeps working on ElevenLabs until you revoke it there.")
         }
+    }
+
+    /// What goes under the key row: this Connect's failure, else the last thing that went
+    /// wrong with the key — a Keychain removal that failed after Remove said it was done.
+    static func errorToShow(connectionFailure: String?, lastError: String?) -> String? {
+        connectionFailure ?? lastError
     }
 
     private func connect() {
@@ -158,9 +165,16 @@ struct ElevenLabsSettingsSection: View {
                     Text(region.displayName).tag(region)
                 }
             }
+            .disabled(connection.verifying)
             Text("Data-residency regions are separate workspaces, each with its own key; Global and US only share one.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let notice = connection.regionNotice {
+                Label(notice, systemImage: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .sheet(item: Binding(
             get: { connection.pendingRegionChange },

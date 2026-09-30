@@ -25,6 +25,16 @@ final class ElevenLabsConnectionModel {
     /// Set by a Connect that worked, for a line of thanks until the next action.
     private(set) var connected = false
     private(set) var pendingRegionChange: RegionChange?
+    /// Why a region change was not made, said under the picker.
+    private(set) var regionNotice: String?
+
+    /// Why the account cannot change while a run that is not a read is still on the wire.
+    static let busyAccountMessage =
+        "An ElevenLabs run that may be billed is still in progress. Wait for it to finish, or cancel it, first."
+    /// Why the region cannot change while a key is being checked.
+    static let verifyingMessage = "Wait for the key check to finish before changing region."
+    /// What a Connect says when Remove was pressed while it was checking.
+    static let removedWhileCheckingMessage = "The key was removed while it was being checked, so it was not kept."
 
     init() {}
 
@@ -35,17 +45,30 @@ final class ElevenLabsConnectionModel {
     func connect(key: String, model: AppModel) async -> Bool {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, !verifying else { return false }
+        // A new key for the same account while a billable request is in flight would hand
+        // the owner fresh runners that could send it again.
+        if model.elevenLabsLinked, model.elevenLabsPane.billableRunsInFlight > 0 {
+            failure = Self.busyAccountMessage
+            return false
+        }
+        // The region as it was when Connect was pressed: the key is checked there, stored for
+        // it, and any failure is worded for it. The picker is locked until the check ends.
+        let region = model.elevenLabsRegion
         verifying = true
         failure = nil
         connected = false
+        regionNotice = nil
         defer { verifying = false }
         do {
-            _ = try await model.linkElevenLabs(key: key)
+            _ = try await model.linkElevenLabs(key: key, region: region)
             model.elevenLabsPane.reset()
             connected = true
             return true
+        } catch ElevenLabsError.cancelled {
+            failure = Self.removedWhileCheckingMessage
+            return false
         } catch {
-            failure = Self.describe(error, key: key, region: model.elevenLabsRegion)
+            failure = Self.describe(error, key: key, region: region)
             return false
         }
     }
@@ -62,10 +85,21 @@ final class ElevenLabsConnectionModel {
     /// the stored key may not work on the new host.
     func requestRegion(_ region: ElevenLabsRegion, model: AppModel) {
         let current = model.elevenLabsRegion
+        regionNotice = nil
         guard region != current else { return }
+        guard !verifying else {
+            regionNotice = Self.verifyingMessage
+            return
+        }
         guard model.elevenLabsLinked else {
             model.elevenLabsRegion = region
             failure = nil
+            return
+        }
+        // Switching rebuilds every runner; one still sending a billable request would be
+        // replaced by an idle one that could send it again.
+        guard model.elevenLabsPane.billableRunsInFlight == 0 else {
+            regionNotice = Self.busyAccountMessage
             return
         }
         pendingRegionChange = RegionChange(
