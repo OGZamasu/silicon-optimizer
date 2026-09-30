@@ -271,6 +271,98 @@ struct ElevenLabsControlMCPTests {
         #expect(transport.recorded.last?.request.operationID == risky.id)
     }
 
+    /// The gate over the real catalog and client: every destructive and real-world
+    /// operation — all 85 — is held with confirm but no switch, and with the switch but no
+    /// confirm, and ElevenLabs hears of none of them.
+    @Test func everyGatedOperationInTheCatalogIsHeld() async throws {
+        let gated = ElevenLabsCatalog.all.filter(\.requiresConfirmation)
+        #expect(gated.count == ElevenLabsCatalog.all.filter { $0.risk == .destructive || $0.risk == .realWorld }.count)
+        #expect(gated.count == 85)
+        for allowRisky in [false, true] {
+            let rig = Rig(allowRisky: allowRisky)
+            defer { rig.clean() }
+            for operation in gated {
+                let body: ELJSON = [
+                    "operation": .string(operation.id),
+                    "arguments": .object(Self.sampleArguments(operation)),
+                    "confirm": .bool(!allowRisky),
+                ]
+                let answer = await rig.handler.handle(.init(route: .call(body: body.encoded())))
+                #expect(answer.status == 403, "\(operation.id) with the switch \(allowRisky ? "on" : "off")")
+            }
+            #expect(rig.transport.recorded.isEmpty)
+        }
+    }
+
+    /// Masking over the real catalog's credential fields and the real client: an agent's
+    /// shareable token, a single-use token and a new service-account key are masked while
+    /// the switch is off (the last two are gated then anyway) and handed over once it is on.
+    @Test func realCredentialsAreMaskedUntilTheOwnerAllowsThem() async throws {
+        let planted = "planted-" + UUID().uuidString
+        let reply: @Sendable (ElevenLabsRequest) -> FakeElevenLabsTransport.Reply = { request in
+            switch request.operationID {
+            case "get_agent_route":
+                return .json(["agent_id": "agent_1", "name": "Support",
+                              "platform_settings": ["auth": ["shareable_token": .string(planted)]]])
+            case "get_single_use_token": return .json(["token": .string(planted)])
+            case "create_service_account_api_key": return .json(["xi-api-key": .string(planted), "key_id": "k"])
+            default: return CoreConformanceTests.reply(for: request)
+            }
+        }
+        for allowRisky in [false, true] {
+            let rig = Rig(allowRisky: allowRisky, reply: reply)
+            defer { rig.clean() }
+            for id in ["get_agent_route", "get_single_use_token", "create_service_account_api_key"] {
+                let operation = try #require(ElevenLabsCatalog.operation(id))
+                #expect(operation.returnsCredential, "\(id)")
+                let body: ELJSON = [
+                    "operation": .string(id), "arguments": .object(Self.sampleArguments(operation)),
+                    "confirm": true,
+                ]
+                let answer = await rig.handler.handle(.init(route: .call(body: body.encoded())))
+                let text = String(decoding: answer.body, as: UTF8.self)
+                if operation.requiresConfirmation && !allowRisky {
+                    #expect(answer.status == 403, "\(id)")
+                } else {
+                    #expect(answer.status == 200, "\(id): \(text.prefix(200))")
+                    #expect(text.contains(planted) == allowRisky, "\(id) with the switch \(allowRisky ? "on" : "off")")
+                    #expect(text.contains(ElevenLabsRedaction.placeholder) == !allowRisky, "\(id)")
+                }
+            }
+        }
+    }
+
+    /// An upload through the real client: its bytes reach ElevenLabs in the multipart body
+    /// under the file's own name, and nothing about where it lives on this Mac does.
+    @Test func anUploadReachesElevenLabsAsItsBytesUnderItsOwnName() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-control-upload-e2e-\(UUID().uuidString)", isDirectory: true)
+        try requireTemporaryDirectory(scratch)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { removeTemporaryDirectory(scratch) }
+        let audio = scratch.appendingPathComponent("voice memo.wav")
+        let bytes = Data("RIFF-\(UUID().uuidString)-WAVE".utf8)
+        try bytes.write(to: audio)
+        let rig = Rig(allowRisky: false)
+        defer { rig.clean() }
+        let body: ELJSON = [
+            "operation": "audio_isolation", "arguments": [:],
+            "files": [["field": "audio", "path": .string(audio.path)]],
+        ]
+        let answer = await rig.handler.handle(.init(route: .call(body: body.encoded())))
+        #expect(answer.status == 200)
+        let sent = try #require(rig.transport.recorded.last)
+        #expect(sent.request.operationID == "audio_isolation")
+        #expect(sent.body.range(of: bytes) != nil)
+        let wire = String(decoding: sent.body, as: UTF8.self)
+        #expect(wire.contains("name=\"audio\"; filename=\"voice memo.wav\""))
+        #expect(!wire.contains(scratch.lastPathComponent))
+        #expect(!wire.contains(ElevenLabsControlHandler.stagingPrefix))
+        let text = String(decoding: answer.body, as: UTF8.self)
+        #expect(!text.contains(scratch.lastPathComponent))
+        #expect(try Data(contentsOf: audio) == bytes)
+    }
+
     // MARK: - Samples
 
     /// Arguments from the operation's own schemas: every path and query parameter, required
