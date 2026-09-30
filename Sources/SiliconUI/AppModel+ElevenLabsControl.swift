@@ -66,6 +66,8 @@ struct ElevenLabsControlHandler: Sendable {
     var catalog: ElevenLabsControlCatalog = .shipped
     /// JSON, text and events past this are shortened inline.
     var inlineBytes = ElevenLabsControl.inlineResultBytes
+    /// A call's uploads, all together.
+    var uploadBytes = ElevenLabsControl.maximumUploadBytes
 
     func handle(_ request: ElevenLabsControlRequest) async -> ElevenLabsControlResponse {
         switch request.route {
@@ -360,17 +362,223 @@ struct ElevenLabsControlHandler: Sendable {
         guard state.linked, let backend else {
             return .refusal(409, .init(error: ElevenLabsControl.notConnected, operation: operation.id))
         }
-        guard request.files.isEmpty else {
-            return .refusal(400, .init(
-                error: "Uploads are not accepted yet.", operation: operation.id
+        // Read on this Mac, off the cooperative pool: a copy can take a while.
+        let staging = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: stage(request.files, for: operation))
+            }
+        }
+        let uploads: StagedUploads
+        switch staging {
+        case .success(let staged): uploads = staged
+        case .failure(let refusal):
+            return .refusal(refusal.status, .init(
+                error: "ElevenLabs operation \(operation.id) was not sent: "
+                    + refusal.problems.joined(separator: " "),
+                operation: operation.id, problems: refusal.problems
             ))
         }
+        defer { uploads.remove() }
         do {
-            let result = try await backend.call(operation, arguments: request.arguments, files: [:])
+            let result = try await backend.call(
+                operation, arguments: request.arguments, files: uploads.files
+            )
             return .init(status: 200, body: await shape(result, for: operation).encoded())
         } catch {
-            return failure(error, operation: operation, scrubbing: [])
+            return failure(error, operation: operation, scrubbing: uploads.paths)
         }
+    }
+
+    // MARK: Uploads
+
+    /// Files read on this Mac and copied where nothing can change them under the client, and
+    /// removed when the call ends.
+    struct StagedUploads: Sendable {
+        var files: [String: [ElevenLabsFile]] = [:]
+        var directory: URL?
+        /// Every spelling of a path a message could quote: the caller's, and the copies'.
+        var paths: [String] = []
+
+        func remove() {
+            if let directory { ElevenLabsControlHandler.removeStaging(directory) }
+        }
+    }
+
+    struct UploadRefusal: Error {
+        var status: Int
+        var problems: [String]
+    }
+
+    static let stagingPrefix = "elevenlabs-uploads-"
+
+    /// `files: [{field, path}]`, checked against the operation's file fields, then each file
+    /// opened and copied (see `copy`). Every problem is named, by its place in the list and
+    /// its field — never by its path.
+    func stage(
+        _ requested: [ElevenLabsWire.CallFile], for operation: ElevenLabsOperation
+    ) -> Result<StagedUploads, UploadRefusal> {
+        guard !requested.isEmpty else { return .success(StagedUploads()) }
+        guard let body = operation.body, body.contentType == .multipart, !body.fileFields.isEmpty else {
+            return .failure(.init(status: 400, problems: [
+                "\(operation.id) takes no files; send its arguments only.",
+            ]))
+        }
+        var problems: [String] = []
+        if requested.count > ElevenLabsControl.maximumUploadFiles {
+            problems.append("A call may upload at most \(ElevenLabsControl.maximumUploadFiles) files.")
+        }
+        let fields = body.fileFields.joined(separator: ", ")
+        var counts: [String: Int] = [:]
+        for (index, file) in requested.enumerated() {
+            let label = "files[\(index)] (\(Self.quoted(file.field)))"
+            if !body.fileFields.contains(file.field) {
+                problems.append(
+                    "\(label): \(operation.id) has no file field by that name; its file fields "
+                        + "are \(fields)."
+                )
+            } else {
+                counts[file.field, default: 0] += 1
+            }
+            if !file.path.hasPrefix("/") { problems.append("\(label): the path must be absolute.") }
+        }
+        for (field, count) in counts.sorted(by: { $0.key < $1.key })
+        where count > 1 && !body.acceptsMultipleFiles(field) {
+            problems.append("\"\(field)\" takes one file; \(count) were given.")
+        }
+        guard problems.isEmpty else { return .failure(.init(status: 400, problems: problems)) }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(Self.stagingPrefix + UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            return .failure(.init(status: 500, problems: [
+                "The app could not make a folder to read the uploads into.",
+            ]))
+        }
+        var staged = StagedUploads(
+            directory: directory,
+            paths: [directory.path, directory.resolvingSymlinksInPath().path] + requested.map(\.path)
+        )
+        var total: Int64 = 0
+        var tooLarge = false
+        for (index, file) in requested.enumerated() {
+            let label = "files[\(index)] (\(Self.quoted(file.field)))"
+            let name = ElevenLabsFileNames.sanitized((file.path as NSString).lastPathComponent)
+            let copy = directory.appendingPathComponent("\(index)-\(name)")
+            switch Self.copy(file.path, to: copy, within: uploadBytes - total, of: uploadBytes) {
+            case .success(let bytes):
+                total += bytes
+                staged.files[file.field, default: []].append(ElevenLabsFile(url: copy, filename: name))
+            case .failure(let problem):
+                problems.append("\(label): \(problem.reason)")
+                tooLarge = tooLarge || problem.tooLarge
+            }
+        }
+        guard problems.isEmpty else {
+            staged.remove()
+            return .failure(.init(status: tooLarge ? 413 : 400, problems: problems))
+        }
+        return .success(staged)
+    }
+
+    struct CopyProblem: Error {
+        var reason: String
+        var tooLarge = false
+    }
+
+    /// Opens `path` without following a final symbolic link or waiting on a pipe, makes sure
+    /// it is a regular file of this user's no bigger than `room`, and copies it to
+    /// `destination` through that same descriptor — a clone where the volume can make one,
+    /// bytes otherwise — so what is sent is what was checked.
+    static func copy(
+        _ path: String, to destination: URL, within room: Int64, of limit: Int64
+    ) -> Result<Int64, CopyProblem> {
+        let source = Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard source >= 0 else {
+            let reason = switch errno {
+            case ENOENT, ENOTDIR: "there is no file at that path."
+            case ELOOP: "it is a symbolic link; give the path of the file itself."
+            case EACCES, EPERM: "the app is not allowed to read it."
+            default: "it could not be opened (\(String(cString: strerror(errno))))."
+            }
+            return .failure(.init(reason: reason))
+        }
+        defer { Darwin.close(source) }
+        var info = stat()
+        guard fstat(source, &info) == 0 else { return .failure(.init(reason: "it could not be read.")) }
+        guard (info.st_mode & S_IFMT) == S_IFREG else {
+            return .failure(.init(
+                reason: "it is not a regular file; a folder, device or pipe cannot be uploaded."
+            ))
+        }
+        guard info.st_uid == getuid() else {
+            return .failure(.init(reason: "it belongs to another user of this Mac."))
+        }
+        let tooBig = CopyProblem(
+            reason: "it would take this call's uploads past \(size(Int(limit))) in all.",
+            tooLarge: true
+        )
+        guard Int64(info.st_size) <= room else { return .failure(tooBig) }
+
+        if fclonefileat(source, AT_FDCWD, destination.path, 0) == 0 {
+            // The clone is the file as it is now, which may be more than fstat saw.
+            var cloned = stat()
+            guard lstat(destination.path, &cloned) == 0, Int64(cloned.st_size) <= room else {
+                unlink(destination.path)
+                return .failure(tooBig)
+            }
+            return .success(Int64(cloned.st_size))
+        }
+        let output = Darwin.open(
+            destination.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600
+        )
+        guard output >= 0 else { return .failure(.init(reason: "it could not be copied.")) }
+        defer { Darwin.close(output) }
+        var copied: Int64 = 0
+        var buffer = [UInt8](repeating: 0, count: 1 << 20)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(source, $0.baseAddress, $0.count) }
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                unlink(destination.path)
+                return .failure(.init(reason: "it could not be read."))
+            }
+            copied += Int64(count)
+            guard copied <= room else {
+                unlink(destination.path)
+                return .failure(tooBig)
+            }
+            var offset = 0
+            while offset < count {
+                let written = buffer.withUnsafeBytes {
+                    Darwin.write(output, $0.baseAddress! + offset, count - offset)
+                }
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    unlink(destination.path)
+                    return .failure(.init(reason: "it could not be copied."))
+                }
+                offset += written
+            }
+        }
+        return .success(copied)
+    }
+
+    /// Removes a staging folder — only one this handler made, directly in the temporary
+    /// directory, with its prefix.
+    static func removeStaging(_ directory: URL) {
+        let temporary = FileManager.default.temporaryDirectory.standardizedFileURL
+            .resolvingSymlinksInPath()
+        let target = directory.standardizedFileURL.resolvingSymlinksInPath()
+        guard target.deletingLastPathComponent().path == temporary.path,
+              target.lastPathComponent.hasPrefix(stagingPrefix)
+        else { return }
+        try? FileManager.default.removeItem(at: target)
     }
 
     /// `destructive` and `realWorld`: `confirm: true` and the owner's switch, or a 403 that

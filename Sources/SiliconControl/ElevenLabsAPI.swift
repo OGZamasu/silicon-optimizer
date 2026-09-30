@@ -69,9 +69,13 @@ public enum ElevenLabsControl {
     public static let defaultListLimit = 50
     public static let maximumListLimit = 500
 
-    /// The largest file a call may upload, each. ElevenLabs's own ceilings are lower for most
-    /// operations; this is the one that stops the app copying anything bigger.
-    public static let maximumUploadBytes: Int64 = 1 << 30
+    /// The most a call may upload, all its files together — the client's own ceiling.
+    /// ElevenLabs's are lower for most operations; this is the one that stops the app reading
+    /// anything bigger.
+    public static let maximumUploadBytes: Int64 = 3 << 30
+
+    /// The most files one call may name.
+    public static let maximumUploadFiles = 100
 }
 
 /// One request for the host, already past the caller policy.

@@ -667,10 +667,14 @@ final class RecordingBackend: ElevenLabsControlBackend, @unchecked Sendable {
 
     private let lock = NSLock()
     private var _calls: [Call] = []
-    private let answer: @Sendable (ElevenLabsOperation) throws -> ElevenLabsResult
+    private let answer: @Sendable (ElevenLabsOperation, [String: [ElevenLabsFile]]) throws -> ElevenLabsResult
 
-    init(answer: @escaping @Sendable (ElevenLabsOperation) throws -> ElevenLabsResult) {
-        self.answer = answer
+    init(answerFiles: @escaping @Sendable (ElevenLabsOperation, [String: [ElevenLabsFile]]) throws -> ElevenLabsResult) {
+        self.answer = answerFiles
+    }
+
+    convenience init(answer: @escaping @Sendable (ElevenLabsOperation) throws -> ElevenLabsResult) {
+        self.init(answerFiles: { operation, _ in try answer(operation) })
     }
 
     convenience init(result: ElevenLabsResult = .json(["ok": true], .init(status: 200))) {
@@ -691,6 +695,6 @@ final class RecordingBackend: ElevenLabsControlBackend, @unchecked Sendable {
         lock.withLock {
             _calls.append(Call(operation: operation.id, arguments: arguments, files: files, contents: contents))
         }
-        return try answer(operation)
+        return try answer(operation, files)
     }
 }
