@@ -24,8 +24,15 @@ enum ElevenLabsSnapshot {
         }
     }
 
+    /// Whether the drawing tests run at all: only when asked, with `ELEVENLABS_SNAPSHOT_DIR`
+    /// or `ELEVENLABS_DRAW=1`. Drawing holds the main actor for seconds at a time, and on a
+    /// shared, loaded Mac that starves other suites' timing tests in a full run.
+    nonisolated static var enabled: Bool {
+        directory != nil || ProcessInfo.processInfo.environment["ELEVENLABS_DRAW"] == "1"
+    }
+
     /// Where PNGs go, when anywhere.
-    static var directory: URL? {
+    nonisolated static var directory: URL? {
         guard let path = ProcessInfo.processInfo.environment["ELEVENLABS_SNAPSHOT_DIR"], !path.isEmpty else {
             return nil
         }

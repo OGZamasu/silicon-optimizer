@@ -13,11 +13,17 @@ struct ElevenLabsResultView: View {
     var operation: ElevenLabsOperation?
     /// Whether the status, request id and cost line is shown under the body.
     var showsMeta = true
+    /// The run's `output_format`, when known: the sample rate of headerless audio.
+    var outputFormat: String?
 
-    init(result: ElevenLabsResult, operation: ElevenLabsOperation? = nil, showsMeta: Bool = true) {
+    init(
+        result: ElevenLabsResult, operation: ElevenLabsOperation? = nil, showsMeta: Bool = true,
+        outputFormat: String? = nil
+    ) {
         self.result = result
         self.operation = operation
         self.showsMeta = showsMeta
+        self.outputFormat = outputFormat
     }
 
     var body: some View {
@@ -26,7 +32,7 @@ struct ElevenLabsResultView: View {
             case .json(let value, _):
                 ElevenLabsJSONBlock(value: value)
             case .file(let url, let contentType, let bytes, _):
-                ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes)
+                ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes, outputFormat: outputFormat)
             case .text(let text, _):
                 ElevenLabsTextBlock(text: text)
             case .events(let events, _):
@@ -37,7 +43,7 @@ struct ElevenLabsResultView: View {
                     case .json(let value): ElevenLabsJSONBlock(value: value)
                     case .text(let text): ElevenLabsTextBlock(text: text)
                     case .file(let url, let contentType, let bytes):
-                        ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes)
+                        ElevenLabsFileResult(url: url, contentType: contentType, bytes: bytes, outputFormat: outputFormat)
                     }
                 }
             }
@@ -48,9 +54,26 @@ struct ElevenLabsResultView: View {
     }
 }
 
-/// Status, request id and what the call cost, in one quiet line.
+/// Status, request id, what the call cost, and the ids ElevenLabs gives what it made (a song,
+/// a history item, a dub) — in one quiet line.
 struct ElevenLabsMetaLine: View {
     let meta: ElevenLabsMeta
+
+    struct Identifier: Hashable {
+        var label: String
+        var value: String
+    }
+
+    /// The made-thing ids among the answer's headers, labelled, one per label.
+    static func identifiers(_ meta: ElevenLabsMeta) -> [Identifier] {
+        var kept: [Identifier] = []
+        for (header, label) in [("song-id", "Song"), ("history-item-id", "History item"),
+                                ("dubbing-id", "Dub"), ("x-dubbing-id", "Dub")] {
+            guard let value = meta.headers[header], !kept.contains(where: { $0.label == label }) else { continue }
+            kept.append(Identifier(label: label, value: value))
+        }
+        return kept
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -60,6 +83,12 @@ struct ElevenLabsMetaLine: View {
             }
             if let requestID = meta.requestID {
                 Text("Request \(requestID)")
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            ForEach(Self.identifiers(meta), id: \.label) { item in
+                Text("\(item.label) \(item.value)")
                     .textSelection(.enabled)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -246,15 +275,17 @@ struct ElevenLabsFileResult: View {
     let url: URL
     let contentType: String
     let bytes: Int
+    /// The run's `output_format`, for headerless audio's sample rate.
+    var outputFormat: String?
 
     var body: some View {
         let type = contentType.lowercased()
         VStack(alignment: .leading, spacing: 6) {
-            if type.hasPrefix("audio/"), Self.isRawAudio(url: url, contentType: type) {
-                fileRow
-                Text("Raw audio with no header: it cannot play here. Save it, or open it in an editor with the sample rate you chose.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if let encoding = ElevenLabsRawAudio.encoding(url: url, contentType: type) {
+                ElevenLabsRawAudioPlayerView(
+                    url: url, encoding: encoding,
+                    knownRate: ElevenLabsRawAudio.sampleRate(outputFormat: outputFormat)
+                )
             } else if type.hasPrefix("audio/") {
                 ElevenLabsAudioPlayerView(url: url, title: url.lastPathComponent).id(url)
             } else if type.hasPrefix("image/"), let image = NSImage(contentsOf: url) {
@@ -276,12 +307,9 @@ struct ElevenLabsFileResult: View {
         }
     }
 
-    /// PCM, μ-law and A-law as ElevenLabs sends them: samples with no header, which no player
-    /// can open without being told the rate.
+    /// PCM, μ-law and A-law as ElevenLabs sends them: samples with no header.
     static func isRawAudio(url: URL, contentType: String) -> Bool {
-        ["pcm", "ulaw", "alaw"].contains(url.pathExtension.lowercased())
-            || ["audio/pcm", "audio/l16", "audio/basic", "audio/x-mulaw", "audio/ulaw", "audio/alaw", "audio/x-alaw"]
-                .contains(contentType.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? "")
+        ElevenLabsRawAudio.encoding(url: url, contentType: contentType) != nil
     }
 
     private var fileRow: some View {

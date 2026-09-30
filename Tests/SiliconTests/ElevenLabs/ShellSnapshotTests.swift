@@ -6,10 +6,10 @@ import SiliconElevenLabs
 @testable import SiliconUI
 
 /// The pane, Settings and the Explorer drawn with made-up data, light and dark, narrow and
-/// wide. Run with `ELEVENLABS_SNAPSHOT_DIR=<scratch folder>` to get PNGs to look at; without
-/// it they are drawn and checked for content, and nothing is written. Every model here has
+/// wide. Run with `ELEVENLABS_SNAPSHOT_DIR=<scratch folder>` to get PNGs to look at, or with
+/// `ELEVENLABS_DRAW=1` to draw and check them without writing anything; skipped otherwise. Every model here has
 /// a transport that refuses everything, so nothing drawn can reach ElevenLabs.
-@Suite("ElevenLabs shell snapshots", .serialized)
+@Suite("ElevenLabs shell snapshots", .serialized, .enabled(if: ElevenLabsSnapshot.enabled))
 @MainActor
 struct ShellSnapshotTests {
 

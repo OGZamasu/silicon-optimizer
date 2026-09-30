@@ -155,14 +155,34 @@ struct ElevenLabsRiskConfirmation: View {
 }
 
 extension View {
-    /// Presents `runner`'s confirmation while it waits for one.
-    func elevenLabsConfirmation(for runner: ElevenLabsRunner) -> some View {
+    /// Presents `runner`'s confirmation while it waits for one. The ElevenLabs pane already
+    /// presents every runner made with its context (`.app(model)`); this is for a runner
+    /// without one.
+    ///
+    /// - Parameter when: Off leaves presenting to someone else, so one question never gets
+    ///   two sheets.
+    func elevenLabsConfirmation(for runner: ElevenLabsRunner, when enabled: Bool = true) -> some View {
         sheet(item: Binding(
-            get: { runner.confirmation },
-            set: { if $0 == nil { runner.decline() } }
+            get: { enabled ? runner.confirmation : nil },
+            set: { if $0 == nil, enabled { runner.decline() } }
         )) { request in
             ElevenLabsRiskConfirmation(
                 request: request, onConfirm: { runner.confirm() }, onCancel: { runner.decline() }
+            )
+        }
+    }
+
+    /// Presents whichever runner's confirmation the pane has on screen. The pane hangs this
+    /// once, so every section's risky runs ask, whatever that section draws.
+    func elevenLabsConfirmations(of pane: ElevenLabsPaneState) -> some View {
+        sheet(item: Binding(
+            get: { pane.confirming?.confirmation },
+            set: { if $0 == nil { pane.confirming?.decline() } }
+        )) { request in
+            ElevenLabsRiskConfirmation(
+                request: request,
+                onConfirm: { pane.confirming?.confirm() },
+                onCancel: { pane.confirming?.decline() }
             )
         }
     }
