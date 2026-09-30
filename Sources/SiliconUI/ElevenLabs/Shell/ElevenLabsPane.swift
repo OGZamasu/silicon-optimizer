@@ -80,7 +80,7 @@ struct ElevenLabsPane: View {
     }
 
     private func openSettings() {
-        settingsPane = "ElevenLabs"
+        settingsPane = SettingsView.Pane.elevenLabs.rawValue
         model.selectedTab = .settings
     }
 }
