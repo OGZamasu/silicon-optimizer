@@ -323,6 +323,20 @@ final class MusicScreenModel: CreativeScreenModel {
         return (CreativeSpec.excludesLowerBound(Self.compose, "finetune_strength") ? range.lowerBound + 0.05 : range.lowerBound)...range.upperBound
     }
     var isDetailed: Bool { delivery == .detailed || delivery == .detailedStream }
+    var isStreamed: Bool { delivery == .stream || delivery == .detailedStream }
+
+    /// The chosen format, or the operation's default when it does not take the chosen one.
+    var effectiveOutputFormat: String? {
+        outputFormats.contains(outputFormat) ? outputFormat : CreativeSpec.defaultString(composeOperationID, "output_format")
+    }
+
+    /// Whether a streamed song plays as it arrives: the default is MP3, and the shell's
+    /// stream player decodes MP3 and raw PCM.
+    var streamsLive: Bool {
+        guard let format = effectiveOutputFormat else { return true }
+        return format == CreativeSpec.defaultString(composeOperationID, "output_format")
+            || CreativeOutputFormat.playsLive(format)
+    }
 
     var composeProblems: [String] {
         var problems: [String] = busyRunner == nil ? [] : [Self.busyProblem]
@@ -394,8 +408,11 @@ final class MusicScreenModel: CreativeScreenModel {
             if withTimestamps { arguments["with_timestamps"] = true }
             if withWaveform { arguments["with_waveform_visual"] = true }
         }
-        let format = outputFormats.contains(outputFormat) ? outputFormat : CreativeSpec.defaultString(id, "output_format")
-        if let format { arguments["output_format"] = .string(format) }
+        // The spec's default ("auto": always MP3) is left for ElevenLabs to apply, so a stream
+        // is decoded as the MP3 it is rather than refused as a format named "auto".
+        if let format = effectiveOutputFormat, format != CreativeSpec.defaultString(id, "output_format") {
+            arguments["output_format"] = .string(format)
+        }
         return arguments
     }
 
@@ -814,6 +831,10 @@ private struct MusicComposeTab: View {
             }
             .pickerStyle(.segmented)
             .disabled(screen.busyRunner != nil)
+            if screen.isStreamed, !screen.streamsLive {
+                Text("\(CreativeOutputFormat.title(screen.effectiveOutputFormat ?? "")) is not played as it arrives; the whole song is kept and plays when it is done.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if screen.isDetailed {
                 Toggle("Lyrics timings", isOn: $screen.withTimestamps)
                 Toggle("Waveform", isOn: $screen.withWaveform)
@@ -852,6 +873,15 @@ private struct MusicResultCard: View {
     var body: some View {
         if runner.phase != .idle || screen.takes.first != nil {
             CreativeCard("Result", systemImage: "play.circle") {
+                if runner.isRunning, let player = runner.streamPlayer {
+                    Label(player.receivedBytes > 0 ? "Streaming…" : "Waiting for the first audio…",
+                          systemImage: "dot.radiowaves.left.and.right")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if let problem = runner.streamPlayer?.problem {
+                    Text(problem).font(.caption).foregroundStyle(.secondary)
+                }
                 if let take = screen.takes.first {
                     if screen.songWords.isEmpty {
                         CreativeAudioResult(take: take)

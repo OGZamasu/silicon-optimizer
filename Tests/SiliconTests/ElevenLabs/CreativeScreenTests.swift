@@ -359,6 +359,37 @@ struct CreativeScreenTests {
         }
     }
 
+    /// Music's default format is the spec's "auto" (always MP3). Sent, it reached the stream
+    /// player as a format it cannot decode, so "Streamed" never played live; it is now left for
+    /// ElevenLabs to apply, and the player decodes the MP3 it gets.
+    @Test func aStreamedSongInTheDefaultFormatPlaysAsItArrives() async throws {
+        let rig = CreativeRig()
+        defer { rig.clean() }
+        let music = rig.session.music
+        #expect(music.outputFormat == "auto")
+        music.prompt = "Lo-fi"
+        #expect(music.composeArguments()["output_format"] == nil)
+        music.outputFormat = "mp3_44100_128"
+        #expect(music.composeArguments()["output_format"] == "mp3_44100_128")
+        music.outputFormat = "opus_48000_64"
+        music.delivery = .stream
+        #expect(!music.streamsLive)
+        music.outputFormat = "auto"
+        #expect(music.streamsLive)
+
+        rig.always(MusicScreenModel.composeStream, .init(
+            status: 200, headers: ["content-type": "audio/mpeg"], body: Data(count: 300),
+            chunks: [Data(count: 100), Data(count: 100), Data(count: 100)], delay: .seconds(5)
+        ))
+        let running = Task { await music.composeSong() }
+        let runner = music.runner(MusicScreenModel.composeStream)
+        try await CreativeRig.waitUntil { runner.streamPlayer != nil }
+        #expect(runner.streamPlayer?.problem == nil, "\(runner.streamPlayer?.problem ?? "")")
+        #expect(rig.requests(MusicScreenModel.composeStream).first?.request.url.query == nil)
+        runner.cancel()
+        await running.value
+    }
+
     @Test func aPlanRoundTripsAndKeepsWhatItDoesNotEdit() throws {
         let plan = try #require(MusicPlan(json: Self.planJSON))
         #expect(plan.sections.map(\.name) == ["Intro", "Chorus"])
@@ -861,6 +892,7 @@ struct CreativeScreenTests {
         #expect(CreativeOutputFormat.playsLive("pcm_24000"))
         #expect(!CreativeOutputFormat.playsLive("ulaw_8000"))
         #expect(!CreativeOutputFormat.playsLive("opus_48000_64"))
+        #expect(!CreativeOutputFormat.playsLive("auto"), "the stream player cannot read a format named auto")
         // A finished raw take goes to the shell's raw player, at the rate the run asked for.
         #expect(CreativeAudioResult(url: URL(fileURLWithPath: "take.pcm"), contentType: "audio/pcm").isRaw)
         #expect(CreativeAudioResult(url: URL(fileURLWithPath: "take.ulaw"), contentType: "application/octet-stream").isRaw)

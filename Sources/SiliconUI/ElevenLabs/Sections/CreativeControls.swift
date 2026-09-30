@@ -549,9 +549,10 @@ enum CreativeOutputFormat {
     }
 
     /// Whether a stream in this format plays as it arrives: the shell's stream player decodes
-    /// MP3 and raw PCM live; other formats are only kept.
+    /// MP3 and raw PCM live; other formats are only kept. "auto" is not a format the player
+    /// can read — a screen whose default it is leaves it unsent (it means MP3).
     static func playsLive(_ id: String) -> Bool {
-        id.hasPrefix("mp3_") || id.hasPrefix("pcm_") || id == "auto"
+        id.hasPrefix("mp3_") || id.hasPrefix("pcm_")
     }
 }
 
