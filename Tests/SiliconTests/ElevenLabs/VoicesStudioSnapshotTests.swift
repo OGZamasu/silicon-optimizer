@@ -64,7 +64,7 @@ struct VoicesStudioSnapshotTests {
         try VoicesStudioSnapshots.render("voices-professional", height: 2100) { VoicesScreen(model: model) }
     }
 
-    // MARK: Voice design
+    // MARK: Voice design and library
 
     @Test func voiceDesignWithPreviews() throws {
         let fixture = VoicesStudioFixture()
@@ -79,6 +79,28 @@ struct VoicesStudioSnapshotTests {
         model.saveName = "Glen narrator"
         model.saveDescription = model.voiceDescription
         try VoicesStudioSnapshots.render("voice-design", height: 1300) { VoiceDesignScreen(model: model) }
+    }
+
+    @Test func theVoiceLibrary() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = VoiceLibrarySectionModel(environment: fixture.environment)
+        let rows: [VoiceLibraryVoice] = try [
+            ("Lena", "british", "female", "young", "narration", 1_204, true),
+            ("Marcus", "american", "male", "middle_aged", "conversational", 88_120, false),
+            ("Aiko", "japanese", "female", "young", "characters", 3_400, false),
+        ].enumerated().map { index, entry in
+            try #require(VoiceLibraryVoice(json: [
+                "public_owner_id": .string("owner\(index)"), "voice_id": .string("lib\(index)"), "name": .string(entry.0),
+                "accent": .string(entry.1), "gender": .string(entry.2), "age": .string(entry.3),
+                "use_case": .string(entry.4), "descriptive": "calm", "category": "professional",
+                "cloned_by_count": .number(Double(entry.5)), "usage_character_count_1y": 1_250_000,
+                "featured": .bool(entry.6), "description": "A clear, friendly voice for long reads.",
+                "preview_url": "https://storage.example/preview.mp3",
+            ]))
+        }
+        model.load(rows: rows, hasMore: true, total: 5_021)
+        try VoicesStudioSnapshots.render("voice-library", height: 900) { VoiceLibraryScreen(model: model) }
     }
 
     // MARK: Fakes

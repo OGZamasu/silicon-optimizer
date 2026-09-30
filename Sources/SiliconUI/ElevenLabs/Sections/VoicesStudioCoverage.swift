@@ -18,6 +18,9 @@ enum VoicesStudioCoverage {
         Entry(section: .voiceDesign, controls: VoiceDesignSectionModel.controls,
               callsWithoutControls: VoiceDesignSectionModel.callsWithoutControls,
               explorerOnly: VoiceDesignSectionModel.explorerOnly),
+        Entry(section: .voiceLibrary, controls: VoiceLibrarySectionModel.controls,
+              callsWithoutControls: VoiceLibrarySectionModel.callsWithoutControls,
+              explorerOnly: VoiceLibrarySectionModel.explorerOnly),
     ]
 
     @MainActor static var controls: [VoicesStudioControl] { entries.flatMap(\.controls) }
