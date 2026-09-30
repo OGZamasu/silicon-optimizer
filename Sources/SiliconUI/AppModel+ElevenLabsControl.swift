@@ -240,7 +240,12 @@ struct ElevenLabsControlHandler: Sendable {
     static let credentialNote =
         "The answer carries a credential (a key, secret, token or signed URL). Agents get it "
         + "masked unless the owner has turned on \"\(ElevenLabsControl.riskySwitch)\" in "
-        + "\(ElevenLabsControl.riskySwitchLocation); the app itself shows it."
+        + "\(ElevenLabsControl.riskySwitchLocation); the app itself shows it. \(newKeyNote)"
+
+    /// Said wherever an agent might expect otherwise: `sk_…` keys are masked whatever the switch.
+    static let newKeyNote =
+        "A newly created API key is never shown over MCP or the control API, even with the "
+        + "switch on; make it in the app."
 
     static func riskDescription(_ risk: ElevenLabsRisk) -> String {
         switch risk {

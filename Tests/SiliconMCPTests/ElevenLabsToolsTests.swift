@@ -39,6 +39,7 @@ struct ElevenLabsToolsTests {
         let call = try #require(listed.first { $0.name == "elevenlabs_call" })
         #expect(call.description.contains("confirm: true"))
         #expect(call.description.contains("Settings → ElevenLabs"))
+        #expect(call.description.contains("A newly created API key is never shown over MCP; make it in the app."))
         #expect(Set(call.properties.keys) == ["operation", "arguments", "files", "confirm"])
         #expect(call.required == ["operation"])
     }

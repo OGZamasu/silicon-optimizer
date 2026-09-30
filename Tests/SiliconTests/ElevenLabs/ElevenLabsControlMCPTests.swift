@@ -349,6 +349,34 @@ struct ElevenLabsControlMCPTests {
         }
     }
 
+    /// A new service-account key is `sk_…`-shaped, so it is masked even with the owner's switch
+    /// on and the call confirmed: an agent never receives one. The call itself runs, and the
+    /// operation's description says to make keys in the app.
+    @Test func aNewAPIKeyIsNeverShownOverTheControlAPI() async throws {
+        let newKey = "sk_" + String(repeating: "5e7a", count: 12)
+        let rig = Rig(allowRisky: true) { request in
+            request.operationID == "create_service_account_api_key"
+                ? .json(["xi-api-key": .string(newKey), "key_id": "key-1"])
+                : CoreConformanceTests.reply(for: request)
+        }
+        defer { rig.clean() }
+        let operation = try #require(ElevenLabsCatalog.operation("create_service_account_api_key"))
+        #expect(operation.returnsCredential && operation.requiresConfirmation)
+        let body: ELJSON = [
+            "operation": .string(operation.id), "arguments": .object(Self.sampleArguments(operation)),
+            "confirm": true,
+        ]
+        let answer = await rig.handler.handle(.init(route: .call(body: body.encoded())))
+        #expect(answer.status == 200)
+        let text = String(decoding: answer.body, as: UTF8.self)
+        #expect(!text.contains(newKey))
+        let json = try ELJSON(data: answer.body)
+        #expect(json["json"]["xi-api-key"] == .string(ElevenLabsRedaction.placeholder))
+        #expect(json["json"]["key_id"] == "key-1")
+        let detail = try ELJSON(data: rig.handler.operation(operation.id).body)
+        #expect(detail["credentialNote"].stringValue?.contains(ElevenLabsControlHandler.newKeyNote) == true)
+    }
+
     /// An upload through the real client: its bytes reach ElevenLabs in the multipart body
     /// under the file's own name, and nothing about where it lives on this Mac does.
     @Test func anUploadReachesElevenLabsAsItsBytesUnderItsOwnName() async throws {

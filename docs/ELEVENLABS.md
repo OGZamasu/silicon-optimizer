@@ -359,17 +359,19 @@ JSON, text and events past 256 KB come back shortened — lists cut to their fir
 strings cut, by the gentlest step that fits — with `truncated: true`, a `note` saying what was cut,
 and the whole answer saved as `fullResult` `{file, contentType, bytes}`.
 
-**Redaction.** Always, whatever the switch: the key preview `GET /v1/user` carries, any `sk_…`
-string, and every plain-string header value (a webhook tool's `request_headers`, custom headers)
-are masked — the owner's own key typed into an agent's tool never reaches another agent. While the
-owner's switch is off, the credential fields of the operations that return one (webhook secrets,
-single-use tokens, signed conversation URLs, shareable agent tokens) are masked too, and so is any
-string under a field whose name says it is a secret (`api_key`, `*token*`, `*secret*`, `signature`,
-`password`, `signed_url` — but not a pagination cursor like `next_page_token`). Turning the switch
-on reveals exactly those named credential fields of that one operation, and nothing else; a key
-shaped like `sk_…` stays masked even there. A masked answer says so in `redacted` and
-`redactionNote`; the saved `fullResult` is the masked answer too. The app's own pane shows
-everything.
+**Redaction.** Always, whatever the switch: the key preview `GET /v1/user` carries and any `sk_…`
+string are masked — the owner's own key typed into an agent's tool never reaches another agent.
+**A newly created API key is never shown over MCP or the control API, even with the switch on:
+make it in the app.** While the owner's switch is off, the credential fields of the operations
+that return one (webhook secrets, single-use tokens, signed conversation URLs, shareable agent
+tokens), every plain-string header value (a webhook tool's `request_headers`, custom headers),
+and any string under a field whose name says it is a secret (`api_key`, `*token*`, `*secret*`,
+`signature`, `password`, `signed_url` — but not a pagination cursor like `next_page_token` or an
+identifier like `secret_id`) are masked. Turning the switch on reveals exactly what it is for:
+that one operation's named credential fields, and header values (so an agent allowed to edit a
+tool can send its config back). A `password` or `client_secret` anywhere else stays masked. A
+masked answer says so in `redacted` and `redactionNote`; the saved `fullResult` is the masked
+answer too. The app's own pane shows everything.
 
 `confirm: true` is the agent's own statement that the user agreed; nothing can check it. The
 owner's switch, off by default, is the real lock.

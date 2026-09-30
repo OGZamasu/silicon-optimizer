@@ -354,7 +354,8 @@ enum ElevenLabsTools {
             not cover. Operations that generate spend credits. Destructive and real-world ones \
             (deleting, phone calls, invitations, API keys, webhooks, secrets) run only with \
             confirm: true after the user has agreed, and only if the owner allows agents to in \
-            Settings → ElevenLabs.
+            Settings → ElevenLabs. A newly created API key is never shown over MCP; make it in \
+            the app.
             """,
         properties: [
             "operation": Tools.property("string", "The operation id, from elevenlabs_search_operations."),
