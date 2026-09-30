@@ -77,9 +77,9 @@ Every operation has an explicit class in `ElevenLabsRiskTable.swift`:
 |---|---|---|---|
 | `read` | 171 | Every GET. Also the POSTs that only compute or download (usage queries, cost estimates, summaries, RAG retrieval, similar-voice search, history and Studio snapshot downloads) | Nothing |
 | `generate` | 52 | Billable creation: speech, dialogue, voice changer, sound effects, music, isolation, transcription, alignment, voice design, dubbing, Studio and Audio Native conversion, Flows, agent simulations and test runs | Nothing extra. The answer reports `character-cost` |
-| `modify` | 95 | Edits to the owner's own resources that cost nothing by themselves | Nothing extra |
-| `destructive` | 33 | Deletes, plus the knowledge-base bulk delete (a POST) | In the app, a confirmation. Over MCP or control, `confirm: true` and the owner's switch |
-| `realWorld` | 52 | Reaches outside the account or changes who can get into it | Same as destructive |
+| `modify` | 90 | Edits to the owner's own resources that cost nothing by themselves | Nothing extra |
+| `destructive` | 34 | Deletes, the knowledge-base bulk delete (a POST), and cancelling a knowledge-base crawl (it removes the documents the crawl made) | In the app, a confirmation. Over MCP or control, `confirm: true` and the owner's switch |
+| `realWorld` | 56 | Reaches outside the account or changes who can get into it — including agent tools and environment variables, because a webhook tool points an agent at an outside URL with headers, as an MCP server does | Same as destructive |
 
 The real-world families, by path: outbound calls and messages (`/v1/convai/twilio`, `exotel`,
 `whatsapp`, `sip-trunk`), batch calling, phone numbers, WhatsApp accounts, secrets, MCP
