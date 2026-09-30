@@ -20,13 +20,16 @@ struct ElevenLabsRevealedCredential: Identifiable, Equatable, Sendable {
     /// The secret fields of a credential-returning answer: exactly the ones the core's
     /// redaction masks for this operation (its reviewed field list), found by comparing the
     /// answer with its redacted copy — so what is shown once here is what MCP never sees.
+    ///
+    /// Header values (`Authorization` in a tool's `request_headers`) are left in, here and in
+    /// `masked`: the owner's editor has to send the real config back, and a header value is not
+    /// a credential ElevenLabs "will not show again", so it does not belong on this card.
     init(operation: ElevenLabsOperation, result: ElevenLabsResult) {
         operationID = operation.id
         var found: [Field] = []
         switch result {
         case .json(let value, _):
-            Self.collect(value, masked: ElevenLabsRedaction.redactCredentials(in: value, for: operation),
-                         path: "", into: &found)
+            Self.collect(value, masked: Self.redacted(value, for: operation), path: "", into: &found)
         case .text(let text, _):
             found = [Field(path: "answer", value: text)]
         case .events, .file, .parts:
@@ -39,12 +42,17 @@ struct ElevenLabsRevealedCredential: Identifiable, Equatable, Sendable {
     static func masked(_ result: ElevenLabsResult, for operation: ElevenLabsOperation) -> ElevenLabsResult {
         switch result {
         case .json(let value, let meta):
-            return .json(ElevenLabsRedaction.redactCredentials(in: value, for: operation), meta)
+            return .json(redacted(value, for: operation), meta)
         case .text(_, let meta):
             return .text(ElevenLabsRedaction.placeholder, meta)
         case .events, .file, .parts:
             return result
         }
+    }
+
+    /// The core's redaction as the app uses it: credential fields masked, header values not.
+    static func redacted(_ value: JSONValue, for operation: ElevenLabsOperation) -> JSONValue {
+        ElevenLabsRedaction.redactCredentials(in: value, for: operation, maskingHeaderValues: false)
     }
 
     private static func collect(_ value: JSONValue, masked: JSONValue, path: String, into found: inout [Field]) {

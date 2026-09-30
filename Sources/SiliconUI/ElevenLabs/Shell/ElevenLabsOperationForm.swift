@@ -31,6 +31,12 @@ struct ElevenLabsOperationForm: View {
                     VStack(alignment: .leading, spacing: 12) {
                         if showsHeadings { heading(location) }
                         if location == .body, form.editsBodyAsJSON {
+                            if form.hasTypedSecrets {
+                                Label("This JSON shows what was typed into secret fields. Show API call and curl never do.",
+                                      systemImage: "eye.trianglebadge.exclamationmark")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
                             ElevenLabsJSONEditor(text: $form.bodyJSON, minHeight: 180)
                             // Upload fields stay pickers even while the rest is JSON.
                             ForEach(nodes.filter { if case .file = $0.field.kind { true } else { false } }) { node in
@@ -135,6 +141,13 @@ struct ElevenLabsFormNodeView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.tertiary)
             }
+            if node.field.isSecret {
+                Image(systemName: "lock.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("A secret: typed hidden, masked in Show API call and curl")
+                    .accessibilityLabel("secret")
+            }
             if node.field.deprecated {
                 Text("Deprecated")
                     .font(.caption2)
@@ -163,7 +176,7 @@ struct ElevenLabsFormNodeView: View {
 
     private var canEditAsJSON: Bool {
         switch node.field.kind {
-        case .object, .list, .variants: true
+        case .object, .list, .variants, .headerMap: true
         default: false
         }
     }
@@ -174,12 +187,21 @@ struct ElevenLabsFormNodeView: View {
     private var control: some View {
         switch node.field.kind {
         case .text(let multiline, let format):
-            if multiline {
+            if node.field.isSecret {
+                SecureField(node.field.title, text: $node.text, prompt: Text("Hidden while typed"))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+            } else if multiline {
                 ElevenLabsTextArea(text: $node.text, prompt: hint)
             } else {
                 TextField(node.field.title, text: $node.text, prompt: Text(hint ?? format ?? ""))
                     .labelsHidden()
                     .textFieldStyle(.roundedBorder)
+                if node.field.location == .path, depth == 0 {
+                    Text("An id, not a path: no “/”, “\\” or “..”.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         case .integer, .number:
             numberControl
@@ -206,6 +228,8 @@ struct ElevenLabsFormNodeView: View {
             variantsControl(variants)
         case .file(let multiple):
             ElevenLabsFilePickerField(files: $node.files, multiple: multiple)
+        case .headerMap:
+            headerMapControl
         case .json:
             ElevenLabsJSONEditor(text: $node.text, minHeight: 80)
         }
@@ -275,6 +299,38 @@ struct ElevenLabsFormNodeView: View {
             }
             .controlSize(.small)
             .disabled(node.field.constraints.maxItems.map { node.items.count >= $0 } ?? false)
+        }
+    }
+
+    private var headerMapControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach($node.headerEntries) { $entry in
+                HStack(spacing: 6) {
+                    TextField("Header", text: $entry.name, prompt: Text("Authorization"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                    SecureField("Value", text: $entry.value, prompt: Text("Hidden while typed"))
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        node.removeHeader(entry.id)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove header")
+                }
+            }
+            Button {
+                node.addHeader()
+            } label: {
+                Label(node.headerEntries.isEmpty ? "Add a header" : "Add another", systemImage: "plus")
+            }
+            .controlSize(.small)
+            Text("Values are typed hidden. A value that refers to a stored secret (secret_id) needs the JSON editor.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 
