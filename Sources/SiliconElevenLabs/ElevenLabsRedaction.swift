@@ -192,8 +192,10 @@ public enum ElevenLabsRedaction {
                         case .string(let text) where !text.isEmpty:
                             return (key, .string(placeholder))
                         case .object(var fields):
-                            if case .string(let text)? = fields[field], !text.isEmpty,
-                               fields["type"] != .string("dynamic") {
+                            // Only a post-dial value can name a variable instead (`type: dynamic`);
+                            // `uui` has no `type`, so one typed there exempts nothing.
+                            let namesAVariable = name == "post_dial_digits" && fields["type"] == .string("dynamic")
+                            if case .string(let text)? = fields[field], !text.isEmpty, !namesAVariable {
                                 fields[field] = .string(placeholder)
                             }
                             return (key, .object(fields))
