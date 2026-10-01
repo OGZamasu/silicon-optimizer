@@ -660,4 +660,168 @@ struct VoicesStudioStaleValueTests {
         #expect(fixture.sent("edit_chapter").count == 1)
         #expect(body(fixture, "edit_chapter").contains("One, renamed"))
     }
+
+    // MARK: - Round 4: a service-account key edited again before its keys are read again
+
+    nonisolated static func key(_ id: String, of account: String, permissions: [String]) -> JSONValue {
+        ["name": .string("Key \(id)"), "hint": "a1b2", "key_id": .string(id), "service_account_user_id": .string(account),
+         "is_disabled": false, "permissions": .array(permissions.map(JSONValue.string)), "character_count": 0,
+         "hashed_xi_api_key": "h"]
+    }
+
+    func permissionsSent(_ fixture: VoicesStudioFixture) -> [[String]] {
+        fixture.sent("edit_service_account_api_key").map {
+            ((try? JSONValue(data: $0.body))?["permissions"].arrayValue ?? []).compactMap(\.stringValue)
+        }
+    }
+
+    /// A permission granted to key k1; while the account's keys are read again, the row shows
+    /// what the save sent (not the permissions from before), and Edit waits for that read — the
+    /// editor must not start from a row the save has just made stale, or the next save would
+    /// take back the permission just granted. Once the read lands, Edit works and the next
+    /// save keeps it.
+    @Test func aKeyChangedAMomentAgoIsEditedFromItsNextRead() async throws {
+        let signals = Signals()
+        let model0 = ServiceAccountsSectionModel(environment: VoicesStudioFixture().environment)
+        let choices = model0.permissionChoices.filter { $0 != "text_to_speech" }
+        let first = try #require(choices.first), second = try #require(choices.dropFirst().first)
+        let afterFirst = Self.key("k1", of: "sa-a", permissions: [first, "text_to_speech"].sorted())
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                return .json(["status": "ok"])
+            case "get_service_account_api_keys_route":
+                if signals.note("keys") == 1 { try await signals.wait(for: "tried to edit") }
+                return .json(["api-keys": [afterFirst]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let key = try #require(account.keys.first)
+        model.edit(key)
+        model.keyDraft.allPermissions = false
+        model.keyDraft.permissions.insert(first)
+        let saving = Task { try await answering(model.actions) { await model.saveKey() } }
+        try await voicesStudioWait { fixture.sent("get_service_account_api_keys_route").count == 1 }
+        let row = try #require(model.selected?.keys.first)
+        #expect(row.permissions.contains(first), "the row still shows the permissions from before the save: \(row.permissions)")
+        #expect(model.accounts.first?.keys.first?.permissions.contains(first) == true)
+        model.edit(row)
+        #expect(model.editingKey == nil, "the editor opened on a key whose read is still on its way")
+        #expect(model.editBlockReason(row) == "Waiting for its keys to be read again after the last change.")
+        #expect(model.problems == ["Waiting for its keys to be read again after the last change."])
+        signals.note("tried to edit")
+        try await saving.value
+        let fresh = try #require(model.selected?.keys.first)
+        #expect(model.editBlockReason(fresh) == nil)
+        model.edit(fresh)
+        #expect(model.keyDraft.permissions.contains(first))
+        model.keyDraft.permissions.insert(second)
+        try await answering(model.actions) { await model.saveKey() }
+        let sent = permissionsSent(fixture)
+        #expect(sent.count == 2)
+        #expect(sent.last?.contains(first) == true && sent.last?.contains(second) == true,
+                "the second save took back the permission the first one granted: \(sent)")
+    }
+
+    /// A key change ElevenLabs refuses claims nothing: the row keeps what it had, and Edit is
+    /// not held.
+    @Test func aRefusedKeyChangeClaimsNothing() async throws {
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                return .jsonText(#"{"detail":{"status":"invalid","message":"Not allowed"}}"#, status: 422)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let key = try #require(account.keys.first)
+        model.edit(key)
+        model.keyDraft.allPermissions = true
+        try await answering(model.actions) { await model.saveKey() }
+        #expect(fixture.sent("edit_service_account_api_key").count == 1)
+        #expect(model.selected?.keys.first?.permissions == ["text_to_speech"], "a refused change was claimed")
+        #expect(model.editBlockReason(key) == nil)
+    }
+
+    /// The accounts list, asked for before a key change answered and answering after it, does
+    /// not put the key's old permissions back.
+    @Test func anAccountsListOlderThanAKeyChangeDoesNotPutTheOldKeyBack() async throws {
+        let signals = Signals()
+        let model0 = ServiceAccountsSectionModel(environment: VoicesStudioFixture().environment)
+        let first = try #require(model0.permissionChoices.first { $0 != "text_to_speech" })
+        let oldList: JSONValue = ["service-accounts": [VoicesStudioLateAnswerTests.account("sa-a", key: "k1")]]
+        let changed = Self.key("k1", of: "sa-a", permissions: [first])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_workspace_service_accounts":
+                try await signals.wait(for: "saved")
+                return .json(oldList)
+            case "edit_service_account_api_key":
+                return .json(["status": "ok"])
+            case "get_service_account_api_keys_route":
+                return .json(["api-keys": [changed]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let listing = Task { await model.refresh() }
+        try await voicesStudioWait { fixture.sent("get_workspace_service_accounts").count == 1 }
+        model.edit(try #require(account.keys.first))
+        model.keyDraft.allPermissions = false
+        model.keyDraft.permissions = [first]
+        try await answering(model.actions) { await model.saveKey() }
+        signals.note("saved")
+        await listing.value
+        #expect(model.selected?.keys.first?.permissions == [first], "the older list put the old permissions back")
+        #expect(model.accounts.first?.keys.first?.permissions == [first])
+    }
+
+    /// A change to a key of account A, then one to a key of account B while A's keys are being
+    /// read again: B's read does not abandon A's, so A's key can be edited once its read lands.
+    @Test func readingOneAccountsKeysDoesNotAbandonAnothersRead() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            let account = request.url.path.contains("sa-a") ? "sa-a" : "sa-b"
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                return .json(["status": "ok"])
+            case "get_service_account_api_keys_route" where account == "sa-a":
+                try await signals.wait(for: "b changed")
+                return .json(["api-keys": [Self.key("ka", of: "sa-a", permissions: ["all"])]])
+            case "get_service_account_api_keys_route":
+                return .json(["api-keys": [Self.key("kb", of: "sa-b", permissions: ["text_to_speech"])]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let a = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "ka")))
+        let b = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-b", key: "kb")))
+        model.load(accounts: [a, b], selected: a)
+        model.edit(try #require(a.keys.first))
+        model.keyDraft.allPermissions = true
+        let savingA = Task { try await answering(model.actions) { await model.saveKey() } }
+        try await voicesStudioWait { fixture.sent("get_service_account_api_keys_route").count == 1 }
+        let keyB = try #require(b.keys.first)
+        try await answering(model.actions) { await model.setEnabled(keyB, false) }
+        signals.note("b changed")
+        try await savingA.value
+        let keyA = try #require(model.accounts.first { $0.id == "sa-a" }?.keys.first)
+        #expect(model.editBlockReason(keyA) == nil, "A's read was abandoned by B's: A's key stays locked")
+        #expect(keyA.permissions == ["all"])
+    }
 }

@@ -46,7 +46,9 @@ struct VoicesStudioLateAnswerTests {
         let slow = try #require(ServiceAccount(json: Self.account("sa-slow", key: "k1")))
         let other = try #require(ServiceAccount(json: Self.account("sa2", key: "k2")))
         model.load(accounts: [slow, other], selected: slow)
-        let task = try await sending(model.actions, "get_service_account_api_keys_route") { await model.refreshKeys() }
+        // Each account's keys are read on a runner of their own: wait for the request itself.
+        let task = Task { await model.refreshKeys() }
+        try await voicesStudioWait { fixture.sent("get_service_account_api_keys_route").count == 1 }
         model.select("sa2")
         fixture.release()
         await task.value

@@ -145,9 +145,21 @@ final class ServiceAccountsSectionModel {
     var isListing: Bool { actions.isRunning("get_workspace_service_accounts") }
 
     func refresh() async {
+        let changesBefore = keyChanges
         guard let json = await actions.perform("get_workspace_service_accounts", quietly: true)?.voicesStudioJSON
         else { return }
-        accounts = (json["service-accounts"].arrayValue ?? []).compactMap(ServiceAccount.init(json:))
+        var listed = (json["service-accounts"].arrayValue ?? []).compactMap(ServiceAccount.init(json:))
+        for index in listed.indices {
+            let id = listed[index].id
+            if keyChanges[id, default: 0] != changesBefore[id, default: 0] {
+                // A key change of this account answered after this list was asked for: its keys
+                // here are older than that change. Keep the ones on screen.
+                listed[index].keys = accounts.first { $0.id == id }?.keys ?? listed[index].keys
+            } else {
+                keysAwaitingRead = keysAwaitingRead.filter { $0.value != id }
+            }
+        }
+        accounts = listed
         loadedOnce = true
         if let id = selected?.id { selected = accounts.first { $0.id == id } }
     }
@@ -195,17 +207,85 @@ final class ServiceAccountsSectionModel {
 
     // MARK: Keys
 
+    /// Key changes that have answered, by account. A read of an account's keys asked before one
+    /// of them answered is older than it, and is dropped: it would put a key's old permissions
+    /// back on its row — for the editor to start from.
+    @ObservationIgnored private var keyChanges: [String: Int] = [:]
+
+    /// Keys changed whose account has not been read again since the change answered: key id →
+    /// account id. Their rows show what the change sent; Edit waits for the read, so the editor
+    /// never starts from a row a change has just made stale.
+    private(set) var keysAwaitingRead: [String: String] = [:]
+
+    /// Why `key` cannot be edited now, when it cannot.
+    func editBlockReason(_ key: ServiceAccountKey) -> String? {
+        guard let accountID = keysAwaitingRead[key.id] else { return nil }
+        if actions.problem("get_service_account_api_keys_route", slot: accountID) != nil {
+            return "Its keys could not be read again after the last change — read them again to edit it."
+        }
+        return "Waiting for its keys to be read again after the last change."
+    }
+
+    /// Whether `key` waits for its account's keys to be read again, and that read failed.
+    func keysReadFailed(for key: ServiceAccountKey) -> Bool {
+        guard let accountID = keysAwaitingRead[key.id] else { return false }
+        return actions.problem("get_service_account_api_keys_route", slot: accountID) != nil
+    }
+
     /// Fetches the keys of `accountID` (the selected account when nil) — after a change, the
-    /// keys of the account the change was made to, whichever is selected by then.
+    /// keys of the account the change was made to, whichever is selected by then. Each account's
+    /// keys are read on a runner of their own, so reading one account's keys never abandons
+    /// another's; a read asked before a key change of its account answered is dropped.
     func refreshKeys(_ accountID: String? = nil) async {
-        guard let accountID = accountID ?? selected?.id,
-              let json = await actions.perform(
-                "get_service_account_api_keys_route", ["service_account_user_id": .string(accountID)], quietly: true
-              )?.voicesStudioJSON else { return }
+        guard let accountID = accountID ?? selected?.id else { return }
+        let changesBefore = keyChanges[accountID, default: 0]
+        guard let json = await actions.perform(
+                "get_service_account_api_keys_route", ["service_account_user_id": .string(accountID)], quietly: true,
+                slot: accountID
+              )?.voicesStudioJSON,
+              keyChanges[accountID, default: 0] == changesBefore else { return }
         let keys = ServiceAccountKey.keys(in: json, of: accountID)
         if let index = accounts.firstIndex(where: { $0.id == accountID }) { accounts[index].keys = keys }
         // Another account may have been chosen meanwhile: these are this account's keys only.
         if selected?.id == accountID { selected?.keys = keys }
+        keysAwaitingRead = keysAwaitingRead.filter { $0.value != accountID }
+    }
+
+    /// A change to the keys of `accountID` has answered (to `keyID`, when it was one key's):
+    /// reads asked before it are stale, and that key's Edit waits for the next read.
+    private func noteKeyChange(_ keyID: String?, of accountID: String) {
+        keyChanges[accountID, default: 0] += 1
+        if let keyID { keysAwaitingRead[keyID] = accountID }
+    }
+
+    /// Changes key `keyID` of `accountID` in place, in the account list and in the selection.
+    private func updateKey(_ keyID: String, of accountID: String, _ change: (inout ServiceAccountKey) -> Void) {
+        if let a = accounts.firstIndex(where: { $0.id == accountID }),
+           let k = accounts[a].keys.firstIndex(where: { $0.id == keyID }) {
+            change(&accounts[a].keys[k])
+        }
+        if var account = selected, account.id == accountID, let k = account.keys.firstIndex(where: { $0.id == keyID }) {
+            change(&account.keys[k])
+            selected = account
+        }
+    }
+
+    /// `key` with what an answered edit sent: what ElevenLabs holds now.
+    nonisolated static func applying(_ arguments: [String: JSONValue], to key: inout ServiceAccountKey) {
+        if let name = arguments["name"]?.stringValue { key.name = name }
+        if let permissions = arguments["permissions"] {
+            key.permissions = permissions.stringValue == "all" ? ["all"] : permissions.arrayValue?.compactMap(\.stringValue) ?? key.permissions
+        }
+        if let limit = arguments["character_limit"] {
+            key.characterLimit = limit.stringValue == "clear" ? nil : limit.intValue ?? key.characterLimit
+        }
+        if let ips = arguments["allowed_ips"] {
+            key.allowedIPs = ips.stringValue == "clear" ? [] : ips.arrayValue?.compactMap(\.stringValue) ?? key.allowedIPs
+        }
+        if let enabled = arguments["is_enabled"]?.boolValue {
+            key.isDisabled = !enabled
+            if enabled { key.disableReason = nil }
+        }
     }
 
     /// The new key's arguments, and every problem with the form.
@@ -251,10 +331,18 @@ final class ServiceAccountsSectionModel {
                 )
               ) != nil else { return }
         if selected?.id == account.id { keyDraft = ServiceAccountKeyDraft() }
+        noteKeyChange(nil, of: account.id)
         await refreshKeys(account.id)
     }
 
     func edit(_ key: ServiceAccountKey?) {
+        // A key changed a moment ago is edited from its next read, not from a row that may not
+        // be what ElevenLabs holds.
+        if let key, let reason = editBlockReason(key) {
+            problems = [reason]
+            return
+        }
+        problems = []
         editingKey = key
         guard let key else {
             keyDraft = ServiceAccountKeyDraft()
@@ -301,6 +389,10 @@ final class ServiceAccountsSectionModel {
                 consequence: "Whatever uses this key gets the new permissions and limits at once."
             )
         ) != nil else { return }
+        // ElevenLabs now holds what was sent: the row takes it at once (only once the change has
+        // answered — a refused change claims nothing), and Edit waits for the keys' next read.
+        updateKey(key.id, of: accountID) { Self.applying(arguments, to: &$0) }
+        noteKeyChange(key.id, of: accountID)
         if editingKey?.id == key.id { edit(nil) }
         await refreshKeys(accountID)
     }
@@ -323,6 +415,8 @@ final class ServiceAccountsSectionModel {
                     : VoicesStudioQuestion("Turn off the API key “\(key.name)” of “\(account.name)”?", button: "Turn off key",
                                            consequence: "Whatever uses this key stops working until it is turned back on.")
               ) != nil else { return }
+        updateKey(key.id, of: account.id) { Self.applying(["is_enabled": .bool(enabled)], to: &$0) }
+        noteKeyChange(key.id, of: account.id)
         await refreshKeys(account.id)
     }
 
@@ -334,6 +428,10 @@ final class ServiceAccountsSectionModel {
                 subject: "the API key “\(key.name)” of “\(account.name)”",
                 consequence: "Whatever uses this key stops working, for good."
               ) != nil else { return }
+        // Gone: its row goes at once, so it cannot be edited or turned on meanwhile.
+        if let a = accounts.firstIndex(where: { $0.id == account.id }) { accounts[a].keys.removeAll { $0.id == key.id } }
+        if selected?.id == account.id { selected?.keys.removeAll { $0.id == key.id } }
+        noteKeyChange(nil, of: account.id)
         await refreshKeys(account.id)
     }
 
