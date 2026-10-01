@@ -44,12 +44,16 @@ struct ElevenLabsConverseHandler: Sendable {
         var settle: Duration = .milliseconds(1_500)
         /// The longest an answer may take.
         var turn: Duration = .seconds(ElevenLabsControl.converseTurnSeconds)
+        /// The longest a whole conversation may run, from the moment it opened.
+        var total: Duration = .seconds(ElevenLabsControl.converseTotalSeconds)
     }
 
     var state: State
     /// Nil when nothing is linked.
     var realtime: ElevenLabsRealtime?
     var timing = Timing()
+    /// One conversation at a time: the app's lane, or a test's own.
+    var lane: ConverseLane = .shared
 
     static let operationName = "agent_converse"
 
@@ -75,6 +79,13 @@ struct ElevenLabsConverseHandler: Sendable {
             return .refusal(400, .init(error: "The conversation was not started: " + problems.joined(separator: " "),
                                        operation: Self.operationName, problems: problems))
         }
+
+        // One at a time: a caller that gave up and retried must not get a second, billed one
+        // beside the first.
+        guard lane.enter() else {
+            return .refusal(409, .init(error: ElevenLabsControl.converseBusy, operation: Self.operationName))
+        }
+        defer { lane.leave() }
 
         let preflight: ElevenLabsAgentPreflight
         do {
@@ -124,14 +135,21 @@ struct ElevenLabsConverseHandler: Sendable {
         preflight: ElevenLabsAgentPreflight, log: ConverseLog
     ) async -> ElevenLabsControlResponse {
         let reader = Task { await Self.read(conversation, into: log) }
-        // The agent's greeting, if it has one.
-        if await log.wait(within: timing.greeting, until: { $0.agentAnswers > 0 || $0.ended != nil }) {
-            await log.waitForQuiet(timing.settle, within: timing.turn)
-        }
+        let deadline = ContinuousClock.now + timing.total
+        func left(_ cap: Duration) -> Duration { min(cap, max(.zero, deadline - ContinuousClock.now)) }
         var note: String?
+        var timedOut = false
+        // The agent's greeting, if it has one.
+        if await log.wait(within: left(timing.greeting), until: { $0.agentAnswers > 0 || $0.ended != nil }) {
+            await log.waitForQuiet(timing.settle, within: left(timing.turn))
+        }
         var sent = 0
         for message in request.messages.prefix(request.turns) {
-            if log.snapshot.ended != nil { break }
+            if log.snapshot.ended != nil || Task.isCancelled { break }
+            guard ContinuousClock.now < deadline else {
+                timedOut = true
+                break
+            }
             let before = log.snapshot.agentAnswers
             do {
                 try await conversation.sendUserMessage(message)
@@ -141,15 +159,24 @@ struct ElevenLabsConverseHandler: Sendable {
             }
             sent += 1
             log.append(role: "user", text: message)
-            let answered = await log.wait(within: timing.turn, until: { $0.agentAnswers > before || $0.ended != nil })
+            let answered = await log.wait(within: left(timing.turn), until: { $0.agentAnswers > before || $0.ended != nil })
             if Task.isCancelled { break }
             guard answered else {
-                note = "The agent did not answer within \(ElevenLabsControl.converseTurnSeconds) seconds, so the conversation was ended."
+                if ContinuousClock.now >= deadline {
+                    timedOut = true
+                } else {
+                    note = "The agent did not answer within \(Self.seconds(timing.turn)) seconds, so the conversation was ended."
+                }
                 break
             }
-            await log.waitForQuiet(timing.settle, within: timing.turn)
+            await log.waitForQuiet(timing.settle, within: left(timing.turn))
+            if ContinuousClock.now >= deadline, log.snapshot.ended == nil {
+                timedOut = true
+                break
+            }
         }
         let endedByAgent = log.snapshot.ended
+        if timedOut, endedByAgent == nil { note = Self.timeLimitNote(timing.total) }
         await conversation.end()
         await reader.value
         if Task.isCancelled {
@@ -161,12 +188,24 @@ struct ElevenLabsConverseHandler: Sendable {
         }
         return .init(status: 200, body: Self.answer(
             request: request, preflight: preflight, conversation: conversation, log: log.snapshot,
-            sent: sent, endedByAgent: endedByAgent, note: note
+            sent: sent, endedByAgent: endedByAgent, timedOut: timedOut && endedByAgent == nil, note: note
         ).encoded())
     }
 
+    /// "90", or "1.5" for a test's short caps.
+    static func seconds(_ duration: Duration) -> String {
+        let value = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        return value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+    }
+
+    static func timeLimitNote(_ total: Duration) -> String {
+        "Ended: time limit. A conversation over MCP or the control API runs at most \(seconds(total)) seconds; "
+            + "this one reached it, so this app ended it. Messages not yet sent were not sent."
+    }
+
     /// Reads every event, answering what must be answered on the owner's behalf: approvals are
-    /// declined and client tool calls told nothing ran.
+    /// declined and client tool calls told nothing ran. Only what the agent says or does counts as
+    /// activity: pings, VAD scores, context usage and status events do not hold a turn open.
     private static func read(_ conversation: ElevenLabsAgentConversation, into log: ConverseLog) async {
         for await event in conversation.events {
             switch event {
@@ -197,8 +236,11 @@ struct ElevenLabsConverseHandler: Sendable {
                 log.error(error)
             case .ended(let close):
                 log.end(close)
-            default:
+            case .agentResponsePart, .agentResponseComplete, .audio, .userTranscript, .tentativeUserTranscript:
                 log.touch()
+            case .started, .ping, .vadScore, .contextUsage, .agentResponseMetadata, .mcpConnectionStatus,
+                 .queueStatus, .interruption, .guardrailTriggered, .other, .unknown:
+                break
             }
         }
     }
@@ -207,7 +249,7 @@ struct ElevenLabsConverseHandler: Sendable {
 
     static func answer(
         request: ConverseRequest, preflight: ElevenLabsAgentPreflight, conversation: ElevenLabsAgentConversation,
-        log: ConverseLog.Snapshot, sent: Int, endedByAgent: ElevenLabsSocketClose?, note: String?
+        log: ConverseLog.Snapshot, sent: Int, endedByAgent: ElevenLabsSocketClose?, timedOut: Bool = false, note: String?
     ) -> JSONValue {
         var object: [String: JSONValue] = [
             "agent_id": .string(request.agentID),
@@ -223,12 +265,14 @@ struct ElevenLabsConverseHandler: Sendable {
         if let endedByAgent {
             object["ended"] = .string(endedByAgent.kind == .normal
                 ? "by the agent" : ElevenLabsRealtimeRedaction.scrub("by ElevenLabs: \(endedByAgent.description)"))
+        } else if timedOut {
+            object["ended"] = .string("time limit")
         } else {
             object["ended"] = .string("by this app, after the last message")
         }
         var notes: [String] = []
         if let note { notes.append(note) }
-        if sent < request.messages.count, note == nil, endedByAgent == nil {
+        if sent < request.messages.count, note == nil, endedByAgent == nil, !timedOut {
             notes.append("max_turns stopped it after \(sent) of \(request.messages.count) messages.")
         }
         if endedByAgent != nil, sent < request.turns {
@@ -296,6 +340,30 @@ extension ElevenLabsControlHandler {
         case .cancelled: (cancelledStatus, nil)
         default: (502, nil)
         }
+    }
+}
+
+// MARK: - One at a time
+
+/// Lets one conversation run at a time over MCP and the control API.
+final class ConverseLane: @unchecked Sendable {
+    static let shared = ConverseLane()
+    private let lock = NSLock()
+    private var busy = false
+
+    init() {}
+
+    /// True, and the lane is taken, when nothing else holds it.
+    func enter() -> Bool {
+        lock.withLock {
+            guard !busy else { return false }
+            busy = true
+            return true
+        }
+    }
+
+    func leave() {
+        lock.withLock { busy = false }
     }
 }
 

@@ -15,6 +15,10 @@ struct ElevenLabsRealtimeToolsTests {
         #expect(tool.description.contains("confirm: true"))
         #expect(tool.description.contains("Settings → ElevenLabs"))
         #expect(tool.description.contains("declined"))
+        // The caps an agent caller plans around (and must not retry into).
+        #expect(tool.description.contains("\(ElevenLabsControl.converseTotalSeconds) s for the whole conversation"))
+        #expect(tool.description.contains("\(ElevenLabsControl.converseTurnSeconds) s for each answer"))
+        #expect(tool.description.contains("one conversation at a time"))
         #expect(Set(tool.properties.keys) == ElevenLabsControl.converseFields)
         #expect(tool.required.sorted() == ["agent_id", "confirm", "messages"])
         #expect(tool.properties["messages"]?["items"]["type"] == "string")

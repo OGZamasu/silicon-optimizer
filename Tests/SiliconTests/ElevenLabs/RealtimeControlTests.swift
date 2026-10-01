@@ -304,6 +304,8 @@ struct ConverseRig {
     let allowRisky: Bool
     let realtime: ElevenLabsRealtime
     var timing = ElevenLabsConverseHandler.Timing(greeting: .milliseconds(300), settle: .milliseconds(150), turn: .seconds(5))
+    /// The rig's own lane, so tests running side by side do not refuse each other.
+    let lane = ConverseLane()
 
     init(
         linked: Bool = true, allowRisky: Bool, auth: Bool = false, textOnlyAllowed: Bool = true,
@@ -331,7 +333,8 @@ struct ConverseRig {
 
     func converse(_ body: JSONValue) async -> (status: Int, answer: JSONValue) {
         let handler = ElevenLabsConverseHandler(
-            state: .init(linked: linked, allowRiskyForAgents: allowRisky), realtime: linked ? realtime : nil, timing: timing
+            state: .init(linked: linked, allowRiskyForAgents: allowRisky), realtime: linked ? realtime : nil,
+            timing: timing, lane: lane
         )
         let response = await handler.handle(body.encoded())
         return (response.status, (try? JSONValue.parse(response.body)) ?? .null)

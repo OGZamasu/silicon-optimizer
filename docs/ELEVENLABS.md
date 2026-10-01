@@ -651,8 +651,16 @@ conversation with one of the owner's agents.
   `confirm: true` and the owner's switch ("Let agents run destructive and real-world ElevenLabs
   actions"); otherwise 403, and nothing is read or opened. Only this Mac's control token reaches it.
 - The agent must allow text-only (or be text-only); otherwise 409 before anything opens.
-- The app sends the messages one by one, waiting for each answer (90 s at most). MCP tool approvals
-  are declined (the owner approves those in the app) and client tool calls are told nothing ran.
+- The app sends the messages one by one, waiting for each answer. MCP tool approvals are declined
+  (the owner approves those in the app) and client tool calls are told nothing ran.
+- **Limits, because the conversation bills by length:** at most 20 messages; 90 s for each answer;
+  **300 s for the whole conversation**, after which the app ends it and the answer says
+  `"ended": "time limit"`; and **one conversation at a time** — a second call while one runs is
+  refused (409) before anything is read or opened. Only what the agent says or does keeps a turn
+  open; pings, VAD scores and context-usage events do not. The control server does not cancel a
+  handler when its caller hangs up, so a caller that gives up does not end the conversation — the
+  300 s cap does, and the lane stays taken until then (do not retry into it). A handler task that
+  is cancelled ends the conversation at once.
 - The answer: the transcript, the tools used (server tools marked "ran on ElevenLabs' side"; client
   and MCP tools with their parameters, masked), errors, how it ended, the duration and a cost note —
   never a signed URL, a token or anything key-shaped. The bridge prints the agent's words inside a

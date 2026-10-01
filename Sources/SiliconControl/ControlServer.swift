@@ -798,11 +798,14 @@ public actor ControlServer {
 
         let source = Self.remoteAddress(of: connection)
         let response: HTTPResponse
-        if request.method == "POST", request.path == "/video/generate" {
+        if request.method == "POST",
+           request.path == "/video/generate" || request.path == ElevenLabsControl.agentConversePath {
             // One request per connection: after its body, EOF/error means
             // this client no longer wants the synchronous response. Keep a
             // receive outstanding so Network.framework notices a FIN/RST
             // while the route is waiting, not only at response.write().
+            // (An agent conversation bills by the second: a caller that hangs
+            // up ends it.)
             let waiting = Task {
                 await route(request, as: caller, from: source, on: origin)
             }

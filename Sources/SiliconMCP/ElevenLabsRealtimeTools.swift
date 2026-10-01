@@ -17,8 +17,11 @@ enum ElevenLabsRealtimeTools {
             confirm: true after the user has agreed to this conversation, and only if the owner allows \
             agents to run real-world actions in Settings → ElevenLabs. MCP tool approvals are always \
             declined here (the owner approves those in the app), and no client tools run. The agent \
-            must allow text-only conversations. For speech or transcription use elevenlabs_speak and \
-            elevenlabs_transcribe instead.
+            must allow text-only conversations. Limits: at most \(ElevenLabsControl.maximumConverseMessages) \
+            messages, \(ElevenLabsControl.converseTurnSeconds) s for each answer, \
+            \(ElevenLabsControl.converseTotalSeconds) s for the whole conversation, and one conversation at a \
+            time (a second call while one runs is refused — do not retry a call that is still running). For \
+            speech or transcription use elevenlabs_speak and elevenlabs_transcribe instead.
             """,
         properties: [
             "agent_id": Tools.property("string", "The agent, e.g. agent_…; list agents with elevenlabs_call get_agents_route."),

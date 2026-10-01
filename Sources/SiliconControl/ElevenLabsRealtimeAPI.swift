@@ -30,6 +30,16 @@ extension ElevenLabsControl {
     /// How long the agent may take to answer one message before the conversation is ended.
     public static let converseTurnSeconds = 90
 
+    /// The longest one conversation may run, from the moment it opened; it is ended then, with a
+    /// note. (The control server does not cancel a handler when its caller hangs up, so this cap,
+    /// not the caller, is what bounds the billed time.)
+    public static let converseTotalSeconds = 300
+
+    /// What a second conversation is told while one is running.
+    public static let converseBusy =
+        "Another agent conversation is still running over MCP or the control API; one runs at a time. "
+        + "Wait for it to finish (at most \(converseTotalSeconds) seconds), then try again."
+
     /// Said with every conversation's answer.
     public static let converseCostNote =
         "ElevenLabs bills agent conversations by their length, and the agent's LLM usage; this "
