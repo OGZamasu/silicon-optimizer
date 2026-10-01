@@ -109,4 +109,36 @@ struct VoicesStudioStaleValueTests {
 
     // MARK: - (b) Save before the open item's details are in
 
+    /// Dictionary A open (its name in the rename field); B chosen, its details slow: the rename
+    /// field no longer holds A's name, so Rename cannot give B the name of A.
+    @Test func choosingAnotherDictionaryDoesNotLeaveTheFirstOnesNameToSend() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "patch_pronunciation_dictionary":
+                return .json(["id": "d-b"])
+            case "get_pronunciation_dictionary_metadata":
+                await signals.wait(for: "checked")
+                return .json(VoicesStudioFollowupTests.dictionary("d-b", name: "Dict B"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        let b = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-b", name: "Dict B")))
+        model.load(dictionaries: [a, b], selected: a)
+        #expect(model.rename == "Dict A")
+        let choosing = Task { await model.select("d-b") }
+        try await voicesStudioWait { fixture.sent("get_pronunciation_dictionary_metadata").count == 1 }
+        #expect(model.rename == "Dict B", "B's rename field still holds A's name: “\(model.rename)”")
+        await model.saveName()
+        #expect(!body(fixture, "patch_pronunciation_dictionary").contains("Dict A"), "B was renamed to A's name")
+        signals.note("checked")
+        await choosing.value
+    }
+
+    // MARK: - Webhooks: no editor from an old row
+
 }

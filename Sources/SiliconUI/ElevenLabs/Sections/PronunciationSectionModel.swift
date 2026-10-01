@@ -222,6 +222,9 @@ final class PronunciationSectionModel {
         }
         if selected?.id != id {
             selected = dictionaries.first { $0.id == id }
+            // The rename field is this dictionary's from now on: it held the previous one's name,
+            // which "Rename" would have sent to this one.
+            rename = selected?.name ?? ""
             marked = []
             download = nil
         }
