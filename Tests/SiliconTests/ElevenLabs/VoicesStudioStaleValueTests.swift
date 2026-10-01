@@ -905,12 +905,18 @@ struct VoicesStudioStaleValueTests {
         let model = VoicesSectionModel(environment: fixture.environment)
         let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
         model.load(rows: [a], selected: a)
+        let asked = ContinuousClock.now
         let first = Task { await model.reloadSelected() }
         try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 1 }
+        // How long one read takes to reach the fake on this machine, as loaded as it is now.
+        let oneRead = ContinuousClock.now - asked
         let second = Task { await model.reloadSelected() }
         try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 2 }
         let third = Task { await model.reloadSelected() }
-        let sent = try await within(.seconds(15)) { fixture.sent("get_voice_by_id").count == 3 }
+        // The third read goes as soon as the second is abandoned: allow three seconds, or ten
+        // times what the first took on a loaded machine. Held reads that ignore cancellation
+        // keep both connections, so a regression fails here in seconds.
+        let sent = try await within(max(.seconds(3), oneRead * 10)) { fixture.sent("get_voice_by_id").count == 3 }
         signals.note("never")
         await first.value
         await second.value
