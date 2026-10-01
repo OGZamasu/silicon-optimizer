@@ -76,4 +76,37 @@ struct VoicesStudioStaleValueTests {
         ["order_id": "o-a", "name": .string(name), "state": "open", "sandbox": false, "items": []]
     }
 
+    /// Pronunciation: a slow read of dictionary A, then A renamed; the older read is dropped.
+    @Test func aDictionaryReadAskedBeforeARenameIsDroppedWhenItAnswersAfter() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "patch_pronunciation_dictionary":
+                return .json(["id": "d-a"])
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 {
+                    await signals.wait(for: "saved")
+                    return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Old name"))
+                }
+                return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "New name"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Old name")))
+        model.load(dictionaries: [a], selected: a)
+        let reading = Task { await model.select("d-a") }
+        try await voicesStudioWait { fixture.sent("get_pronunciation_dictionary_metadata").count == 1 }
+        model.rename = "New name"
+        await model.saveName()
+        signals.note("saved")
+        await reading.value
+        #expect(model.rename == "New name", "the older read put the old name back in the field")
+        #expect(model.selected?.name == "New name")
+    }
+
+    // MARK: - (b) Save before the open item's details are in
+
 }

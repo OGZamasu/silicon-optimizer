@@ -228,13 +228,20 @@ final class PronunciationSectionModel {
         await fetch(id)
     }
 
+    /// Changes to each dictionary that have answered, by id. A read asked before one of them
+    /// answered is older than it — even when it answers later, on another runner — and is
+    /// dropped whole: it would put the old name and rules back on screen.
+    @ObservationIgnored private var landed: [String: Int] = [:]
+
     /// Fetches one dictionary into the list, and onto the screen only while it is still the
     /// chosen one — so a change that finishes after another was chosen does not take it back.
     private func fetch(_ id: String, slot: String? = nil) async {
+        let changesBefore = landed[id, default: 0]
         guard let json = await actions.perform(
             "get_pronunciation_dictionary_metadata", ["pronunciation_dictionary_id": .string(id)], quietly: true,
             slot: slot
-        )?.voicesStudioJSON, let dictionary = PronunciationDictionary(json: json) else { return }
+        )?.voicesStudioJSON, let dictionary = PronunciationDictionary(json: json),
+              landed[id, default: 0] == changesBefore else { return }
         if let index = dictionaries.firstIndex(where: { $0.id == id }) { dictionaries[index] = dictionary }
         guard wantedDictionary == id else { return }
         selected = dictionary
@@ -244,6 +251,7 @@ final class PronunciationSectionModel {
     /// After a change to dictionary `id`: fetch it again on a runner of its own (the read of a
     /// dictionary opened meanwhile is not abandoned); the screen takes it only while it is open.
     private func refetch(_ id: String) async {
+        landed[id, default: 0] += 1
         await fetch(id, slot: VoicesStudioActions.afterChange(of: id))
     }
 
