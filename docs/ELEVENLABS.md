@@ -374,6 +374,11 @@ shown-once card lists only the credential fields the risk table names for that o
   - A cancelled or replaced run never touches the next run's state, even when its request
     completes late. Each run and each Cancel takes a generation number, and only the current
     one may change what the runner shows.
+  - **A failed run keeps ElevenLabs' HTTP status** (`ElevenLabsRunnerFailure.api(status:message:)`),
+    and `provesNothingWasDone` says whether the failure proves nothing happened: never sent, or
+    refused with a 401, 403 or another 4xx. A 408, a 429, a 5xx, a lost answer and a cancel do
+    not, so a section that spends or reaches the outside world (voices & studio's spending holds,
+    the agents' real-world send guard) asks the owner to check before the next try.
 - **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
   `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
   `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.
