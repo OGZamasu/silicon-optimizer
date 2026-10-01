@@ -617,6 +617,33 @@ final class VoicesSectionModel {
     /// Why the selected voice's details or settings could not be read, if they could not.
     var detailProblem: String? { actions.problem("get_voice_by_id") ?? actions.problem("get_voice_settings") }
 
+    /// Changes to each voice that have answered, by voice id. A read asked before one of them
+    /// answered is older than it — even when it answers later, on another runner — and is dropped
+    /// whole: the fetch after the change brings the newer voice.
+    @ObservationIgnored private var landed: [String: Int] = [:]
+
+    /// The voice whose own details the forms hold: until they arrive, the forms hold the list
+    /// row's values, which may be older than ElevenLabs' (a description changed on the website).
+    private(set) var detailsIn: String?
+
+    /// Whether the open voice's details are in, so its forms may be saved: a save sends every
+    /// field, and before then the untouched ones would be the list row's.
+    var detailsAreIn: Bool {
+        guard let id = selected?.id else { return false }
+        return detailsIn == id && wantedVoice == id
+    }
+
+    /// Why the open voice's forms cannot be saved yet, when they cannot.
+    var waitingForDetails: String? {
+        guard selected != nil, !detailsAreIn else { return nil }
+        return detailProblem == nil ? "Waiting for this voice's details." : "Its details could not be read — try again."
+    }
+
+    /// A change to `voiceID` has answered: reads asked before it are now stale.
+    private func noteLanded(_ voiceID: String) {
+        landed[voiceID, default: 0] += 1
+    }
+
     func select(_ voiceID: String?) async {
         wantedVoice = voiceID
         guard let voiceID else {
@@ -625,6 +652,7 @@ final class VoicesSectionModel {
         }
         if selected?.id != voiceID {
             selected = rows.first { $0.id == voiceID }
+            detailsIn = nil
             settingsDraft = selected?.settings
             settingsBase = settingsDraft
             if let selected {
@@ -650,6 +678,7 @@ final class VoicesSectionModel {
     /// After a change to `voiceID`: fetch it again, onto the screen only while it is still the
     /// one open (its own runner, so the read of a voice opened meanwhile is not abandoned).
     private func refetch(_ voiceID: String) async {
+        noteLanded(voiceID)
         await reloadSelected(voiceID, slot: VoicesStudioActions.afterChange(of: voiceID))
     }
 
@@ -657,13 +686,16 @@ final class VoicesSectionModel {
     /// finished change may clear.
     private func isOpen(_ voiceID: String) -> Bool { wantedVoice == voiceID }
 
-    /// Fetches the selected voice (or `voiceID`) again, with its settings.
+    /// Fetches the selected voice (or `voiceID`) again, with its settings. An answer asked
+    /// before a change to the voice answered is dropped whole (see `landed`).
     func reloadSelected(_ voiceID: String? = nil, slot: String? = nil) async {
-        guard let voiceID = voiceID ?? selected?.id,
-              let json = await actions.perform(
+        guard let voiceID = voiceID ?? selected?.id else { return }
+        let changesBefore = landed[voiceID, default: 0]
+        guard let json = await actions.perform(
                 "get_voice_by_id", ["voice_id": .string(voiceID)], quietly: true, slot: slot
               )?.voicesStudioJSON,
-              let voice = VoicesVoice(json: json)
+              let voice = VoicesVoice(json: json),
+              landed[voiceID, default: 0] == changesBefore
         else { return }
         if let index = rows.firstIndex(where: { $0.id == voice.id }) { rows[index] = voice }
         guard wantedVoice == voiceID else { return }
@@ -674,10 +706,10 @@ final class VoicesSectionModel {
             takeSettings(settings)
         } else if let json = await actions.perform(
             "get_voice_settings", ["voice_id": .string(voice.id)], quietly: true, slot: slot
-        )?.voicesStudioJSON, selected?.id == voice.id {
+        )?.voicesStudioJSON, selected?.id == voice.id, landed[voiceID, default: 0] == changesBefore {
             takeSettings(VoicesSettings(json: json))
         }
-        guard selected?.id == voice.id else { return }
+        guard selected?.id == voice.id, landed[voiceID, default: 0] == changesBefore else { return }
         // Field by field: what the owner typed since the form was filled (or since a save went
         // out, typing while it was on its way) stays; untouched fields take the fresh values.
         let fresh = VoicesEditDraft(voice: voice)
@@ -691,6 +723,7 @@ final class VoicesSectionModel {
         for sample in voice.samples where sampleDrafts[sample.id] == nil {
             sampleDrafts[sample.id] = VoicesSampleDraft(sample: sample)
         }
+        detailsIn = voice.id
     }
 
     /// Fresh settings for the open voice, merged slider by slider: one the owner moved since the
@@ -705,7 +738,7 @@ final class VoicesSectionModel {
     }
 
     func saveSettings() async {
-        guard let voice = selected, let sent = settingsDraft else { return }
+        guard detailsAreIn, let voice = selected, let sent = settingsDraft else { return }
         let fills = editFills
         var arguments = sent.arguments
         arguments["voice_id"] = .string(voice.id)
@@ -713,6 +746,8 @@ final class VoicesSectionModel {
         else { return }
         // The voice now holds what was sent; a slider moved since is the owner's.
         if isOpen(voice.id), editFills == fills { settingsBase = sent }
+        // Like every change: reads asked before it are stale, and the voice is fetched again.
+        await refetch(voice.id)
     }
 
     /// Puts the account's default settings in the sliders; nothing is saved until Save.
@@ -724,7 +759,7 @@ final class VoicesSectionModel {
     }
 
     func saveEdit() async {
-        guard let voice = selected else { return }
+        guard detailsAreIn, let voice = selected else { return }
         let sent = editDraft
         let fills = editFills
         let (arguments, files) = Self.editArguments(voiceID: voice.id, draft: sent)
@@ -830,7 +865,7 @@ final class VoicesSectionModel {
     }
 
     func editProfessional() async {
-        guard let voice = selected else { return }
+        guard detailsAreIn, let voice = selected else { return }
         let sent = professional
         let fills = editFills
         let saved = await actions.perform(
@@ -995,6 +1030,7 @@ final class VoicesSectionModel {
         self.rows = rows
         self.selected = selected
         wantedVoice = selected?.id
+        detailsIn = selected?.id
         settingsDraft = selected?.settings
         settingsBase = settingsDraft
         if let selected {

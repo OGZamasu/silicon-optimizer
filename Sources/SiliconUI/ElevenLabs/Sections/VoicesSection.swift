@@ -236,7 +236,8 @@ struct VoicesSettingsEditor: View {
                     .help("Put the account's default settings in the sliders; Save keeps them")
                 Button("Save settings") { Task { await model.saveSettings() } }
                     .controlSize(.small)
-                    .disabled(model.settingsDraft == nil)
+                    .disabled(model.settingsDraft == nil || !model.detailsAreIn)
+                    .help(model.waitingForDetails ?? "Save these settings to the voice")
             }
             if let draft = Binding($model.settingsDraft) {
                 VoicesStudioSlider(title: "Stability", value: draft.stability, range: VoicesSectionModel.stabilityRange,
@@ -288,10 +289,13 @@ struct VoicesEditForm: View {
                     .help(VoicesStudioSchema.description("edit_voice", "remove_background_noise"))
             }
             HStack {
+                if let waiting = model.waitingForDetails {
+                    Text(waiting).font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Save changes") { Task { await model.saveEdit() } }
                     .disabled(model.editDraft.name.trimmingCharacters(in: .whitespaces).isEmpty
-                              || model.actions.isRunning("edit_voice"))
+                              || model.actions.isRunning("edit_voice") || !model.detailsAreIn)
             }
         }
     }
