@@ -1402,7 +1402,7 @@ final class AgentsSendGuard {
             state = .ready
         } else {
             let why = switch runner.failure {
-            case .api?, .rateLimited?: "ElevenLabs answered with an error that does not say whether it went out"
+            case .api?: "ElevenLabs answered with an error that does not say whether it went out"
             default: "the request reached ElevenLabs and no answer came back"
             }
             state = .uncertain(
@@ -1420,8 +1420,8 @@ final class AgentsSendGuard {
     }
 
     /// Declined, refused before sending, or refused by ElevenLabs with a 4xx that means it did
-    /// not act (a 422 for a bad number, say): nothing went out. A 408, a 429, a 5xx, a lost
-    /// answer or a cancel leave it unknown — the runner's `provesNothingWasDone`.
+    /// not act (a 422 for a bad number, a 429): nothing went out. A 408, a 5xx, a lost answer or
+    /// a cancel leave it unknown — the runner's `provesNothingWasDone`.
     static func provesNothingWasSent(_ runner: ElevenLabsRunner) -> Bool {
         switch runner.phase {
         case .idle:

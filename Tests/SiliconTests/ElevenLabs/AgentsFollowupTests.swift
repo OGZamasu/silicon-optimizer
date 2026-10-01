@@ -6,15 +6,15 @@ import Testing
 /// The agents critic's last nits, taken after the merge.
 extension AgentsSectionsTests {
 
-    /// A real-world send ElevenLabs refused with a 4xx (a 422 for a bad recipient list) placed
-    /// nothing: the screen is ready again at once. A 408, a 429 or a 5xx does not say whether
+    /// A real-world send ElevenLabs refused with a 4xx (a 422 for a bad recipient list, a 429)
+    /// placed nothing: the screen is ready again at once. A 408 or a 5xx does not say whether
     /// the calls went out, so the owner checks first, as after a lost answer.
     @Test func aRefusedBatchIsAKnownOutcomeAndATimeoutOrServerErrorIsNot() async throws {
         let cases: [(reply: FakeElevenLabsTransport.Reply, known: Bool)] = [
             (.jsonText(#"{"detail":{"status":"invalid_recipients","message":"Bad number"}}"#, status: 422), true),
             (.jsonText(#"{"detail":"Not found"}"#, status: 404), true),
             (.jsonText(#"{"detail":"Request timeout"}"#, status: 408), false),
-            (.jsonText(#"{"detail":"busy"}"#, status: 429), false),
+            (.jsonText(#"{"detail":"busy"}"#, status: 429), true),
             (.jsonText(#"{"detail":"Internal error"}"#, status: 500), false),
         ]
         for (reply, known) in cases {

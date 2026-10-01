@@ -254,9 +254,10 @@ final class VoicesStudioActions {
     }
 
     /// Whether a failed or stopped run may still have been carried out: cancelled after it
-    /// started, or lost on the way back (no connection, a timeout, a 408, a 429, a server error).
-    /// A refusal ElevenLabs gave (another 4xx) or arguments refused before sending are known
-    /// outcomes — read off the failure's HTTP status (`provesNothingWasDone`), not its words.
+    /// started, or lost on the way back (no connection, a timeout, a 408, a server error). A
+    /// refusal ElevenLabs gave (another 4xx, a 429 included) or arguments refused before sending
+    /// are known outcomes — read off the failure's HTTP status (`provesNothingWasDone`), not its
+    /// words.
     static func outcomeIsUnknown(_ runner: ElevenLabsRunner) -> Bool {
         switch runner.phase {
         case .cancelled:

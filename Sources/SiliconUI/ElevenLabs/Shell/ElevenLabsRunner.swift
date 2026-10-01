@@ -493,16 +493,17 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
     }
 
     /// Whether this failure proves ElevenLabs did not act on the request: it was never sent (no
-    /// key, the arguments refused, the Keychain said no), or ElevenLabs refused it — a 401, a 403
-    /// or another 4xx. A 408 (the request timed out on its way in), a 429, a 5xx, a lost
-    /// connection and anything without a status are left unknown: it may have been carried out.
+    /// key, the arguments refused, the Keychain said no), or ElevenLabs refused it — a 401, a 403,
+    /// a 429 (a refusal before any work, as the client's retry rule has it) or another 4xx. A 408
+    /// (the request timed out on its way in), a 5xx, a lost connection, a cancel after sending
+    /// and anything without a status are left unknown: it may have been carried out.
     var provesNothingWasDone: Bool {
         switch self {
-        case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden:
+        case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden, .rateLimited:
             true
         case .api(let status, _):
-            (400..<500).contains(status) && status != 408 && status != 429
-        case .rateLimited, .offline, .other:
+            (400..<500).contains(status) && status != 408
+        case .offline, .other:
             false
         }
     }
