@@ -237,4 +237,25 @@ extension AgentsSectionsTests {
         #expect(sent.request.url.lastPathComponent == "tkt_1", "the change went to \(sent.request.url.lastPathComponent)")
         #expect(model.ticket?.id == "tkt_2", "the ticket open stays open")
     }
+
+    /// The spec says a priority on a ticket about a conversation that already has an open ticket
+    /// raises that ticket (when lower). The form says so for a ticket about a conversation with a
+    /// priority — and not for a follow-up task, or with no priority. If the spec stops saying it,
+    /// this fails and the words are looked at again.
+    @Test func theNewTicketFormSaysAPriorityRaisesAnOpenTicket() throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let operation = try #require(ElevenLabsCatalog.operation(AgentsOp.createTicket))
+        let said = operation.body?.schema["properties"]["priority"]["description"].stringValue ?? ""
+        #expect(said.contains("If the conversation already has an open ticket, it is raised to this priority when lower."),
+                "the spec's words changed: \(said)")
+        let model = rig.store.analytics
+        model.newTicketPriority = "high"
+        #expect(model.newTicketPriorityNote == nil, "a follow-up task is not about a conversation")
+        model.newTicketConversationID = "conv_0002"
+        #expect(model.newTicketPriorityNote
+                == "If this conversation already has an open ticket, ElevenLabs raises that ticket to high priority when it is lower.")
+        model.newTicketPriority = ""
+        #expect(model.newTicketPriorityNote == nil)
+    }
 }

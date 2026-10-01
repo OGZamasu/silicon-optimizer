@@ -97,6 +97,17 @@ final class AgentAnalyticsModel {
     var newTicketComment = ""
     /// How urgent a new ticket is; empty for none.
     var newTicketPriority = ""
+
+    /// What a priority on a ticket about a conversation also does, as the spec says it
+    /// (`create_agent_conversation_ticket_route`, `priority`: "If the conversation already has an
+    /// open ticket, it is raised to this priority when lower."). Nil for a follow-up task, or when
+    /// no priority is chosen.
+    var newTicketPriorityNote: String? {
+        guard !newTicketPriority.isEmpty,
+              !newTicketConversationID.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return "If this conversation already has an open ticket, ElevenLabs raises that ticket to "
+            + "\(AgentsFormat.words(newTicketPriority).lowercased()) priority when it is lower."
+    }
     var ticketComment = ""
     var turnIndex = 0
     var turnComment = ""
@@ -570,6 +581,9 @@ private struct AgentTicketsCard: View {
                 ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
             }
             .fixedSize()
+            if let note = model.newTicketPriorityNote {
+                Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             let manual = model.newTicketConversationID.trimmingCharacters(in: .whitespaces).isEmpty
             AgentsRunButton(runner: calls.runner(manual ? AgentsOp.createManualTicket : AgentsOp.createTicket), title: "Raise ticket",
                                 disabled: model.newTicketComment.isEmpty || (manual && model.agentID.isEmpty)) {
