@@ -258,13 +258,19 @@ codex mcp add silicon-optimizer -- \
 Building from source instead? `Scripts/install-mcp.sh` compiles the bridge, installs it to
 `/usr/local/bin`, and prints the same configs pointed there.
 
-Long calls can be stopped. The bridge runs each tool call on its own, up to eight at once, so
-`ping`, `tools/list` and quick calls keep answering while a render or an ElevenLabs
-conversation runs. When the assistant cancels a call (`notifications/cancelled`) or quits, the
-bridge closes that call's request to the app and sends no answer for it: `generate_video` stops
-waiting (a clip the app already queued stays in the Video queue; `video_queue` shows it and can
-cancel it where its node allows), and `elevenlabs_agent_converse` ends the conversation at once
-instead of at its time limit.
+The bridge runs each tool call on its own, so `ping`, `tools/list` and quick calls keep
+answering while a render or an ElevenLabs conversation runs. Up to eight run at once; a ninth is
+refused with an error (`-32000`), not queued. When the assistant cancels a call
+(`notifications/cancelled`, which MCP clients also send when their own request timeout runs
+out) or quits, the bridge closes that call's request to the app and sends no answer for it.
+**Only two kinds of work stop:** `generate_video` stops waiting (a clip the app already queued
+stays in the Video queue; `video_queue` shows it and can cancel it where its node allows), and
+`elevenlabs_agent_converse` ends the conversation at once instead of at its time limit.
+**Every other call finishes in the app even after a cancel** — chat, images, 3D, installs,
+loads, benchmarks, and every other ElevenLabs tool: its result is saved and its ElevenLabs
+credits are spent; only the answer is dropped, so asking again pays again. A script that pipes
+requests into the bridge must keep stdin open until it has read the answers: closing it cancels
+whatever is still running.
 
 ### What the assistant can do with it
 

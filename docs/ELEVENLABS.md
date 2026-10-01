@@ -464,6 +464,13 @@ Keychain 503; a call cut short because its caller went away 499, saying ElevenLa
 (and billed) the work anyway. Every message is redacted of anything key-shaped and of every upload
 path. A value an earlier answer masked (`‹redacted›`) is refused if an agent sends it back.
 
+**Hanging up does not stop a call.** The control server watches for a caller going away only on
+`/video/generate` and the agent conversation. A `POST /elevenlabs/call` whose caller hangs up — an
+MCP client cancelling the tool call, or quitting — runs to its end in the app: ElevenLabs does the
+work and bills it, and a file answer is saved under `ElevenLabs/<date>/` as usual. Only the answer
+is lost, so check the history (or the resource) before asking again. The paid curated tools and
+`elevenlabs_call` say so in their descriptions.
+
 ### What a call answers
 
 `operation`, `method`, `path`, `risk`, `status`, `requestID`, `characterCost` (when ElevenLabs sends
