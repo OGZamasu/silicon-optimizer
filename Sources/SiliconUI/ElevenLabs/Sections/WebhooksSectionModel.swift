@@ -59,6 +59,7 @@ final class WebhooksSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         actions.readsShownInPlace = ["get_workspace_webhooks_route"]
+        actions.onReadAgain = { [weak self] _ in await self?.refresh() }
     }
 
     // MARK: Spec
@@ -139,8 +140,11 @@ final class WebhooksSectionModel {
             "create_workspace_webhook_route", arguments, subject: "a webhook to \(draft.url)",
             consequence: "ElevenLabs will send the events you subscribe it to — with the data they carry — "
                 + "to \(draft.url). Its signing secret is shown once.",
-            holdIfUnknown: Self.lostCreateMessage(draft.name.trimmingCharacters(in: .whitespaces),
-                                                  url: draft.url.trimmingCharacters(in: .whitespaces))
+            holdIfUnknown: VoicesStudioHold(
+                notice: Self.lostCreateMessage(draft.name.trimmingCharacters(in: .whitespaces),
+                                               url: draft.url.trimmingCharacters(in: .whitespaces)),
+                listOperation: "get_workspace_webhooks_route"
+            )
         ) != nil else {
             // It may have been made: "Create webhook" is held until the owner has checked, the
             // draft stays, and the list is read at once (newer than any read asked before).

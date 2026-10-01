@@ -211,6 +211,8 @@ final class WorkspaceSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         actions.readsShownInPlace = ["get_workspace_members", "get_groups_endpoint", "search_groups", "list_auth_connections", "get_workspace_audit_logs"]
+        // Only sign-in connections are listed here; invitations are checked on elevenlabs.io.
+        actions.onReadAgain = { [weak self] _ in await self?.refreshConnections() }
     }
 
     // MARK: Spec
@@ -376,7 +378,7 @@ final class WorkspaceSectionModel {
                 + "workspace\(inviteSeat.isEmpty ? "" : " with a \(VoicesStudioFormat.words(inviteSeat).lowercased()) seat")"
                 + ", using one of your seats."
                 + (emails.count > 1 ? " Every address must be in a verified domain of the workspace." : ""),
-            holdIfUnknown: Self.lostInviteMessage(emails)
+            holdIfUnknown: VoicesStudioHold(notice: Self.lostInviteMessage(emails))
         ) != nil else { return }
         inviteEmails = ""
         inviteUsageLimit = ""
@@ -577,7 +579,7 @@ final class WorkspaceSectionModel {
                 "Create the sign-in connection “\(name)”?", button: "Create connection",
                 consequence: "Agents and tools in this workspace can sign in to another service with these credentials."
             ),
-            holdIfUnknown: Self.lostConnectionMessage(name)
+            holdIfUnknown: VoicesStudioHold(notice: Self.lostConnectionMessage(name), listOperation: "list_auth_connections")
         ) != nil else {
             // It may have been made, holding these credentials: "Create connection" is held until
             // the owner has checked, the form keeps what was typed, and the list is read at once.

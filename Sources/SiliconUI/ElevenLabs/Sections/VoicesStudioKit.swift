@@ -107,21 +107,58 @@ final class VoicesStudioActions {
     /// The runners (operation, or operation and slot) whose last `perform` gave no answer though
     /// what it sent may have been carried out — spending or not. See `outcomeWasUnknown`.
     @ObservationIgnored private var lastRunUnknown: Set<String> = []
-    /// Creates that gave no answer though they may have been carried out, by operation, with
-    /// what the owner should check. Each holds that create — only that one — until the owner
-    /// says they have checked: a second could mint a second credential (whose secret, like the
-    /// first one's, was never shown and cannot be), or send something real twice (an
-    /// invitation, a subscription). Free calls too: the spending hold does not cover them.
-    private(set) var heldCreates: [String: String] = [:]
+    /// Creates that gave no answer though they may have been carried out, by operation and scope
+    /// (the account or voice they were for), with what the owner should check. Each holds that
+    /// create — for that scope only — until the owner says they have checked: a second could mint
+    /// a second credential (whose secret, like the first one's, was never shown and cannot be),
+    /// or send something real twice (an invitation, a subscription). Free calls too: the spending
+    /// hold does not cover them.
+    private(set) var heldCreates: [String: VoicesStudioHeldCreate] = [:]
 
-    /// What holds `operationID`, when an earlier create of it may have been carried out unseen.
-    func heldCreate(_ operationID: String) -> String? { heldCreates[operationID] }
+    /// Every hold, in a steady order.
+    var heldCreateList: [VoicesStudioHeldCreate] { heldCreates.values.sorted { $0.id < $1.id } }
 
-    /// The owner has looked at the list: `operationID` may run again.
-    func acknowledgeHeldCreate(_ operationID: String) {
-        heldCreates[operationID] = nil
+    /// The hold on `operationID` for `scope`, if there is one.
+    func held(_ operationID: String, scope: String? = nil) -> VoicesStudioHeldCreate? {
+        heldCreates[VoicesStudioHeldCreate.key(operationID, scope)]
+    }
+
+    /// What holds `operationID` for `scope`, when an earlier create of it may have been carried
+    /// out unseen.
+    func heldCreate(_ operationID: String, scope: String? = nil) -> String? { held(operationID, scope: scope)?.notice }
+
+    /// "I have checked": the owner has looked at the list read again since the answer was lost.
+    /// Refused — false — while that list has not been read here (there was nothing on screen to
+    /// check), and for what this screen cannot list: those take `acknowledgeHeldCreateOnWebsite`.
+    @discardableResult
+    func acknowledgeHeldCreate(_ operationID: String, scope: String? = nil) -> Bool {
+        guard let held = held(operationID, scope: scope), held.listedHere, held.listRead else { return false }
+        release(held.id)
+        return true
+    }
+
+    /// "I checked on elevenlabs.io": the owner has checked there — where something this screen
+    /// cannot list is, or when the list here could not be read.
+    func acknowledgeHeldCreateOnWebsite(_ operationID: String, scope: String? = nil) {
+        release(VoicesStudioHeldCreate.key(operationID, scope))
+    }
+
+    private func release(_ key: String) {
+        heldCreates[key] = nil
         if heldCreates.isEmpty, refusal?.hasPrefix(Self.heldPrefix) == true { refusal = nil }
     }
+
+    /// Reads again, through the section, the list a hold waits for ("Read again").
+    @ObservationIgnored var onReadAgain: (@MainActor (VoicesStudioHeldCreate) async -> Void)?
+    /// Which holds the section shows now (one account's, not another's); all when nil.
+    @ObservationIgnored var showsHold: (@MainActor (VoicesStudioHeldCreate) -> Bool)?
+
+    /// Every hold the section shows now.
+    var visibleHeldCreates: [VoicesStudioHeldCreate] { heldCreateList.filter { showsHold?($0) ?? true } }
+
+    /// Calls in the order they were made: a list read counts for a hold only when it was asked
+    /// after the answer was lost.
+    @ObservationIgnored private var tickets = 0
 
     private static let heldPrefix = "Held until you have checked: "
     /// Lists and lookups that failed, by operation, with why — until that read runs again.
@@ -230,17 +267,20 @@ final class VoicesStudioActions {
     ///     the runner's question, whole (the shell's `title:`/`confirmLabel:`/`warning:`); for one
     ///     that does not, it is asked first and nothing is sent on a no.
     ///   - holdIfUnknown: For a create that mints a credential or sends something real: what
-    ///     the owner should check if its answer is lost. Then that create is held
-    ///     (`heldCreates`) until they say they have checked.
+    ///     the owner should check if its answer is lost, for which scope, and the list that shows
+    ///     whether it was made. Then that create is held (`heldCreates`) for that scope until
+    ///     they say they have checked.
     @discardableResult
     func perform(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], subject: String? = nil,
         consequence: String? = nil, title: String? = nil, quietly: Bool = false,
         spends: Bool? = nil, question: VoicesStudioQuestion? = nil, slot: String? = nil,
-        holdIfUnknown: String? = nil
+        holdIfUnknown: VoicesStudioHold? = nil
     ) async -> ElevenLabsResult? {
         let key = Self.key(operationID, slot)
+        let ticket = tickets
+        tickets += 1
         // Only a run that is sent below can leave an unknown outcome: one refused, declined or
         // not sent says nothing about an earlier one (whose phase the runner may still show).
         lastRunUnknown.remove(key)
@@ -248,8 +288,8 @@ final class VoicesStudioActions {
             missingOperation = operationID
             return nil
         }
-        if let held = heldCreates[operationID] {
-            refusal = Self.heldPrefix + held
+        if let hold = holdIfUnknown, let held = held(operationID, scope: hold.scope) {
+            refusal = Self.heldPrefix + held.notice
             return nil
         }
         let spendsNow = spends ?? runner.operation.billable
@@ -275,7 +315,20 @@ final class VoicesStudioActions {
         spendingOverrides.remove(operationID)
         if result == nil, Self.outcomeIsUnknown(runner) {
             lastRunUnknown.insert(key)
-            if let holdIfUnknown { heldCreates[operationID] = holdIfUnknown }
+            if let hold = holdIfUnknown {
+                let held = VoicesStudioHeldCreate(
+                    operationID: operationID, scope: hold.scope, notice: hold.notice,
+                    listOperation: hold.listOperation, listSlot: hold.listSlot, since: tickets
+                )
+                heldCreates[held.id] = held
+            }
+        }
+        if result != nil, quietly {
+            // A list a hold waits for, read since its answer was lost: the owner can check it now.
+            for held in heldCreates.values where held.listOperation == operationID && held.listSlot == slot
+                && !held.listRead && ticket >= held.since {
+                heldCreates[held.id]?.listRead = true
+            }
         }
         if quietly {
             // A read replaced by a newer one of the same operation leaves the runner to it.
@@ -298,6 +351,25 @@ final class VoicesStudioActions {
     /// change may have made stale.
     func outcomeWasUnknown(_ operationID: String, slot: String? = nil) -> Bool {
         lastRunUnknown.contains(Self.key(operationID, slot))
+    }
+
+    /// Whether the list `held` waits for is being read now.
+    func isReadingList(for held: VoicesStudioHeldCreate) -> Bool {
+        guard let list = held.listOperation else { return false }
+        return runners[Self.key(list, held.listSlot)]?.isRunning ?? false
+    }
+
+    /// What the hold's box says under its text: only that the list was read again when a read
+    /// since the lost answer succeeded — otherwise that it could not be, or that this screen
+    /// cannot list it, and where to check instead.
+    func holdCaption(_ held: VoicesStudioHeldCreate) -> String {
+        guard held.listedHere else {
+            return "This screen cannot list it: check on elevenlabs.io. It is not made again until you have."
+        }
+        if held.listRead { return "The list has been read again: check it. It is not made again until you have." }
+        if isReadingList(for: held) { return "Reading the list again…" }
+        return "The list could not be read, so there is nothing here to check yet. Read it again, or check on "
+            + "elevenlabs.io. It is not made again until you have."
     }
 
     /// Whether a failed or stopped run may still have been carried out: cancelled after it
@@ -384,6 +456,36 @@ final class VoicesStudioActions {
     func clearLast() {
         last = nil
     }
+}
+
+/// What a create holds if its answer is lost: the owner's text, whose it is (an account, a
+/// voice — nil for the workspace), and the list read that shows whether it was made.
+struct VoicesStudioHold: Sendable {
+    var notice: String
+    var scope: String? = nil
+    /// The read (operation and slot) that lists it here; nil when this screen cannot list it.
+    var listOperation: String? = nil
+    var listSlot: String? = nil
+}
+
+/// A create held after its answer was lost (`VoicesStudioActions.heldCreates`).
+struct VoicesStudioHeldCreate: Identifiable, Equatable, Sendable {
+    var operationID: String
+    var scope: String?
+    var notice: String
+    var listOperation: String?
+    var listSlot: String?
+    /// Whether that list has been read since the answer was lost — only then can the owner
+    /// check it here.
+    var listRead = false
+    /// Calls asked from this one on were asked after the answer was lost.
+    var since: Int
+
+    var id: String { Self.key(operationID, scope) }
+    /// Whether this screen lists what it may have made.
+    var listedHere: Bool { listOperation != nil }
+
+    static func key(_ operationID: String, _ scope: String?) -> String { scope.map { "\(operationID)@\($0)" } ?? operationID }
 }
 
 /// A model that speaks text, as `GET /v1/models` lists it — for the sections whose projects
@@ -896,21 +998,33 @@ struct VoicesStudioActivity: View {
                 .padding(10)
                 .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
             }
-            ForEach(actions.heldCreates.keys.sorted(), id: \.self) { operationID in
+            ForEach(actions.visibleHeldCreates) { held in
                 VStack(alignment: .leading, spacing: 6) {
-                    Label(actions.heldCreates[operationID] ?? "", systemImage: "exclamationmark.triangle.fill")
+                    Label(held.notice, systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
                         .foregroundStyle(.orange)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
-                        Text("The list has been read again. It is not made again until you have checked.")
+                        Text(actions.holdCaption(held))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer()
-                        Button("I have checked") { actions.acknowledgeHeldCreate(operationID) }
+                        if held.listedHere, !held.listRead, actions.onReadAgain != nil {
+                            Button("Read again") { Task { await actions.onReadAgain?(held) } }
+                                .controlSize(.small)
+                                .disabled(actions.isReadingList(for: held))
+                        }
+                        if held.listedHere, held.listRead {
+                            Button("I have checked") { actions.acknowledgeHeldCreate(held.operationID, scope: held.scope) }
+                                .controlSize(.small)
+                        } else {
+                            Button("I checked on elevenlabs.io") {
+                                actions.acknowledgeHeldCreateOnWebsite(held.operationID, scope: held.scope)
+                            }
                             .controlSize(.small)
+                        }
                     }
                 }
                 .padding(10)

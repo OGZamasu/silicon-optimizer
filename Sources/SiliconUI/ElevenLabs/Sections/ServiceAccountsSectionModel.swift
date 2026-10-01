@@ -105,6 +105,14 @@ final class ServiceAccountsSectionModel {
     init(environment: VoicesStudioEnvironment) {
         actions = VoicesStudioActions(context: environment.context)
         actions.readsShownInPlace = ["get_workspace_service_accounts"]
+        actions.onReadAgain = { [weak self] held in
+            guard let self else { return }
+            if held.operationID == "create_service_account_api_key", let accountID = held.listSlot {
+                await refreshKeys(accountID)
+            } else {
+                await refresh()
+            }
+        }
     }
 
     // MARK: Spec
@@ -214,7 +222,7 @@ final class ServiceAccountsSectionModel {
                 consequence: "A new identity joins the workspace; keys made for it can act on the workspace's "
                     + "resources as their permissions allow."
             ),
-            holdIfUnknown: Self.lostAccountMessage(name)
+            holdIfUnknown: VoicesStudioHold(notice: Self.lostAccountMessage(name), listOperation: "get_workspace_service_accounts")
         )?.voicesStudioJSON else {
             // It may have been made: the list shows whether it was. The name stays typed.
             if actions.outcomeWasUnknown("create_service_account") { await refresh() }
@@ -354,7 +362,10 @@ final class ServiceAccountsSectionModel {
                 consequence: "Whoever holds the new key can use the workspace as its permissions allow, and spend "
                     + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
             ),
-            holdIfUnknown: Self.lostKeyMessage(keyDraft.name, account: account.name)
+            holdIfUnknown: VoicesStudioHold(
+                notice: Self.lostKeyMessage(keyDraft.name, account: account.name),
+                listOperation: "get_service_account_api_keys_route", listSlot: account.id
+            )
         ) != nil else {
             // It may have been made, its secret never shown: "Make key" is held until the owner
             // has checked, the draft stays, and the account's keys are read at once.

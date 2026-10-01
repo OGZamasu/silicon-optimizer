@@ -861,7 +861,7 @@ final class VoicesSectionModel {
                 consequence: "A copy of “\(voice.name)” is made in another, isolated workspace, where "
                     + "that workspace's members can use it."
             ),
-            holdIfUnknown: Self.lostCopyMessage(voice.name, workspace: target)
+            holdIfUnknown: VoicesStudioHold(notice: Self.lostCopyMessage(voice.name, workspace: target))
         )
     }
 

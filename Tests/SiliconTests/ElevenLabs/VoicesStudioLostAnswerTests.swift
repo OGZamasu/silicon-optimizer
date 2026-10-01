@@ -51,10 +51,22 @@ struct VoicesStudioLostAnswerTests {
 
     // MARK: - Service-account keys and accounts
 
-    func keysFixture(_ made: Made) -> VoicesStudioFixture {
+    /// Counts reads, and fails the first `failing` of them.
+    final class Reads: @unchecked Sendable {
+        let lock = NSLock()
+        var count = 0
+        var failing: Int
+        init(failing: Int = 0) { self.failing = failing }
+        func fails() -> Bool { lock.withLock { count += 1; return count <= failing } }
+    }
+
+    func keysFixture(_ made: Made, keyReads: Reads = Reads()) -> VoicesStudioFixture {
         let keys: JSONValue = ["api-keys": [VoicesStudioLateAnswerTests.key("k1", of: "sa-a")]]
         let accounts: JSONValue = ["service-accounts": [VoicesStudioLateAnswerTests.account("sa-a", key: "k1")]]
         return VoicesStudioFixture(handler: { request in
+            if request.operationID == "get_service_account_api_keys_route", keyReads.fails() {
+                return VoicesStudioLostAnswerTests.lost
+            }
             switch request.operationID {
             case "create_service_account_api_key":
                 return made.answer(request.operationID, .json(["xi-api-key": "sk_fixture_not_a_real_key_0000", "key_id": "new"]))
@@ -104,11 +116,83 @@ struct VoicesStudioLostAnswerTests {
         try await answering(model.actions) { await model.saveKey() }
         #expect(made.count("edit_service_account_api_key") == 1)
         // Checked: "Make key" goes again, from the draft.
-        model.actions.acknowledgeHeldCreate("create_service_account_api_key")
+        #expect(model.actions.acknowledgeHeldCreate("create_service_account_api_key"))
         model.keyDraft = ServiceAccountKeyDraft(name: "CI key", allPermissions: true)
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 2)
         #expect(model.actions.heldCreate("create_service_account_api_key") == nil)
+    }
+
+    /// R6-1: "Make key" lost, and the keys read after it fails too. Nothing was read, so nothing
+    /// says it was: the hold's caption says the list could not be read, "I have checked" is
+    /// refused (a second "Make key" stays held, though the owner never saw the list), and "Read
+    /// again" is offered. Once a read succeeds the caption says so and the check is taken; or the
+    /// owner can say they checked on elevenlabs.io. (Before: the box said the list had been read,
+    /// and after "I have checked" a second key was minted.)
+    @Test func aCheckIsNotTakenWhileTheListCouldNotBeRead() async throws {
+        let made = Made()
+        made.lose("create_service_account_api_key")
+        let fixture = keysFixture(made, keyReads: Reads(failing: 1))
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        model.keyDraft.name = "CI key"
+        model.keyDraft.allPermissions = true
+        try await answering(model.actions) { await model.createKey() }
+        #expect(fixture.sent("get_service_account_api_keys_route").count == 1)
+        let held = try #require(model.actions.held("create_service_account_api_key"))
+        #expect(!held.listRead)
+        #expect(model.actions.holdCaption(held).hasPrefix("The list could not be read"), "\(model.actions.holdCaption(held))")
+        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key"),
+                "a check was taken though the list was never read")
+        try await answering(model.actions) { await model.createKey() }
+        #expect(made.count("create_service_account_api_key") == 1, "a second key was minted though the list was never read")
+        // "Read again": this time the keys are read.
+        await model.actions.onReadAgain?(held)
+        let read = try #require(model.actions.held("create_service_account_api_key"))
+        #expect(read.listRead)
+        #expect(model.actions.holdCaption(read).hasPrefix("The list has been read again"))
+        #expect(model.actions.acknowledgeHeldCreate("create_service_account_api_key"))
+        try await answering(model.actions) { await model.createKey() }
+        #expect(made.count("create_service_account_api_key") == 2)
+    }
+
+    /// The same, the keys never readable: "I checked on elevenlabs.io" releases the hold — the
+    /// owner's word that they looked where the key would be.
+    @Test func checkingOnTheWebsiteReleasesAHoldWhoseListCouldNotBeRead() async throws {
+        let made = Made()
+        made.lose("create_service_account_api_key")
+        let fixture = keysFixture(made, keyReads: Reads(failing: 100))
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        model.keyDraft.name = "CI key"
+        model.keyDraft.allPermissions = true
+        try await answering(model.actions) { await model.createKey() }
+        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key"))
+        model.actions.acknowledgeHeldCreateOnWebsite("create_service_account_api_key")
+        try await answering(model.actions) { await model.createKey() }
+        #expect(made.count("create_service_account_api_key") == 2)
+    }
+
+    /// What this screen cannot list (an invitation) says so, and is checked on elevenlabs.io:
+    /// "I have checked" — which would mean the list here was looked at — is refused.
+    @Test func whatThisScreenCannotListIsCheckedOnTheWebsite() async throws {
+        let made = Made()
+        made.lose("invite_user")
+        let fixture = workspaceFixture(made)
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        model.inviteEmails = "sam@example.com"
+        try await answering(model.actions) { await model.invite() }
+        let held = try #require(model.actions.held("invite_user"))
+        #expect(!held.listedHere)
+        #expect(model.actions.holdCaption(held).hasPrefix("This screen cannot list it"))
+        #expect(!model.actions.acknowledgeHeldCreate("invite_user"))
+        model.actions.acknowledgeHeldCreateOnWebsite("invite_user")
+        #expect(model.invitationsHeld == nil)
     }
 
     /// A key create ElevenLabs refused made nothing: nothing is read, nothing is held, and
@@ -147,7 +231,7 @@ struct VoicesStudioLostAnswerTests {
         #expect(model.actions.heldCreate("create_service_account") == ServiceAccountsSectionModel.lostAccountMessage("CI"))
         try await answering(model.actions) { await model.createAccount() }
         #expect(made.count("create_service_account") == 1, "a second service account was made after the first one's answer was lost")
-        model.actions.acknowledgeHeldCreate("create_service_account")
+        #expect(model.actions.acknowledgeHeldCreate("create_service_account"))
         try await answering(model.actions) { await model.createAccount() }
         #expect(made.count("create_service_account") == 2)
     }
@@ -204,7 +288,7 @@ struct VoicesStudioLostAnswerTests {
                 == WebhooksSectionModel.lostCreateMessage("Ops", url: "https://hooks.example.com/ops"))
         try await answering(model.actions) { await model.create() }
         #expect(fixture.sent("create_workspace_webhook_route").count == 1, "a second subscription was sent")
-        model.actions.acknowledgeHeldCreate("create_workspace_webhook_route")
+        #expect(model.actions.acknowledgeHeldCreate("create_workspace_webhook_route"))
         try await answering(model.actions) { await model.create() }
         #expect(fixture.sent("create_workspace_webhook_route").count == 2)
     }
@@ -246,7 +330,7 @@ struct VoicesStudioLostAnswerTests {
         try await answering(model.actions) { await model.invite() }
         #expect(fixture.sent("invite_users_bulk").isEmpty, "inviting several people was not held")
         #expect(model.inviteProblems == [WorkspaceSectionModel.lostInviteMessage(["sam@example.com"])])
-        model.actions.acknowledgeHeldCreate("invite_user")
+        model.actions.acknowledgeHeldCreateOnWebsite("invite_user")
         try await answering(model.actions) { await model.invite() }
         #expect(fixture.sent("invite_users_bulk").count == 1)
     }
@@ -272,7 +356,7 @@ struct VoicesStudioLostAnswerTests {
         #expect(model.actions.heldCreate("create_auth_connection") == WorkspaceSectionModel.lostConnectionMessage("Search API"))
         try await answering(model.actions) { await model.createConnection() }
         #expect(made.count("create_auth_connection") == 1, "a second connection was made after the first one's answer was lost")
-        model.actions.acknowledgeHeldCreate("create_auth_connection")
+        #expect(model.actions.acknowledgeHeldCreate("create_auth_connection"))
         try await answering(model.actions) { await model.createConnection() }
         #expect(made.count("create_auth_connection") == 2)
     }
@@ -303,7 +387,7 @@ struct VoicesStudioLostAnswerTests {
                 == VoicesSectionModel.lostCopyMessage("Voice A", workspace: "ws-isolated"))
         try await answering(model.actions) { await model.replicate() }
         #expect(made.count("replicate_voice_to_isolated_environment") == 1, "a second copy was sent")
-        model.actions.acknowledgeHeldCreate("replicate_voice_to_isolated_environment")
+        model.actions.acknowledgeHeldCreateOnWebsite("replicate_voice_to_isolated_environment")
         try await answering(model.actions) { await model.replicate() }
         #expect(made.count("replicate_voice_to_isolated_environment") == 2)
     }
