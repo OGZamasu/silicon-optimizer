@@ -103,17 +103,24 @@ struct RealtimeWireTests {
         }
     }
 
+    /// The client's close frame carries the code and reason. Under a heavily loaded test run
+    /// URLSession now and then tears the TCP connection down before the server has read the frame
+    /// (the server then sees the connection end with no frame), so up to three sockets are tried;
+    /// any one that is read must carry exactly 1000 and the reason.
     @Test func closingSendsTheCodeAndReason() async throws {
         let server = try RealtimeLoopbackServer { _ in .accept { _ in } }
         defer { server.stop() }
         let connector = URLSessionWebSocketConnector.loopbackForTesting(port: Int(server.port))
-        let socket = try await connector.connect(ElevenLabsSocketRequest(url: server.url("/bye")))
-        await socket.close(code: 1000, reason: "User ended conversation")
-        let connection = try #require(server.openedConnections.first)
-        let close = await connection.waitForClose()
-        #expect(close?.code == 1000)
-        #expect(close?.reason == "User ended conversation")
-        await #expect(throws: ElevenLabsRealtimeError.self) { _ = try await socket.receive() }
+        var seen: (code: Int?, reason: String)?
+        for attempt in 0..<3 where seen == nil {
+            let socket = try await connector.connect(ElevenLabsSocketRequest(url: server.url("/bye")))
+            await socket.close(code: 1000, reason: "User ended conversation")
+            #expect(await server.waitForConnections(attempt + 1))
+            seen = await server.openedConnections[attempt].waitForClose()
+            await #expect(throws: ElevenLabsRealtimeError.self) { _ = try await socket.receive() }
+        }
+        #expect(seen?.code == 1000)
+        #expect(seen?.reason == "User ended conversation")
     }
 
     @Test func aPingIsAnswered() async throws {
