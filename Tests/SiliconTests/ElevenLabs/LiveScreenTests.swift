@@ -597,6 +597,9 @@ struct LiveScreenTests {
         let socket = try #require(rig.connector.sockets.first)
         await rig.until { socket.sentJSON.contains { $0["type"] == "mcp_tool_approval_result" } }
         #expect(socket.sentJSON.contains(["type": "mcp_tool_approval_result", "tool_call_id": "call_t", "is_approved": false]))
+        // The card turns "declined" once the send returns, on the main actor — a moment after the
+        // socket has the frame: waited for, not assumed.
+        await rig.until { screen.approvals.first?.state == .declined("it timed out") }
         #expect(screen.approvals.first?.state == .declined("it timed out"))
         await screen.end()
     }
