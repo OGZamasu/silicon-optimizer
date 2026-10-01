@@ -193,7 +193,8 @@ struct RealtimeWireTests {
         let started = ContinuousClock.now
         task.cancel()
         await #expect(throws: ElevenLabsRealtimeError.cancelled) { _ = try await task.value }
-        #expect(ContinuousClock.now - started < .seconds(3))
+        // Well inside the 20 s open timeout it would otherwise wait; loose for a busy run.
+        #expect(ContinuousClock.now - started < .seconds(10))
     }
 
     @Test func aHandshakeThatNeverAnswersTimesOut() async throws {

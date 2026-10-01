@@ -156,6 +156,8 @@ struct LiveScreenTests {
         try await Task.sleep(for: .milliseconds(400))
         #expect(screen.words.isEmpty)
         #expect(rig.audio.scheduled.isEmpty)
+        // The close runs in a task of its own: waited for, not assumed done after a fixed sleep.
+        await rig.until { rig.connector.sockets.first?.closedByClient != nil }
         #expect(rig.connector.sockets.first?.closedByClient != nil)
         #expect(rig.pane.billableRunsInFlight == 0)
     }
@@ -305,6 +307,26 @@ struct LiveScreenTests {
         await screen.stop()
     }
 
+    /// ElevenLabs' side for a file, which is sent with `commit_strategy=manual`: in manual mode
+    /// nothing is committed unless asked, so the only committed text answers the commit. (The
+    /// microphone server above also commits on its own, which a file session would take as the
+    /// answer to Stop's commit if it landed after it — under load it did, and the last text was
+    /// lost from the test.)
+    nonisolated static func fileServer() -> FakeElevenLabsSocketConnector.Server {
+        { socket in
+            socket.push(["message_type": "session_started", "session_id": "s1", "config": [:]])
+            var heard = 0
+            while let message = await socket.nextSent(timeout: .seconds(60)) {
+                if message["commit"] == true {
+                    socket.push(["message_type": "committed_transcript", "text": "the rest"])
+                    continue
+                }
+                heard += 1
+                socket.push(["message_type": "partial_transcript", "text": .string("part \(heard)")])
+            }
+        }
+    }
+
     @Test func aFileIsSentCommittedAndClosed() async throws {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("elevenlabs-live-\(UUID().uuidString)", isDirectory: true)
@@ -313,15 +335,16 @@ struct LiveScreenTests {
         let url = folder.appendingPathComponent("talk.wav")
         let samples = (0..<Int(2.5 * 16_000)).map { Float(0.3 * sin(2 * Double.pi * 200 * Double($0) / 16_000)) }
         try MicRecorder.wavData(samples: samples, sampleRate: 16_000).write(to: url)
-        let rig = LiveRig(server: Self.transcriptionServer())
+        let rig = LiveRig(server: Self.fileServer())
         defer { rig.clean() }
-        LiveTranscriptionModel.filePace = .milliseconds(5)
         let screen = LiveTranscriptionModel(context: rig.context)
         screen.source = .file
         screen.file = url
         #expect(screen.costLines.first?.contains("This file is 2.5 s long.") == true)
         await screen.start()
         await rig.until { screen.phase == .ended }
+        try #require(screen.phase == .ended, "the file session did not end")
+        guard case .ended = screen.outcome else { Issue.record("\(String(describing: screen.outcome))"); return }
         #expect(!rig.audio.capturing)
         #expect(rig.audio.asked == 0, "a file needs no microphone")
         let socket = try #require(rig.connector.sockets.first)
@@ -329,7 +352,7 @@ struct LiveScreenTests {
         #expect(audio.count == 3)
         #expect(socket.sentJSON.last?["commit"] == true)
         #expect(socket.request.url.query?.contains("commit_strategy=manual") == true)
-        #expect(screen.segments.map(\.text).contains("the rest"))
+        #expect(screen.segments.map(\.text) == ["the rest"])
         #expect(screen.fileProgress.map { abs($0.sent - 2.5) < 0.05 } == true)
         await screen.export()
         #expect(screen.exported.count == 2)

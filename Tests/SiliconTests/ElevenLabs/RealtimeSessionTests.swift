@@ -701,7 +701,9 @@ struct RealtimeSessionTests {
         }
         let started = ContinuousClock.now
         await conversation.end()
-        #expect(ContinuousClock.now - started < .seconds(4))
+        // A stalled socket would hold it for ever; two seconds is the bound, the rest is margin
+        // for a busy run.
+        #expect(ContinuousClock.now - started < .seconds(10))
         let socket = try #require(rig.connector.sockets.first)
         #expect(socket.closedByClient == .init(code: 1000, reason: "User ended conversation"))
     }
