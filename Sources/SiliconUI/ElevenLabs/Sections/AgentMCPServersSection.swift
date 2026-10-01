@@ -214,13 +214,28 @@ final class AgentMCPServersModel {
                 ? Self.approvalQuestion(to: settings.approvalPolicy, server: server)
                 : "Save the settings of “\(server.name)”?",
             confirmLabel: "Save settings"
-        ) else { return }
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.updateMCPServer, slot: server.id) { await rebaseAfterLostSave(server.id) }
+            return
+        }
         if let updated = AgentsMCPServer(json: json) {
             show(updated)
             list.upsert(updated)
         } else {
             originalSettings = settings
         }
+    }
+
+    /// After a settings save whose answer was lost: the server is read again and becomes the
+    /// form's base, the owner's edits kept. Saved changes then show as saved; and setting one back
+    /// is a change again (against the stale base it looked like none, so it was never sent).
+    private func rebaseAfterLostSave(_ id: String) async {
+        guard let json = await calls.json(AgentsOp.getMCPServer, ["mcp_server_id": .string(id)], slot: id, quiet: true),
+              selectedID == id, let fresh = AgentsMCPServer(json: json) else { return }
+        let edits = settings
+        show(fresh)
+        settings = edits
+        list.upsert(fresh)
     }
 
     /// What a change of the server's approval policy means, in words.

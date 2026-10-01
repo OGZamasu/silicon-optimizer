@@ -110,6 +110,8 @@ final class AgentsModel {
     let questions = AgentsQuestionBox()
     /// Why "Keep as a draft" cannot run for the agent on screen, or nil.
     private(set) var draftProblem: String?
+    /// Said after a save whose answer was lost, about the agent on screen.
+    private(set) var lostSaveNote: String?
     /// The LLMs ElevenLabs offers this account (filtered by region); nil until fetched.
     private(set) var availableLLMs: [AgentsLLMInfo]?
 
@@ -158,6 +160,7 @@ final class AgentsModel {
         changeDescription = ""
         duplicateName = ""
         draftProblem = nil
+        lostSaveNote = nil
         branches.reset(agentID: id)
         sharing.reset(agentID: id)
         await load(id)
@@ -272,9 +275,13 @@ final class AgentsModel {
     /// Saves exactly the changes the question (if any) was about, to the agent they were made on.
     private func commitSave(_ arguments: [String: JSONValue], agentID selectedID: String, saved: AgentsAgentDraft) async {
         let runner = calls.runner(AgentsOp.updateAgent, slot: selectedID)
+        lostSaveNote = nil
         guard let json = await calls.json(AgentsOp.updateAgent, arguments, slot: selectedID,
                                           title: "Saved agent “\(saved.name)”")
-        else { return }
+        else {
+            if calls.outcomeWasUnknown(AgentsOp.updateAgent, slot: selectedID) { await rebaseAfterLostSave(selectedID, name: saved.name) }
+            return
+        }
         runner.dismissCredential()
         changeDescription = ""
         guard self.selectedID == selectedID else { return }
@@ -283,6 +290,29 @@ final class AgentsModel {
         } else {
             loaded = saved
         }
+    }
+
+    /// What the editor says after a save whose answer was lost.
+    nonisolated static func lostSaveMessage(_ name: String) -> String {
+        "The answer to saving “\(name)” was lost, so it may have been saved. The agent has been read again: what "
+            + "still differs from it shows as unsaved, and Revert goes back to it."
+    }
+
+    /// After a save of agent `id` whose answer was lost (a 5xx, a timeout, a cancel after
+    /// sending): the agent is read again and becomes the editor's base — what ElevenLabs holds —
+    /// while the draft keeps the owner's edits. What the save carried out then shows as saved,
+    /// the rest as unsaved; and Revert, or a list edited in place, starts from what ElevenLabs
+    /// holds, not from the agent before the save (whose next save would take the change back).
+    private func rebaseAfterLostSave(_ id: String, name: String) async {
+        var arguments: [String: JSONValue] = ["agent_id": .string(id)]
+        if let branchID, branchID != mainBranchID { arguments["branch_id"] = .string(branchID) }
+        guard let json = await calls.json(AgentsOp.getAgent, arguments, slot: id, quiet: true) else { return }
+        calls.runner(AgentsOp.getAgent, slot: id).dismissCredential()
+        guard selectedID == id else { return }
+        let edits = draft
+        apply(json)
+        draft = edits
+        lostSaveNote = Self.lostSaveMessage(name)
     }
 
     // MARK: Creating
@@ -885,6 +915,12 @@ private struct AgentsAgentEditor: View {
                 }
                 Button("Revert") { model.revert() }
                     .disabled(!model.isDirty)
+            }
+            if let note = model.lostSaveNote {
+                Label(note, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if model.branchID != nil, model.isDirty {
                 AgentsRunButton(runner: draftRunner, title: "Keep as a draft instead") {

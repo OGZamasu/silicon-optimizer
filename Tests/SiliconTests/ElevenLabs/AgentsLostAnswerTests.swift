@@ -121,4 +121,106 @@ extension AgentsSectionsTests {
         try await confirming(runners) { await model.create() }
         #expect(rig.requests(AgentsOp.createSecret).count == 2)
     }
+
+    /// One field of a pretend agent or MCP server that patches set; the first patch's answer is lost.
+    final class LostPatch: @unchecked Sendable {
+        let lock = NSLock()
+        var value: JSONValue
+        var answersToLose = 1
+        init(_ value: JSONValue) { self.value = value }
+        /// Takes `field` from the patch; true when its answer is to be lost.
+        func patch(_ request: ElevenLabsRequest, field: String) -> Bool {
+            let data: Data = if case .data(let data) = request.body { data } else { Data() }
+            let body = (try? JSONValue(data: data)) ?? .null
+            return lock.withLock {
+                if body[field] != .null { value = body[field] }
+                defer { answersToLose = max(0, answersToLose - 1) }
+                return answersToLose > 0
+            }
+        }
+        var current: JSONValue { lock.withLock { value } }
+    }
+
+    nonisolated static func setting(_ field: String, _ value: JSONValue, in json: JSONValue, under: String? = nil) -> JSONValue {
+        guard case .object(var fields) = json else { return json }
+        if let under, case .object(var inner) = fields[under] ?? .null {
+            inner[field] = value
+            fields[under] = .object(inner)
+        } else {
+            fields[field] = value
+        }
+        return .object(fields)
+    }
+
+    /// A tag added to the agent and saved: carried out, answer lost. The agent is read again into
+    /// the editor's base, the edits kept — so nothing shows as unsaved — and the editor says so.
+    /// Then Revert and a tag added in place keep the one the lost save added. (Before: the base
+    /// stayed the agent before the save; Revert went back to it, and the next save took the
+    /// added tag away.)
+    @Test func anAgentSaveWhoseAnswerWasLostIsReadAgainIntoTheEditorsBase() async throws {
+        let state = LostPatch(["support", "english"])
+        let rig = AgentsFixtures.Rig { request in
+            switch request.operationID {
+            case AgentsOp.updateAgent:
+                if state.patch(request, field: "tags") { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                return .json(Self.setting("tags", state.current, in: AgentsFixtures.agent))
+            case AgentsOp.getAgent:
+                return .json(Self.setting("tags", state.current, in: AgentsFixtures.agent))
+            default:
+                return try await AgentsFixtures.reply(request)
+            }
+        }
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        let runners = [rig.store.calls.runner(AgentsOp.updateAgent, slot: AgentsFixtures.agentID)]
+        let readsBefore = rig.requests(AgentsOp.getAgent).count
+        model.draft.tags.append("billing")
+        try await confirming(runners) { await model.save() }
+        #expect(state.current == ["support", "english", "billing"])
+        #expect(rig.requests(AgentsOp.getAgent).count == readsBefore + 1, "the agent was not read again after a lost answer")
+        #expect(model.loaded?.tags == ["support", "english", "billing"], "the editor's base is the agent from before the save")
+        #expect(!model.isDirty)
+        #expect(model.lostSaveNote == AgentsModel.lostSaveMessage("Support"))
+        model.revert()
+        model.draft.tags.append("priority")
+        try await confirming(runners) { await model.save() }
+        #expect(state.current == ["support", "english", "billing", "priority"],
+                "the next save took back the tag the lost save added: \(state.current)")
+    }
+
+    /// An MCP server's timeout changed and saved: carried out, answer lost. The server is read
+    /// again into the form's base, the edit kept; setting the timeout back is then a change, and
+    /// goes. (Before: against the stale base, setting it back looked like no change — nothing was
+    /// sent, and the server kept the timeout the owner had undone.)
+    @Test func anMCPServerSaveWhoseAnswerWasLostIsReadAgainIntoTheFormsBase() async throws {
+        let state = LostPatch(30)
+        let rig = AgentsFixtures.Rig { request in
+            switch request.operationID {
+            case AgentsOp.updateMCPServer:
+                if state.patch(request, field: "response_timeout_secs") {
+                    return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+                }
+                return .json(Self.setting("response_timeout_secs", state.current, in: AgentsFixtures.mcpServer, under: "config"))
+            case AgentsOp.getMCPServer:
+                return .json(Self.setting("response_timeout_secs", state.current, in: AgentsFixtures.mcpServer, under: "config"))
+            default:
+                return try await AgentsFixtures.reply(request)
+            }
+        }
+        defer { rig.clean() }
+        let model = rig.store.mcpServers
+        await model.select(AgentsFixtures.serverID)
+        let runners = [rig.store.calls.runner(AgentsOp.updateMCPServer, slot: AgentsFixtures.serverID)]
+        let readsBefore = rig.requests(AgentsOp.getMCPServer).count
+        model.settings.timeoutSeconds = 45
+        try await confirming(runners) { await model.saveSettings() }
+        #expect(state.current == 45)
+        #expect(rig.requests(AgentsOp.getMCPServer).count == readsBefore + 1, "the server was not read again after a lost answer")
+        #expect(model.settings.timeoutSeconds == 45)
+        model.settings.timeoutSeconds = 30
+        try await confirming(runners) { await model.saveSettings() }
+        #expect(rig.requests(AgentsOp.updateMCPServer).count == 2, "setting the timeout back was not sent")
+        #expect(state.current == 30)
+    }
 }
