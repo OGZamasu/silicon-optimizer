@@ -123,4 +123,47 @@ struct LiveFollowUpTests {
         #expect(LiveMicrophoneIndicator.label(muted: false) == "Microphone on")
         #expect(LiveMicrophoneIndicator.muteHelp.contains("still billed"))
     }
+
+    /// A socket that stops taking microphone audio: the chunks are not queued without limit
+    /// (and none is dropped from the middle) — the session ends and says why.
+    @Test func aTranscriptionWhoseSocketStopsTakingAudioEnds() async throws {
+        let rig = LiveRig(server: { socket in
+            socket.push(["message_type": "session_started", "session_id": "s1", "config": [:]])
+            socket.stallSends()
+            _ = await socket.waitUntilEnded(timeout: .seconds(60))
+        })
+        defer { rig.clean() }
+        var context = rig.context
+        context.microphoneQueueCapacity = 5
+        let screen = LiveTranscriptionModel(context: context)
+        await screen.start()
+        #expect(screen.phase == .live)
+        let socket = try #require(rig.connector.sockets.first)
+        for _ in 0..<3 { _ = rig.audio.hear(seconds: 0.5) }
+        await rig.until { screen.phase == .ended }
+        #expect(screen.outcome == .mayHaveBeenBilled(LiveContext.microphoneFellBehind))
+        #expect(!rig.audio.holdsDevices)
+        await rig.until { socket.endedWith != nil }
+        #expect(socket.endedWith != nil)
+    }
+
+    @Test func aConversationWhoseSocketStopsTakingAudioEnds() async throws {
+        let rig = LiveRig(replies: LiveScreenTests.agentReplies(), server: LiveScreenTests.agent { socket in
+            socket.stallSends()
+            _ = await socket.waitUntilEnded(timeout: .seconds(60))
+        })
+        defer { rig.clean() }
+        var context = rig.context
+        context.microphoneQueueCapacity = 5
+        let screen = LiveAgentModel(context: context)
+        await screen.loadAgents()
+        await screen.requestStart()
+        await rig.until { screen.microphoneOn }
+        try #require(screen.phase == .live)
+        for _ in 0..<3 { _ = rig.audio.hear(seconds: 0.5) }
+        await rig.until { screen.phase == .ended }
+        #expect(screen.outcome == .mayHaveBeenBilled(LiveContext.microphoneFellBehind))
+        #expect(!rig.audio.holdsDevices)
+        #expect(!rig.audio.voiceProcessing)
+    }
 }

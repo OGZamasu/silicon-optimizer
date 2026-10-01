@@ -86,7 +86,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     @ObservationIgnored private let guardian: LiveSessionGuard
     @ObservationIgnored private var stream: ElevenLabsTranscriptionStream?
     @ObservationIgnored private var converter: LiveCaptureConverter?
-    @ObservationIgnored private var chunks: AsyncStream<Data>.Continuation?
+    @ObservationIgnored private var chunks: LiveMicrophoneQueue?
     @ObservationIgnored private var sender: Task<Void, Never>?
     @ObservationIgnored private var nextSegmentID = 0
     /// The devices were touched this session and must be let go when it ends.
@@ -205,9 +205,11 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         self.stream = stream
         self.converter = converter
         converter.muted = muted
-        let (chunks, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
-        self.chunks = continuation
-        sender = Task.detached { for await chunk in chunks { try? await stream.sendAudio(chunk) } }
+        let queue = LiveMicrophoneQueue(capacity: context.microphoneQueueCapacity) { [weak self] in
+            Task { @MainActor in self?.microphoneFellBehind(token) }
+        }
+        self.chunks = queue
+        sender = Task.detached { for await chunk in queue.chunks { try? await stream.sendAudio(chunk) } }
         phase = .live
         Task { await consume(stream, token: token) }
         Task { await watch(token: token) }
@@ -216,7 +218,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             do {
                 holdsAudio = true
                 try context.audio().startCapture(echoCancellation: false) { buffer in
-                    for chunk in converter.process(buffer) { continuation.yield(chunk) }
+                    for chunk in converter.process(buffer) { queue.yield(chunk) }
                 }
                 microphoneOn = true
             } catch {
@@ -225,6 +227,14 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         case .file:
             if let decodedFile { Task { await send(decodedFile.chunks, total: decodedFile.seconds, converter: converter, token: token) } }
         }
+    }
+
+    /// The socket stopped taking audio for the queue's length: ended, not left with a gap.
+    private func microphoneFellBehind(_ token: UUID) {
+        guard guardian.isCurrent(token), isOpen else { return }
+        let closing = stream
+        end(.mayHaveBeenBilled(LiveContext.microphoneFellBehind))
+        Task { await closing?.close() }
     }
 
     /// Microphone off, the rest committed, the last text awaited, the socket closed.

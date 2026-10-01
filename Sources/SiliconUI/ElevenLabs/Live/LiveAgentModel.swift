@@ -140,7 +140,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     @ObservationIgnored private var conversation: ElevenLabsAgentConversation?
     @ObservationIgnored private var playback: LivePlayback?
     @ObservationIgnored private var converter: LiveCaptureConverter?
-    @ObservationIgnored private var chunks: AsyncStream<Data>.Continuation?
+    @ObservationIgnored private var chunks: LiveMicrophoneQueue?
     @ObservationIgnored private var sender: Task<Void, Never>?
     @ObservationIgnored private var servers: [String: LiveMCPServer] = [:]
     @ObservationIgnored private var nextLineID = 0
@@ -366,12 +366,14 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         }
         self.converter = converter
         converter.muted = muted
-        let (chunks, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
-        self.chunks = continuation
-        sender = Task.detached { for await chunk in chunks { try? await conversation.sendAudio(chunk) } }
+        let queue = LiveMicrophoneQueue(capacity: context.microphoneQueueCapacity) { [weak self] in
+            Task { @MainActor in self?.microphoneFellBehind(token) }
+        }
+        self.chunks = queue
+        sender = Task.detached { for await chunk in queue.chunks { try? await conversation.sendAudio(chunk) } }
         do {
             try context.audio().startCapture(echoCancellation: true) { buffer in
-                for chunk in converter.process(buffer) { continuation.yield(chunk) }
+                for chunk in converter.process(buffer) { queue.yield(chunk) }
             }
             microphoneOn = true
         } catch {
@@ -528,6 +530,12 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             return
         }
         end(.ended(LiveOutcome.leftScreen), closing: true)
+    }
+
+    /// The socket stopped taking audio for the queue's length: ended, not left with a gap.
+    private func microphoneFellBehind(_ token: UUID) {
+        guard guardian.isCurrent(token), isOpen else { return }
+        end(.mayHaveBeenBilled(LiveContext.microphoneFellBehind), closing: true)
     }
 
     func endForAccountChange() -> Bool {

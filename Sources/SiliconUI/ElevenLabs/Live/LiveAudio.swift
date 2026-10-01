@@ -174,6 +174,40 @@ final class LiveCaptureConverter: @unchecked Sendable {
 }
 
 /// An audio file on disk, read for a socket.
+/// Microphone chunks on their way to the socket, bounded.
+///
+/// Audio is never dropped from the middle — a transcript with a hole in it, or an agent that
+/// hears half a sentence, is worse than an ending that says why. When `capacity` chunks are
+/// waiting (the socket has stopped taking audio for that long: thirty seconds of 100 ms chunks by
+/// default), `onOverflow` runs once, nothing more is queued, and the screen ends the session.
+final class LiveMicrophoneQueue: @unchecked Sendable {
+    static let defaultCapacity = 300
+
+    let chunks: AsyncStream<Data>
+    private let continuation: AsyncStream<Data>.Continuation
+    private let onOverflow: @Sendable () -> Void
+    private let lock = NSLock()
+    private var overflowed = false
+
+    init(capacity: Int = defaultCapacity, onOverflow: @escaping @Sendable () -> Void) {
+        (chunks, continuation) = AsyncStream<Data>.makeStream(bufferingPolicy: .bufferingOldest(max(1, capacity)))
+        self.onOverflow = onOverflow
+    }
+
+    /// Queues `chunk` — from the audio thread — unless the queue is full or has been.
+    func yield(_ chunk: Data) {
+        guard !lock.withLock({ overflowed }) else { return }
+        guard case .dropped = continuation.yield(chunk) else { return }
+        let first: Bool = lock.withLock {
+            defer { overflowed = true }
+            return !overflowed
+        }
+        if first { onOverflow() }
+    }
+
+    func finish() { continuation.finish() }
+}
+
 enum LiveAudioFile {
     /// The whole file converted to `converter`'s format, in its chunks, and the file's length in
     /// seconds. Reads as it goes, a second at a time; call it off the main actor.

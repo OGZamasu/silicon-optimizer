@@ -16,6 +16,8 @@ struct LiveContext {
     /// The pane, for the account session and the billable-run count. Optional for tests.
     var pane: ElevenLabsPaneState?
     var limits = ElevenLabsRealtime.Limits()
+    /// How many microphone chunks may wait for a socket that has stopped taking them.
+    var microphoneQueueCapacity = LiveMicrophoneQueue.defaultCapacity
 
     @MainActor static func app(_ model: AppModel) -> LiveContext {
         LiveContext(
@@ -28,6 +30,10 @@ struct LiveContext {
     }
 
     /// A realtime opener on the current client, or nil when nothing is linked.
+    /// What a session that stopped taking microphone audio ends with.
+    static let microphoneFellBehind = "The connection stopped taking microphone audio, so the session was ended rather "
+        + "than leave a gap in what was said. What was sent may have been billed."
+
     @MainActor func realtime() -> ElevenLabsRealtime? {
         client().map { ElevenLabsRealtime(client: $0, connector: connector(), limits: limits) }
     }
