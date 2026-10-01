@@ -142,15 +142,29 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
         }
         guard let stream, phase == .live else { return }
         let token = guardian.token
+        // Piece by piece, so a failure part-way knows what went (and was billed) and what did not.
+        let pieces = ElevenLabsTextChunker.chunks(words)
+        var sent = 0
         do {
-            try await stream.speak(words)
+            for (index, piece) in pieces.enumerated() {
+                try await stream.send(piece, flush: index == pieces.count - 1)
+                sent += 1
+            }
             guard guardian.isCurrent(token) else { return }
             spoken.append(words)
         } catch {
-            guard guardian.isCurrent(token) else { return }
-            serverMessage = ElevenLabsRealtimeError(wrapping: error).description
-            // Not lost: back in the box, to send again once a stream is open.
-            if text.isEmpty { text = words }
+            // Only what was not sent goes back in the box, to send again once a stream is open —
+            // whatever has become of this one. (Speak is refused while this runs, so no other
+            // session has started meanwhile.)
+            let unsent = pieces.dropFirst(sent).joined().trimmingCharacters(in: .whitespaces)
+            if text.isEmpty { text = unsent }
+            let why = ElevenLabsRealtimeError(wrapping: error).description
+            if sent > 0 {
+                spoken.append(pieces.prefix(sent).joined().trimmingCharacters(in: .whitespaces))
+                serverMessage = why + " Part of the text was sent (and billed); the rest is back in the box."
+            } else {
+                serverMessage = why
+            }
         }
         refresh()
     }

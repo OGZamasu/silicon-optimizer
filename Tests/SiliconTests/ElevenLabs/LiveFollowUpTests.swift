@@ -201,4 +201,29 @@ struct LiveFollowUpTests {
         await rig.until { socket.closedByClient != nil }
         #expect(socket.closedByClient?.code == 1000)
     }
+
+    /// A stream that fails part-way through a text: what was sent stays sent (it was billed),
+    /// and only the rest goes back in the box.
+    @Test func aFailurePartWayRestoresOnlyTheUnsentText() async throws {
+        let rig = LiveRig(server: { socket in
+            // The settings, the first piece — and the connection drops as the second goes.
+            socket.drop(atSend: 3)
+            _ = await socket.waitUntilEnded(timeout: .seconds(60))
+        })
+        defer { rig.clean() }
+        let screen = LiveSpeechModel(context: rig.context)
+        screen.voiceID = "voice_1"
+        let first = "This is the first sentence here."
+        let rest = "This is the second sentence here. And this is the third one here."
+        #expect(ElevenLabsTextChunker.chunks(first + " " + rest).count == 3)
+        screen.text = first + " " + rest
+        await screen.speak()
+        await rig.until { screen.phase == .ended }
+        #expect(screen.text == rest, "the box holds \(screen.text)")
+        #expect(screen.spoken == [first])
+        #expect(screen.serverMessage?.contains("Part of the text was sent") == true)
+        let socket = try #require(rig.connector.sockets.first)
+        #expect(socket.sentJSON.count == 2)
+        #expect(socket.sentJSON.last?["text"] == .string(first + " "))
+    }
 }

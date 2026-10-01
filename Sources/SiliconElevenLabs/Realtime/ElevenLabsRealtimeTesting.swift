@@ -78,6 +78,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     private var _pings = 0
     private var stalled = false
     private var sendDelay: Duration?
+    private var dropAtSend: Int?
 
     init(request: ElevenLabsSocketRequest) {
         self.request = request
@@ -164,6 +165,12 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
         lock.withLock { sendDelay = delay }
     }
 
+    /// The client's `number`th frame (counting from 1) never arrives: the connection drops as it
+    /// is sent, and the send fails.
+    public func drop(atSend number: Int) {
+        lock.withLock { dropAtSend = number }
+    }
+
     /// The connection drops, with no close code.
     public func drop() {
         finish(ElevenLabsSocketClose(code: 0, reason: "the connection was lost"))
@@ -187,6 +194,8 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
             try? await Task.sleep(for: .milliseconds(5))
         }
         if let delay = lock.withLock({ sendDelay }) { try? await Task.sleep(for: delay) }
+        let dropsNow = lock.withLock { ended == nil && dropAtSend == _sent.count + 1 }
+        if dropsNow { drop() }
         let refused: ElevenLabsSocketClose? = lock.withLock {
             if let ended { return ended }
             _sent.append(message)
