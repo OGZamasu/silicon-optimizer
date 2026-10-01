@@ -89,7 +89,9 @@ struct ServiceAccountsListCard: View {
                 Button("Create service account…") { Task { await model.createAccount() } }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
-                    .disabled(model.newAccountName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(model.newAccountName.trimmingCharacters(in: .whitespaces).isEmpty
+                              || model.actions.heldCreate("create_service_account") != nil)
+                    .help(model.actions.heldCreate("create_service_account") ?? "Create the service account")
             }
         }
     }
@@ -175,6 +177,8 @@ struct ServiceAccountKeysCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
+                .disabled(model.editingKey == nil && model.actions.heldCreate("create_service_account_api_key") != nil)
+                .help(model.editingKey == nil ? model.actions.heldCreate("create_service_account_api_key") ?? "Make the key" : "Save the key's changes")
             }
         }
     }

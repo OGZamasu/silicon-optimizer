@@ -188,17 +188,35 @@ final class ServiceAccountsSectionModel {
         return arguments
     }
 
+    /// What holds "Create account" after its answer was lost.
+    nonisolated static func lostAccountMessage(_ name: String) -> String {
+        "The answer to creating the service account “\(name)” was lost, so it may have been made. If it is in the "
+            + "list, use it — or delete it on elevenlabs.io — rather than making another."
+    }
+
+    /// What holds "Make key" after its answer was lost: the key may exist, and its secret —
+    /// shown only in that answer — cannot be shown again.
+    nonisolated static func lostKeyMessage(_ name: String, account: String) -> String {
+        "The answer to making the key “\(name)” for “\(account)” was lost, so it may have been made — its secret "
+            + "cannot be shown again. If it is in that account's keys, delete it, then make another."
+    }
+
     func createAccount() async {
         let name = newAccountName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty,
-              let json = await actions.perform(
-                "create_service_account", createAccountArguments(), subject: "a service account “\(name)”",
-                question: VoicesStudioQuestion(
-                    "Create the service account “\(name)”?", button: "Create account",
-                    consequence: "A new identity joins the workspace; keys made for it can act on the workspace's "
-                        + "resources as their permissions allow."
-                )
-              )?.voicesStudioJSON else { return }
+        guard !name.isEmpty else { return }
+        guard let json = await actions.perform(
+            "create_service_account", createAccountArguments(), subject: "a service account “\(name)”",
+            question: VoicesStudioQuestion(
+                "Create the service account “\(name)”?", button: "Create account",
+                consequence: "A new identity joins the workspace; keys made for it can act on the workspace's "
+                    + "resources as their permissions allow."
+            ),
+            holdIfUnknown: Self.lostAccountMessage(name)
+        )?.voicesStudioJSON else {
+            // It may have been made: the list shows whether it was. The name stays typed.
+            if actions.outcomeWasUnknown("create_service_account") { await refresh() }
+            return
+        }
         newAccountName = ""
         newAccountGroups = [:]
         await refresh()
@@ -324,16 +342,25 @@ final class ServiceAccountsSectionModel {
         guard let account = selected else { return }
         let (arguments, problems) = createKeyArguments()
         self.problems = problems
-        guard problems.isEmpty,
-              await actions.perform(
-                "create_service_account_api_key", arguments,
-                subject: "an API key “\(keyDraft.name)” for “\(account.name)”",
-                question: VoicesStudioQuestion(
-                    "Make the API key “\(keyDraft.name)” for “\(account.name)”?", button: "Make key",
-                    consequence: "Whoever holds the new key can use the workspace as its permissions allow, and spend "
-                        + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
-                )
-              ) != nil else { return }
+        guard problems.isEmpty else { return }
+        guard await actions.perform(
+            "create_service_account_api_key", arguments,
+            subject: "an API key “\(keyDraft.name)” for “\(account.name)”",
+            question: VoicesStudioQuestion(
+                "Make the API key “\(keyDraft.name)” for “\(account.name)”?", button: "Make key",
+                consequence: "Whoever holds the new key can use the workspace as its permissions allow, and spend "
+                    + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
+            ),
+            holdIfUnknown: Self.lostKeyMessage(keyDraft.name, account: account.name)
+        ) != nil else {
+            // It may have been made, its secret never shown: "Make key" is held until the owner
+            // has checked, the draft stays, and the account's keys are read at once.
+            if actions.outcomeWasUnknown("create_service_account_api_key") {
+                noteKeyChange(nil, of: account.id)
+                await refreshKeys(account.id)
+            }
+            return
+        }
         if selected?.id == account.id { keyDraft = ServiceAccountKeyDraft() }
         noteKeyChange(nil, of: account.id)
         await refreshKeys(account.id)

@@ -132,6 +132,8 @@ struct WebhookFormCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
+                .disabled(model.editing == nil && model.actions.heldCreate("create_workspace_webhook_route") != nil)
+                .help(model.editing == nil ? model.actions.heldCreate("create_workspace_webhook_route") ?? "Create the webhook" : "Save the webhook")
             }
         }
     }

@@ -107,6 +107,23 @@ final class VoicesStudioActions {
     /// The runners (operation, or operation and slot) whose last `perform` gave no answer though
     /// what it sent may have been carried out — spending or not. See `outcomeWasUnknown`.
     @ObservationIgnored private var lastRunUnknown: Set<String> = []
+    /// Creates that gave no answer though they may have been carried out, by operation, with
+    /// what the owner should check. Each holds that create — only that one — until the owner
+    /// says they have checked: a second could mint a second credential (whose secret, like the
+    /// first one's, was never shown and cannot be), or send something real twice (an
+    /// invitation, a subscription). Free calls too: the spending hold does not cover them.
+    private(set) var heldCreates: [String: String] = [:]
+
+    /// What holds `operationID`, when an earlier create of it may have been carried out unseen.
+    func heldCreate(_ operationID: String) -> String? { heldCreates[operationID] }
+
+    /// The owner has looked at the list: `operationID` may run again.
+    func acknowledgeHeldCreate(_ operationID: String) {
+        heldCreates[operationID] = nil
+        if heldCreates.isEmpty, refusal?.hasPrefix(Self.heldPrefix) == true { refusal = nil }
+    }
+
+    private static let heldPrefix = "Held until you have checked: "
     /// Lists and lookups that failed, by operation, with why — until that read runs again.
     private(set) var readFailures: [String: String] = [:]
     /// The reads whose failure the section draws where their content goes (its lists, a voice's
@@ -212,12 +229,16 @@ final class VoicesStudioActions {
     ///   - question: The section's own question. For an operation that asks by itself it is
     ///     the runner's question, whole (the shell's `title:`/`confirmLabel:`/`warning:`); for one
     ///     that does not, it is asked first and nothing is sent on a no.
+    ///   - holdIfUnknown: For a create that mints a credential or sends something real: what
+    ///     the owner should check if its answer is lost. Then that create is held
+    ///     (`heldCreates`) until they say they have checked.
     @discardableResult
     func perform(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], subject: String? = nil,
         consequence: String? = nil, title: String? = nil, quietly: Bool = false,
-        spends: Bool? = nil, question: VoicesStudioQuestion? = nil, slot: String? = nil
+        spends: Bool? = nil, question: VoicesStudioQuestion? = nil, slot: String? = nil,
+        holdIfUnknown: String? = nil
     ) async -> ElevenLabsResult? {
         let key = Self.key(operationID, slot)
         // Only a run that is sent below can leave an unknown outcome: one refused, declined or
@@ -225,6 +246,10 @@ final class VoicesStudioActions {
         lastRunUnknown.remove(key)
         guard let runner = runner(operationID, slot: slot) else {
             missingOperation = operationID
+            return nil
+        }
+        if let held = heldCreates[operationID] {
+            refusal = Self.heldPrefix + held
             return nil
         }
         let spendsNow = spends ?? runner.operation.billable
@@ -248,7 +273,10 @@ final class VoicesStudioActions {
             warning: asks ? question?.warning : nil
         )
         spendingOverrides.remove(operationID)
-        if result == nil, Self.outcomeIsUnknown(runner) { lastRunUnknown.insert(key) }
+        if result == nil, Self.outcomeIsUnknown(runner) {
+            lastRunUnknown.insert(key)
+            if let holdIfUnknown { heldCreates[operationID] = holdIfUnknown }
+        }
         if quietly {
             // A read replaced by a newer one of the same operation leaves the runner to it.
             readFailures[key] = runner.phase == .failed ? (runner.errorMessage ?? "it failed.") : nil
@@ -862,6 +890,26 @@ struct VoicesStudioActivity: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         Button("I have checked") { actions.acknowledgeUnknownOutcomes() }
+                            .controlSize(.small)
+                    }
+                }
+                .padding(10)
+                .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
+            }
+            ForEach(actions.heldCreates.keys.sorted(), id: \.self) { operationID in
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(actions.heldCreates[operationID] ?? "", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Text("The list has been read again. It is not made again until you have checked.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("I have checked") { actions.acknowledgeHeldCreate(operationID) }
                             .controlSize(.small)
                     }
                 }

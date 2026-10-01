@@ -123,15 +123,33 @@ final class WebhooksSectionModel {
         return (["settings": .object(settings)], problems)
     }
 
+    /// What holds "Create webhook" after its answer was lost: a second one would send every
+    /// event twice, and the first one's signing secret — shown only in that answer — is lost.
+    nonisolated static func lostCreateMessage(_ name: String, url: String) -> String {
+        "The answer to creating the webhook “\(name)” was lost, so it may have been made — its signing secret cannot "
+            + "be shown again, and a second one would send every event to \(url) twice. If it is in the list, delete "
+            + "it, then create it again."
+    }
+
     func create() async {
         let (arguments, problems) = createArguments()
         self.problems = problems
-        guard problems.isEmpty,
-              await actions.perform(
-                "create_workspace_webhook_route", arguments, subject: "a webhook to \(draft.url)",
-                consequence: "ElevenLabs will send the events you subscribe it to — with the data they carry — "
-                    + "to \(draft.url). Its signing secret is shown once."
-              ) != nil else { return }
+        guard problems.isEmpty else { return }
+        guard await actions.perform(
+            "create_workspace_webhook_route", arguments, subject: "a webhook to \(draft.url)",
+            consequence: "ElevenLabs will send the events you subscribe it to — with the data they carry — "
+                + "to \(draft.url). Its signing secret is shown once.",
+            holdIfUnknown: Self.lostCreateMessage(draft.name.trimmingCharacters(in: .whitespaces),
+                                                  url: draft.url.trimmingCharacters(in: .whitespaces))
+        ) != nil else {
+            // It may have been made: "Create webhook" is held until the owner has checked, the
+            // draft stays, and the list is read at once (newer than any read asked before).
+            if actions.outcomeWasUnknown("create_workspace_webhook_route") {
+                changesLanded += 1
+                await refresh()
+            }
+            return
+        }
         draft = WebhookDraft()
         changesLanded += 1
         await refresh()
