@@ -268,6 +268,103 @@ struct VoicesStudioFollowupTests {
         #expect(model.editDraft.name == "Voice A renamed", "the saved name: “\(model.editDraft.name)”")
     }
 
+    /// A professional voice's details: Save details is pressed on a new name; the description
+    /// typed while it is on its way stays, the saved name and a field nobody touched (labels
+    /// changed elsewhere) come from the fetch after the save.
+    @Test func typingInAProfessionalVoicesDetailsWhileTheirSaveIsOnItsWayIsKept() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_pvc_voice":
+                await signals.wait(for: "typed")
+                return .json(["voice_id": "v-p"])
+            case "get_voice_by_id":
+                return .json(VoicesStudioFakes.voice("v-p", "Pro renamed", category: "professional",
+                                                     labels: ["accent": "irish"], settings: VoicesStudioFakes.settings))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let voice = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-p", "Pro", category: "professional",
+                                                                          settings: VoicesStudioFakes.settings)))
+        model.load(rows: [voice], selected: voice)
+        model.professional.name = "Pro renamed"
+        let saving = try await sending(model.actions, "edit_pvc_voice") { await model.editProfessional() }
+        model.professional.description = "typed while the save was on its way"
+        signals.note("typed")
+        await saving.value
+        #expect(fixture.sent("get_voice_by_id").count == 1)
+        #expect(model.professional.description == "typed while the save was on its way",
+                "typing after Save details was replaced: “\(model.professional.description)”")
+        #expect(model.professional.name == "Pro renamed")
+        #expect(model.professional.labels == VoicesSectionModel.labelsText(["accent": "irish"]),
+                "an untouched field takes the fresh value")
+    }
+
+    /// The settings sliders: a stability dragged while a save of the voice is on its way stays
+    /// where it was put; a slider nobody touched (the speed, changed elsewhere) takes the value
+    /// the fetch after the save brings.
+    @Test func aSliderMovedWhileTheVoiceIsSavedStaysWhereItWasPut() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_voice":
+                await signals.wait(for: "dragged")
+                return .json(["status": "ok"])
+            case "get_voice_by_id":
+                return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed", settings: [
+                    "stability": 0.4, "similarity_boost": 0.8, "style": 0.1, "speed": 1.1, "use_speaker_boost": true,
+                ]))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
+        model.load(rows: [a], selected: a)
+        #expect(model.settingsDraft?.stability == 0.4)
+        model.editDraft.name = "Voice A renamed"
+        let saving = try await sending(model.actions, "edit_voice") { await model.saveEdit() }
+        model.settingsDraft?.stability = 0.75
+        signals.note("dragged")
+        await saving.value
+        #expect(fixture.sent("get_voice_by_id").count == 1)
+        #expect(model.settingsDraft?.stability == 0.75, "the dragged slider was put back: \(model.settingsDraft?.stability ?? -1)")
+        #expect(model.settingsDraft?.speed == 1.1, "an untouched slider takes the fresh value")
+    }
+
+    /// Settings saved, then the voice fetched again (after an edit): the sliders show what the
+    /// voice holds — the saved values are not mistaken for moves the owner has not saved.
+    @Test func savedSettingsAreNotKeptAsUnsavedMoves() async throws {
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_voice_settings", "edit_voice":
+                return .json(["status": "ok"])
+            case "get_voice_by_id":
+                // ElevenLabs holds the saved stability, rounded, and a speed changed elsewhere.
+                return .json(VoicesStudioFakes.voice("v-a", "Voice A", settings: [
+                    "stability": 0.7, "similarity_boost": 0.8, "style": 0.1, "speed": 1.1, "use_speaker_boost": true,
+                ]))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
+        model.load(rows: [a], selected: a)
+        model.settingsDraft?.stability = 0.7004
+        await model.saveSettings()
+        #expect(fixture.sent("edit_voice_settings").count == 1)
+        model.editDraft.description = "New description"
+        await model.saveEdit()
+        #expect(model.settingsDraft?.stability == 0.7, "the voice's own (saved) value, not the draft's")
+        #expect(model.settingsDraft?.speed == 1.1)
+    }
+
     /// Studio: the project's settings saved; the author typed while the save is on its way stays,
     /// untouched fields take the answer's values.
     @Test func typingInAProjectsSettingsWhileItsSaveIsOnItsWayIsKept() async throws {

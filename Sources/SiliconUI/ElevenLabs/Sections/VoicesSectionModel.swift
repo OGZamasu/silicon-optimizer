@@ -118,6 +118,18 @@ struct VoicesSettings: Hashable, Sendable {
         ["stability": .number(stability), "similarity_boost": .number(similarityBoost),
          "style": .number(style), "speed": .number(speed), "use_speaker_boost": .bool(useSpeakerBoost)]
     }
+
+    /// `fresh`'s values, except those the owner moved since the sliders held `base` — what they
+    /// were filled with, or what a save sent: those stay where the owner put them.
+    func merged(over fresh: VoicesSettings, base: VoicesSettings) -> VoicesSettings {
+        var result = fresh
+        if stability != base.stability { result.stability = stability }
+        if similarityBoost != base.similarityBoost { result.similarityBoost = similarityBoost }
+        if style != base.style { result.style = style }
+        if speed != base.speed { result.speed = speed }
+        if useSpeakerBoost != base.useSpeakerBoost { result.useSpeakerBoost = useSpeakerBoost }
+        return result
+    }
 }
 
 /// Where a professional clone is in its training.
@@ -252,6 +264,17 @@ struct VoicesProfessionalDraft: Hashable, Sendable {
         description = voice.description ?? ""
         labels = VoicesSectionModel.labelsText(voice.labels)
     }
+
+    /// `fresh`'s fields, except those the owner changed since the form held `base` — what it was
+    /// filled with, or what a save sent: that typing is kept.
+    func merged(over fresh: VoicesProfessionalDraft, base: VoicesProfessionalDraft) -> VoicesProfessionalDraft {
+        var result = fresh
+        if name != base.name { result.name = name }
+        if language != base.language { result.language = language }
+        if description != base.description { result.description = description }
+        if labels != base.labels { result.labels = labels }
+        return result
+    }
 }
 
 /// One professional sample's training settings: `POST /v1/voices/pvc/{voice_id}/samples/{sample_id}`.
@@ -324,6 +347,10 @@ final class VoicesSectionModel {
     /// Counts the times the edit form was filled afresh (another voice chosen): a save that went
     /// out before a refill does not speak for the form any more.
     @ObservationIgnored private var editFills = 0
+    /// The same for the settings sliders and the professional details: what they held when last
+    /// filled from the voice, or what a save sent. `editFills` counts their refills too.
+    @ObservationIgnored private var settingsBase: VoicesSettings?
+    @ObservationIgnored private var professionalBase = VoicesProfessionalDraft()
     /// Played sample audio, by sample id.
     private(set) var sampleFiles: [String: URL] = [:]
     var replicateWorkspaceID = ""
@@ -599,11 +626,15 @@ final class VoicesSectionModel {
         if selected?.id != voiceID {
             selected = rows.first { $0.id == voiceID }
             settingsDraft = selected?.settings
+            settingsBase = settingsDraft
             if let selected {
                 editDraft = VoicesEditDraft(voice: selected)
                 editBase = editDraft
                 editFills += 1
-                if selected.isProfessional { professional = VoicesProfessionalDraft(voice: selected) }
+                if selected.isProfessional {
+                    professional = VoicesProfessionalDraft(voice: selected)
+                    professionalBase = professional
+                }
             }
             sampleFiles = [:]
             // What was picked or read for the previous voice is not offered for this one.
@@ -640,11 +671,11 @@ final class VoicesSectionModel {
         // The answer's `settings` may be null (and `with_settings` is deprecated and ignored):
         // then the settings route says them.
         if let settings = voice.settings {
-            settingsDraft = settings
+            takeSettings(settings)
         } else if let json = await actions.perform(
             "get_voice_settings", ["voice_id": .string(voice.id)], quietly: true, slot: slot
         )?.voicesStudioJSON, selected?.id == voice.id {
-            settingsDraft = VoicesSettings(json: json)
+            takeSettings(VoicesSettings(json: json))
         }
         guard selected?.id == voice.id else { return }
         // Field by field: what the owner typed since the form was filled (or since a save went
@@ -652,17 +683,36 @@ final class VoicesSectionModel {
         let fresh = VoicesEditDraft(voice: voice)
         editDraft = editDraft.merged(over: fresh, base: editBase)
         editBase = fresh
-        if voice.isProfessional { professional = VoicesProfessionalDraft(voice: voice) }
+        if voice.isProfessional {
+            let freshProfessional = VoicesProfessionalDraft(voice: voice)
+            professional = professional.merged(over: freshProfessional, base: professionalBase)
+            professionalBase = freshProfessional
+        }
         for sample in voice.samples where sampleDrafts[sample.id] == nil {
             sampleDrafts[sample.id] = VoicesSampleDraft(sample: sample)
         }
     }
 
+    /// Fresh settings for the open voice, merged slider by slider: one the owner moved since the
+    /// sliders were filled (or since a save sent them) stays where it is.
+    private func takeSettings(_ fresh: VoicesSettings) {
+        if let current = settingsDraft, let base = settingsBase {
+            settingsDraft = current.merged(over: fresh, base: base)
+        } else {
+            settingsDraft = fresh
+        }
+        settingsBase = fresh
+    }
+
     func saveSettings() async {
-        guard let voice = selected, let settingsDraft else { return }
-        var arguments = settingsDraft.arguments
+        guard let voice = selected, let sent = settingsDraft else { return }
+        let fills = editFills
+        var arguments = sent.arguments
         arguments["voice_id"] = .string(voice.id)
-        await actions.perform("edit_voice_settings", arguments, title: "Settings of \(voice.name)")
+        guard await actions.perform("edit_voice_settings", arguments, title: "Settings of \(voice.name)") != nil
+        else { return }
+        // The voice now holds what was sent; a slider moved since is the owner's.
+        if isOpen(voice.id), editFills == fills { settingsBase = sent }
     }
 
     /// Puts the account's default settings in the sliders; nothing is saved until Save.
@@ -781,9 +831,13 @@ final class VoicesSectionModel {
 
     func editProfessional() async {
         guard let voice = selected else { return }
-        await actions.perform(
-            "edit_pvc_voice", Self.professionalArguments(professional, voiceID: voice.id), title: "Edit \(voice.name)"
-        )
+        let sent = professional
+        let fills = editFills
+        let saved = await actions.perform(
+            "edit_pvc_voice", Self.professionalArguments(sent, voiceID: voice.id), title: "Edit \(voice.name)"
+        ) != nil
+        // The voice now holds what was sent; anything else in the form was typed since.
+        if saved, isOpen(voice.id), editFills == fills { professionalBase = sent }
         await refetch(voice.id)
     }
 
@@ -942,11 +996,15 @@ final class VoicesSectionModel {
         self.selected = selected
         wantedVoice = selected?.id
         settingsDraft = selected?.settings
+        settingsBase = settingsDraft
         if let selected {
             editDraft = VoicesEditDraft(voice: selected)
             editBase = editDraft
             editFills += 1
-            if selected.isProfessional { professional = VoicesProfessionalDraft(voice: selected) }
+            if selected.isProfessional {
+                professional = VoicesProfessionalDraft(voice: selected)
+                professionalBase = professional
+            }
             for sample in selected.samples { sampleDrafts[sample.id] = VoicesSampleDraft(sample: sample) }
         }
         self.hasMore = hasMore
