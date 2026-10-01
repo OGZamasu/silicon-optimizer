@@ -711,8 +711,9 @@ conversation with one of the owner's agents.
   conversation:** the control server keeps a read pending on the request's connection (as for
   `/video/generate`), and its closing cancels the route, which ends the conversation at once. A
   caller that keeps its connection open and stops reading is bounded by the 300 s cap, and holds
-  the one-at-a-time lane until then — do not retry into it. (The MCP bridge does not yet act on an
-  MCP-level cancel; the cap bounds that too.)
+  the one-at-a-time lane until then — do not retry into it. An MCP client that cancels the call
+  (`notifications/cancelled`) or quits hangs up this way: the bridge closes the call's request, so
+  the conversation ends at once, and answers nothing for it.
 - The answer: the transcript, the tools used (server tools marked "ran on ElevenLabs' side"; client
   and MCP tools with their parameters, masked), errors, how it ended, the duration and a cost note —
   never a signed URL, a token or anything key-shaped. The bridge prints the agent's words inside a

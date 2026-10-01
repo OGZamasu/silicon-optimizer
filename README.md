@@ -258,6 +258,14 @@ codex mcp add silicon-optimizer -- \
 Building from source instead? `Scripts/install-mcp.sh` compiles the bridge, installs it to
 `/usr/local/bin`, and prints the same configs pointed there.
 
+Long calls can be stopped. The bridge runs each tool call on its own, up to eight at once, so
+`ping`, `tools/list` and quick calls keep answering while a render or an ElevenLabs
+conversation runs. When the assistant cancels a call (`notifications/cancelled`) or quits, the
+bridge closes that call's request to the app and sends no answer for it: `generate_video` stops
+waiting (a clip the app already queued stays in the Video queue; `video_queue` shows it and can
+cancel it where its node allows), and `elevenlabs_agent_converse` ends the conversation at once
+instead of at its time limit.
+
 ### What the assistant can do with it
 
 | Tool | What it answers |
