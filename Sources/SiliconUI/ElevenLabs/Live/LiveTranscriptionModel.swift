@@ -393,11 +393,11 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         // commit's text can land just after Stop's commit: the first text after it, then a quiet
         // moment.
         let expected = stream.usage.commits
-        let deadline = ContinuousClock.now + timing.finalWait
+        let deadline = timing.now() + timing.finalWait
         var answered = false
-        while guardian.isCurrent(token), ContinuousClock.now < deadline {
+        while guardian.isCurrent(token), timing.now() < deadline {
             let after = committedReceived > receivedBefore
-            let quiet = lastCommittedAt.map { ContinuousClock.now - $0 >= timing.finalQuiet } ?? true
+            let quiet = lastCommittedAt.map { timing.now() - $0 >= timing.finalQuiet } ?? true
             if manual {
                 answered = committedReceived >= expected && (after || !commits) && quiet
             } else {
@@ -430,7 +430,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             case .committed(let text):
                 partial = ""
                 committedReceived += 1
-                lastCommittedAt = .now
+                lastCommittedAt = context.transcription.now()
                 guard !text.isEmpty else { continue }
                 segments.append(Segment(id: nextSegmentID, text: ElevenLabsRedaction.redact(text)))
                 nextSegmentID += 1
