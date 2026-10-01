@@ -214,13 +214,28 @@ final class AgentMCPServersModel {
                 ? Self.approvalQuestion(to: settings.approvalPolicy, server: server)
                 : "Save the settings of “\(server.name)”?",
             confirmLabel: "Save settings"
-        ) else { return }
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.updateMCPServer, slot: server.id) { await rebaseAfterLostSave(server.id) }
+            return
+        }
         if let updated = AgentsMCPServer(json: json) {
             show(updated)
             list.upsert(updated)
         } else {
             originalSettings = settings
         }
+    }
+
+    /// After a settings save whose answer was lost: the server is read again and becomes the
+    /// form's base, the owner's edits kept. Saved changes then show as saved; and setting one back
+    /// is a change again (against the stale base it looked like none, so it was never sent).
+    private func rebaseAfterLostSave(_ id: String) async {
+        guard let json = await calls.json(AgentsOp.getMCPServer, ["mcp_server_id": .string(id)], slot: id, quiet: true),
+              selectedID == id, let fresh = AgentsMCPServer(json: json) else { return }
+        let edits = settings
+        show(fresh)
+        settings = edits
+        list.upsert(fresh)
     }
 
     /// What a change of the server's approval policy means, in words.
@@ -365,8 +380,13 @@ final class AgentMCPServersModel {
             consequence: (warnings.isEmpty ? "" : "Careful: " + warnings.joined(separator: " ") + " ")
                 + "Agents you give it to can call its tools during conversations and send it what callers say. "
                 + tools + " Only connect servers you trust.",
-            question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect"
-        ), let server = AgentsMCPServer(json: json) else { return }
+            question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect",
+            holdIfUnknown: AgentsCreateHolds.lost("the MCP server “\(newName)”", check: "the MCP servers list")
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.createMCPServer) { await list.refresh() }
+            return
+        }
+        guard let server = AgentsMCPServer(json: json) else { return }
         list.upsert(server)
         store.directory.mcpServers.upsert(server)
         creating = false
@@ -442,7 +462,9 @@ private struct AgentMCPServerComposer: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            AgentsRunButton(runner: runner, title: "Connect…", disabled: model.createArguments() == nil) {
+            AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.createMCPServer)
+            AgentsRunButton(runner: runner, title: "Connect…", disabled: model.createArguments() == nil
+                                || model.calls.holds.notice(AgentsOp.createMCPServer) != nil) {
                 Task { await model.create() }
             }
             AgentsRunnerOutput(runner: runner, showsResult: false)

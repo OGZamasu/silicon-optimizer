@@ -289,10 +289,16 @@ final class AgentToolsModel {
     func create() async {
         guard newTool.problems.isEmpty, let config = try? newTool.config() else { return }
         let wording = Self.describe(config)
-        guard let json = await calls.json(AgentsOp.createTool, ["tool_config": config], title: "New tool “\(newTool.name)”",
-                                          subject: wording.subject, consequence: wording.consequence,
-                                          question: "Create the tool \(wording.subject)?", confirmLabel: "Create tool"),
-              let tool = AgentsTool(json: json) else { return }
+        guard let json = await calls.json(
+            AgentsOp.createTool, ["tool_config": config], title: "New tool “\(newTool.name)”",
+            subject: wording.subject, consequence: wording.consequence,
+            question: "Create the tool \(wording.subject)?", confirmLabel: "Create tool",
+            holdIfUnknown: AgentsCreateHolds.lost("the tool “\(newTool.name)”", check: "the tools list")
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.createTool) { await list.refresh() }
+            return
+        }
+        guard let tool = AgentsTool(json: json) else { return }
         list.upsert(tool)
         store.directory.tools.upsert(tool)
         creating = false
@@ -407,9 +413,11 @@ private struct AgentToolForm: View {
             }
             .formStyle(.columns)
             ElevenLabsProblemList(problems: editor.problems)
+            if isNew { AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.createTool) }
             HStack {
                 AgentsRunButton(runner: runner, title: isNew ? "Create tool…" : "Save…", disabled: !editor.problems.isEmpty
-                                    || (!isNew && !model.isDirty)) {
+                                    || (!isNew && !model.isDirty)
+                                    || (isNew && model.calls.holds.notice(AgentsOp.createTool) != nil)) {
                     Task { if isNew { await model.create() } else { await model.save() } }
                 }
             }

@@ -577,6 +577,7 @@ final class DubbingSectionModel {
             sourceEdits = [:]
             targetEdits = [:]
             newSegment = DubbingSegmentDraft()   // its speaker and times belong to the previous project
+            segmentNote = nil
             lastRegeneration = nil
         }
         if let json = await actions.perform("dubbing_project_get", ["project_id": .string(id)], quietly: true)?
@@ -760,11 +761,27 @@ final class DubbingSectionModel {
                 "start_s": .number(start), "end_s": .number(end), "text": .string(newSegment.text)]
     }
 
+    /// What the owner is told after an "Add segment" whose answer was lost.
+    static let lostSegmentMessage = "The answer to adding the segment was lost, so it may have been added. The "
+        + "transcript has been read again: check it before adding the segment again."
+
+    /// Said under the new segment's fields after its answer was lost; cleared by the next Add
+    /// or another project.
+    private(set) var segmentNote: String?
+
     func addSegment() async {
-        guard let arguments = addSegmentArguments(), let projectID = selectedProject?.id,
-              await actions.perform("dubbing_transcript_segment_add", arguments, title: "New segment") != nil,
-              isOpen(projectID)
-        else { return }
+        guard let arguments = addSegmentArguments(), let projectID = selectedProject?.id else { return }
+        segmentNote = nil
+        guard await actions.perform("dubbing_transcript_segment_add", arguments, title: "New segment") != nil else {
+            // It may have been added, and a second Add would add it twice: read the transcript
+            // and say so. The fields stay as typed (unsaved edits too).
+            if actions.outcomeWasUnknown("dubbing_transcript_segment_add"), isOpen(projectID) {
+                segmentNote = Self.lostSegmentMessage
+                await loadSourceTranscript(keepingEditsBut: [:])
+            }
+            return
+        }
+        guard isOpen(projectID) else { return }
         newSegment = DubbingSegmentDraft()
         await loadSourceTranscript(keepingEditsBut: [:])
     }

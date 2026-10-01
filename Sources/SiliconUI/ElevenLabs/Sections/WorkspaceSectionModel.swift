@@ -347,10 +347,26 @@ final class WorkspaceSectionModel {
         return ("invite_users_bulk", arguments, problems)
     }
 
+    /// What holds "Send invitations" after an answer to one was lost: they may have gone, and
+    /// sending again would email the same people twice. ElevenLabs' API lists no pending
+    /// invitations, so the owner checks on elevenlabs.io — or withdraws them below.
+    nonisolated static func lostInviteMessage(_ emails: [String]) -> String {
+        let who = emails.count == 1 ? "the invitation to \(emails[0])" : "the \(emails.count) invitations (\(emails.joined(separator: ", ")))"
+        return "The answer to \(who) was lost, so it may have been sent. Check the workspace's pending invitations "
+            + "on elevenlabs.io — or withdraw it below — before inviting again."
+    }
+
+    /// Why "Send invitations" is held, when it is: either way of inviting holds both.
+    var invitationsHeld: String? { actions.heldCreate("invite_user") ?? actions.heldCreate("invite_users_bulk") }
+
     func invite() async {
         let call = inviteCall()
         inviteProblems = call.problems
         guard call.problems.isEmpty else { return }
+        if let held = invitationsHeld {
+            inviteProblems = [held]
+            return
+        }
         let emails = VoicesStudioFormat.list(inviteEmails)
         let subject = emails.count == 1 ? "an invitation to \(emails[0])"
             : "invitations to \(emails.count) people (\(emails.joined(separator: ", ")))"
@@ -359,7 +375,8 @@ final class WorkspaceSectionModel {
             consequence: "An email goes to \(emails.count == 1 ? emails[0] : "each of them") inviting them to join this "
                 + "workspace\(inviteSeat.isEmpty ? "" : " with a \(VoicesStudioFormat.words(inviteSeat).lowercased()) seat")"
                 + ", using one of your seats."
-                + (emails.count > 1 ? " Every address must be in a verified domain of the workspace." : "")
+                + (emails.count > 1 ? " Every address must be in a verified domain of the workspace." : ""),
+            holdIfUnknown: Self.lostInviteMessage(emails)
         ) != nil else { return }
         inviteEmails = ""
         inviteUsageLimit = ""
@@ -559,10 +576,22 @@ final class WorkspaceSectionModel {
             question: VoicesStudioQuestion(
                 "Create the sign-in connection “\(name)”?", button: "Create connection",
                 consequence: "Agents and tools in this workspace can sign in to another service with these credentials."
-            )
-        ) != nil else { return }
+            ),
+            holdIfUnknown: Self.lostConnectionMessage(name)
+        ) != nil else {
+            // It may have been made, holding these credentials: "Create connection" is held until
+            // the owner has checked, the form keeps what was typed, and the list is read at once.
+            if actions.outcomeWasUnknown("create_auth_connection") { await refreshConnections() }
+            return
+        }
         form.reset()
         await refreshConnections()
+    }
+
+    /// What holds "Create connection" after its answer was lost.
+    nonisolated static func lostConnectionMessage(_ name: String) -> String {
+        "The answer to creating the sign-in connection “\(name)” was lost, so it may have been made with these "
+            + "credentials. If it is in the list, use it — or delete it — rather than creating another."
     }
 
     func edit(_ connection: WorkspaceAuthConnection?) {
