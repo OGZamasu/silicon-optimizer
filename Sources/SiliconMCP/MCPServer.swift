@@ -10,18 +10,54 @@ import SiliconControl
 ///
 /// Every tool proxies to the running app's control server, so Claude and ChatGPT drive the model
 /// the user already has loaded rather than starting a competing copy.
-struct MCPServer {
+///
+/// The frames in, the frames out and the tools are all given to it: `overStandardIO()` is the
+/// bridge a client spawns, and a test drives the same loop with lines it types and fake tools.
+struct MCPServer: Sendable {
 
     static let protocolVersion = "2025-06-18"
 
-    let client = ControlClient()
+    /// One line per frame, as the client sent them. The stream ending is the client hanging up.
+    let lines: AsyncStream<String>
+    /// Writes one whole frame, without its newline, to the client.
+    let write: @Sendable (String) -> Void
+    let tools: any ToolRunner
+
+    init(
+        lines: AsyncStream<String>, write: @escaping @Sendable (String) -> Void,
+        tools: any ToolRunner = ControlTools()
+    ) {
+        self.lines = lines
+        self.write = write
+        self.tools = tools
+    }
+
+    /// The bridge as a client spawns it: frames in on stdin, out on stdout, every tool a request
+    /// to the running app.
+    static func overStandardIO() -> MCPServer {
+        MCPServer(lines: standardInputLines()) { frame in
+            // stdout carries protocol frames only. Anything diagnostic must go to stderr or it
+            // corrupts the stream — the single most common way to break an MCP server.
+            fputs(frame + "\n", stdout)
+            fflush(stdout)
+        }
+    }
+
+    /// stdin, line by line, read on a thread of its own: `readLine` blocks, and a blocked
+    /// cooperative thread is one the tools cannot use.
+    static func standardInputLines() -> AsyncStream<String> {
+        let (lines, continuation) = AsyncStream.makeStream(of: String.self)
+        Thread {
+            while let line = readLine(strippingNewline: true) { continuation.yield(line) }
+            continuation.finish()
+        }.start()
+        return lines
+    }
 
     // MARK: - Run loop
 
     func run() async {
-        // stdout carries protocol frames only. Anything diagnostic must go to stderr or it
-        // corrupts the stream — the single most common way to break an MCP server.
-        while let line = readLine(strippingNewline: true) {
+        for await line in lines {
             guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
             guard let data = line.data(using: .utf8),
                   let request = try? JSONDecoder().decode(RPCRequest.self, from: data)
@@ -81,7 +117,7 @@ struct MCPServer {
         }()
 
         do {
-            let text = try await Tools.invoke(name, arguments: arguments, client: client)
+            let text = try await tools.run(name, arguments: arguments)
             emit(RPCResponse(id: request.id, result: .object([
                 "content": .array([.object([
                     "type": .string("text"),
@@ -106,8 +142,26 @@ struct MCPServer {
         guard response.id != .null || response.error != nil else { return }
         guard let data = try? JSONEncoder().encode(response),
               let line = String(data: data, encoding: .utf8) else { return }
-        print(line)
-        fflush(stdout)
+        write(line)
+    }
+}
+
+/// Runs one tool by name. The bridge's runs `Tools.invoke` against the app's control API; a
+/// test gives a fake, so the server can be driven without the app.
+protocol ToolRunner: Sendable {
+    func run(_ name: String, arguments: [String: JSONValue]) async throws -> String
+}
+
+/// The tools as the bridge runs them: each one a request to the running app.
+struct ControlTools: ToolRunner {
+    let client: ControlClient
+
+    init(client: ControlClient = ControlClient()) {
+        self.client = client
+    }
+
+    func run(_ name: String, arguments: [String: JSONValue]) async throws -> String {
+        try await Tools.invoke(name, arguments: arguments, client: client)
     }
 }
 
