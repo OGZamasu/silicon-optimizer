@@ -145,7 +145,13 @@ struct ProductionsOrderCard: View {
                 }
             }
             if let reason = order.cancelReason, !reason.isEmpty { VoicesStudioFact("Cancelled because", reason) }
-            Text(order.items.isEmpty ? "No items yet." : "Items").font(.headline)
+            HStack {
+                Text(order.items.isEmpty ? "No items yet." : "Items").font(.headline)
+                Spacer()
+                if model.itemsReadFailed {
+                    Button("Read again") { Task { await model.select(order.id) } }.controlSize(.small)
+                }
+            }
             ForEach(order.items) { item in
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -157,7 +163,10 @@ struct ProductionsOrderCard: View {
                     Spacer()
                     if let quote = item.quote { Text(quote.formatted(.currency(code: "USD"))).monospacedDigit() }
                     if order.isOpen {
-                        Button("Edit") { model.edit(item) }.controlSize(.small)
+                        Button("Edit") { model.edit(item) }
+                            .controlSize(.small)
+                            .disabled(model.itemEditBlockReason != nil)
+                            .help(model.itemEditBlockReason ?? "Change this item")
                         Button(role: .destructive) { Task { await model.remove(item) } } label: { Image(systemName: "trash") }
                             .buttonStyle(.borderless)
                             .accessibilityLabel("Remove this item")

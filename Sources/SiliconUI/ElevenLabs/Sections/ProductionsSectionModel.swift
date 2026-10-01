@@ -263,6 +263,7 @@ final class ProductionsSectionModel {
         }
         if selected?.id != orderID {
             selected = nil
+            orderIn = nil
             rename = ""
             deliverables = []
             item = ProductionsItemDraft()
@@ -276,7 +277,43 @@ final class ProductionsSectionModel {
     /// order opened meanwhile is not abandoned; the screen takes it only while it is open.
     private func refetch(_ orderID: String) async {
         landed[orderID, default: 0] += 1
+        if orderIn == orderID { orderIn = nil }
         await fetch(orderID, slot: VoicesStudioActions.afterChange(of: orderID))
+    }
+
+    /// After a change to `orderID` that gave no answer: when it may still have been carried out
+    /// (a 5xx, a lost answer, a cancel after sending), the same as after one that answered —
+    /// the order on screen may be older than ElevenLabs' — without claiming what was sent.
+    private func refetchIfUnknown(_ operationID: String, _ orderID: String) async {
+        guard actions.outcomeWasUnknown(operationID) else { return }
+        await refetch(orderID)
+    }
+
+    /// The order whose items on screen are what ElevenLabs holds: read since its last change
+    /// answered (or gave no answer, yet may have been carried out). Until then an item's Edit
+    /// would fill the form from a row the change may have made stale, and saving it — the whole
+    /// item is sent — would take the change back.
+    private(set) var orderIn: String?
+
+    /// Whether the open order's items may be edited.
+    var itemsAreIn: Bool { selected != nil && orderIn == selected?.id }
+
+    /// Whether the read the open order's items wait for has failed, with nothing reading them.
+    var itemsReadFailed: Bool {
+        guard let id = selected?.id, !itemsAreIn else { return false }
+        let afterChange = VoicesStudioActions.afterChange(of: id)
+        guard !actions.isRunning("public_get_order"), !actions.isRunning("public_get_order", slot: afterChange) else {
+            return false
+        }
+        return (actions.problem("public_get_order") ?? actions.problem("public_get_order", slot: afterChange)) != nil
+    }
+
+    /// Why the open order's items cannot be edited now, when they cannot.
+    var itemEditBlockReason: String? {
+        guard selected != nil, !itemsAreIn else { return nil }
+        return itemsReadFailed
+            ? "The order could not be read again after the last change — check its status to edit its items."
+            : "Waiting for the order to be read again after the last change."
     }
 
     /// Changes to each order that have answered, by order id. A read asked before one of them
@@ -295,6 +332,7 @@ final class ProductionsSectionModel {
         if let index = orders.firstIndex(where: { $0.id == order.id }) { orders[index] = order } else { orders.insert(order, at: 0) }
         guard wantedOrder == orderID else { return }
         selected = order
+        orderIn = orderID
         rename = order.name
         await loadLanguages(for: item.kind)
     }
@@ -304,7 +342,7 @@ final class ProductionsSectionModel {
         guard await actions.perform(
             "public_update_order", ["order_id": .string(order.id), "request": ["name": .string(rename)]],
             title: "Rename order"
-        ) != nil else { return }
+        ) != nil else { return await refetchIfUnknown("public_update_order", order.id) }
         await refetch(order.id)
     }
 
@@ -449,14 +487,21 @@ final class ProductionsSectionModel {
         guard let order = selected else { return }
         let (arguments, problems) = Self.itemArguments(orderID: order.id, draft: item)
         itemProblems = problems
-        guard problems.isEmpty,
-              await actions.perform("public_upsert_order_item", arguments, title: "Item for \(order.name)") != nil
-        else { return }
+        guard problems.isEmpty else { return }
+        guard await actions.perform("public_upsert_order_item", arguments, title: "Item for \(order.name)") != nil
+        else { return await refetchIfUnknown("public_upsert_order_item", order.id) }
         if wantedOrder == order.id { item = ProductionsItemDraft(kind: item.kind) }
         await refetch(order.id)
     }
 
     func edit(_ existing: ProductionsItem) {
+        // An item changed a moment ago is edited from the order's next read, not from a row
+        // that may not be what ElevenLabs holds.
+        if let reason = itemEditBlockReason {
+            itemProblems = [reason]
+            return
+        }
+        itemProblems = []
         item = ProductionsItemDraft(
             kind: existing.kind, itemID: existing.id, mediaIDs: existing.mediaIDs,
             sourceLanguage: existing.sourceLanguage ?? "", destinationLanguages: existing.destinationLanguages,
@@ -465,11 +510,11 @@ final class ProductionsSectionModel {
     }
 
     func remove(_ existing: ProductionsItem) async {
-        guard let order = selected,
-              await actions.perform(
-                "public_remove_order_item", ["order_id": .string(order.id), "item_id": .string(existing.id)],
-                subject: "the \(VoicesStudioFormat.words(existing.kind).lowercased()) item from “\(order.name)”"
-              ) != nil else { return }
+        guard let order = selected else { return }
+        guard await actions.perform(
+            "public_remove_order_item", ["order_id": .string(order.id), "item_id": .string(existing.id)],
+            subject: "the \(VoicesStudioFormat.words(existing.kind).lowercased()) item from “\(order.name)”"
+        ) != nil else { return await refetchIfUnknown("public_remove_order_item", order.id) }
         await refetch(order.id)
     }
 
@@ -557,6 +602,7 @@ final class ProductionsSectionModel {
         self.orders = orders
         self.selected = selected
         wantedOrder = selected?.id
+        orderIn = selected?.id
         rename = selected?.name ?? ""
         if let selected { self.media[selected.id] = media }
         if let languages { take(languagesJSON: languages, for: item.kind) }

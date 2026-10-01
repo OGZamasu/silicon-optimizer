@@ -758,6 +758,10 @@ struct VoicesStudioStaleValueTests {
         #expect(fixture.sent("edit_service_account_api_key").count == 1)
         #expect(model.selected?.keys.first?.permissions == ["text_to_speech"], "a refused change was claimed")
         #expect(model.editBlockReason(key) == nil)
+        // A refusal is a known outcome — nothing was done: the editor stays open on the draft, and
+        // nothing is read again (only a lost answer is).
+        #expect(model.editingKey?.id == key.id, "a refused change closed the editor")
+        #expect(fixture.sent("get_service_account_api_keys_route").isEmpty, "a refused change was read again as if it may have landed")
     }
 
     /// The accounts list, asked for before a key change answered and answering after it, does
@@ -901,12 +905,18 @@ struct VoicesStudioStaleValueTests {
         let model = VoicesSectionModel(environment: fixture.environment)
         let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
         model.load(rows: [a], selected: a)
+        let asked = ContinuousClock.now
         let first = Task { await model.reloadSelected() }
         try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 1 }
+        // How long one read takes to reach the fake on this machine, as loaded as it is now.
+        let oneRead = ContinuousClock.now - asked
         let second = Task { await model.reloadSelected() }
         try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 2 }
         let third = Task { await model.reloadSelected() }
-        let sent = try await within(.seconds(15)) { fixture.sent("get_voice_by_id").count == 3 }
+        // The third read goes as soon as the second is abandoned: allow three seconds, or ten
+        // times what the first took on a loaded machine. Held reads that ignore cancellation
+        // keep both connections, so a regression fails here in seconds.
+        let sent = try await within(max(.seconds(3), oneRead * 10)) { fixture.sent("get_voice_by_id").count == 3 }
         signals.note("never")
         await first.value
         await second.value
@@ -983,5 +993,452 @@ struct VoicesStudioStaleValueTests {
         await model.select("d-a")                                  // Try again
         #expect(model.rulesAreIn)
         #expect(model.rulesProblem == nil)
+    }
+
+    // MARK: - Round 5: a change whose answer was lost
+
+    /// A pretend ElevenLabs that remembers each key's permissions and whether it is off, as
+    /// edits set them — and can carry out an edit while losing its answer (a 500).
+    final class KeyServer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var permissions: [String: [String]]
+        private var disabled: [String: Bool] = [:]
+        private var answersToLose: Int
+        init(_ keys: [String: [String]], losing: Int = 0) {
+            permissions = keys
+            answersToLose = losing
+        }
+
+        /// Carries out the edit; false when its answer is to be lost.
+        func edit(_ request: ElevenLabsRequest) -> Bool {
+            lock.withLock {
+                let data: Data = if case .data(let data) = request.body { data } else { Data() }
+                let json = (try? JSONValue(data: data)) ?? .null
+                let id = request.url.lastPathComponent
+                if let list = json["permissions"].arrayValue?.compactMap(\.stringValue) { permissions[id] = list }
+                if let enabled = json["is_enabled"].boolValue { disabled[id] = !enabled }
+                guard answersToLose > 0 else { return true }
+                answersToLose -= 1
+                return false
+            }
+        }
+
+        func keys(of account: String) -> JSONValue {
+            lock.withLock {
+                ["api-keys": .array(permissions.keys.sorted().map { id in
+                    ["name": .string("Key \(id)"), "hint": "a1b2", "key_id": .string(id),
+                     "service_account_user_id": .string(account), "is_disabled": .bool(disabled[id] ?? false),
+                     "permissions": .array((permissions[id] ?? []).map(JSONValue.string)),
+                     "character_count": 0, "hashed_xi_api_key": "h"]
+                })]
+            }
+        }
+
+        func current(_ id: String) -> [String] { lock.withLock { (permissions[id] ?? []).sorted() } }
+        func isDisabled(_ id: String) -> Bool { lock.withLock { disabled[id] ?? false } }
+    }
+
+    /// A permission granted to key k1 reaches ElevenLabs and is carried out, but the answer is a
+    /// 500. The row claims nothing, yet it may now be older than ElevenLabs: the editor closes,
+    /// the key's Edit waits, and the account's keys are read again. Opened from that read, the
+    /// editor keeps the permission the lost-answer save granted when another is added. (Before:
+    /// no read, and an editor reopened from the row sent the list without it, taking it back.)
+    @Test func aKeyChangeWhoseAnswerWasLostIsReadAgainBeforeItIsEditedAgain() async throws {
+        let signals = Signals()
+        let catalog = VoicesStudioFixture()
+        defer { catalog.clean() }
+        let choices = ServiceAccountsSectionModel(environment: catalog.environment).permissionChoices
+            .filter { $0 != "text_to_speech" }
+        try #require(choices.count >= 2)
+        let granted = choices[0], added = choices[1]
+        let server = KeyServer(["k1": ["text_to_speech"]], losing: 1)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                if server.edit(request) { return .json(["status": "ok"]) }
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)    // carried out; answer lost
+            case "get_service_account_api_keys_route":
+                if signals.note("keys") == 1 { try await signals.wait(for: "looked") }
+                return .json(server.keys(of: "sa-a"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        model.edit(try #require(model.selected?.keys.first))
+        model.keyDraft.allPermissions = false
+        model.keyDraft.permissions.insert(granted)
+        let saving = Task { try await answering(model.actions) { await model.saveKey() } }
+        // Should no read be made (a regression), the save ends at once, and so does this wait.
+        let releasing = Task { _ = try? await saving.value; signals.note("looked") }
+        try await voicesStudioWait {
+            fixture.sent("get_service_account_api_keys_route").count == 1 || signals.has("looked")
+        }
+        #expect(fixture.sent("get_service_account_api_keys_route").count == 1, "the keys were not read again after a lost answer")
+        let row = try #require(model.selected?.keys.first)
+        #expect(row.permissions == ["text_to_speech"], "a change whose answer was lost was claimed")
+        #expect(model.editingKey == nil, "the editor stayed open, its starting point a row older than ElevenLabs")
+        #expect(model.problems == [ServiceAccountsSectionModel.lostAnswerMessage(row.name)], "\(model.problems)")
+        #expect(model.editBlockReason(row) != nil, "Edit did not wait for the keys to be read again")
+        model.edit(row)
+        #expect(model.editingKey == nil, "the editor opened from the unread row")
+        signals.note("looked")
+        try await saving.value
+        await releasing.value
+        let fresh = try #require(model.selected?.keys.first)
+        #expect(fresh.permissions.sorted() == ["text_to_speech", granted].sorted(), "the row is not what ElevenLabs holds")
+        #expect(model.editBlockReason(fresh) == nil)
+        model.edit(fresh)
+        model.keyDraft.permissions.insert(added)
+        try await answering(model.actions) { await model.saveKey() }
+        #expect(server.current("k1") == ["text_to_speech", granted, added].sorted(),
+                "the next change took back the permission the lost-answer save granted: \(server.current("k1"))")
+    }
+
+    /// Turned off, carried out, answer lost: the row would keep showing the key on, its button
+    /// offering "Turn off…" again. The keys are read again, and the row says the key is off.
+    @Test func aKeyTurnedOffWhoseAnswerWasLostIsReadAgain() async throws {
+        let server = KeyServer(["k1": ["text_to_speech"]], losing: 1)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                if server.edit(request) { return .json(["status": "ok"]) }
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+            case "get_service_account_api_keys_route":
+                return .json(server.keys(of: "sa-a"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let key = try #require(model.selected?.keys.first)
+        try await answering(model.actions) { await model.setEnabled(key, false) }
+        #expect(server.isDisabled("k1"))
+        #expect(fixture.sent("get_service_account_api_keys_route").count == 1, "the keys were not read again after a lost answer")
+        #expect(model.selected?.keys.first?.isDisabled == true, "the row still shows the key on")
+        #expect(model.accounts.first?.keys.first?.isDisabled == true)
+        #expect(model.problems == [ServiceAccountsSectionModel.lostAnswerMessage(key.name)], "\(model.problems)")
+    }
+
+    /// The request body a fake received, as JSON.
+    nonisolated static func body(_ request: ElevenLabsRequest) -> JSONValue {
+        let data: Data = if case .data(let data) = request.body { data } else { Data() }
+        return (try? JSONValue(data: data)) ?? .null
+    }
+
+    /// A seat change and a lock, each carried out with its answer lost (a 500): the members are
+    /// read again after each, so the row shows the seat and the lock the member now has. (Before:
+    /// nothing was read; the row kept the seat from before — picking it to go back looked like no
+    /// change — and offered "Lock…" for a member just locked.) A refused change reads nothing.
+    @Test func aMembersSeatOrLockWhoseAnswerWasLostIsReadAgain() async throws {
+        final class Member: @unchecked Sendable {
+            let lock = NSLock()
+            var json: JSONValue
+            var refuseNext = false
+            init(_ json: JSONValue) { self.json = json }
+        }
+        let server = Member(VoicesStudioWorkspaceTests.member)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_workspace_member":
+                let body = Self.body(request)
+                return server.lock.withLock {
+                    if server.refuseNext {
+                        server.refuseNext = false
+                        return .jsonText(#"{"detail":{"status":"invalid","message":"Not allowed"}}"#, status: 422)
+                    }
+                    guard case .object(var fields) = server.json else { return .jsonText("{}", status: 500) }
+                    if let seat = body["workspace_seat_type"].stringValue { fields["seat_type"] = .string(seat) }
+                    if let locked = body["is_locked"].boolValue { fields["is_locked"] = .bool(locked) }
+                    server.json = .object(fields)
+                    return .jsonText(#"{"detail":"Internal error"}"#, status: 500)        // carried out; answer lost
+                }
+            case "get_workspace_members":
+                return .json([server.lock.withLock { server.json }])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        let row = try #require(WorkspaceMember(json: VoicesStudioWorkspaceTests.member))
+        model.load(members: [row])
+        model.seatEdits[row.id] = "workspace_admin"
+        try await answering(model.actions) { await model.changeSeat(row) }
+        #expect(fixture.sent("get_workspace_members").count == 1, "the members were not read again after a lost answer")
+        #expect(model.members.first?.seatType == "workspace_admin", "the row still shows the seat from before")
+        let current = try #require(model.members.first)
+        try await answering(model.actions) { await model.setLocked(current, true) }
+        #expect(fixture.sent("get_workspace_members").count == 2)
+        #expect(model.members.first?.isLocked == true, "the row still offers to lock a member just locked")
+        server.lock.withLock { server.refuseNext = true }
+        let locked = try #require(model.members.first)
+        try await answering(model.actions) { await model.setLocked(locked, false) }
+        #expect(fixture.sent("update_workspace_member").count == 3)
+        #expect(fixture.sent("get_workspace_members").count == 2, "a refused change was read again as if it may have landed")
+    }
+
+    /// A rule added to dictionary A reaches ElevenLabs, but the answer is a 500. The rules on
+    /// screen are those from before the add, so "Edit all" waits while the dictionary is read
+    /// again; once that lands it copies the rules with the added one, and a Replace keeps it.
+    /// (Before: nothing was read, "Edit all" copied the rules from before the add, and Replace
+    /// took the added rule back.)
+    @Test func aRuleAddedWithItsAnswerLostIsReadAgainBeforeEditAllCopiesTheRules() async throws {
+        final class Rules: @unchecked Sendable {
+            let lock = NSLock()
+            var rules: [JSONValue]
+            var answersToLose = 1
+            init(_ rules: [JSONValue]) { self.rules = rules }
+            func dictionary() -> JSONValue {
+                lock.withLock {
+                    ["id": "d-a", "name": "Dict A", "latest_version_id": "ver2",
+                     "latest_version_rules_num": .number(Double(rules.count)), "rules": .array(rules)]
+                }
+            }
+            var strings: [String] { lock.withLock { rules.compactMap { $0["string_to_replace"].stringValue }.sorted() } }
+        }
+        let signals = Signals()
+        let server = Rules([["string_to_replace": "Nguyen", "type": "alias", "alias": "Win"]])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "add_rules":
+                let added = Self.body(request)["rules"].arrayValue ?? []
+                let lose = server.lock.withLock {
+                    server.rules += added
+                    defer { server.answersToLose = max(0, server.answersToLose - 1) }
+                    return server.answersToLose > 0
+                }
+                if lose { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }   // carried out; answer lost
+                return .json(["id": "d-a", "version_id": "ver2"])
+            case "set_rules":
+                let rules = Self.body(request)["rules"].arrayValue ?? []
+                server.lock.withLock { server.rules = rules }
+                return .json(["id": "d-a", "version_id": "ver3"])
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 { try await signals.wait(for: "looked") }
+                return .json(server.dictionary())
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a], selected: a)
+        var rule = PronunciationRule()
+        rule.stringToReplace = "Siobhan"
+        rule.alias = "Shivawn"
+        model.rules = [rule]
+        let adding = Task { try await answering(model.actions) { await model.addRules() } }
+        // Should no read be made (a regression), the add ends at once, and so does this wait.
+        let releasing = Task { _ = try? await adding.value; signals.note("looked") }
+        try await voicesStudioWait {
+            fixture.sent("get_pronunciation_dictionary_metadata").count == 1 || signals.has("looked")
+        }
+        #expect(server.strings == ["Nguyen", "Siobhan"])
+        #expect(fixture.sent("get_pronunciation_dictionary_metadata").count == 1, "the dictionary was not read again after a lost answer")
+        #expect(!model.rulesAreIn, "\"Edit all\" would copy the rules from before the add")
+        signals.note("looked")
+        try await adding.value
+        await releasing.value
+        #expect(model.rulesAreIn)
+        model.editCurrentRules()
+        #expect(model.rules.map(\.stringToReplace).sorted() == ["Nguyen", "Siobhan"], "\(model.rules.map(\.stringToReplace))")
+        try await answering(model.actions) { await model.replaceRules() }
+        #expect(server.strings == ["Nguyen", "Siobhan"], "Replace took back the rule whose answer was lost: \(server.strings)")
+    }
+
+    /// A pretend ElevenLabs holding order o-a with one dub item, whose upserts it carries out —
+    /// losing the answer to as many as asked.
+    final class OrderServer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var item: JSONValue = [
+            "item_id": "i1", "quote": ["amount_usd": 240],
+            "item": ["kind": "dub", "media_id": "m1", "source_language": "en", "destination_languages": ["es-ES"],
+                     "instructions": "Warm", "include_captions": false, "include_source_captions": false],
+        ]
+        private var answersToLose: Int
+        init(losing: Int = 0) { answersToLose = losing }
+
+        /// Carries out the upsert; false when its answer is to be lost.
+        func upsert(_ body: JSONValue) -> Bool {
+            lock.withLock {
+                let request = body["item"] != .null ? body : body["request"]
+                item = ["item_id": request["item_id"] != .null ? request["item_id"] : "i1",
+                        "quote": ["amount_usd": 240], "item": request["item"]]
+                guard answersToLose > 0 else { return true }
+                answersToLose -= 1
+                return false
+            }
+        }
+
+        func order() -> JSONValue {
+            lock.withLock {
+                ["order_id": "o-a", "name": "Launch", "state": "open", "sandbox": false, "items": [item],
+                 "total_amount_usd": 240]
+            }
+        }
+
+        var instructions: String? { lock.withLock { item["item"]["instructions"].stringValue } }
+    }
+
+    func productionsFixture(_ server: OrderServer, signals: Signals) -> VoicesStudioFixture {
+        VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "public_upsert_order_item":
+                if server.upsert(Self.body(request)) { return .json(["item_id": "i1"]) }
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)        // carried out; answer lost
+            case "public_get_order":
+                if signals.note("get") == 1 { try await signals.wait(for: "looked") }
+                return .json(server.order())
+            case "public_get_available_languages":
+                return .json(["languages": []])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+    }
+
+    /// An item's instructions changed and saved; while the order is read again, its row still
+    /// holds the instructions from before. Edit waits for that read — the form would start from
+    /// the old instructions, and the next save, which sends the whole item, would put them back.
+    /// Once the read lands, Edit starts from the instructions saved.
+    @Test func anItemChangedAMomentAgoIsEditedFromTheOrdersNextRead() async throws {
+        let signals = Signals()
+        let server = OrderServer()
+        let fixture = productionsFixture(server, signals: signals)
+        defer { fixture.clean() }
+        let model = ProductionsSectionModel(environment: fixture.environment)
+        let order = try #require(ProductionsOrder(json: server.order()))
+        model.load(orders: [order], selected: order)
+        model.edit(try #require(model.selected?.items.first))
+        model.item.instructions = "Bright"
+        let saving = Task { try await answering(model.actions) { await model.saveItem() } }
+        let releasing = Task { _ = try? await saving.value; signals.note("looked") }
+        try await voicesStudioWait { fixture.sent("public_get_order").count == 1 || signals.has("looked") }
+        #expect(server.instructions == "Bright")
+        let stale = try #require(model.selected?.items.first)
+        #expect(model.itemEditBlockReason != nil, "Edit did not wait for the order to be read again")
+        model.edit(stale)
+        #expect(model.item.itemID == nil && model.item.instructions != "Warm", "the form was filled from the row before the save")
+        signals.note("looked")
+        try await saving.value
+        await releasing.value
+        #expect(model.itemsAreIn)
+        model.edit(try #require(model.selected?.items.first))
+        #expect(model.item.itemID == "i1" && model.item.instructions == "Bright")
+    }
+
+    /// The same item change carried out with its answer lost (a 500): the order is read again,
+    /// and Edit waits for that read and then starts from what ElevenLabs holds. (Before: nothing
+    /// was read, and Edit filled the form with the instructions from before.)
+    @Test func anItemChangeWhoseAnswerWasLostIsReadAgainBeforeItIsEdited() async throws {
+        let signals = Signals()
+        let server = OrderServer(losing: 1)
+        let fixture = productionsFixture(server, signals: signals)
+        defer { fixture.clean() }
+        let model = ProductionsSectionModel(environment: fixture.environment)
+        let order = try #require(ProductionsOrder(json: server.order()))
+        model.load(orders: [order], selected: order)
+        model.edit(try #require(model.selected?.items.first))
+        model.item.instructions = "Bright"
+        let saving = Task { try await answering(model.actions) { await model.saveItem() } }
+        let releasing = Task { _ = try? await saving.value; signals.note("looked") }
+        try await voicesStudioWait { fixture.sent("public_get_order").count == 1 || signals.has("looked") }
+        #expect(server.instructions == "Bright")
+        #expect(fixture.sent("public_get_order").count == 1, "the order was not read again after a lost answer")
+        #expect(model.itemEditBlockReason != nil, "Edit did not wait for the order to be read again")
+        signals.note("looked")
+        try await saving.value
+        await releasing.value
+        model.edit(try #require(model.selected?.items.first))
+        #expect(model.item.instructions == "Bright", "Edit started from the instructions before the change")
+    }
+
+    /// d-new switched on: carried out, but the answer is a 500. The project's list on screen is
+    /// the one from before, and the next switch — which sends the whole list — would drop d-new.
+    /// The switches wait while the project is read again; then switching d-two on keeps d-new.
+    /// (Before: nothing was read, and the second switch sent the list without d-new.)
+    @Test func aDictionarySwitchWhoseAnswerWasLostIsReadAgainBeforeTheNext() async throws {
+        final class Locators: @unchecked Sendable {
+            let lock = NSLock()
+            var ids = ["d-kept"]
+            var answersToLose = 1
+        }
+        let signals = Signals()
+        let server = Locators()
+        let base = Self.project("p-a", dictionaries: [])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_pronunciation_dictionaries":
+                let sent = (Self.body(request)["pronunciation_dictionary_locators"].arrayValue ?? [])
+                    .compactMap { $0["pronunciation_dictionary_id"].stringValue }
+                let lose = server.lock.withLock {
+                    server.ids = sent
+                    defer { server.answersToLose = max(0, server.answersToLose - 1) }
+                    return server.answersToLose > 0
+                }
+                if lose { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }   // carried out; answer lost
+                return .json(["status": "ok"])
+            case "get_project_by_id":
+                if signals.note("get") == 1 { try await signals.wait(for: "looked") }
+                guard case .object(var fields) = base else { return .jsonText("{}", status: 500) }
+                fields["pronunciation_dictionary_locators"] = .array(server.lock.withLock { server.ids }.map {
+                    ["pronunciation_dictionary_id": .string($0), "version_id": "v1"]
+                })
+                return .json(.object(fields))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: Self.project("p-a", dictionaries: ["d-kept"])))
+        let new = StudioDictionary(id: "d-new", name: "New", latestVersionID: "v1")
+        let two = StudioDictionary(id: "d-two", name: "Two", latestVersionID: "v1")
+        model.load(projects: [project], selected: project, dictionaries: [new, two])
+        let switching = Task { try await answering(model.actions) { await model.setDictionary(new, attached: true) } }
+        // Should no read be made (a regression), the switch ends at once, and so does this wait.
+        let releasing = Task { _ = try? await switching.value; signals.note("looked") }
+        try await voicesStudioWait { fixture.sent("get_project_by_id").count == 1 || signals.has("looked") }
+        #expect(server.lock.withLock { server.ids } == ["d-kept", "d-new"])
+        #expect(fixture.sent("get_project_by_id").count == 1, "the project was not read again after a lost answer")
+        #expect(!model.detailsAreIn, "the switches did not wait for the project to be read again")
+        #expect(model.selected?.dictionaries.map(\.id) == ["d-kept"], "a switch whose answer was lost was claimed")
+        signals.note("looked")
+        try await switching.value
+        await releasing.value
+        #expect(model.detailsAreIn)
+        #expect(model.selected?.dictionaries.map(\.id) == ["d-kept", "d-new"])
+        try await answering(model.actions) { await model.setDictionary(two, attached: true) }
+        let held = server.lock.withLock { server.ids }
+        #expect(held == ["d-kept", "d-new", "d-two"], "the next switch dropped the dictionary whose answer was lost: \(held)")
+    }
+
+    /// The read after a dictionary switch whose answer was lost fails too: nothing is reading the
+    /// project, so the panel says its details could not be read (not "Waiting…").
+    @Test func aFailedReadAfterALostSwitchAnswerIsShownNotWaitedFor() async throws {
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_pronunciation_dictionaries", "get_project_by_id":
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: Self.project("p-a", dictionaries: ["d-kept"])))
+        let new = StudioDictionary(id: "d-new", name: "New", latestVersionID: "v1")
+        model.load(projects: [project], selected: project, dictionaries: [new])
+        try await answering(model.actions) { await model.setDictionary(new, attached: true) }
+        #expect(fixture.sent("get_project_by_id").count == 1)
+        #expect(model.waitingForDetails == "Its details could not be read — open it again.", "\(model.waitingForDetails ?? "-")")
     }
 }

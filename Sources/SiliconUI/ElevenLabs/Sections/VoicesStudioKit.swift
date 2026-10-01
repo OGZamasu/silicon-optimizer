@@ -104,6 +104,9 @@ final class VoicesStudioActions {
     /// Fetches the section's list again after an unknown outcome, so the owner can see whether
     /// the thing was made.
     @ObservationIgnored var onUnknownOutcome: (@MainActor (String) async -> Void)?
+    /// The runners (operation, or operation and slot) whose last `perform` gave no answer though
+    /// what it sent may have been carried out — spending or not. See `outcomeWasUnknown`.
+    @ObservationIgnored private var lastRunUnknown: Set<String> = []
     /// Lists and lookups that failed, by operation, with why — until that read runs again.
     private(set) var readFailures: [String: String] = [:]
     /// The reads whose failure the section draws where their content goes (its lists, a voice's
@@ -217,6 +220,9 @@ final class VoicesStudioActions {
         spends: Bool? = nil, question: VoicesStudioQuestion? = nil, slot: String? = nil
     ) async -> ElevenLabsResult? {
         let key = Self.key(operationID, slot)
+        // Only a run that is sent below can leave an unknown outcome: one refused, declined or
+        // not sent says nothing about an earlier one (whose phase the runner may still show).
+        lastRunUnknown.remove(key)
         guard let runner = runner(operationID, slot: slot) else {
             missingOperation = operationID
             return nil
@@ -242,6 +248,7 @@ final class VoicesStudioActions {
             warning: asks ? question?.warning : nil
         )
         spendingOverrides.remove(operationID)
+        if result == nil, Self.outcomeIsUnknown(runner) { lastRunUnknown.insert(key) }
         if quietly {
             // A read replaced by a newer one of the same operation leaves the runner to it.
             readFailures[key] = runner.phase == .failed ? (runner.errorMessage ?? "it failed.") : nil
@@ -251,6 +258,18 @@ final class VoicesStudioActions {
             await onUnknownOutcome?(operationID)
         }
         return result
+    }
+
+    /// Whether the last `perform` of `operationID` (on `slot`) gave no answer, yet what it sent may
+    /// have been carried out: cancelled after it was sent, or its answer lost (a 5xx, a timeout,
+    /// no connection). A refusal ElevenLabs gave, a question answered no, or a run refused before
+    /// sending is not. Read straight after the `perform` that returned nil.
+    ///
+    /// A section treats a change with an unknown outcome as one that may have landed: it reads
+    /// the item again, and its editor waits for that read rather than starting from a row the
+    /// change may have made stale.
+    func outcomeWasUnknown(_ operationID: String, slot: String? = nil) -> Bool {
+        lastRunUnknown.contains(Self.key(operationID, slot))
     }
 
     /// Whether a failed or stopped run may still have been carried out: cancelled after it

@@ -238,6 +238,10 @@ final class ServiceAccountsSectionModel {
     /// another's; a read asked before a key change of its account answered is dropped.
     func refreshKeys(_ accountID: String? = nil) async {
         guard let accountID = accountID ?? selected?.id else { return }
+        // Today every read of an account's keys runs here, on that account's runner, and the
+        // read a change asks for abandons any older one before its answer is used — so this
+        // check cannot be seen to act. It is kept for a future read of the same account made off
+        // that runner (an accounts list carries keys too, and has its own check in `refresh`).
         let changesBefore = keyChanges[accountID, default: 0]
         guard let json = await actions.perform(
                 "get_service_account_api_keys_route", ["service_account_user_id": .string(accountID)], quietly: true,
@@ -378,6 +382,24 @@ final class ServiceAccountsSectionModel {
         return arguments
     }
 
+    /// What the section says when a key change's answer was lost: the change may have been made.
+    nonisolated static func lostAnswerMessage(_ name: String) -> String {
+        "The answer to the change of “\(name)” was lost, so it may have been made. Its keys are read again: "
+            + "check what it holds before changing it again."
+    }
+
+    /// A change to `key` gave no answer, yet may have been carried out (a 5xx, a lost answer, a
+    /// cancel after sending): its row may be older than what ElevenLabs holds, and an editor
+    /// opened from it would send that older state back with the next change. So it is treated
+    /// as a change that may have landed, without claiming what it sent: the editor open on it
+    /// closes, its Edit waits, and the account's keys are read again.
+    private func keyChangeMayHaveLanded(_ key: ServiceAccountKey, of accountID: String) async {
+        noteKeyChange(key.id, of: accountID)
+        if editingKey?.id == key.id { edit(nil) }
+        problems = [Self.lostAnswerMessage(key.name)]
+        await refreshKeys(accountID)
+    }
+
     func saveKey() async {
         // The key and its changes are taken now: the answer acts on these, whatever is open by then.
         guard let key = editingKey, let arguments = editKeyArguments(),
@@ -388,7 +410,12 @@ final class ServiceAccountsSectionModel {
                 "Change the API key “\(key.name)”?", button: "Save changes",
                 consequence: "Whatever uses this key gets the new permissions and limits at once."
             )
-        ) != nil else { return }
+        ) != nil else {
+            if actions.outcomeWasUnknown("edit_service_account_api_key") {
+                await keyChangeMayHaveLanded(key, of: accountID)
+            }
+            return
+        }
         // ElevenLabs now holds what was sent: the row takes it at once (only once the change has
         // answered — a refused change claims nothing), and Edit waits for the keys' next read.
         updateKey(key.id, of: accountID) { Self.applying(arguments, to: &$0) }
@@ -414,7 +441,14 @@ final class ServiceAccountsSectionModel {
                                            consequence: "Whatever holds this key can use it again.")
                     : VoicesStudioQuestion("Turn off the API key “\(key.name)” of “\(account.name)”?", button: "Turn off key",
                                            consequence: "Whatever uses this key stops working until it is turned back on.")
-              ) != nil else { return }
+              ) != nil else {
+            // The row would keep the state from before, its button offering the action just
+            // taken: read the keys again.
+            if let account = account(of: key), actions.outcomeWasUnknown("edit_service_account_api_key") {
+                await keyChangeMayHaveLanded(key, of: account.id)
+            }
+            return
+        }
         updateKey(key.id, of: account.id) { Self.applying(["is_enabled": .bool(enabled)], to: &$0) }
         noteKeyChange(key.id, of: account.id)
         await refreshKeys(account.id)
