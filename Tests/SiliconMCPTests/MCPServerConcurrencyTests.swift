@@ -29,6 +29,8 @@ struct MCPServerConcurrencyTests {
         #expect(bridge.frames.answers(to: "conversation").isEmpty)
         #expect(bridge.frames.all.count == 1)
         try await bridge.end()
+        // The client cancelled both itself: closing stdin afterwards cancels nothing.
+        #expect(bridge.logged.isEmpty)
     }
 
     /// Ids are JSON values: a number and the same digits as a string are two requests, and
@@ -129,6 +131,8 @@ struct MCPServerConcurrencyTests {
         for tag in tags { #expect(bridge.tools.fate(tag) == .cancelled, "\(tag)") }
         #expect(bridge.server.callsInFlight == 0)
         #expect(bridge.frames.all.isEmpty)
+        // Not a word on stdout, but one on stderr for whoever piped requests in by hand.
+        #expect(bridge.logged == ["silicon-mcp: stdin closed: cancelled 3 in-flight call(s)"])
     }
 
     /// A call that ignores its cancellation holds the exit up for the grace period, no longer.
@@ -142,6 +146,7 @@ struct MCPServerConcurrencyTests {
         try await eventually(.seconds(10), "the loop to end") { bridge.hasExited ? true : nil }
         #expect(ContinuousClock.now - start < .seconds(5))
         #expect(bridge.tools.fate("stuck") == .running)
+        #expect(bridge.logged == ["silicon-mcp: stdin closed: cancelled 1 in-flight call(s)"])
 
         // When it does finish, there is nobody to answer.
         bridge.tools.release("stuck")

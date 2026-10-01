@@ -36,6 +36,8 @@ struct MCPServer: Sendable {
     let tools: any ToolRunner
     let maximumConcurrentCalls: Int
     let shutdownGrace: Duration
+    /// One line for whoever runs the bridge by hand — stderr, never the protocol's stdout.
+    let log: @Sendable (String) -> Void
     private let output: FrameWriter
     private let calls = CallRegistry()
 
@@ -45,13 +47,19 @@ struct MCPServer: Sendable {
         lines: AsyncStream<String>, write: @escaping @Sendable (String) -> Void,
         tools: any ToolRunner = ControlTools(),
         maximumConcurrentCalls: Int = MCPServer.maximumConcurrentCalls,
-        shutdownGrace: Duration = MCPServer.shutdownGrace
+        shutdownGrace: Duration = MCPServer.shutdownGrace,
+        log: @escaping @Sendable (String) -> Void = MCPServer.standardError
     ) {
         self.lines = lines
         self.output = FrameWriter(write)
         self.tools = tools
         self.maximumConcurrentCalls = maximumConcurrentCalls
         self.shutdownGrace = shutdownGrace
+        self.log = log
+    }
+
+    static let standardError: @Sendable (String) -> Void = { message in
+        fputs(message + "\n", stderr)
     }
 
     /// Tool calls whose tasks have not ended yet, cancelled ones still unwinding included.
@@ -95,7 +103,12 @@ struct MCPServer: Sendable {
         // The client hung up. Nobody is left to read an answer, and a render or a conversation
         // it started must not outlive it: cancel every call, give their requests a moment to
         // close, then return — and the process exits.
-        await unwind(calls.cancelAll())
+        let (tasks, cancelled) = calls.cancelAll()
+        if cancelled > 0 {
+            // `printf '<tools/call>' | silicon-mcp` otherwise ends in silence, with no word of why.
+            log("silicon-mcp: stdin closed: cancelled \(cancelled) in-flight call(s)")
+        }
+        await unwind(tasks)
     }
 
     /// Never waits on a tool: those run in tasks of their own, so the next line is read at once.
@@ -331,14 +344,20 @@ final class CallRegistry: @unchecked Sendable {
         task?.cancel()
     }
 
-    /// Cancels every call, for a client that has hung up, and returns their tasks.
-    func cancelAll() -> [Task<Void, Never>] {
-        let tasks: [Task<Void, Never>] = lock.withLock {
-            for ticket in calls.keys { calls[ticket]?.cancelled = true }
-            return calls.values.compactMap(\.task)
+    /// Cancels every call, for a client that has hung up. Returns every task still to end,
+    /// and how many calls were still waiting on an answer — calls cancelled earlier, and answers
+    /// already being written, are not among those.
+    func cancelAll() -> (tasks: [Task<Void, Never>], cancelled: Int) {
+        let (tasks, cancelled): ([Task<Void, Never>], Int) = lock.withLock {
+            var cancelled = 0
+            for ticket in calls.keys where calls[ticket]?.isOpen == true {
+                calls[ticket]?.cancelled = true
+                cancelled += 1
+            }
+            return (calls.values.compactMap(\.task), cancelled)
         }
         for task in tasks { task.cancel() }
-        return tasks
+        return (tasks, cancelled)
     }
 }
 

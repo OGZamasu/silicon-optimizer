@@ -70,6 +70,8 @@ struct MCPServerTests {
         _ = try await bridge.answer(1)
         try await bridge.end()
         #expect(bridge.hasExited)
+        // Nothing was running, so there is nothing to say about it.
+        #expect(bridge.logged.isEmpty)
     }
 }
 
@@ -83,6 +85,7 @@ final class Bridge: Sendable {
     let tools: FakeTools
     private let input: AsyncStream<String>.Continuation
     private let exited = Flag()
+    private let stderrLog: Locked<[String]>
 
     init(
         tools: FakeTools = FakeTools(),
@@ -91,10 +94,13 @@ final class Bridge: Sendable {
     ) {
         let (lines, input) = AsyncStream.makeStream(of: String.self)
         let frames = FrameLog()
+        let stderrLog = Locked<[String]>([])
         let server = MCPServer(
             lines: lines, write: { frames.write($0) }, tools: tools,
-            maximumConcurrentCalls: maximumConcurrentCalls, shutdownGrace: shutdownGrace
+            maximumConcurrentCalls: maximumConcurrentCalls, shutdownGrace: shutdownGrace,
+            log: { message in stderrLog.withLock { $0.append(message) } }
         )
+        self.stderrLog = stderrLog
         self.server = server
         self.frames = frames
         self.tools = tools
@@ -107,6 +113,9 @@ final class Bridge: Sendable {
     }
 
     var hasExited: Bool { exited.isSet }
+
+    /// What the bridge wrote for a person reading its stderr.
+    var logged: [String] { stderrLog.withLock { $0 } }
 
     func send(_ line: String) { input.yield(line) }
 
