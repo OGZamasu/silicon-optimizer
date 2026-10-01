@@ -154,11 +154,11 @@ extension AgentsSectionsTests {
 
         await model.openTicket("tkt_1")
         #expect(model.ticket?.priority == "high")
-        await model.updateTicket(priority: "low")
+        await model.updateTicket("tkt_1", priority: "low")
         let lowered = try #require(rig.body(AgentsOp.updateTicket))
         #expect(lowered == ["priority": "low"])
         #expect(try AgentsSpec.shared().unresolved(body: lowered, operationID: AgentsOp.updateTicket).isEmpty)
-        await model.updateTicket(priority: "")
+        await model.updateTicket("tkt_1", priority: "")
         #expect(rig.body(AgentsOp.updateTicket) == ["priority": .null], "None clears it")
     }
 
@@ -210,5 +210,31 @@ extension AgentsSectionsTests {
         #expect(transport.requests.isEmpty, "nothing was sent")
         #expect(guardian.canSend, "a refusal before sending cannot have placed anything")
         #expect(guardian.warning == nil)
+    }
+
+    /// A ticket's picker changed, and another ticket opened before the change runs: the change
+    /// goes to the ticket whose picker it was, not to the one now open.
+    @Test func aTicketChangeGoesToTheTicketWhosePickerChanged() async throws {
+        var second = AgentsFixtures.ticket
+        if case .object(var fields) = second {
+            fields["agentqa_ticket_id"] = "tkt_2"
+            fields["qa_comment"] = "Another ticket"
+            second = .object(fields)
+        }
+        let other = second
+        let rig = AgentsFixtures.Rig { request in
+            if request.operationID == AgentsOp.getTicket, request.url.lastPathComponent == "tkt_2" { return .json(other) }
+            return try await AgentsFixtures.reply(request)
+        }
+        defer { rig.clean() }
+        let model = rig.store.analytics
+        await model.openTicket("tkt_1")
+        let first = try #require(model.ticket)
+        await model.openTicket("tkt_2")
+        #expect(model.ticket?.id == "tkt_2")
+        await model.updateTicket(first.id, priority: "urgent")
+        let sent = try #require(rig.requests(AgentsOp.updateTicket).last)
+        #expect(sent.request.url.lastPathComponent == "tkt_1", "the change went to \(sent.request.url.lastPathComponent)")
+        #expect(model.ticket?.id == "tkt_2", "the ticket open stays open")
     }
 }

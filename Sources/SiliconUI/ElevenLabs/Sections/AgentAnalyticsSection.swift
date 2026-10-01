@@ -245,15 +245,15 @@ final class AgentAnalyticsModel {
         }
     }
 
-    /// Changes the open ticket. An empty assignee or priority clears it (sent as null).
-    func updateTicket(status: String? = nil, assignee: String? = nil, priority: String? = nil) async {
-        guard let ticket else { return }
-        var arguments: [String: JSONValue] = ["agentqa_ticket_id": .string(ticket.id)]
+    /// Changes the ticket `ticketID` — the one whose picker was changed, whichever ticket is
+    /// open by the time this runs. An empty assignee or priority clears it (sent as null).
+    func updateTicket(_ ticketID: String, status: String? = nil, assignee: String? = nil, priority: String? = nil) async {
+        var arguments: [String: JSONValue] = ["agentqa_ticket_id": .string(ticketID)]
         if let status { arguments["status"] = .string(status) }
         if let assignee { arguments["assignee_user_id"] = assignee.isEmpty ? .null : .string(assignee) }
         if let priority { arguments["priority"] = priority.isEmpty ? .null : .string(priority) }
-        guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticket.id) != nil else { return }
-        if openingTicketID == ticket.id { await openTicket(ticket.id) }
+        guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticketID) != nil else { return }
+        if openingTicketID == ticketID { await openTicket(ticketID) }
     }
 
     func comment() async {
@@ -605,20 +605,20 @@ private struct AgentTicketDetail: View {
             }
             HStack {
                 Picker("Status", selection: Binding(get: { ticket.status }, set: { status in
-                    Task { await model.updateTicket(status: status) }
+                    Task { await model.updateTicket(ticket.id, status: status) }
                 })) {
                     ForEach(AgentsSchema.choices(AgentsOp.updateTicket, "status"), id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                 }
                 .fixedSize()
                 Picker("Priority", selection: Binding(get: { ticket.priority ?? "" }, set: { priority in
-                    Task { await model.updateTicket(priority: priority) }
+                    Task { await model.updateTicket(ticket.id, priority: priority) }
                 })) {
                     Text("None").tag("")
                     ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                 }
                 .fixedSize()
                 Picker("Assignee", selection: Binding(get: { ticket.assigneeID ?? "" }, set: { user in
-                    Task { await model.updateTicket(assignee: user) }
+                    Task { await model.updateTicket(ticket.id, assignee: user) }
                 })) {
                     Text("Nobody").tag("")
                     ForEach(model.assignableUsers) { user in
