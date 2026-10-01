@@ -107,12 +107,14 @@ final class ServiceAccountsSectionModel {
         actions.readsShownInPlace = ["get_workspace_service_accounts"]
         actions.onReadAgain = { [weak self] held in
             guard let self else { return }
-            if held.operationID == "create_service_account_api_key", let accountID = held.listSlot {
+            if held.operationID == "create_service_account_api_key", let accountID = held.scope {
                 await refreshKeys(accountID)
             } else {
                 await refresh()
             }
         }
+        // A key held for one account is shown — and checked — under that account only.
+        actions.showsHold = { [weak self] held in held.scope == nil || held.scope == self?.selected?.id }
     }
 
     // MARK: Spec
@@ -363,7 +365,7 @@ final class ServiceAccountsSectionModel {
                     + "its credits\(keyDraft.characterLimit.isEmpty ? "" : " up to its monthly limit"). It is shown once."
             ),
             holdIfUnknown: VoicesStudioHold(
-                notice: Self.lostKeyMessage(keyDraft.name, account: account.name),
+                notice: Self.lostKeyMessage(keyDraft.name, account: account.name), scope: account.id,
                 listOperation: "get_service_account_api_keys_route", listSlot: account.id
             )
         ) != nil else {

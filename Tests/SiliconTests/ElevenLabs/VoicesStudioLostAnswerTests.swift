@@ -103,7 +103,7 @@ struct VoicesStudioLostAnswerTests {
         #expect(made.count("create_service_account_api_key") == 1)
         #expect(fixture.sent("get_service_account_api_keys_route").count == 1, "the keys were not read after a lost answer")
         #expect(model.keyDraft.name == "CI key", "the draft was not kept")
-        let held = model.actions.heldCreate("create_service_account_api_key")
+        let held = model.actions.heldCreate("create_service_account_api_key", scope: "sa-a")
         #expect(held == ServiceAccountsSectionModel.lostKeyMessage("CI key", account: account.name))
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 1, "a second key was minted after the first one's answer was lost")
@@ -116,11 +116,11 @@ struct VoicesStudioLostAnswerTests {
         try await answering(model.actions) { await model.saveKey() }
         #expect(made.count("edit_service_account_api_key") == 1)
         // Checked: "Make key" goes again, from the draft.
-        #expect(model.actions.acknowledgeHeldCreate("create_service_account_api_key"))
+        #expect(model.actions.acknowledgeHeldCreate("create_service_account_api_key", scope: "sa-a"))
         model.keyDraft = ServiceAccountKeyDraft(name: "CI key", allPermissions: true)
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 2)
-        #expect(model.actions.heldCreate("create_service_account_api_key") == nil)
+        #expect(model.actions.heldCreate("create_service_account_api_key", scope: "sa-a") == nil)
     }
 
     /// R6-1: "Make key" lost, and the keys read after it fails too. Nothing was read, so nothing
@@ -141,19 +141,19 @@ struct VoicesStudioLostAnswerTests {
         model.keyDraft.allPermissions = true
         try await answering(model.actions) { await model.createKey() }
         #expect(fixture.sent("get_service_account_api_keys_route").count == 1)
-        let held = try #require(model.actions.held("create_service_account_api_key"))
+        let held = try #require(model.actions.held("create_service_account_api_key", scope: "sa-a"))
         #expect(!held.listRead)
         #expect(model.actions.holdCaption(held).hasPrefix("The list could not be read"), "\(model.actions.holdCaption(held))")
-        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key"),
+        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key", scope: "sa-a"),
                 "a check was taken though the list was never read")
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 1, "a second key was minted though the list was never read")
         // "Read again": this time the keys are read.
         await model.actions.onReadAgain?(held)
-        let read = try #require(model.actions.held("create_service_account_api_key"))
+        let read = try #require(model.actions.held("create_service_account_api_key", scope: "sa-a"))
         #expect(read.listRead)
         #expect(model.actions.holdCaption(read).hasPrefix("The list has been read again"))
-        #expect(model.actions.acknowledgeHeldCreate("create_service_account_api_key"))
+        #expect(model.actions.acknowledgeHeldCreate("create_service_account_api_key", scope: "sa-a"))
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 2)
     }
@@ -171,10 +171,38 @@ struct VoicesStudioLostAnswerTests {
         model.keyDraft.name = "CI key"
         model.keyDraft.allPermissions = true
         try await answering(model.actions) { await model.createKey() }
-        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key"))
-        model.actions.acknowledgeHeldCreateOnWebsite("create_service_account_api_key")
+        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key", scope: "sa-a"))
+        model.actions.acknowledgeHeldCreateOnWebsite("create_service_account_api_key", scope: "sa-a")
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 2)
+    }
+
+    /// N6-1: a key create for account A whose answer was lost holds A's "Make key" only. On
+    /// account B the hold is not shown, B's "Make key" goes, and B cannot clear A's hold; back on
+    /// A it is there.
+    @Test func aKeyHeldForOneAccountNeitherHoldsNorIsClearedFromAnother() async throws {
+        let made = Made()
+        made.lose("create_service_account_api_key")
+        let fixture = keysFixture(made)
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let a = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        let b = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-b", key: "kb")))
+        model.load(accounts: [a, b], selected: a)
+        model.keyDraft.name = "A key"
+        model.keyDraft.allPermissions = true
+        try await answering(model.actions) { await model.createKey() }
+        #expect(model.actions.heldCreate("create_service_account_api_key", scope: "sa-a") != nil)
+        model.select("sa-b")
+        #expect(model.actions.visibleHeldCreates.isEmpty, "account A's hold is shown under account B")
+        #expect(model.actions.heldCreate("create_service_account_api_key", scope: "sa-b") == nil)
+        #expect(!model.actions.acknowledgeHeldCreate("create_service_account_api_key", scope: "sa-b"))
+        model.keyDraft = ServiceAccountKeyDraft(name: "B key", allPermissions: true)
+        try await answering(model.actions) { await model.createKey() }
+        #expect(made.count("create_service_account_api_key") == 2, "account A's lost answer held B's Make key")
+        #expect(model.actions.heldCreate("create_service_account_api_key", scope: "sa-a") != nil, "B cleared A's hold")
+        model.select("sa-a")
+        #expect(model.actions.visibleHeldCreates.map(\.scope) == ["sa-a"])
     }
 
     /// What this screen cannot list (an invitation) says so, and is checked on elevenlabs.io:
@@ -208,7 +236,7 @@ struct VoicesStudioLostAnswerTests {
         model.keyDraft.name = "CI key"
         model.keyDraft.allPermissions = true
         try await answering(model.actions) { await model.createKey() }
-        #expect(model.actions.heldCreate("create_service_account_api_key") == nil, "a refused create was held")
+        #expect(model.actions.heldCreate("create_service_account_api_key", scope: "sa-a") == nil, "a refused create was held")
         #expect(fixture.sent("get_service_account_api_keys_route").isEmpty)
         try await answering(model.actions) { await model.createKey() }
         #expect(made.count("create_service_account_api_key") == 1)
@@ -383,11 +411,11 @@ struct VoicesStudioLostAnswerTests {
         model.load(rows: [voice], selected: voice)
         model.replicateWorkspaceID = "ws-isolated"
         try await answering(model.actions) { await model.replicate() }
-        #expect(model.actions.heldCreate("replicate_voice_to_isolated_environment")
+        #expect(model.actions.heldCreate("replicate_voice_to_isolated_environment", scope: "v-a")
                 == VoicesSectionModel.lostCopyMessage("Voice A", workspace: "ws-isolated"))
         try await answering(model.actions) { await model.replicate() }
         #expect(made.count("replicate_voice_to_isolated_environment") == 1, "a second copy was sent")
-        model.actions.acknowledgeHeldCreateOnWebsite("replicate_voice_to_isolated_environment")
+        model.actions.acknowledgeHeldCreateOnWebsite("replicate_voice_to_isolated_environment", scope: "v-a")
         try await answering(model.actions) { await model.replicate() }
         #expect(made.count("replicate_voice_to_isolated_environment") == 2)
     }

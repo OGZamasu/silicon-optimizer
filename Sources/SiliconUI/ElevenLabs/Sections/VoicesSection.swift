@@ -205,8 +205,9 @@ struct VoicesDetailCard: View {
                     Toggle("Keep the same voice id", isOn: $model.replicatePreservesID)
                     Button("Copy voice…") { Task { await model.replicate() } }
                         .disabled(model.replicateWorkspaceID.trimmingCharacters(in: .whitespaces).isEmpty
-                                  || model.actions.heldCreate("replicate_voice_to_isolated_environment") != nil)
-                        .help(model.actions.heldCreate("replicate_voice_to_isolated_environment") ?? "Copy the voice to that workspace")
+                                  || model.actions.heldCreate("replicate_voice_to_isolated_environment", scope: model.selected?.id) != nil)
+                        .help(model.actions.heldCreate("replicate_voice_to_isolated_environment", scope: model.selected?.id)
+                              ?? "Copy the voice to that workspace")
                 }
                 .padding(.top, 6)
             }

@@ -177,8 +177,11 @@ struct ServiceAccountKeysCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
-                .disabled(model.editingKey == nil && model.actions.heldCreate("create_service_account_api_key") != nil)
-                .help(model.editingKey == nil ? model.actions.heldCreate("create_service_account_api_key") ?? "Make the key" : "Save the key's changes")
+                .disabled(model.editingKey == nil
+                          && model.actions.heldCreate("create_service_account_api_key", scope: model.selected?.id) != nil)
+                .help(model.editingKey == nil
+                      ? model.actions.heldCreate("create_service_account_api_key", scope: model.selected?.id) ?? "Make the key"
+                      : "Save the key's changes")
             }
         }
     }

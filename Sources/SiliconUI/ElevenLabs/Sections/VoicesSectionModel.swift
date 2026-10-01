@@ -389,6 +389,8 @@ final class VoicesSectionModel {
         actions = VoicesStudioActions(context: environment.context)
         actions.readsShownInPlace = ["get_user_voices_v2", "get_voice_by_id", "get_voice_settings"]
         directory = environment.voices
+        // A copy held for one voice is shown — and checked — with that voice.
+        actions.showsHold = { [weak self] held in held.scope == nil || held.scope == self?.selected?.id }
     }
 
     // MARK: Spec
@@ -861,7 +863,7 @@ final class VoicesSectionModel {
                 consequence: "A copy of “\(voice.name)” is made in another, isolated workspace, where "
                     + "that workspace's members can use it."
             ),
-            holdIfUnknown: VoicesStudioHold(notice: Self.lostCopyMessage(voice.name, workspace: target))
+            holdIfUnknown: VoicesStudioHold(notice: Self.lostCopyMessage(voice.name, workspace: target), scope: voice.id)
         )
     }
 
