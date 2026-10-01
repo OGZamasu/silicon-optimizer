@@ -141,11 +141,21 @@ It reports every problem at once, as `ElevenLabsError.invalidArguments`. An inva
 nothing and does not read the key. `validate` returns the same list without calling. `describe`
 returns what would be sent, for Show API call, with the key shown as `‹redacted›`, and with the
 secrets the owner typed masked too: a secret's value, provider tokens (Twilio, Exotel), SIP
-passwords, and plain-string header values such as a literal `Authorization` (references to
-secrets stay). Which request fields are masked is checked against every request schema in the
-pinned spec, so a spec refresh that adds a secret-looking field fails a test until it is
-classified. Answers get the same header rule: a tool, MCP server or webhook whose header holds a
-literal token comes back with the token masked.
+passwords, plain-string header values such as a literal `Authorization` (references to secrets
+stay), and a phone transfer's post-dial digits and SIP UUI payload (a dynamic post-dial value
+names a variable and stays). Which request fields are masked is checked against every request
+schema in the pinned spec, so a spec refresh that adds a secret-looking field fails a test until
+it is classified.
+
+The URL is masked as well: the values of the credential query parameters (`token`,
+`conversation_signature`, however the name is cased or percent-encoded), any `sk_…` key typed into
+another value or a path, and any fragment. A URL that cannot be taken apart is shown without
+anything after its path. The request itself keeps the real URL.
+
+Answers get a header rule too: a tool, MCP server or webhook whose header holds a literal token
+comes back with the token masked by default. That follows the owner's switch over MCP and the
+control API (see below), and the app's own results keep header values real, because the owner's
+editor writes them back. An `sk_…` key is masked everywhere, whatever the switch says.
 
 How a call goes out:
 
@@ -473,7 +483,8 @@ and any string under a field whose name says it is a secret (`api_key`, `*token*
 `signature`, `password`, `signed_url` — but not a pagination cursor like `next_page_token` or an
 identifier like `secret_id`) are masked. Turning the switch on reveals exactly what it is for:
 that one operation's named credential fields, and header values (so an agent allowed to edit a
-tool can send its config back). A `password` or `client_secret` anywhere else stays masked. A
+tool can send its config back), where they are strings. A `password` or `client_secret` anywhere
+else stays masked, including inside a named field that holds an object rather than a string. A
 masked answer says so in `redacted` and `redactionNote`; the saved `fullResult` is the masked
 answer too. The app's own pane shows everything.
 
