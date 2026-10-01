@@ -10,21 +10,32 @@ import SiliconElevenLabs
 @Suite("ElevenLabs realtime over control: how long a conversation runs")
 struct RealtimeConverseLimitsTests {
 
-    /// An agent that answers each message after 20 ms and, when `noisy`, sends a ping, a VAD
-    /// score or a context-usage event every 100 ms for as long as the socket is open.
-    static func agent(noisy: Bool) -> FakeElevenLabsSocketConnector.Server {
+    /// The events that are not activity, one frame each.
+    static let noise = ["ping", "vad_score", "context_usage", "agent_response_metadata", "mcp_connection_status", "queue_status"]
+
+    static func noiseFrame(_ kind: String, _ id: Int) -> JSONValue {
+        switch kind {
+        case "ping": ["type": "ping", "ping_event": ["event_id": .number(Double(id)), "ping_ms": 20]]
+        case "vad_score": ["type": "vad_score", "vad_score_event": ["vad_score": 0.4]]
+        case "context_usage": ["type": "context_usage", "context_usage_event": ["context_tokens": .number(Double(id))]]
+        case "agent_response_metadata":
+            ["type": "agent_response_metadata", "agent_response_metadata_event": ["metadata": [:], "event_id": .number(Double(id))]]
+        case "mcp_connection_status": ["type": "mcp_connection_status", "mcp_connection_status": ["status": "connected"]]
+        default: ["type": "queue_status", "queue_status_event": ["status": "admitted"]]
+        }
+    }
+
+    /// An agent that answers each message after 20 ms and, given `noise`, sends that one kind of
+    /// event every 100 ms — well inside the 150 ms settle — for as long as the socket is open.
+    static func agent(noise: String?) -> FakeElevenLabsSocketConnector.Server {
         { socket in
             guard await socket.nextSent() != nil else { return }
             socket.push(ConverseRig.metadata)
-            if noisy {
+            if let noise {
                 Task {
                     var id = 100
                     while socket.endedWith == nil {
-                        switch id % 3 {
-                        case 0: socket.push(["type": "ping", "ping_event": ["event_id": .number(Double(id)), "ping_ms": 20]])
-                        case 1: socket.push(["type": "vad_score", "vad_score_event": ["vad_score": 0.4]])
-                        default: socket.push(["type": "context_usage", "context_usage_event": ["context_tokens": .number(Double(id))]])
-                        }
+                        socket.push(noiseFrame(noise, id))
                         id += 1
                         try? await Task.sleep(for: .milliseconds(100))
                     }
@@ -49,17 +60,20 @@ struct RealtimeConverseLimitsTests {
         return (ContinuousClock.now - started, status, answer, rig.connector.sockets.first)
     }
 
-    /// The critic's probe: pings every 100 ms stretched each turn's wait for quiet to the turn's
-    /// cap, so the same two answers ran (and billed) 3 s a turn instead of a fraction of one.
-    @Test func pingsAndScoresDoNotHoldATurnOpen() async throws {
-        // Each turn's cap is ten seconds: pings that held turns open would take twenty; the margin
-        // below is for a busy run.
+    /// The critic's probe, one kind at a time (round 2: rotating three kinds every 100 ms let a
+    /// regression in two of them pass, their gaps being longer than the settle): pings every
+    /// 100 ms stretched each turn's wait for quiet to the turn's cap, so the same two answers ran
+    /// (and billed) a full turn each instead of a fraction of a second.
+    @Test(arguments: noise)
+    func eventsThatAreNotActivityDoNotHoldATurnOpen(kind: String) async throws {
+        // Each turn's cap is ten seconds: an event kind that held turns open would take twenty;
+        // the margin below is for a busy run.
         let timing = ElevenLabsConverseHandler.Timing(greeting: .milliseconds(300), settle: .milliseconds(150), turn: .seconds(10))
-        let quiet = await run(Self.agent(noisy: false), timing: timing)
-        let noisy = await run(Self.agent(noisy: true), timing: timing)
+        let quiet = await run(Self.agent(noise: nil), timing: timing)
+        let noisy = await run(Self.agent(noise: kind), timing: timing)
         #expect(quiet.status == 200 && noisy.status == 200)
         #expect(noisy.answer["messages_sent"] == 2)
-        #expect(noisy.seconds < quiet.seconds + .seconds(4), "pings turned \(quiet.seconds) into \(noisy.seconds)")
+        #expect(noisy.seconds < quiet.seconds + .seconds(4), "\(kind) every 100 ms turned \(quiet.seconds) into \(noisy.seconds)")
         #expect(noisy.answer["ended"] == "by this app, after the last message")
     }
 
