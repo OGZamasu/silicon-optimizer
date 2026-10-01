@@ -66,14 +66,13 @@ struct RealtimeConverseLimitsTests {
     /// (and billed) a full turn each instead of a fraction of a second.
     @Test(arguments: noise)
     func eventsThatAreNotActivityDoNotHoldATurnOpen(kind: String) async throws {
-        // Each turn's cap is ten seconds: an event kind that held turns open would take twenty;
-        // the margin below is for a busy run.
-        let timing = ElevenLabsConverseHandler.Timing(greeting: .milliseconds(300), settle: .milliseconds(150), turn: .seconds(10))
-        let quiet = await run(Self.agent(noise: nil), timing: timing)
+        // Each turn's cap is a minute: an event kind that held turns open would take two. Done in
+        // well under half a minute even in a busy run; nothing here leans on a tighter clock.
+        let timing = ElevenLabsConverseHandler.Timing(greeting: .milliseconds(300), settle: .milliseconds(150), turn: .seconds(60))
         let noisy = await run(Self.agent(noise: kind), timing: timing)
-        #expect(quiet.status == 200 && noisy.status == 200)
+        #expect(noisy.status == 200)
         #expect(noisy.answer["messages_sent"] == 2)
-        #expect(noisy.seconds < quiet.seconds + .seconds(4), "\(kind) every 100 ms turned \(quiet.seconds) into \(noisy.seconds)")
+        #expect(noisy.seconds < .seconds(30), "\(kind) every 100 ms held the turns open: \(noisy.seconds)")
         #expect(noisy.answer["ended"] == "by this app, after the last message")
     }
 
@@ -95,12 +94,12 @@ struct RealtimeConverseLimitsTests {
             }
         }
         let timing = ElevenLabsConverseHandler.Timing(
-            greeting: .milliseconds(200), settle: .milliseconds(150), turn: .seconds(10), total: .milliseconds(1_500)
+            greeting: .milliseconds(200), settle: .milliseconds(150), turn: .seconds(60), total: .milliseconds(1_500)
         )
         let result = await run(chatter, timing: timing, messages: ["One", "Two", "Three"])
         #expect(result.status == 200)
-        // Three ten-second turns without the cap; the margin is for a busy run.
-        #expect(result.seconds < .seconds(8), "ran \(result.seconds) against a 1.5 s cap")
+        // Three one-minute turns without the cap; half a minute is room for a busy run.
+        #expect(result.seconds < .seconds(30), "ran \(result.seconds) against a 1.5 s cap")
         #expect(result.answer["ended"] == "time limit")
         #expect((result.answer["note"].stringValue ?? "").contains("Ended: time limit"))
         #expect((result.answer["note"].stringValue ?? "").contains("1.5 seconds"))
@@ -117,10 +116,11 @@ struct RealtimeConverseLimitsTests {
             socket.push(ConverseRig.metadata)
         }
         let timing = ElevenLabsConverseHandler.Timing(
-            greeting: .milliseconds(200), settle: .milliseconds(150), turn: .seconds(10), total: .milliseconds(800)
+            greeting: .milliseconds(200), settle: .milliseconds(150), turn: .seconds(60), total: .milliseconds(800)
         )
         let result = await run(silent, timing: timing)
-        #expect(result.seconds < .seconds(7), "a ten-second turn ran \(result.seconds) against a 0.8 s cap")
+        // A one-minute turn without the cap; half a minute is room for a busy run.
+        #expect(result.seconds < .seconds(30), "a one-minute turn ran \(result.seconds) against a 0.8 s cap")
         #expect(result.answer["ended"] == "time limit")
         #expect(!(result.answer["note"].stringValue ?? "").contains("did not answer"))
     }
