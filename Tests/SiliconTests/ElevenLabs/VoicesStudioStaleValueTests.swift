@@ -758,6 +758,10 @@ struct VoicesStudioStaleValueTests {
         #expect(fixture.sent("edit_service_account_api_key").count == 1)
         #expect(model.selected?.keys.first?.permissions == ["text_to_speech"], "a refused change was claimed")
         #expect(model.editBlockReason(key) == nil)
+        // A refusal is a known outcome — nothing was done: the editor stays open on the draft, and
+        // nothing is read again (only a lost answer is).
+        #expect(model.editingKey?.id == key.id, "a refused change closed the editor")
+        #expect(fixture.sent("get_service_account_api_keys_route").isEmpty, "a refused change was read again as if it may have landed")
     }
 
     /// The accounts list, asked for before a key change answered and answering after it, does
@@ -983,5 +987,136 @@ struct VoicesStudioStaleValueTests {
         await model.select("d-a")                                  // Try again
         #expect(model.rulesAreIn)
         #expect(model.rulesProblem == nil)
+    }
+
+    // MARK: - Round 5: a change whose answer was lost
+
+    /// A pretend ElevenLabs that remembers each key's permissions and whether it is off, as
+    /// edits set them — and can carry out an edit while losing its answer (a 500).
+    final class KeyServer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var permissions: [String: [String]]
+        private var disabled: [String: Bool] = [:]
+        private var answersToLose: Int
+        init(_ keys: [String: [String]], losing: Int = 0) {
+            permissions = keys
+            answersToLose = losing
+        }
+
+        /// Carries out the edit; false when its answer is to be lost.
+        func edit(_ request: ElevenLabsRequest) -> Bool {
+            lock.withLock {
+                let data: Data = if case .data(let data) = request.body { data } else { Data() }
+                let json = (try? JSONValue(data: data)) ?? .null
+                let id = request.url.lastPathComponent
+                if let list = json["permissions"].arrayValue?.compactMap(\.stringValue) { permissions[id] = list }
+                if let enabled = json["is_enabled"].boolValue { disabled[id] = !enabled }
+                guard answersToLose > 0 else { return true }
+                answersToLose -= 1
+                return false
+            }
+        }
+
+        func keys(of account: String) -> JSONValue {
+            lock.withLock {
+                ["api-keys": .array(permissions.keys.sorted().map { id in
+                    ["name": .string("Key \(id)"), "hint": "a1b2", "key_id": .string(id),
+                     "service_account_user_id": .string(account), "is_disabled": .bool(disabled[id] ?? false),
+                     "permissions": .array((permissions[id] ?? []).map(JSONValue.string)),
+                     "character_count": 0, "hashed_xi_api_key": "h"]
+                })]
+            }
+        }
+
+        func current(_ id: String) -> [String] { lock.withLock { (permissions[id] ?? []).sorted() } }
+        func isDisabled(_ id: String) -> Bool { lock.withLock { disabled[id] ?? false } }
+    }
+
+    /// A permission granted to key k1 reaches ElevenLabs and is carried out, but the answer is a
+    /// 500. The row claims nothing, yet it may now be older than ElevenLabs: the editor closes,
+    /// the key's Edit waits, and the account's keys are read again. Opened from that read, the
+    /// editor keeps the permission the lost-answer save granted when another is added. (Before:
+    /// no read, and an editor reopened from the row sent the list without it, taking it back.)
+    @Test func aKeyChangeWhoseAnswerWasLostIsReadAgainBeforeItIsEditedAgain() async throws {
+        let signals = Signals()
+        let catalog = VoicesStudioFixture()
+        defer { catalog.clean() }
+        let choices = ServiceAccountsSectionModel(environment: catalog.environment).permissionChoices
+            .filter { $0 != "text_to_speech" }
+        try #require(choices.count >= 2)
+        let granted = choices[0], added = choices[1]
+        let server = KeyServer(["k1": ["text_to_speech"]], losing: 1)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                if server.edit(request) { return .json(["status": "ok"]) }
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)    // carried out; answer lost
+            case "get_service_account_api_keys_route":
+                if signals.note("keys") == 1 { try await signals.wait(for: "looked") }
+                return .json(server.keys(of: "sa-a"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        model.edit(try #require(model.selected?.keys.first))
+        model.keyDraft.allPermissions = false
+        model.keyDraft.permissions.insert(granted)
+        let saving = Task { try await answering(model.actions) { await model.saveKey() } }
+        // Should no read be made (a regression), the save ends at once, and so does this wait.
+        let releasing = Task { _ = try? await saving.value; signals.note("looked") }
+        try await voicesStudioWait {
+            fixture.sent("get_service_account_api_keys_route").count == 1 || signals.has("looked")
+        }
+        #expect(fixture.sent("get_service_account_api_keys_route").count == 1, "the keys were not read again after a lost answer")
+        let row = try #require(model.selected?.keys.first)
+        #expect(row.permissions == ["text_to_speech"], "a change whose answer was lost was claimed")
+        #expect(model.editingKey == nil, "the editor stayed open, its starting point a row older than ElevenLabs")
+        #expect(model.problems == [ServiceAccountsSectionModel.lostAnswerMessage(row.name)], "\(model.problems)")
+        #expect(model.editBlockReason(row) != nil, "Edit did not wait for the keys to be read again")
+        model.edit(row)
+        #expect(model.editingKey == nil, "the editor opened from the unread row")
+        signals.note("looked")
+        try await saving.value
+        await releasing.value
+        let fresh = try #require(model.selected?.keys.first)
+        #expect(fresh.permissions.sorted() == ["text_to_speech", granted].sorted(), "the row is not what ElevenLabs holds")
+        #expect(model.editBlockReason(fresh) == nil)
+        model.edit(fresh)
+        model.keyDraft.permissions.insert(added)
+        try await answering(model.actions) { await model.saveKey() }
+        #expect(server.current("k1") == ["text_to_speech", granted, added].sorted(),
+                "the next change took back the permission the lost-answer save granted: \(server.current("k1"))")
+    }
+
+    /// Turned off, carried out, answer lost: the row would keep showing the key on, its button
+    /// offering "Turn off…" again. The keys are read again, and the row says the key is off.
+    @Test func aKeyTurnedOffWhoseAnswerWasLostIsReadAgain() async throws {
+        let server = KeyServer(["k1": ["text_to_speech"]], losing: 1)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                if server.edit(request) { return .json(["status": "ok"]) }
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+            case "get_service_account_api_keys_route":
+                return .json(server.keys(of: "sa-a"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let key = try #require(model.selected?.keys.first)
+        try await answering(model.actions) { await model.setEnabled(key, false) }
+        #expect(server.isDisabled("k1"))
+        #expect(fixture.sent("get_service_account_api_keys_route").count == 1, "the keys were not read again after a lost answer")
+        #expect(model.selected?.keys.first?.isDisabled == true, "the row still shows the key on")
+        #expect(model.accounts.first?.keys.first?.isDisabled == true)
+        #expect(model.problems == [ServiceAccountsSectionModel.lostAnswerMessage(key.name)], "\(model.problems)")
     }
 }
