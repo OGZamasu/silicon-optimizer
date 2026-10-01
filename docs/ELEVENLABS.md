@@ -595,7 +595,8 @@ Decoding is tolerant: both spellings of every key the sources disagree on (`isFi
 - Every session keeps a usage record — characters sent, audio sent and received, messages,
   commits, duration — which the screens show as they go.
 - An agent's `ping` is answered at once, ahead of queued audio. Audio of an interrupted answer is
-  dropped (`event_id` at or below the interrupted one, as the Python and Node clients do). An MCP
+  dropped (`event_id` at or below the interrupted one, as the Python and Node clients do; if `≤` is
+  wrong, an interrupted agent's whole next answer is silent — see the live check, step 5). An MCP
   tool approval is answered at most once, only while ElevenLabs still waits, only an explicit
   approval approves, and ending the conversation sends a decline for every approval still waiting.
   A client tool call is answered at most once.
@@ -703,20 +704,39 @@ ElevenLabs, touches the microphone or speakers, or reads the Keychain.
 
 ### The owner's live check (once, with the real key)
 
-What only a real account can settle, in about two minutes and a few credits:
+What only a real account can settle, cheapest first. Note the credit balance (Settings → ElevenLabs,
+or the ElevenLabs dashboard) before step 1 and after the last step you run.
 
-1. **Live speech:** choose a voice, type "Hello from the live stream." and press Speak. It should
-   play within a second or two, show the words with timings, and end cleanly (Finish). *Settles:* the
-   header auth and spellings on the speech socket, the PCM format, and whether ElevenLabs closes an
-   idle socket with 1000.
-2. **Live transcription:** Start listening, say a sentence for about ten seconds, press Stop. Partial
-   text should turn into a committed line; with Word timings on, times appear. *Settles:* the
-   transcription socket's header auth, chunking, commit and the `warning`/error shapes.
-3. **Talk to an agent, text only:** with a public test agent that allows text-only (or is
-   text-only), start a text conversation, send one message, read the answer, End. Then try the MCP
-   tool once: `elevenlabs_agent_converse` with that agent, one message and `confirm: true` (the switch
-   on). *Settles:* bare `agent_id` for a public agent, the initiation and metadata, `error` vs
-   `client_error`, the ping cadence.
-4. Optional, voice: talk to the agent through speakers. *Settles:* echo cancellation, the
-   interruption rule (does audio at the interrupted `event_id` itself belong to the old answer?), and
-   a signed URL for an agent with authentication on.
+1. **Live speech** — *costs about 30 characters of text-to-speech.* Choose a voice, type "Hello from
+   the live stream." and press Speak. It should play within a second or two, show the words with
+   timings, and end cleanly (Finish). *Settles:* the header auth and spellings on the speech socket,
+   the PCM format, and whether ElevenLabs closes an idle socket with 1000.
+2. **Live transcription** — *costs about 10 seconds of realtime speech-to-text.* Start listening, say
+   a sentence for about ten seconds, press Stop. Partial text should turn into a committed line; with
+   Word timings on, times appear. *Settles:* the transcription socket's header auth, chunking, commit
+   and the `warning`/error shapes. **Watch for:** the menu-bar microphone indicator (the orange dot)
+   goes out within a second of Stop.
+3. **Talk to an agent, text only** — *costs about a minute of agent time plus the agent's LLM use.*
+   With a public test agent that allows text-only (or is text-only), start a text conversation, send
+   one message, read the answer, End. *Settles:* bare `agent_id` for a public agent, the initiation and
+   metadata, `error` vs `client_error`, the ping cadence. **Watch for:** the agent's Conversations
+   (Agents → the agent → Conversations, or the ElevenLabs dashboard) shows **exactly one** new
+   conversation, ended. Then start one more and press Cancel while it says Connecting: Conversations
+   should still show only that one more at most, ended — never one left running.
+4. **The MCP tool** — *costs about the same as step 3: a minute of agent time plus LLM.* With the
+   switch on, call `elevenlabs_agent_converse` with that agent, one message and `confirm: true`. The
+   answer should carry the transcript, `"ended"` and a `duration_seconds` of a few seconds; Conversations
+   should show exactly one more. *Settles:* the same socket from the control route.
+5. Optional, **voice** — *costs a few minutes of a voice agent plus LLM.* Talk to the agent through
+   the speakers, and talk over it once while it answers. *Settles:* echo cancellation, a signed URL for
+   an agent with authentication on, and **the interruption rule**. ElevenLabs gives every audio chunk
+   of one answer the same `event_id`, and the app drops audio at or below the interrupted `event_id`
+   (`ElevenLabsAgentConversation.dropsAudioAtTheInterruptedEvent = true`, as the Python and Node
+   clients do; the browser client drops only below it). If that is wrong for this API, the symptom is
+   unmistakable: after you talk over the agent, **its whole next answer is silent — its text appears
+   but no voice plays**, not merely a clipped first word. To flip it, set
+   `dropsAudioAtTheInterruptedEvent` to `false` in
+   `Sources/SiliconElevenLabs/Realtime/ElevenLabsAgentConversation.swift` and turn round the
+   expectations of `RealtimeSessionTests.audioOfAnInterruptedResponseIsDropped` (with `<`, the
+   interrupted chunk is dropped only below its id). **Watch for:** after End, the microphone
+   indicator goes out and music in other apps is no longer quieter (voice processing is off).
