@@ -140,10 +140,17 @@ public enum ElevenLabsRedaction {
         "update_environment_variable": ["values"],
     ]
 
+    /// Objects one of whose fields is what the owner typed for a phone transfer: the DTMF digits
+    /// sent once it connects (an extension, but also a conference PIN or an account passcode) and
+    /// the SIP User-to-User payload (CRM identifiers, an escalation reason). That field is masked;
+    /// a `dynamic` post-dial value names a variable rather than holding digits, and stays.
+    static let requestSecretSubfields: [String: String] = ["post_dial_digits": "value", "uui": "data"]
+
     /// A request body as "Show API call" and "Copy as curl" may show it: what the owner typed
     /// that is a secret — a secret's value, a Twilio or Exotel auth token, a SIP password, a
-    /// literal `Authorization` header — replaced by a placeholder, keys and everything else as
-    /// typed, and `sk_…` keys scrubbed from every string.
+    /// literal `Authorization` header, a transfer's post-dial digits and UUI payload — replaced
+    /// by a placeholder, keys and everything else as typed, and `sk_…` keys scrubbed from every
+    /// string.
     public static func maskingRequestSecrets(in value: JSONValue, operationID: String) -> JSONValue {
         let extra = requestSecretFieldsByOperation[operationID] ?? []
         let maps = requestSecretMapsByOperation[operationID] ?? []
@@ -158,6 +165,20 @@ public enum ElevenLabsRedaction {
                     }
                     if headerMapFields.contains(name) || maps.contains(name) {
                         return (key, maskHeaderValues(mask(inner)))
+                    }
+                    if let field = requestSecretSubfields[name] {
+                        switch mask(inner) {
+                        case .string(let text) where !text.isEmpty:
+                            return (key, .string(placeholder))
+                        case .object(var fields):
+                            if case .string(let text)? = fields[field], !text.isEmpty,
+                               fields["type"] != .string("dynamic") {
+                                fields[field] = .string(placeholder)
+                            }
+                            return (key, .object(fields))
+                        case let other:
+                            return (key, other)
+                        }
                     }
                     return (key, mask(inner))
                 }))

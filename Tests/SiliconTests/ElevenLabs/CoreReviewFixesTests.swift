@@ -234,6 +234,25 @@ struct CoreReviewFixesTests {
         }
     }
 
+    /// A transfer's post-dial digits can be a conference PIN or an account passcode, and its SIP
+    /// UUI payload carries CRM identifiers: both are the owner's typing and masked. A dynamic
+    /// post-dial value names a variable and stays; so does the number transferred to.
+    @Test func aTransfersPostDialDigitsAndUUIPayloadAreMaskedInTheDescribedCall() {
+        let request: JSONValue = ["tool_config": ["params": ["transfers": [
+            ["transfer_destination": ["type": "phone", "phone_number": "+15550100"],
+             "post_dial_digits": ["type": "static", "value": "ww1234#"],
+             "uui": ["data": "crm-case-4471-escalated", "protocol_discriminator": "00"]],
+            ["post_dial_digits": ["type": "dynamic", "value": "conference_pin"]],
+        ]]]]
+        let text = (try? ElevenLabsRedaction.maskingRequestSecrets(in: request, operationID: "add_tool_route")
+            .jsonString()) ?? ""
+        #expect(!text.contains("ww1234#"), "post-dial digits must be masked")
+        #expect(!text.contains("crm-case-4471"), "the UUI payload must be masked")
+        for kept in ["+15550100", "conference_pin", "protocol_discriminator", "static"] {
+            #expect(text.contains(kept), "\(kept) is not a secret and must stay")
+        }
+    }
+
     @Test func anEnvironmentVariablesPlainValuesAreMaskedButItsReferencesStay() {
         let request: JSONValue = ["label": "backend", "values": [
             "production": "https://internal.example.com/?key=abc123", "staging": ["secret_id": "s-1"],
