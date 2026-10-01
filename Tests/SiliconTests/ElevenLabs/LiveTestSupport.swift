@@ -3,19 +3,24 @@ import Foundation
 import SiliconElevenLabs
 @testable import SiliconUI
 
-/// A microphone and speaker that touch no device: capture is whatever a test pushes, playback is
-/// a list of buffers, and permission is a flag.
+/// A microphone and speaker that touch no device, keeping the real engine's bookkeeping: starting
+/// capture starts the engine (with voice processing when asked) and installs the tap; playing
+/// starts the engine; `stopCapture` removes only the tap — the engine, and so the system's
+/// microphone, stays on — and only `release` stops the engine and turns voice processing off.
 final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
     private let lock = NSLock()
     private var _permission: Bool
     private var _asked = 0
-    private var _capturing = false
+    private var _tap = false
+    private var _running = false
+    private var _voiceProcessing = false
     private var _echoCancellation: Bool?
     private var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
     private var _scheduled: [AVAudioPCMBuffer] = []
     private var pending: [@Sendable () -> Void] = []
     private var _flushes = 0
     private var _captureStarts = 0
+    private var _releases = 0
     var captureFailure: (any Error)?
 
     init(permission: Bool = true) {
@@ -23,7 +28,14 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
     }
 
     var asked: Int { lock.withLock { _asked } }
-    var capturing: Bool { lock.withLock { _capturing } }
+    /// The microphone tap is installed.
+    var capturing: Bool { lock.withLock { _tap } }
+    /// The engine is running: the input (and the system's microphone indicator) is held.
+    var engineRunning: Bool { lock.withLock { _running } }
+    var voiceProcessing: Bool { lock.withLock { _voiceProcessing } }
+    /// Anything still held: the tap, the engine or voice processing.
+    var holdsDevices: Bool { lock.withLock { _tap || _running || _voiceProcessing } }
+    var releases: Int { lock.withLock { _releases } }
     var captureStarts: Int { lock.withLock { _captureStarts } }
     var echoCancellation: Bool? { lock.withLock { _echoCancellation } }
     var scheduled: [AVAudioPCMBuffer] { lock.withLock { _scheduled } }
@@ -38,9 +50,15 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
     }
 
     func startCapture(echoCancellation: Bool, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
-        if let captureFailure { throw captureFailure }
+        if let captureFailure {
+            // As the real engine can: voice processing switched on, then the start fails.
+            lock.withLock { _voiceProcessing = echoCancellation }
+            throw captureFailure
+        }
         lock.withLock {
-            _capturing = true
+            _tap = true
+            _running = true
+            _voiceProcessing = echoCancellation
             _captureStarts += 1
             _echoCancellation = echoCancellation
             self.onBuffer = onBuffer
@@ -49,13 +67,14 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
 
     func stopCapture() {
         lock.withLock {
-            _capturing = false
+            _tap = false
             onBuffer = nil
         }
     }
 
     func play(_ buffer: AVAudioPCMBuffer, played: @escaping @Sendable () -> Void) {
         lock.withLock {
+            _running = true
             _scheduled.append(buffer)
             pending.append(played)
         }
@@ -70,9 +89,17 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
         for callback in callbacks { callback() }
     }
 
-    func stopAll() {
-        stopCapture()
-        flushPlayback()
+    func release() {
+        let callbacks: [@Sendable () -> Void] = lock.withLock {
+            _tap = false
+            _running = false
+            _voiceProcessing = false
+            _releases += 1
+            onBuffer = nil
+            defer { pending = [] }
+            return pending
+        }
+        for callback in callbacks { callback() }
     }
 
     /// What the microphone hears: `seconds` of a sine at `frequency`, in the device's format

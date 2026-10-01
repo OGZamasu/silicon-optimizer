@@ -245,6 +245,9 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
             }
             self.stream = stream
             sessionEncoding = config.outputEncoding
+            // The last session's audio may still be playing out; it no longer gets to let go of
+            // the devices this one is about to use.
+            playback?.cancelPendingRelease()
             playback = config.outputEncoding.map { LivePlayback(audio: context.audio(), encoding: $0) }
             phase = .live
             Task { await consume(stream, token: token) }
@@ -298,7 +301,13 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
     ///   otherwise what has arrived plays out.
     private func end(_ outcome: LiveOutcome, silence: Bool = true) {
         refresh()
-        if silence { playback?.interrupt() } else { playback?.finish() }
+        // The devices are let go: at once when silenced, once the last audio has played otherwise.
+        if silence {
+            playback?.interrupt()
+            if playback != nil { context.audio().release() }
+        } else {
+            playback?.finishThenRelease()
+        }
         self.outcome = outcome
         stream = nil
         phase = .ended

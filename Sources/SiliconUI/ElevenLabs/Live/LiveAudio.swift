@@ -1,3 +1,4 @@
+import AppKit
 @preconcurrency import AVFoundation
 import Foundation
 import SiliconElevenLabs
@@ -328,14 +329,17 @@ protocol LiveAudioIO: AnyObject, Sendable {
     /// Turns the microphone on. Buffers arrive on an audio thread. `echoCancellation` puts the
     /// input through macOS voice processing, so an agent on the speakers does not hear itself.
     func startCapture(echoCancellation: Bool, onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws
-    /// Turns the microphone off.
+    /// Turns the microphone tap off. The engine itself keeps running (and holding the input)
+    /// until `release()`.
     func stopCapture()
     /// Schedules a decoded buffer; `played` is called when it has played (or been dropped).
     func play(_ buffer: AVAudioPCMBuffer, played: @escaping @Sendable () -> Void)
     /// Silence at once: everything scheduled is dropped.
     func flushPlayback()
-    /// Microphone off, speaker off, engine stopped.
-    func stopAll()
+    /// Lets go of the devices: the tap removed, the speaker stopped, the engine stopped and macOS
+    /// voice processing turned off — so the system's microphone indicator goes out and other
+    /// apps' audio is no longer ducked. Every live screen calls it when its session ends.
+    func release()
 }
 
 /// The devices, through one `AVAudioEngine` — one engine, so macOS voice processing on the input
@@ -350,6 +354,10 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
 
     init() {
         engine.attach(player)
+        // Quitting with a session open still lets go of the microphone and voice processing.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.release() }
     }
 
     func requestMicrophone() async -> Bool {
@@ -407,7 +415,7 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
         }
     }
 
-    func stopAll() {
+    func release() {
         lock.withLock {
             if capturing { engine.inputNode.removeTap(onBus: 0) }
             capturing = false
@@ -434,6 +442,8 @@ final class LivePlayback {
     private var generation = 0
     private(set) var playedSeconds: TimeInterval = 0
     private(set) var receivedBytes = 0
+    /// Set by `finishThenRelease()`: once the last buffer has played, the devices are let go.
+    private var releasesWhenDrained = false
 
     init(audio: any LiveAudioIO, encoding: ElevenLabsAudioEncoding) {
         self.audio = audio
@@ -455,6 +465,24 @@ final class LivePlayback {
         for ready in jitter.finish() { schedule(ready) }
     }
 
+    /// The stream is over: what is held plays out, and then the devices are let go.
+    func finishThenRelease() {
+        finish()
+        releasesWhenDrained = true
+        releaseIfDrained()
+    }
+
+    /// Another session has the devices now: a release still pending from this one must not stop them.
+    func cancelPendingRelease() {
+        releasesWhenDrained = false
+    }
+
+    private func releaseIfDrained() {
+        guard releasesWhenDrained, jitter.held.isEmpty, jitter.queuedSeconds <= 0.001 else { return }
+        releasesWhenDrained = false
+        audio.release()
+    }
+
     /// An interruption: silence now, and nothing held or half-decoded survives.
     func interrupt() {
         generation += 1
@@ -471,6 +499,7 @@ final class LivePlayback {
                 guard let self, self.generation == scheduled else { return }
                 self.jitter.played(seconds)
                 self.playedSeconds += seconds
+                self.releaseIfDrained()
             }
         }
     }

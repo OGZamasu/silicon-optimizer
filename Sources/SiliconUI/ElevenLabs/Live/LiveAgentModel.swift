@@ -152,6 +152,8 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     @ObservationIgnored private var silencedThrough: Int?
     @ObservationIgnored private var lastAgentEventID: Int?
     @ObservationIgnored private var toolLines: [String: Int] = [:]
+    /// The devices were touched this conversation and must be let go when it ends.
+    @ObservationIgnored private var holdsAudio = false
 
     /// How long an approval waits when ElevenLabs does not say.
     static let defaultApprovalTimeout: TimeInterval = 300
@@ -339,6 +341,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         Task { await consume(conversation, token: token) }
         Task { await watch(token: token) }
         guard !textOnly, let metadata = conversation.startedWith else { return }
+        holdsAudio = true
         if let output = metadata.outputEncoding {
             playback = LivePlayback(audio: context.audio(), encoding: output)
         }
@@ -558,6 +561,10 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         }
         conversation = nil
         playback = nil
+        if holdsAudio {
+            context.audio().release()
+            holdsAudio = false
+        }
         question = nil
         self.outcome = outcome
         phase = .ended

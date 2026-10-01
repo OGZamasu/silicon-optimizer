@@ -89,6 +89,8 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     @ObservationIgnored private var chunks: AsyncStream<Data>.Continuation?
     @ObservationIgnored private var sender: Task<Void, Never>?
     @ObservationIgnored private var nextSegmentID = 0
+    /// The devices were touched this session and must be let go when it ends.
+    @ObservationIgnored private var holdsAudio = false
     @ObservationIgnored private var awaitingFinal = false
     @ObservationIgnored private var finalArrived = false
 
@@ -187,6 +189,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         switch source {
         case .microphone:
             do {
+                holdsAudio = true
                 try context.audio().startCapture(echoCancellation: false) { buffer in
                     for chunk in converter.process(buffer) { continuation.yield(chunk) }
                 }
@@ -395,6 +398,10 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         refresh()
         if microphoneOn { context.audio().stopCapture() }
         microphoneOn = false
+        if holdsAudio {
+            context.audio().release()
+            holdsAudio = false
+        }
         chunks?.finish()
         chunks = nil
         sender?.cancel()
