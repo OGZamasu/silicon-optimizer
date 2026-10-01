@@ -77,6 +77,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     private var _closedByClient: ElevenLabsSocketClose?
     private var _pings = 0
     private var stalled = false
+    private var sendDelay: Duration?
 
     init(request: ElevenLabsSocketRequest) {
         self.request = request
@@ -158,6 +159,11 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
         lock.withLock { stalled = true }
     }
 
+    /// From now on each of the client's sends takes `delay` to complete — a slow connection.
+    public func delaySends(by delay: Duration) {
+        lock.withLock { sendDelay = delay }
+    }
+
     /// The connection drops, with no close code.
     public func drop() {
         finish(ElevenLabsSocketClose(code: 0, reason: "the connection was lost"))
@@ -180,6 +186,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
         while lock.withLock({ stalled && ended == nil }) {
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if let delay = lock.withLock({ sendDelay }) { try? await Task.sleep(for: delay) }
         let refused: ElevenLabsSocketClose? = lock.withLock {
             if let ended { return ended }
             _sent.append(message)

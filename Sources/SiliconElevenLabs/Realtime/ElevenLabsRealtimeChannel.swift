@@ -12,6 +12,9 @@ final class ElevenLabsRealtimeChannel: @unchecked Sendable {
     private var urgent: [Outgoing] = []
     private var normal: [Outgoing] = []
     private var waiter: CheckedContinuation<Outgoing?, Never>?
+    /// Frames the writer has taken and not yet finished sending: a close waits for these too,
+    /// not only for the queue (a decline handed to the writer just before a close was lost).
+    private var sending = 0
     private var finished: ElevenLabsRealtimeError?
     private var writer: Task<Void, Never>?
     private var reader: Task<Void, Never>?
@@ -36,9 +39,11 @@ final class ElevenLabsRealtimeChannel: @unchecked Sendable {
             while let item = await self?.next() {
                 do {
                     try await socket.send(item.message)
+                    self?.sent()
                     item.done?(nil)
                 } catch {
                     let failure = ElevenLabsRealtimeError(wrapping: error)
+                    self?.sent()
                     item.done?(failure)
                     self?.finish(failure)
                     return
@@ -109,6 +114,7 @@ final class ElevenLabsRealtimeChannel: @unchecked Sendable {
             if let finished { return .refused(finished) }
             if let waiter {
                 self.waiter = nil
+                sending += 1
                 return .handoff(waiter)
             }
             if isUrgent { urgent.append(item) } else { normal.append(item) }
@@ -126,8 +132,14 @@ final class ElevenLabsRealtimeChannel: @unchecked Sendable {
     private func next() async -> Outgoing? {
         await withCheckedContinuation { continuation in
             let ready: Outgoing?? = lock.withLock {
-                if !urgent.isEmpty { return .some(urgent.removeFirst()) }
-                if !normal.isEmpty { return .some(normal.removeFirst()) }
+                if !urgent.isEmpty {
+                    sending += 1
+                    return .some(urgent.removeFirst())
+                }
+                if !normal.isEmpty {
+                    sending += 1
+                    return .some(normal.removeFirst())
+                }
                 if finished != nil { return .some(nil) }
                 waiter = continuation
                 return .none
@@ -136,12 +148,16 @@ final class ElevenLabsRealtimeChannel: @unchecked Sendable {
         }
     }
 
-    /// Waits until everything queued has been handed to the socket — two seconds at most: a
-    /// socket that has stalled must not keep a close waiting for ever.
+    private func sent() {
+        lock.withLock { sending -= 1 }
+    }
+
+    /// Waits until everything queued has been sent, the frame being written included — two
+    /// seconds at most: a socket that has stalled must not keep a close waiting for ever.
     private func drain() async {
         let deadline = ContinuousClock.now + .seconds(2)
         while ContinuousClock.now < deadline {
-            let empty = lock.withLock { urgent.isEmpty && normal.isEmpty }
+            let empty = lock.withLock { urgent.isEmpty && normal.isEmpty && sending == 0 }
             if empty || hasEnded { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
