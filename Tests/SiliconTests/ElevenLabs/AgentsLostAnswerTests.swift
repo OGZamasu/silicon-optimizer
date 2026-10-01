@@ -228,4 +228,84 @@ extension AgentsSectionsTests {
         #expect(rig.requests(AgentsOp.updateMCPServer).count == 2, "setting the timeout back was not sent")
         #expect(state.current == 30)
     }
+
+    /// Fails every read while on (the client retries a failed read, so one failure is not enough).
+    final class ReadSwitch: @unchecked Sendable {
+        let lock = NSLock()
+        private var on = false
+        func set(_ failing: Bool) { lock.withLock { on = failing } }
+        func fails() -> Bool { lock.withLock { on } }
+    }
+
+    /// N6-5: an agent save whose answer was lost, and the read after it fails too. The editor
+    /// keeps its old base, and says so — it may be older than ElevenLabs — with Read again;
+    /// Read again takes the agent as it is now. (Before: no note at all.)
+    @Test func anAgentWhoseReadAfterALostSaveFailsSaysSoAndReadsAgain() async throws {
+        let state = LostPatch(["support", "english"])
+        let reads = ReadSwitch()
+        let rig = AgentsFixtures.Rig { request in
+            switch request.operationID {
+            case AgentsOp.updateAgent:
+                if state.patch(request, field: "tags") { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                return .json(Self.setting("tags", state.current, in: AgentsFixtures.agent))
+            case AgentsOp.getAgent:
+                // Not found: a failed read the client does not retry (a 5xx it retries, with backoff).
+                if reads.fails() { return .jsonText(#"{"detail":{"status":"not_found","message":"Not found"}}"#, status: 404) }
+                return .json(Self.setting("tags", state.current, in: AgentsFixtures.agent))
+            default:
+                return try await AgentsFixtures.reply(request)
+            }
+        }
+        defer { rig.clean() }
+        let model = rig.store.agents
+        await model.select(AgentsFixtures.agentID)
+        reads.set(true)
+        model.draft.tags.append("billing")
+        try await confirming([rig.store.calls.runner(AgentsOp.updateAgent, slot: AgentsFixtures.agentID)]) { await model.save() }
+        #expect(model.lostSaveUnread, "a failed read after the lost save says nothing")
+        #expect(model.lostSaveNote == AgentsModel.lostSaveUnreadMessage("Support"))
+        #expect(model.loaded?.tags == ["support", "english"])
+        reads.set(false)
+        await model.readAgainAfterLostSave()
+        #expect(!model.lostSaveUnread)
+        #expect(model.loaded?.tags == ["support", "english", "billing"])
+        #expect(model.lostSaveNote == AgentsModel.lostSaveMessage("Support"))
+    }
+
+    /// The same for an MCP server's settings.
+    @Test func anMCPServerWhoseReadAfterALostSaveFailsSaysSoAndReadsAgain() async throws {
+        let state = LostPatch(30)
+        let reads = ReadSwitch()
+        let rig = AgentsFixtures.Rig { request in
+            switch request.operationID {
+            case AgentsOp.updateMCPServer:
+                if state.patch(request, field: "response_timeout_secs") {
+                    return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+                }
+                return .json(Self.setting("response_timeout_secs", state.current, in: AgentsFixtures.mcpServer, under: "config"))
+            case AgentsOp.getMCPServer:
+                // Not found: a failed read the client does not retry (a 5xx it retries, with backoff).
+                if reads.fails() { return .jsonText(#"{"detail":{"status":"not_found","message":"Not found"}}"#, status: 404) }
+                return .json(Self.setting("response_timeout_secs", state.current, in: AgentsFixtures.mcpServer, under: "config"))
+            default:
+                return try await AgentsFixtures.reply(request)
+            }
+        }
+        defer { rig.clean() }
+        let model = rig.store.mcpServers
+        await model.select(AgentsFixtures.serverID)
+        reads.set(true)
+        model.settings.timeoutSeconds = 45
+        try await confirming([rig.store.calls.runner(AgentsOp.updateMCPServer, slot: AgentsFixtures.serverID)]) {
+            await model.saveSettings()
+        }
+        #expect(model.lostSaveUnread, "a failed read after the lost save says nothing")
+        #expect(model.lostSaveNote == AgentMCPServersModel.lostSaveUnreadMessage)
+        #expect(model.originalSettings.timeoutSeconds == 30)
+        reads.set(false)
+        await model.readAgainAfterLostSave()
+        #expect(!model.lostSaveUnread)
+        #expect(model.originalSettings.timeoutSeconds == 45)
+        #expect(model.lostSaveNote == AgentMCPServersModel.lostSaveMessage)
+    }
 }
