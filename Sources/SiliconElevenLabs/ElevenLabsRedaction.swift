@@ -101,14 +101,35 @@ public enum ElevenLabsRedaction {
     /// "Show API call", "Copy as curl" and a request's `description` use; the request itself
     /// keeps the real URL.
     public static func maskingQuerySecrets(in url: URL) -> String {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let items = components.percentEncodedQueryItems, !items.isEmpty
-        else { return redactKeys(inURL: url.absoluteString) }
-        components.percentEncodedQueryItems = items.map { item in
-            secretQueryParameters.contains(item.name.lowercased())
-                ? URLQueryItem(name: item.name, value: urlPlaceholder) : item
+        maskingQuerySecrets(in: url.absoluteString, components: URLComponents(url: url, resolvingAgainstBaseURL: false))
+    }
+
+    /// The same for a URL's text and its parts. It fails closed: when the parts could not be read
+    /// (nil) or put back together, nothing after the path is shown. A parameter's name counts
+    /// however it is written (`Token`, `%74oken`), and a fragment — which never reaches the server,
+    /// and which the client never builds — is not shown at all.
+    static func maskingQuerySecrets(in text: String, components: URLComponents?) -> String {
+        guard var components else {
+            let end = text.firstIndex { $0 == "?" || $0 == "#" } ?? text.endIndex
+            return redactKeys(inURL: String(text[..<end]) + (end < text.endIndex ? "?" + urlPlaceholder : ""))
         }
-        return redactKeys(inURL: components.string ?? url.absoluteString)
+        if let items = components.percentEncodedQueryItems, !items.isEmpty {
+            components.percentEncodedQueryItems = items.map { item in
+                isSecretQueryName(item.name) ? URLQueryItem(name: item.name, value: urlPlaceholder) : item
+            }
+        }
+        if let fragment = components.percentEncodedFragment, !fragment.isEmpty {
+            components.percentEncodedFragment = urlPlaceholder
+        }
+        guard let shown = components.string else { return maskingQuerySecrets(in: text, components: nil) }
+        return redactKeys(inURL: shown)
+    }
+
+    /// Whether a query parameter's name, as written in the URL, is one of `secretQueryParameters`
+    /// in any case or percent-encoding. A name that cannot be decoded counts as one.
+    static func isSecretQueryName(_ encoded: String) -> Bool {
+        guard let name = encoded.removingPercentEncoding else { return true }
+        return secretQueryParameters.contains(name.lowercased())
     }
 
     /// The placeholder as it stands in a URL.

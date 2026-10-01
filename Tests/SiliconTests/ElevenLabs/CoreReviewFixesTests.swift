@@ -472,6 +472,28 @@ struct CoreReviewFixesTests {
         #expect(!"\(sent)".contains(Self.key) && !String(reflecting: sent).contains(Self.key))
     }
 
+    /// The query mask fails closed — a URL it cannot take apart is shown without its query — and
+    /// sees through a percent-encoded or upper-case name and a fragment. The client never builds
+    /// such URLs; the mask must not depend on that.
+    @Test func theQueryMaskFailsClosedAndSeesThroughEncodedNamesAndFragments() throws {
+        func masked(_ text: String) throws -> String {
+            ElevenLabsRedaction.maskingQuerySecrets(in: try #require(URL(string: text)))
+        }
+        let base = "https://api.elevenlabs.io/v1/speech-to-text"
+        let encoded = try masked("\(base)?%74oken=encoded-name-value&TOKEN=upper-case-value&enable_logging=false")
+        #expect(!encoded.contains("encoded-name-value") && !encoded.contains("upper-case-value"))
+        #expect(encoded.contains("enable_logging=false"), "other parameters are shown as sent")
+
+        let fragment = try masked("\(base)?x=1#token=fragment-value")
+        #expect(!fragment.contains("fragment-value"))
+        #expect(fragment.hasPrefix("\(base)?x=1#"))
+
+        let unread = ElevenLabsRedaction.maskingQuerySecrets(
+            in: "\(base)?token=raw-value&x=1#more", components: nil)
+        #expect(unread == "\(base)?%E2%80%B9redacted%E2%80%BA", "nothing after the path when the URL cannot be read")
+        #expect(ElevenLabsRedaction.maskingQuerySecrets(in: "\(base)/\(Self.key)", components: nil) == "\(base)/%E2%80%B9redacted%E2%80%BA")
+    }
+
     @Test func aSlashBackslashOrNULInAPathValueIsRefusedBeforeAnythingIsSent() async throws {
         // "P/convert" would reach a different (billing) route once the server decodes %2F.
         for bad in ["P/convert", "a\\b", "a\0b", String(repeating: "x", count: 513)] {
