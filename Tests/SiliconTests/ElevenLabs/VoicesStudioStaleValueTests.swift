@@ -913,4 +913,75 @@ struct VoicesStudioStaleValueTests {
         await third.value
         #expect(sent, "the third read waited for connections held by abandoned reads")
     }
+
+    // MARK: - Round 4: Pronunciation "Edit all" after a failed fetch
+
+    /// Rules added, and the fetch after it fails. Nothing is reading the rules any more, so
+    /// "Edit all" says they could not be read, with Try again, instead of "Waiting…". While Try
+    /// again's read is on its way it is waiting again; once it answers, Edit all works.
+    @Test func editAllAfterAFailedFetchSaysSoAndTryAgainReadsTheRules() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "add_rules":
+                return .json(["id": "d-a", "version_id": "ver2"])
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                try await signals.wait(for: "seen waiting")
+                return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a], selected: a)
+        var rule = PronunciationRule()
+        rule.stringToReplace = "Siobhan"
+        rule.alias = "Shivawn"
+        model.rules = [rule]
+        try await answering(model.actions) { await model.addRules() }
+        #expect(fixture.sent("get_pronunciation_dictionary_metadata").count == 1)
+        #expect(!model.rulesAreIn)
+        #expect(model.rulesProblem != nil, "a fetch that failed is shown as \"Waiting…\"")
+        let retrying = Task { await model.select("d-a") }           // Try again
+        // A read never sent (a regression) lets the wait below end once Try again has finished.
+        let releasing = Task { await retrying.value; signals.note("seen waiting") }
+        try await voicesStudioWait {
+            fixture.sent("get_pronunciation_dictionary_metadata").count == 2 || signals.has("seen waiting")
+        }
+        #expect(model.rulesProblem == nil, "the old failure is shown while the rules are read again")
+        signals.note("seen waiting")
+        await retrying.value
+        await releasing.value
+        #expect(model.rulesAreIn)
+        #expect(model.rulesProblem == nil)
+    }
+
+    /// The same when the read that opens the dictionary fails: its rules shown are the list's,
+    /// and "Edit all" says they could not be read rather than waiting.
+    @Test func editAllAfterAFailedOpeningReadSaysSo() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a])
+        await model.select("d-a")
+        #expect(model.selected?.id == "d-a")
+        #expect(!model.rulesAreIn)
+        #expect(model.rulesProblem != nil, "a read that failed is shown as \"Waiting…\"")
+        await model.select("d-a")                                  // Try again
+        #expect(model.rulesAreIn)
+        #expect(model.rulesProblem == nil)
+    }
 }

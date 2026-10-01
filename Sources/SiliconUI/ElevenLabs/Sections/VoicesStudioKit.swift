@@ -150,9 +150,9 @@ final class VoicesStudioActions {
         slot.map { "\(operationID)#\($0)" } ?? operationID
     }
 
-    /// Whether `operationID` is running right now.
-    func isRunning(_ operationID: String) -> Bool {
-        runners[operationID]?.isRunning ?? false
+    /// Whether `operationID` (on `slot`'s runner, when one is given) is running right now.
+    func isRunning(_ operationID: String, slot: String? = nil) -> Bool {
+        runners[Self.key(operationID, slot)]?.isRunning ?? false
     }
 
     /// Every runner of this screen that is running or waiting for its question to be answered.

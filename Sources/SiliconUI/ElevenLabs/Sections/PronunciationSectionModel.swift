@@ -262,6 +262,18 @@ final class PronunciationSectionModel {
     /// Whether the open dictionary's rules may be copied into the editor.
     var rulesAreIn: Bool { selected != nil && rulesIn == selected?.id }
 
+    /// Why the open dictionary's rules are not in, once nothing is reading them any more: the
+    /// fetch after its last change failed, or the read that opened it did. "Edit all" then says
+    /// so, beside a Try again (a fresh read of the dictionary), instead of waiting for a read
+    /// that is not coming. Nil while the rules are in, or while either read is still on its way.
+    var rulesProblem: String? {
+        guard let id = selected?.id, !rulesAreIn else { return nil }
+        let operation = "get_pronunciation_dictionary_metadata"
+        let afterChange = VoicesStudioActions.afterChange(of: id)
+        guard !actions.isRunning(operation), !actions.isRunning(operation, slot: afterChange) else { return nil }
+        return actions.problem(operation) ?? actions.problem(operation, slot: afterChange)
+    }
+
     /// After a change to dictionary `id`: fetch it again on a runner of its own (the read of a
     /// dictionary opened meanwhile is not abandoned); the screen takes it only while it is open.
     private func refetch(_ id: String) async {
