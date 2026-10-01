@@ -209,13 +209,20 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             Task { @MainActor in self?.microphoneFellBehind(token) }
         }
         self.chunks = queue
-        // Committing by hand, the microphone commits every `commitEvery` seconds of audio too, as
-        // a file does, so ElevenLabs never commits on its own.
-        let commitEvery = config.commitStrategy == .manual ? context.transcription.commitEvery : nil
+        // Committing by hand, the microphone commits as it goes too, as a file does — at a quiet
+        // moment after `commitEvery` seconds, at `commitCap` at the latest — so ElevenLabs never
+        // commits on its own.
+        let handTiming = config.commitStrategy == .manual ? context.transcription : nil
+        let pcm = config.audioFormat.isPCM
+        let bytesPerSecond = config.audioFormat.bytesPerSecond ?? 32_000
         sender = Task.detached {
             for await chunk in queue.chunks {
                 try? await stream.sendAudio(chunk)
-                if let commitEvery, stream.secondsSinceCommit >= commitEvery { try? await stream.commit() }
+                if let handTiming, handTiming.commitsAfter(
+                    chunk, pcm: pcm, secondsSinceCommit: stream.secondsSinceCommit, bytesPerSecond: bytesPerSecond
+                ) {
+                    try? await stream.commit()
+                }
             }
         }
         phase = .live
@@ -348,7 +355,10 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             }
             sentSeconds += Double(chunk.count) / bytesPerSecond
             fileProgress = (sentSeconds, total)
-            if stream.secondsSinceCommit >= timing.commitEvery {
+            if timing.commitsAfter(
+                chunk, pcm: converter.target.isPCM, secondsSinceCommit: stream.secondsSinceCommit,
+                bytesPerSecond: Int(bytesPerSecond)
+            ) {
                 try? await stream.commit()
             }
             try? await Task.sleep(for: timing.filePace)

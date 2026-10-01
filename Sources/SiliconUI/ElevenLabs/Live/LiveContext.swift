@@ -50,10 +50,15 @@ struct LiveContext {
 
 /// Live transcription's commits and Stop's wait for the last text.
 struct LiveTranscriptionTiming: Sendable {
-    /// Seconds of audio between commits when committing by hand. ElevenLabs recommends one every
-    /// 20–30 s, and commits on its own after about 36 s of audio — which would be a committed
-    /// transcript nobody asked for, and so throw off the count Stop waits on.
+    /// Committing by hand, seconds of audio after a commit from which the next one is made at the
+    /// first quiet moment, so a word is not cut where that can be helped. ElevenLabs recommends one
+    /// every 20–30 s, and commits on its own after about 36 s of audio — which would be a
+    /// committed transcript nobody asked for, and so throw off the count Stop waits on.
     var commitEvery: Double = 20
+    /// …and the latest it is made, quiet or not, so a loud room still commits before ElevenLabs does.
+    var commitCap: Double = 28
+    /// A quiet moment: the last 100 ms sent below this RMS level (about −34 dBFS).
+    var quietLevel: Float = 0.02
     /// How fast a file is sent: a second of audio every this long.
     var filePace: Duration = .milliseconds(100)
     /// How long Stop waits for the last text at most.
@@ -61,6 +66,20 @@ struct LiveTranscriptionTiming: Sendable {
     /// Committing at pauses: after the first text that follows Stop's commit, how long nothing more
     /// must arrive — an automatic commit's text can land just before Stop's own.
     var finalQuiet: Duration = .milliseconds(750)
+
+    /// Whether to commit by hand right after `chunk` went, `secondsSinceCommit` after the last
+    /// commit: from `commitEvery` on at a quiet moment (`chunk`'s last 100 ms, 16-bit PCM, below
+    /// `quietLevel`; audio in another encoding is never taken as quiet), and at `commitCap` whatever.
+    func commitsAfter(_ chunk: Data, pcm: Bool, secondsSinceCommit: Double, bytesPerSecond: Int) -> Bool {
+        guard secondsSinceCommit >= commitEvery else { return false }
+        if secondsSinceCommit >= max(commitCap, commitEvery) { return true }
+        return pcm && LiveAudioLevel.tailRMS(ofPCM16: chunk, bytes: bytesPerSecond / 10) < quietLevel
+    }
+
+    /// The hand-commit choice, as the commit picker shows it.
+    var handCommitLabel: String {
+        "When I press Stop, and every \(Int(commitEvery))–\(Int(max(commitCap, commitEvery))) s at a quiet moment"
+    }
 }
 
 /// The app's one set of audio devices, made when a live screen first needs them.

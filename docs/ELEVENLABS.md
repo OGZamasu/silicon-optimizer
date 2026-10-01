@@ -659,8 +659,11 @@ last stretch was sent and billed, so it must reach the screen and the export. Co
 (always for a file), every commit is answered by one committed transcript, in order, so Stop waits
 for the answer to its own commit, the last one, and then 0.75 s of quiet (a duplicate answer, or
 one sent unasked, cannot stand in for it) — not the first text after it, which can be the
-late answer to an earlier commit (a file commits every 20 s of audio, and so does the microphone
-when committing by hand, so ElevenLabs never commits on its own after its ~36 s). Committing at
+late answer to an earlier commit. A file, and the microphone when committing by hand, commit as they
+go: at the first quiet moment (the last 100 ms sent below about −34 dBFS) once 20 s of audio have
+gone since the last commit, so a word is not cut where that can be helped, and at 28 s at the latest,
+so a loud room still commits before ElevenLabs commits on its own (~36 s). The commit picker says so:
+"When I press Stop, and every 20–28 s at a quiet moment". Committing at
 pauses, ElevenLabs' own commits cannot be counted: Stop waits for the first text after its commit
 and then for 0.75 s of quiet, so an automatic commit's text landing just before Stop's does not end
 the wait. Either way the wait is 4 s at most; if it runs out with text still owed, the outcome says
