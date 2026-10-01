@@ -118,7 +118,7 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_workspace_webhook_route":
-                await signals.wait(for: "other editor open")
+                try await signals.wait(for: "other editor open")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
                 return .json(list)
@@ -152,12 +152,12 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_workspace_webhook_route":
-                await signals.wait(for: "edit asked")
+                try await signals.wait(for: "edit asked")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
                 if signals.note("list") == 1 {
                     signals.note("edit asked")
-                    await signals.wait(for: "listed after the save")
+                    try await signals.wait(for: "listed after the save")
                 } else {
                     signals.note("listed after the save")
                 }
@@ -196,12 +196,12 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_workspace_webhook_route":
-                await signals.wait(for: "edit asked")
+                try await signals.wait(for: "edit asked")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
                 if signals.note("list") == 1 {                     // Edit on w2
                     signals.note("edit asked")
-                    await signals.wait(for: "refreshed")
+                    try await signals.wait(for: "refreshed")
                     return .json(old)
                 }
                 signals.note("refreshed")                           // the save's refresh
@@ -407,7 +407,7 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "create_public_template_run":
-                await signals.wait(for: "other template open")
+                try await signals.wait(for: "other template open")
                 return .json(["id": "run-of-slow", "status": "pending", "version_id": "v1"])
             case "get_public_template":
                 return .json(template(signals.note("get") == 1 ? "tmpl-two" : "tmpl-slow"))

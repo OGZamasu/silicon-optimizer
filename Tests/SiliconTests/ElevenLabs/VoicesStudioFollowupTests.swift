@@ -99,9 +99,13 @@ struct VoicesStudioFollowupTests {
         /// than any step takes, so the answer it holds is never let go early. (Five seconds was
         /// not: under a load average near 100 a test took longer than that to note its signal,
         /// and the held answer arrived first.)
-        func wait(for name: String) async {
+        ///
+        /// A held request that is abandoned (its task cancelled, as a runner does when it is
+        /// asked again) lets go at once, as URLSession would: the client has two connection
+        /// slots, and a held request ignoring cancellation would keep one of them.
+        func wait(for name: String) async throws {
             let deadline = ContinuousClock.now + .seconds(90)
-            while !has(name), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+            while !has(name), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         }
     }
 
@@ -115,14 +119,14 @@ struct VoicesStudioFollowupTests {
             let path = request.url.path
             switch request.operationID {
             case "delete_sample":
-                await signals.wait(for: "refetch v-a")
+                try await signals.wait(for: "refetch v-a")
                 return .json(["status": "ok"])
             case "edit_voice":
                 return .json(["status": "ok"])
             case "get_voice_by_id" where path.hasSuffix("/v-a"):
                 if signals.note("get v-a") == 1 { return .json(VoicesStudioFakes.voice("v-a", "Voice A")) }
                 signals.note("refetch v-a")
-                await signals.wait(for: "refetch v-b")
+                try await signals.wait(for: "refetch v-b")
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed"))
             case "get_voice_by_id" where path.hasSuffix("/v-b"):
                 signals.note("refetch v-b")
@@ -169,14 +173,14 @@ struct VoicesStudioFollowupTests {
             let path = request.url.path
             switch request.operationID {
             case "add_rules":
-                await signals.wait(for: "refetch d-a")
+                try await signals.wait(for: "refetch d-a")
                 return .json(["id": "d-b", "version_id": "ver2"])
             case "patch_pronunciation_dictionary":
                 return .json(["id": "d-a"])
             case "get_pronunciation_dictionary_metadata" where path.hasSuffix("/d-a"):
                 if signals.note("get d-a") == 1 { return .json(Self.dictionary("d-a", name: "Dict A")) }
                 signals.note("refetch d-a")
-                await signals.wait(for: "refetch d-b")
+                try await signals.wait(for: "refetch d-b")
                 return .json(Self.dictionary("d-a", name: "Dict A renamed"))
             case "get_pronunciation_dictionary_metadata" where path.hasSuffix("/d-b"):
                 signals.note("refetch d-b")
@@ -221,7 +225,7 @@ struct VoicesStudioFollowupTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_voice":
-                await signals.wait(for: "typed")
+                try await signals.wait(for: "typed")
                 return .json(["status": "ok"])
             case "get_voice_by_id":
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed", labels: ["accent": "irish"]))
@@ -255,7 +259,7 @@ struct VoicesStudioFollowupTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_voice":
-                await signals.wait(for: "back on A")
+                try await signals.wait(for: "back on A")
                 return .json(["status": "ok"])
             case "get_voice_by_id" where request.url.path.hasSuffix("/v-b"):
                 return .json(VoicesStudioFakes.voice("v-b", "Voice B"))
@@ -289,7 +293,7 @@ struct VoicesStudioFollowupTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_pvc_voice":
-                await signals.wait(for: "typed")
+                try await signals.wait(for: "typed")
                 return .json(["voice_id": "v-p"])
             case "get_voice_by_id":
                 return .json(VoicesStudioFakes.voice("v-p", "Pro renamed", category: "professional",
@@ -324,7 +328,7 @@ struct VoicesStudioFollowupTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_voice":
-                await signals.wait(for: "dragged")
+                try await signals.wait(for: "dragged")
                 return .json(["status": "ok"])
             case "get_voice_by_id":
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed", settings: [
@@ -386,7 +390,7 @@ struct VoicesStudioFollowupTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_project":
-                await signals.wait(for: "typed")
+                try await signals.wait(for: "typed")
                 return .json(["project": saved])
             case "get_project_by_id":
                 return .json(saved)
@@ -425,7 +429,7 @@ struct VoicesStudioFollowupTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "dubbing_transcript_segment_update":
-                await signals.wait(for: "typed")
+                try await signals.wait(for: "typed")
                 return .json(["status": "ok"])
             case "dubbing_transcript_get":
                 return .json(["segments": [Self.segment("s1", "Hello there"), Self.segment("s2", "World")]])

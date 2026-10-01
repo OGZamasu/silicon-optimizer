@@ -53,7 +53,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["status": "ok"])
             case "get_voice_by_id":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(VoicesStudioFakes.voice("v-a", "Voice A"))            // as before the save
                 }
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed"))       // after it
@@ -92,7 +92,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["status": "ok"])
             case "get_voice_by_id":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings))
                 }
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A", settings: saved))
@@ -127,7 +127,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["project": renamed])
             case "get_project_by_id":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(first)
                 }
                 return .json(renamed)
@@ -161,7 +161,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["order_id": "o-a"])
             case "public_get_order":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(order("Old name"))
                 }
                 return .json(order("New name"))
@@ -198,7 +198,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["id": "d-a"])
             case "get_pronunciation_dictionary_metadata":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Old name"))
                 }
                 return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "New name"))
@@ -239,7 +239,7 @@ struct VoicesStudioStaleValueTests {
             case "edit_voice", "edit_voice_settings":
                 return .json(["status": "ok"])
             case "get_voice_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                if signals.note("get") == 1 { try await signals.wait(for: "tried") }
                 return .json(fresh)
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -279,7 +279,7 @@ struct VoicesStudioStaleValueTests {
             case "edit_pvc_voice":
                 return .json(["voice_id": "v-p"])
             case "get_voice_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                if signals.note("get") == 1 { try await signals.wait(for: "tried") }
                 return .json(VoicesStudioFakes.voice("v-p", "Pro", category: "professional", labels: ["accent": "irish"]))
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -319,7 +319,7 @@ struct VoicesStudioStaleValueTests {
             case "update_pronunciation_dictionaries":
                 return .json(["status": "ok"])
             case "get_project_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                if signals.note("get") == 1 { try await signals.wait(for: "tried") }
                 return .json(fresh)
             case "get_project_snapshots":
                 return .json(["snapshots": []])
@@ -363,7 +363,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["id": "d-b"])
             case "get_pronunciation_dictionary_metadata":
                 // Only B's opening read is held; the fetch after a rename answers at once.
-                if signals.note("get") == 1 { await signals.wait(for: "checked") }
+                if signals.note("get") == 1 { try await signals.wait(for: "checked") }
                 return .json(VoicesStudioFollowupTests.dictionary("d-b", name: "Dict B"))
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -430,7 +430,7 @@ struct VoicesStudioStaleValueTests {
             case "update_pronunciation_dictionaries":
                 return .json(["status": "ok"])
             case "get_project_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "second sent") }
+                if signals.note("get") == 1 { try await signals.wait(for: "second sent") }
                 return .json(after)
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -471,7 +471,7 @@ struct VoicesStudioStaleValueTests {
             case "add_rules":
                 return .json(["id": "d-a", "version_id": "ver2"])
             case "get_pronunciation_dictionary_metadata":
-                await signals.wait(for: "tried to copy")
+                try await signals.wait(for: "tried to copy")
                 return .json(added)
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -554,7 +554,7 @@ struct VoicesStudioStaleValueTests {
             case "get_voice_by_id":
                 switch signals.note("get") {
                 case 1:
-                    await signals.wait(for: "refetch failed")
+                    try await signals.wait(for: "refetch failed")
                     return .json(VoicesStudioFakes.voice("v-a", "Voice A"))
                 case 2:
                     return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
@@ -591,7 +591,7 @@ struct VoicesStudioStaleValueTests {
             let path = request.url.path
             switch request.operationID {
             case "public_update_order":
-                await signals.wait(for: "reopened")
+                try await signals.wait(for: "reopened")
                 return .json(["order_id": "o-a"])
             case "public_get_order" where path.hasSuffix("/o-b"):
                 return .json(["order_id": "o-b", "name": "B", "state": "open", "sandbox": false, "items": []])
@@ -599,7 +599,7 @@ struct VoicesStudioStaleValueTests {
                 switch signals.note("get a") {
                 case 1:
                     signals.note("reopened")
-                    await signals.wait(for: "refetched")
+                    try await signals.wait(for: "refetched")
                     return .json(order("Old name"))
                 case 2:
                     signals.note("refetched")
@@ -860,5 +860,49 @@ struct VoicesStudioStaleValueTests {
         signals.note("checked")
         try await changing.value
         try await locking.value
+    }
+
+    // MARK: - Round 4: held requests let go when abandoned
+
+    /// Polls `condition` for up to `limit`; true as soon as it holds.
+    func within(_ limit: Duration, _ condition: @MainActor () -> Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while ContinuousClock.now < deadline {
+            if condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    /// Two reads held by the fake are abandoned in turn ("Try again" pressed three times): each
+    /// abandoned read lets go of its connection, as URLSession does, so the third read is sent
+    /// at once. (The client allows two at a time; held reads that ignored cancellation kept
+    /// both, and the third waited for the fake's backstop.)
+    @Test func abandonedHeldReadsLetGoOfTheirConnections() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_voice_by_id":
+                if signals.note("get") <= 2 { try await signals.wait(for: "never") }
+                return .json(VoicesStudioFakes.voice("v-a", "Voice A"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
+        model.load(rows: [a], selected: a)
+        let first = Task { await model.reloadSelected() }
+        try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 1 }
+        let second = Task { await model.reloadSelected() }
+        try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 2 }
+        let third = Task { await model.reloadSelected() }
+        let sent = try await within(.seconds(15)) { fixture.sent("get_voice_by_id").count == 3 }
+        signals.note("never")
+        await first.value
+        await second.value
+        await third.value
+        #expect(sent, "the third read waited for connections held by abandoned reads")
     }
 }

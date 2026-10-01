@@ -45,11 +45,12 @@ final class VoicesStudioHeldRequests: @unchecked Sendable {
     /// Lets every held request (and every later one) through.
     func release() { lock.withLock { released = true } }
 
-    /// Waits until released, with a 90 s backstop for a test that never releases.
-    func wait() async {
+    /// Waits until released, with a 90 s backstop for a test that never releases — or until the
+    /// request is abandoned (cancelled), when it lets go at once, as URLSession would.
+    func wait() async throws {
         let deadline = ContinuousClock.now + .seconds(90)
         while !lock.withLock({ released }), ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
+            try await Task.sleep(for: .milliseconds(5))
         }
     }
 }
@@ -78,7 +79,7 @@ struct VoicesStudioFixture {
         transport = FakeElevenLabsTransport { request in
             let reply = routes.next(request.operationID)
             let address = request.url.absoluteString
-            if keys.contains(where: { address.contains($0) }) { await held.wait() }
+            if keys.contains(where: { address.contains($0) }) { try await held.wait() }
             return reply
         }
         var limits = ElevenLabsClient.Limits()
