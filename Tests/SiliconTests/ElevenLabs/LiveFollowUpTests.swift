@@ -35,4 +35,55 @@ struct LiveFollowUpTests {
         #expect(rig.connector.requests.count == 1)
         await screen.end()
     }
+
+    /// A file that is not audio is found out before anything opens: no socket, nothing billed.
+    @Test(arguments: ["not audio at all", ""])
+    func aFileThatIsNotAudioOpensNoSocket(contents: String) async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-live-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let url = folder.appendingPathComponent("talk.wav")
+        try Data(contents.utf8).write(to: url)
+        let rig = LiveRig(server: LiveScreenTests.transcriptionServer())
+        defer { rig.clean() }
+        let screen = LiveTranscriptionModel(context: rig.context)
+        screen.source = .file
+        screen.file = url
+        await screen.start()
+        await rig.until { screen.phase == .ended }
+        #expect(rig.connector.requests.isEmpty, "a socket was opened for a file that is not audio")
+        guard case .notStarted(let why) = screen.outcome else {
+            Issue.record("expected nothing started, got \(String(describing: screen.outcome))")
+            return
+        }
+        #expect(why.contains("talk.wav"))
+        #expect(why.contains("nothing was sent"))
+    }
+
+    /// Stop pressed while a (slow) file is read: nothing opens afterwards.
+    @Test func aStartStoppedWhileItsFileIsReadOpensNothing() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-live-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let url = folder.appendingPathComponent("long.wav")
+        let samples = (0..<Int(60 * 16_000)).map { Float(0.3 * sin(2 * Double.pi * 200 * Double($0) / 16_000)) }
+        try MicRecorder.wavData(samples: samples, sampleRate: 16_000).write(to: url)
+        let rig = LiveRig(server: LiveScreenTests.transcriptionServer())
+        defer { rig.clean() }
+        let screen = LiveTranscriptionModel(context: rig.context)
+        screen.source = .file
+        screen.file = url
+        let starting = Task { await screen.start() }
+        await rig.until { screen.phase != .idle }
+        // Still reading the minute-long file (it is read whole before anything opens).
+        try #require(screen.phase == .connecting)
+        await screen.stop()
+        await starting.value
+        #expect(screen.phase == .ended)
+        #expect(screen.outcome == .notStarted("Cancelled before any audio was sent."))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(rig.connector.requests.isEmpty)
+    }
 }

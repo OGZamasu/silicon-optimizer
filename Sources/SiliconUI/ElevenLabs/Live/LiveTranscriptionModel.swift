@@ -91,6 +91,9 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     @ObservationIgnored private var nextSegmentID = 0
     /// The devices were touched this session and must be let go when it ends.
     @ObservationIgnored private var holdsAudio = false
+    /// The Start in progress, so one that was stopped (and perhaps started again) while it
+    /// read its file or asked for the microphone does nothing more.
+    @ObservationIgnored private var starting = UUID()
     @ObservationIgnored private var awaitingFinal = false
     @ObservationIgnored private var finalArrived = false
 
@@ -151,13 +154,37 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         let file = file
         resetSession()
         phase = .connecting
-        if source == .microphone {
+        let attempt = UUID()
+        starting = attempt
+        guard let converter = LiveCaptureConverter(target: config.audioFormat, chunkMilliseconds: source == .file ? 1_000 : 100) else {
+            end(.notStarted("This app cannot send \(config.audioFormat)."))
+            return
+        }
+        // A file is read whole before anything opens: a file that is not audio costs nothing.
+        var decodedFile: (chunks: [Data], seconds: Double)?
+        switch source {
+        case .microphone:
             guard await context.audio().requestMicrophone() else {
                 end(.notStarted("The microphone is not allowed for this app. Allow it in System Settings → Privacy & Security → Microphone."))
                 return
             }
-            guard phase == .connecting else { return }
+        case .file:
+            guard let file else { return }
+            do {
+                let (chunks, seconds) = try await Task.detached { try LiveAudioFile.chunks(of: file, with: converter) }.value
+                decodedFile = (chunks, seconds)
+            } catch {
+                guard starting == attempt, phase == .connecting else { return }
+                end(.notStarted("“\(file.lastPathComponent)” could not be read as audio, so nothing was sent: \(ElevenLabsRedaction.redact(error.localizedDescription))"))
+                return
+            }
+            if decodedFile?.chunks.isEmpty != false {
+                guard starting == attempt, phase == .connecting else { return }
+                end(.notStarted("“\(file.lastPathComponent)” has no audio in it, so nothing was sent."))
+                return
+            }
         }
+        guard starting == attempt, phase == .connecting else { return }
         guard let realtime = context.realtime() else {
             end(.notStarted(ElevenLabsError.notLinked.description))
             return
@@ -171,9 +198,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             if guardian.isCurrent(token) { end(LiveOutcome.failedToStart(error)) }
             return
         }
-        guard guardian.isCurrent(token), phase == .connecting,
-              let converter = LiveCaptureConverter(target: config.audioFormat, chunkMilliseconds: source == .file ? 1_000 : 100)
-        else {
+        guard guardian.isCurrent(token), phase == .connecting else {
             await stream.close()
             return
         }
@@ -198,7 +223,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
                 await close(.mayHaveBeenBilled("The microphone could not start: \(ElevenLabsRedaction.redact(error.localizedDescription))."))
             }
         case .file:
-            if let file { Task { await send(file: file, converter: converter, token: token) } }
+            if let decodedFile { Task { await send(decodedFile.chunks, total: decodedFile.seconds, converter: converter, token: token) } }
         }
     }
 
@@ -279,16 +304,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
 
     // MARK: Session
 
-    private func send(file: URL, converter: LiveCaptureConverter, token: UUID) async {
-        let decoded: [Data]
-        let total: Double
-        do {
-            (decoded, total) = try await Task.detached { try LiveAudioFile.chunks(of: file, with: converter) }.value
-        } catch {
-            guard guardian.isCurrent(token) else { return }
-            await close(.mayHaveBeenBilled("The file could not be read: \(ElevenLabsRedaction.redact(error.localizedDescription))."))
-            return
-        }
+    private func send(_ decoded: [Data], total: Double, converter: LiveCaptureConverter, token: UUID) async {
         fileProgress = (0, total)
         var sentSeconds = 0.0
         var sinceCommit = 0.0
