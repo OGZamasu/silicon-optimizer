@@ -4,7 +4,7 @@ import Testing
 @testable import SiliconUI
 
 /// The shell critic's last nits, taken after the merge: the key file is read through one
-/// descriptor.
+/// descriptor, and a refused second Connect leaves no stale line once the first works.
 @Suite("ElevenLabs shell follow-ups")
 @MainActor
 struct ShellFollowupTests {
@@ -89,5 +89,31 @@ struct ShellFollowupTests {
             try? handle.write(contentsOf: Data(repeating: 0x61, count: 300 * 1024))
         }
         #expect(Self.problem(result)?.contains("too big") == true)
+    }
+
+    // MARK: - Connect
+
+    /// Return in the key field while a key is being checked: the second Connect is refused with
+    /// a line saying so — and once the first one works, that line is gone, not left in red
+    /// under a connected key.
+    @Test func aRefusedSecondConnectLeavesNoLineOnceTheFirstWorks() async throws {
+        let gate = ShellRunnerGenerationTests.Gate()
+        let (model, transport, store) = ShellSettingsTests.model(linkedKey: nil) { request in
+            await gate.wait()
+            return ShellSettingsTests.accountAnswer(request)
+        }
+        defer { ShellSettingsTests.clean(model, transport) }
+        let connection = model.elevenLabsPane.connection
+        let connecting = Task { await connection.connect(key: ShellSettingsTests.candidate, model: model) }
+        try await ShellExplorerTests.waitUntil { transport.requests.count >= 1 }
+
+        #expect(await connection.connect(key: ShellSettingsTests.candidate, model: model) == false)
+        #expect(connection.failure == ElevenLabsConnectionModel.alreadyCheckingMessage)
+
+        gate.open()
+        #expect(await connecting.value)
+        #expect(connection.connected)
+        #expect(connection.failure == nil, "still showing: \(connection.failure ?? "")")
+        #expect(store.key == ShellSettingsTests.candidate)
     }
 }

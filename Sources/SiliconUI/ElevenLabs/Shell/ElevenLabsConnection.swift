@@ -68,6 +68,9 @@ final class ElevenLabsConnectionModel {
         do {
             _ = try await model.linkElevenLabs(key: key, region: region)
             model.elevenLabsPane.reset()
+            // A second Connect refused meanwhile (Return in the key field) said "already being
+            // checked"; that is over now.
+            failure = nil
             connected = true
             return true
         } catch ElevenLabsError.cancelled {
