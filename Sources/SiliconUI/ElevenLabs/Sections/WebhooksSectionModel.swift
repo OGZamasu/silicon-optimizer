@@ -133,6 +133,7 @@ final class WebhooksSectionModel {
                     + "to \(draft.url). Its signing secret is shown once."
               ) != nil else { return }
         draft = WebhookDraft()
+        changesLanded += 1
         await refresh()
     }
 
@@ -147,12 +148,17 @@ final class WebhooksSectionModel {
     /// was pressed is dropped, so the editor never opens on the wrong webhook.
     @ObservationIgnored private var wantedEdit: String?
 
+    /// Changes (create, save, delete) that have answered: the list each refreshes is newer than
+    /// one an Edit asked for before it.
+    @ObservationIgnored private var changesLanded = 0
+
     /// Opens the editor, listing the webhooks with their usages first so the events shown (and
     /// any change to them) start from what ElevenLabs holds. When that list cannot be read the
     /// editor is not opened: a save sends the name and whether the webhook is off, and the row
     /// drawn earlier may be older than ElevenLabs (turned off on the website since, say).
     func startEditing(_ webhook: WorkspaceWebhook) async {
         wantedEdit = webhook.id
+        let changesBefore = changesLanded
         // On a runner of its own: a list refresh (after a save, say) must not abandon this read
         // and leave the editor unopened. A newer Edit replaces it (and `wantedEdit` drops it).
         let json = await actions.perform(
@@ -160,9 +166,14 @@ final class WebhooksSectionModel {
         )?.voicesStudioJSON
         guard wantedEdit == webhook.id else { return }
         if let json {
-            webhooks = (json["webhooks"].arrayValue ?? []).compactMap(WorkspaceWebhook.init(json:))
-            includeUsages = true
-            guard let fresh = webhooks.first(where: { $0.id == webhook.id }) else {
+            let listed = (json["webhooks"].arrayValue ?? []).compactMap(WorkspaceWebhook.init(json:))
+            // A change that answered after this read was asked has refreshed the list since: the
+            // list read here is older, and only opens the editor.
+            if changesLanded == changesBefore {
+                webhooks = listed
+                includeUsages = true
+            }
+            guard let fresh = listed.first(where: { $0.id == webhook.id }) else {
                 // Gone since the list was drawn: nothing to edit, and the old entry is stale.
                 edit(nil)
                 problems = ["“\(webhook.name)” is no longer in the workspace's webhooks."]
@@ -234,6 +245,7 @@ final class WebhooksSectionModel {
         // Close the editor only if it is still this webhook's, and no other webhook's editor
         // has been asked for meanwhile (closing would drop that request).
         if editing?.id == webhook.id, wantedEdit == webhook.id { edit(nil) }
+        changesLanded += 1
         await refresh()
     }
 
@@ -244,6 +256,7 @@ final class WebhooksSectionModel {
                 : "\(webhook.url) stops receiving events, and \(webhook.usages.count) things using it lose their notifications."
         ) != nil else { return }
         if editing?.id == webhook.id, wantedEdit == webhook.id { edit(nil) }
+        changesLanded += 1
         await refresh()
     }
 

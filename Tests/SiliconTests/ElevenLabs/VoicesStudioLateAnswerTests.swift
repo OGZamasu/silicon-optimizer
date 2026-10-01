@@ -180,6 +180,48 @@ struct VoicesStudioLateAnswerTests {
         #expect(model.problems.isEmpty, "\(model.problems)")
     }
 
+    /// Webhook A renamed and saved; Edit pressed on B while the save is on its way, B's read
+    /// answering only after the save's own list refresh. B's editor opens, and A's row keeps the
+    /// saved name — the older list from B's read does not replace the newer one.
+    @Test func anEditReadOlderThanASavesRefreshDoesNotPutTheOldListBack() async throws {
+        let signals = VoicesStudioFollowupTests.Signals()
+        func list(_ aName: String) -> JSONValue {
+            var a = Self.webhook("w-a")
+            if case .object(var fields) = a { fields["name"] = .string(aName); a = .object(fields) }
+            return ["webhooks": [a, Self.webhook("w2")]]
+        }
+        let old = list("Hook w-a"), new = list("A renamed")
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_workspace_webhook_route":
+                await signals.wait(for: "edit asked")
+                return .json(["status": "ok"])
+            case "get_workspace_webhooks_route":
+                if signals.note("list") == 1 {                     // Edit on w2
+                    signals.note("edit asked")
+                    await signals.wait(for: "refreshed")
+                    return .json(old)
+                }
+                signals.note("refreshed")                           // the save's refresh
+                return .json(new)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = WebhooksSectionModel(environment: fixture.environment)
+        let a = try #require(WorkspaceWebhook(json: Self.webhook("w-a")))
+        let other = try #require(WorkspaceWebhook(json: Self.webhook("w2")))
+        model.load(webhooks: [a, other])
+        model.edit(a, eventsKnown: true)
+        model.draft.name = "A renamed"
+        let saving = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
+        await model.startEditing(other)
+        await saving.value
+        #expect(model.editing?.id == "w2")
+        #expect(model.webhooks.first { $0.id == "w-a" }?.name == "A renamed", "the older list put A's old name back")
+    }
+
     // MARK: Studio
 
     /// A chapter saved after another project was opened is not reopened under that project.
