@@ -36,6 +36,24 @@ final class VoicesStudioRoutes: @unchecked Sendable {
     }
 }
 
+/// Requests a test holds back until it says so — the stale answer of a race, arriving when the
+/// test has done what must happen first, however loaded the machine is.
+final class VoicesStudioHeldRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+
+    /// Lets every held request (and every later one) through.
+    func release() { lock.withLock { released = true } }
+
+    /// Waits until released, with a 90 s backstop for a test that never releases.
+    func wait() async {
+        let deadline = ContinuousClock.now + .seconds(90)
+        while !lock.withLock({ released }), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
 /// A client over the public fakes, and the section environment built on it.
 @MainActor
 struct VoicesStudioFixture {
@@ -47,16 +65,20 @@ struct VoicesStudioFixture {
     let sink = TemporaryFileSink()
     let client: ElevenLabsClient
     let voices: ElevenLabsVoiceDirectory
+    let held = VoicesStudioHeldRequests()
 
-    /// - Parameter late: Ids whose requests are answered late: a request whose address holds
-    ///   one of them waits that long for its scripted reply — the stale answer of a race.
-    init(_ replies: [String: [FakeElevenLabsTransport.Reply]] = [:], late: [String: Duration] = [:]) {
+    /// - Parameter held: Ids whose requests are answered late: a request whose address holds
+    ///   one of them waits for `release()` before its scripted reply — the stale answer of a
+    ///   race, let go once the test has done what must come first (not after a delay, which a
+    ///   busy machine can outrun).
+    init(_ replies: [String: [FakeElevenLabsTransport.Reply]] = [:], held keys: [String] = []) {
         let routes = VoicesStudioRoutes(replies)
         self.routes = routes
+        let held = held
         transport = FakeElevenLabsTransport { request in
-            var reply = routes.next(request.operationID)
+            let reply = routes.next(request.operationID)
             let address = request.url.absoluteString
-            if let delay = late.first(where: { address.contains($0.key) })?.value { reply.delay = delay }
+            if keys.contains(where: { address.contains($0) }) { await held.wait() }
             return reply
         }
         var limits = ElevenLabsClient.Limits()
@@ -103,7 +125,11 @@ struct VoicesStudioFixture {
         sent(operationID).last.map { String(decoding: $0.body, as: UTF8.self) } ?? ""
     }
 
+    /// Lets the held requests through.
+    func release() { held.release() }
+
     func clean() {
+        held.release()
         transport.removeTemporaryFiles()
         sink.removeAll()
     }
@@ -135,10 +161,13 @@ struct VoicesStudioScratch {
     }
 }
 
-/// Waits for a condition the main actor will make true, failing the test after a while.
+/// Waits for a condition the main actor will make true, failing the test after a while. The
+/// limit is a backstop for a condition that never comes, not a measure of how long a step
+/// should take: on a machine under heavy load a step takes seconds, so it is generous.
 @MainActor
 func voicesStudioWait(_ condition: @MainActor () -> Bool) async throws {
-    for _ in 0..<500 {
+    let deadline = ContinuousClock.now + .seconds(60)
+    while ContinuousClock.now < deadline {
         if condition() { return }
         try await Task.sleep(for: .milliseconds(10))
     }

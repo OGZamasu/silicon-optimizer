@@ -222,28 +222,51 @@ final class PronunciationSectionModel {
         }
         if selected?.id != id {
             selected = dictionaries.first { $0.id == id }
+            // The rename field is this dictionary's from now on: it held the previous one's name,
+            // which "Rename" would have sent to this one.
+            rename = selected?.name ?? ""
+            rulesIn = nil
             marked = []
             download = nil
         }
         await fetch(id)
     }
 
+    /// Changes to each dictionary that have answered, by id. A read asked before one of them
+    /// answered is older than it — even when it answers later, on another runner — and is
+    /// dropped whole: it would put the old name and rules back on screen.
+    @ObservationIgnored private var landed: [String: Int] = [:]
+
     /// Fetches one dictionary into the list, and onto the screen only while it is still the
     /// chosen one — so a change that finishes after another was chosen does not take it back.
     private func fetch(_ id: String, slot: String? = nil) async {
+        let changesBefore = landed[id, default: 0]
         guard let json = await actions.perform(
             "get_pronunciation_dictionary_metadata", ["pronunciation_dictionary_id": .string(id)], quietly: true,
             slot: slot
-        )?.voicesStudioJSON, let dictionary = PronunciationDictionary(json: json) else { return }
+        )?.voicesStudioJSON, let dictionary = PronunciationDictionary(json: json),
+              landed[id, default: 0] == changesBefore else { return }
         if let index = dictionaries.firstIndex(where: { $0.id == id }) { dictionaries[index] = dictionary }
         guard wantedDictionary == id else { return }
         selected = dictionary
         rename = dictionary.name
+        rulesIn = id
     }
+
+    /// The dictionary whose rules on screen are what ElevenLabs holds: read since its last
+    /// change answered. Between a change answering and the fetch after it, the rules shown are
+    /// the ones from before, and "Edit all in the editor" would copy them for a Replace that
+    /// undoes the change.
+    private(set) var rulesIn: String?
+
+    /// Whether the open dictionary's rules may be copied into the editor.
+    var rulesAreIn: Bool { selected != nil && rulesIn == selected?.id }
 
     /// After a change to dictionary `id`: fetch it again on a runner of its own (the read of a
     /// dictionary opened meanwhile is not abandoned); the screen takes it only while it is open.
     private func refetch(_ id: String) async {
+        landed[id, default: 0] += 1
+        if rulesIn == id { rulesIn = nil }
         await fetch(id, slot: VoicesStudioActions.afterChange(of: id))
     }
 
@@ -336,9 +359,10 @@ final class PronunciationSectionModel {
         await refetch(dictionary.id)
     }
 
-    /// Puts the dictionary's current rules in the editor, to change and replace them.
+    /// Puts the dictionary's current rules in the editor, to change and replace them — only once
+    /// they are ElevenLabs' current ones (`rulesAreIn`).
     func editCurrentRules() {
-        guard let dictionary = selected, !dictionary.rules.isEmpty else { return }
+        guard rulesAreIn, let dictionary = selected, !dictionary.rules.isEmpty else { return }
         rules = dictionary.rules
     }
 
@@ -389,6 +413,7 @@ final class PronunciationSectionModel {
         self.selected = selected
         wantedDictionary = selected?.id
         rename = selected?.name ?? ""
+        rulesIn = selected?.id
         loadedOnce = true
     }
 }

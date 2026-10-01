@@ -254,6 +254,17 @@ struct CoreReviewFixesTests {
         }
     }
 
+    /// The `dynamic` exemption is the post-dial value's alone: `uui` has no `type`, so a
+    /// hand-typed `{"type": "dynamic", "data": …}` still has its payload masked.
+    @Test func aUUIPayloadIsMaskedWhateverTypeIsTypedBesideIt() {
+        let request: JSONValue = ["tool_config": ["params": ["transfers": [
+            ["uui": ["type": "dynamic", "data": "crm-case-9911-escalated"]],
+        ]]]]
+        let text = (try? ElevenLabsRedaction.maskingRequestSecrets(in: request, operationID: "add_tool_route")
+            .jsonString()) ?? ""
+        #expect(!text.contains("crm-case-9911"), "the UUI payload was shown: \(text)")
+    }
+
     @Test func anEnvironmentVariablesPlainValuesAreMaskedButItsReferencesStay() {
         let request: JSONValue = ["label": "backend", "values": [
             "production": "https://internal.example.com/?key=abc123", "staging": ["secret_id": "s-1"],

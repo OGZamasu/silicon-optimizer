@@ -84,9 +84,12 @@ struct VoicesProfessionalDetails: View {
         Card(title: "1 · Details", systemImage: "info.circle") {
             VoicesProfessionalFields(draft: $model.professional)
             HStack {
+                if let waiting = model.waitingForDetails {
+                    Text(waiting).font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Save details") { Task { await model.editProfessional() } }
-                    .disabled(model.actions.isRunning("edit_pvc_voice"))
+                    .disabled(model.actions.isRunning("edit_pvc_voice") || !model.detailsAreIn)
             }
         }
     }

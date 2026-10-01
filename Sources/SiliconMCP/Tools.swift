@@ -1523,10 +1523,20 @@ actor CalibrationCache {
     private var readAt: Date?
 
     func current(from client: ControlClient) async -> ControlAPI.JevCalibration? {
+        await current { try await client.get("/jev/calibration") as ControlAPI.JevCalibration }
+    }
+
+    /// A read whose `get_status` the client cancelled ends with nothing, and that says nothing
+    /// about this Mac: it is not remembered, or the cascade line would go missing for a minute.
+    func current(
+        reading read: @Sendable () async throws -> ControlAPI.JevCalibration
+    ) async -> ControlAPI.JevCalibration? {
         if let readAt, Date().timeIntervalSince(readAt) < Self.lifetime { return value }
-        value = try? await client.get("/jev/calibration") as ControlAPI.JevCalibration
+        let answer = try? await read()
+        guard !Task.isCancelled else { return answer }
+        value = answer
         readAt = Date()
-        return value
+        return answer
     }
 
     func forget() {

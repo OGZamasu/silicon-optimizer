@@ -114,7 +114,7 @@ final class ElevenLabsRunner: Identifiable {
     /// What a Cancel says once a request that is not a read may have gone out.
     static let cancelledAfterSendingMessage = "Cancelled. The request may already have been billed or performed."
     /// What a confirmed question says when the account or region changed while it was open.
-    static let accountChangedMessage =
+    nonisolated static let accountChangedMessage =
         "The ElevenLabs account or region changed while this question was open, so nothing was sent. Run it again to be asked anew."
     /// Plays a stream as it arrives; nil when not playing one.
     private(set) var streamPlayer: ElevenLabsStreamPlayer?
@@ -256,7 +256,7 @@ final class ElevenLabsRunner: Identifiable {
             // (A context's client closure hands back one client per account; the app's does.)
             let sessionEnded = context.pane.map { $0.epoch != runEpoch } ?? false
             guard !sessionEnded, let now = context.client(), now === client, now.region == client.region else {
-                return fail(.other(Self.accountChangedMessage))
+                return fail(.accountChanged)
             }
         }
 
@@ -470,6 +470,9 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
     case credentialUnavailable(String)
     /// Any other error answer from ElevenLabs: its HTTP status, and what it said.
     case api(status: Int, message: String)
+    /// A question was answered yes after the account or region changed: the runner sent
+    /// nothing (it stops before the request starts).
+    case accountChanged
     /// A local problem, or an answer that never came whole.
     case other(String)
 
@@ -493,13 +496,14 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
     }
 
     /// Whether this failure proves ElevenLabs did not act on the request: it was never sent (no
-    /// key, the arguments refused, the Keychain said no), or ElevenLabs refused it — a 401, a 403,
+    /// key, the arguments refused, the Keychain said no, the account changed while the question
+    /// was open), or ElevenLabs refused it — a 401, a 403,
     /// a 429 (a refusal before any work, as the client's retry rule has it) or another 4xx. A 408
     /// (the request timed out on its way in), a 5xx, a lost connection, a cancel after sending
     /// and anything without a status are left unknown: it may have been carried out.
     var provesNothingWasDone: Bool {
         switch self {
-        case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden, .rateLimited:
+        case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden, .rateLimited, .accountChanged:
             true
         case .api(let status, _):
             (400..<500).contains(status) && status != 408
@@ -513,6 +517,8 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
         switch self {
         case .notLinked:
             ElevenLabsError.notLinked.description
+        case .accountChanged:
+            ElevenLabsRunner.accountChangedMessage
         case .invalidArguments(let problems):
             ElevenLabsError.invalidArguments(problems).description
         case .keyRejected(let message):
