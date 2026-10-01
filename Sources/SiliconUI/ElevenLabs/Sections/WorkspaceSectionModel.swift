@@ -285,7 +285,10 @@ final class WorkspaceSectionModel {
                 consequence: "\(member.email) gets what a \(VoicesStudioFormat.words(seat).lowercased()) seat allows, "
                     + "from now on."
             )
-        ) != nil else { return }
+        ) != nil else {
+            await readMembersAfterUnknownOutcome()
+            return
+        }
         seatEdits[member.id] = nil
         // The member holds the seat sent from now on: the row says so at once, so its picker does
         // not start from the seat before (picking that one to go back would look like no change).
@@ -302,8 +305,20 @@ final class WorkspaceSectionModel {
                                        consequence: "\(member.email) can no longer use this workspace until unlocked.")
                 : VoicesStudioQuestion("Let \(member.email) back into the workspace?", button: "Unlock",
                                        consequence: "\(member.email) can use this workspace again.")
-        ) != nil else { return }
+        ) != nil else {
+            await readMembersAfterUnknownOutcome()
+            return
+        }
         if let index = members.firstIndex(where: { $0.id == member.id }) { members[index].isLocked = locked }
+        await refreshMembers()
+    }
+
+    /// A seat or lock change gave no answer, yet may have been carried out (a 5xx, a lost answer,
+    /// a cancel after sending): the member's row may be older than ElevenLabs — its picker
+    /// starting from a seat the member no longer has, so picking that one to go back would look
+    /// like no change, and its button offering the lock just made. The members are read again.
+    private func readMembersAfterUnknownOutcome() async {
+        guard actions.outcomeWasUnknown("update_workspace_member") else { return }
         await refreshMembers()
     }
 

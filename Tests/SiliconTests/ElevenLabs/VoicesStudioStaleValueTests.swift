@@ -1125,4 +1125,62 @@ struct VoicesStudioStaleValueTests {
         #expect(model.accounts.first?.keys.first?.isDisabled == true)
         #expect(model.problems == [ServiceAccountsSectionModel.lostAnswerMessage(key.name)], "\(model.problems)")
     }
+
+    /// The request body a fake received, as JSON.
+    nonisolated static func body(_ request: ElevenLabsRequest) -> JSONValue {
+        let data: Data = if case .data(let data) = request.body { data } else { Data() }
+        return (try? JSONValue(data: data)) ?? .null
+    }
+
+    /// A seat change and a lock, each carried out with its answer lost (a 500): the members are
+    /// read again after each, so the row shows the seat and the lock the member now has. (Before:
+    /// nothing was read; the row kept the seat from before — picking it to go back looked like no
+    /// change — and offered "Lock…" for a member just locked.) A refused change reads nothing.
+    @Test func aMembersSeatOrLockWhoseAnswerWasLostIsReadAgain() async throws {
+        final class Member: @unchecked Sendable {
+            let lock = NSLock()
+            var json: JSONValue
+            var refuseNext = false
+            init(_ json: JSONValue) { self.json = json }
+        }
+        let server = Member(VoicesStudioWorkspaceTests.member)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_workspace_member":
+                let body = Self.body(request)
+                return server.lock.withLock {
+                    if server.refuseNext {
+                        server.refuseNext = false
+                        return .jsonText(#"{"detail":{"status":"invalid","message":"Not allowed"}}"#, status: 422)
+                    }
+                    guard case .object(var fields) = server.json else { return .jsonText("{}", status: 500) }
+                    if let seat = body["workspace_seat_type"].stringValue { fields["seat_type"] = .string(seat) }
+                    if let locked = body["is_locked"].boolValue { fields["is_locked"] = .bool(locked) }
+                    server.json = .object(fields)
+                    return .jsonText(#"{"detail":"Internal error"}"#, status: 500)        // carried out; answer lost
+                }
+            case "get_workspace_members":
+                return .json([server.lock.withLock { server.json }])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        let row = try #require(WorkspaceMember(json: VoicesStudioWorkspaceTests.member))
+        model.load(members: [row])
+        model.seatEdits[row.id] = "workspace_admin"
+        try await answering(model.actions) { await model.changeSeat(row) }
+        #expect(fixture.sent("get_workspace_members").count == 1, "the members were not read again after a lost answer")
+        #expect(model.members.first?.seatType == "workspace_admin", "the row still shows the seat from before")
+        let current = try #require(model.members.first)
+        try await answering(model.actions) { await model.setLocked(current, true) }
+        #expect(fixture.sent("get_workspace_members").count == 2)
+        #expect(model.members.first?.isLocked == true, "the row still offers to lock a member just locked")
+        server.lock.withLock { server.refuseNext = true }
+        let locked = try #require(model.members.first)
+        try await answering(model.actions) { await model.setLocked(locked, false) }
+        #expect(fixture.sent("update_workspace_member").count == 3)
+        #expect(fixture.sent("get_workspace_members").count == 2, "a refused change was read again as if it may have landed")
+    }
 }
