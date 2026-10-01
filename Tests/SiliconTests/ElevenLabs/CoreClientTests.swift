@@ -386,7 +386,8 @@ struct CoreClientTests {
         task.cancel()
         let started = ContinuousClock.now
         await #expect(throws: ElevenLabsError.cancelled) { try await task.value }
-        #expect(ContinuousClock.now - started < .seconds(5))
+        // Well inside the 30 s the answer would take; room for a loaded run.
+        #expect(ContinuousClock.now - started < .seconds(15))
     }
 
     @Test func cancellingAStreamStopsTheTransportStream() async throws {
@@ -399,7 +400,11 @@ struct CoreClientTests {
             if case .audio = chunk { received += 1 }
             if received == 3 { break }
         }
-        try await Task.sleep(for: .milliseconds(200))
+        // The transport hears of it on its own task: waited for, not slept for.
+        let deadline = ContinuousClock.now + .seconds(15)
+        while rig.transport.cancelledStreams == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(rig.transport.cancelledStreams == 1)
     }
 

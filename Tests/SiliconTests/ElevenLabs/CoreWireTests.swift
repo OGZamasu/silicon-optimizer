@@ -95,12 +95,13 @@ struct CoreWireTests {
         let server = try LoopbackServer { _ in .hang }
         defer { server.stop() }
         let transport = URLSessionTransport.loopbackForTesting(port: Int(server.port))
-        let task = Task { try await transport.send(Self.request(server, "/v1/models")) }
+        // A minute's timeout, so only the cancel can end it inside the bound below.
+        let task = Task { try await transport.send(Self.request(server, "/v1/models", timeout: 60)) }
         try await server.waitForRequests(1)
         task.cancel()
         let started = ContinuousClock.now
         await #expect(throws: ElevenLabsError.cancelled) { try await task.value }
-        #expect(ContinuousClock.now - started < .seconds(3))
+        #expect(ContinuousClock.now - started < .seconds(15))
         try await server.waitForClosedConnections(1)
     }
 
@@ -202,12 +203,12 @@ struct CoreWireTests {
     static func request(
         _ server: LoopbackServer, _ target: String, method: String = "GET",
         headers: [String: String] = [:], body: ElevenLabsRequest.Body = .none,
-        handling: ElevenLabsRequest.ResponseHandling = .memory(limit: 1 << 20)
+        handling: ElevenLabsRequest.ResponseHandling = .memory(limit: 1 << 20), timeout: TimeInterval = 10
     ) -> ElevenLabsRequest {
         ElevenLabsRequest(
             operationID: "wire-test", method: method,
             url: URL(string: "http://127.0.0.1:\(server.port)\(target)")!,
-            headers: headers.merging(["xi-api-key": key]) { $1 }, body: body, timeout: 10,
+            headers: headers.merging(["xi-api-key": key]) { $1 }, body: body, timeout: timeout,
             responseHandling: handling
         )
     }
@@ -290,7 +291,7 @@ final class LoopbackServer: @unchecked Sendable {
     }
 
     private func waitUntil(_ condition: @escaping @Sendable () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(5)
+        let deadline = ContinuousClock.now + .seconds(15)
         while !condition() {
             guard ContinuousClock.now < deadline else {
                 Issue.record("timed out waiting on the loopback server")

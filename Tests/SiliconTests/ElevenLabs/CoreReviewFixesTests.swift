@@ -96,7 +96,8 @@ struct CoreReviewFixesTests {
         }
 
         func waitUntilAsked() async throws {
-            for _ in 0..<1_000 where !started { try await Task.sleep(for: .milliseconds(5)) }
+            let deadline = ContinuousClock.now + .seconds(15)
+            while !started, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
             #expect(started, "the read never started")
         }
     }

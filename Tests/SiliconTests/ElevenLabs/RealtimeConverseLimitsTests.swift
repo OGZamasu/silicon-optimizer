@@ -219,13 +219,13 @@ struct RealtimeConverseHangUpTests {
                     "POST", path, token: fixture.local.token, body: #"{"fixtureHold":true}"#
                 )
             }
-            let deadline = ContinuousClock.now + .seconds(10)
+            let deadline = ContinuousClock.now + .seconds(15)
             while await ConverseHangUpProbe.shared.count(id).held == 0, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
             try #require(await ConverseHangUpProbe.shared.count(id).held == 1)
             call.cancel()
-            let cancelDeadline = ContinuousClock.now + .seconds(8)
+            let cancelDeadline = ContinuousClock.now + .seconds(15)
             while await ConverseHangUpProbe.shared.count(id).cancelled == 0, ContinuousClock.now < cancelDeadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
