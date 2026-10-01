@@ -301,22 +301,25 @@ extension ElevenLabsSpeechStreamEvent {
 public final class ElevenLabsSpeechStream: @unchecked Sendable {
     public let config: ElevenLabsSpeechStreamConfig
     public let events: AsyncStream<ElevenLabsSpeechStreamEvent>
-    private let continuation: AsyncStream<ElevenLabsSpeechStreamEvent>.Continuation
+    private let continuation: ElevenLabsEventQueue<ElevenLabsSpeechStreamEvent>
     private let channel: ElevenLabsRealtimeChannel
     private let meter = UsageMeter()
     private let lock = NSLock()
     private var finished = false
 
-    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsSpeechStreamConfig) {
+    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsSpeechStreamConfig, waitingEvents: Int) {
         self.channel = channel
         self.config = config
-        (events, continuation) = AsyncStream<ElevenLabsSpeechStreamEvent>.makeStream(bufferingPolicy: .unbounded)
+        continuation = ElevenLabsEventQueue(capacity: waitingEvents, channel: channel)
+        events = continuation.stream
     }
 
     static func start(
-        on socket: any ElevenLabsSocket, config: ElevenLabsSpeechStreamConfig
+        on socket: any ElevenLabsSocket, config: ElevenLabsSpeechStreamConfig, waitingEvents: Int = ElevenLabsRealtime.Limits.defaultWaitingEvents
     ) async throws -> ElevenLabsSpeechStream {
-        let stream = ElevenLabsSpeechStream(channel: ElevenLabsRealtimeChannel(socket: socket), config: config)
+        let stream = ElevenLabsSpeechStream(
+            channel: ElevenLabsRealtimeChannel(socket: socket), config: config, waitingEvents: waitingEvents
+        )
         stream.channel.start(
             onFrame: { [weak stream] frame in stream?.receive(frame) },
             onEnd: { [weak stream] failure in stream?.end(failure) }
@@ -425,7 +428,6 @@ public final class ElevenLabsSpeechStream: @unchecked Sendable {
         } else {
             ElevenLabsSocketClose(code: 0, reason: failure.description)
         }
-        continuation.yield(.ended(close))
-        continuation.finish()
+        continuation.finish(with: .ended(close))
     }
 }

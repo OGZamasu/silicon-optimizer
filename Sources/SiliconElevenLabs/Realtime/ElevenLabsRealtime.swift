@@ -24,6 +24,10 @@ public struct ElevenLabsRealtime: Sendable {
         public var openTimeout: TimeInterval = 20
         /// How long an agent may take to send `conversation_initiation_metadata`.
         public var agentStartTimeout: TimeInterval = 20
+        /// How many events may wait for a session's reader before the session is ended as
+        /// fallen behind (`ElevenLabsEventQueue`). Generous: a reader that keeps up never sees it.
+        public var maximumWaitingEvents = Self.defaultWaitingEvents
+        public static let defaultWaitingEvents = 2_048
 
         public init() {}
     }
@@ -46,7 +50,7 @@ public struct ElevenLabsRealtime: Sendable {
             path: "/v1/text-to-speech/\(config.voiceID)/stream-input", query: config.queryItems()
         )
         let socket = try await open(request)
-        return try await ElevenLabsSpeechStream.start(on: socket, config: config)
+        return try await ElevenLabsSpeechStream.start(on: socket, config: config, waitingEvents: limits.maximumWaitingEvents)
     }
 
     /// Opens `multi-stream-input`: up to five contexts on one socket. Billable as text is sent.
@@ -59,7 +63,7 @@ public struct ElevenLabsRealtime: Sendable {
             path: "/v1/text-to-speech/\(config.voiceID)/multi-stream-input", query: config.queryItems()
         )
         let socket = try await open(request)
-        return ElevenLabsSpeechMultiStream.start(on: socket, config: config)
+        return ElevenLabsSpeechMultiStream.start(on: socket, config: config, waitingEvents: limits.maximumWaitingEvents)
     }
 
     // MARK: - Transcription
@@ -72,7 +76,7 @@ public struct ElevenLabsRealtime: Sendable {
         guard problems.isEmpty else { throw ElevenLabsRealtimeError.invalidConfiguration(problems) }
         let request = try await keyedRequest(path: "/v1/speech-to-text/realtime", query: config.queryItems())
         let socket = try await open(request)
-        return ElevenLabsTranscriptionStream.start(on: socket, config: config)
+        return ElevenLabsTranscriptionStream.start(on: socket, config: config, waitingEvents: limits.maximumWaitingEvents)
     }
 
     // MARK: - Agents
@@ -134,7 +138,8 @@ public struct ElevenLabsRealtime: Sendable {
             throw ElevenLabsRealtimeError.cancelled
         }
         return try await ElevenLabsAgentConversation.start(
-            on: socket, config: config, initiation: initiation, startTimeout: limits.agentStartTimeout
+            on: socket, config: config, initiation: initiation, startTimeout: limits.agentStartTimeout,
+            waitingEvents: limits.maximumWaitingEvents
         )
     }
 

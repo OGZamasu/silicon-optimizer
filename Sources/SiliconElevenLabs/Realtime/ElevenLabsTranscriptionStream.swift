@@ -257,21 +257,26 @@ extension ElevenLabsTranscriptionStreamEvent {
 public final class ElevenLabsTranscriptionStream: @unchecked Sendable {
     public let config: ElevenLabsTranscriptionStreamConfig
     public let events: AsyncStream<ElevenLabsTranscriptionStreamEvent>
-    private let continuation: AsyncStream<ElevenLabsTranscriptionStreamEvent>.Continuation
+    private let continuation: ElevenLabsEventQueue<ElevenLabsTranscriptionStreamEvent>
     private let channel: ElevenLabsRealtimeChannel
     private let meter = UsageMeter()
     private let lock = NSLock()
     private var sentFirst = false
     private var closing = false
 
-    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsTranscriptionStreamConfig) {
+    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsTranscriptionStreamConfig, waitingEvents: Int) {
         self.channel = channel
         self.config = config
-        (events, continuation) = AsyncStream<ElevenLabsTranscriptionStreamEvent>.makeStream(bufferingPolicy: .unbounded)
+        continuation = ElevenLabsEventQueue(capacity: waitingEvents, channel: channel)
+        events = continuation.stream
     }
 
-    static func start(on socket: any ElevenLabsSocket, config: ElevenLabsTranscriptionStreamConfig) -> ElevenLabsTranscriptionStream {
-        let stream = ElevenLabsTranscriptionStream(channel: ElevenLabsRealtimeChannel(socket: socket), config: config)
+    static func start(
+        on socket: any ElevenLabsSocket, config: ElevenLabsTranscriptionStreamConfig, waitingEvents: Int = ElevenLabsRealtime.Limits.defaultWaitingEvents
+    ) -> ElevenLabsTranscriptionStream {
+        let stream = ElevenLabsTranscriptionStream(
+            channel: ElevenLabsRealtimeChannel(socket: socket), config: config, waitingEvents: waitingEvents
+        )
         stream.channel.start(
             onFrame: { [weak stream] frame in stream?.receive(frame) },
             onEnd: { [weak stream] failure in stream?.end(failure) }
@@ -353,7 +358,6 @@ public final class ElevenLabsTranscriptionStream: @unchecked Sendable {
         } else {
             ElevenLabsSocketClose(code: 0, reason: failure.description)
         }
-        continuation.yield(.ended(close))
-        continuation.finish()
+        continuation.finish(with: .ended(close))
     }
 }

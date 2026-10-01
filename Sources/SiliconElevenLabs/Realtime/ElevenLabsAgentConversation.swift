@@ -490,7 +490,7 @@ public final class ElevenLabsAgentConversation: @unchecked Sendable {
 
     public let config: ElevenLabsAgentConversationConfig
     public let events: AsyncStream<ElevenLabsAgentEvent>
-    private let continuation: AsyncStream<ElevenLabsAgentEvent>.Continuation
+    private let continuation: ElevenLabsEventQueue<ElevenLabsAgentEvent>
     private let channel: ElevenLabsRealtimeChannel
     private let meter = UsageMeter()
     private let lock = NSLock()
@@ -506,17 +506,20 @@ public final class ElevenLabsAgentConversation: @unchecked Sendable {
     private var pendingClientTools: Set<String> = []
     private var ending = false
 
-    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsAgentConversationConfig) {
+    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsAgentConversationConfig, waitingEvents: Int) {
         self.channel = channel
         self.config = config
-        (events, continuation) = AsyncStream<ElevenLabsAgentEvent>.makeStream(bufferingPolicy: .unbounded)
+        continuation = ElevenLabsEventQueue(capacity: waitingEvents, channel: channel)
+        events = continuation.stream
     }
 
     static func start(
         on socket: any ElevenLabsSocket, config: ElevenLabsAgentConversationConfig, initiation: JSONValue,
-        startTimeout: TimeInterval
+        startTimeout: TimeInterval, waitingEvents: Int = ElevenLabsRealtime.Limits.defaultWaitingEvents
     ) async throws -> ElevenLabsAgentConversation {
-        let conversation = ElevenLabsAgentConversation(channel: ElevenLabsRealtimeChannel(socket: socket), config: config)
+        let conversation = ElevenLabsAgentConversation(
+            channel: ElevenLabsRealtimeChannel(socket: socket), config: config, waitingEvents: waitingEvents
+        )
         conversation.channel.start(
             onFrame: { [weak conversation] frame in conversation?.receive(frame) },
             onEnd: { [weak conversation] failure in conversation?.end(failure) }
@@ -773,7 +776,6 @@ public final class ElevenLabsAgentConversation: @unchecked Sendable {
             awaitingApproval = []
             pendingClientTools = []
         }
-        continuation.yield(.ended(close))
-        continuation.finish()
+        continuation.finish(with: .ended(close))
     }
 }

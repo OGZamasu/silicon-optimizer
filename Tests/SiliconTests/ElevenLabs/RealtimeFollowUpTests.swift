@@ -86,4 +86,42 @@ struct RealtimeFollowUpTests {
         #expect(error as? ElevenLabsRealtimeError == .cancelled)
         #expect(socket.closedByClient != nil)
     }
+
+    /// A reader that stops reading (or a server that floods) cannot grow memory without limit:
+    /// past the cap the session ends itself — 1011, "fell behind" — and `.ended` still arrives.
+    @Test func aTranscriptionWhoseReaderFallsBehindEndsItself() async throws {
+        var rig = RealtimeRig(server: { socket in
+            for index in 0..<50 { socket.push(["message_type": "partial_transcript", "text": .string("part \(index)")]) }
+        })
+        rig.realtime.limits.maximumWaitingEvents = 8
+        defer { rig.clean() }
+        let stream = try await rig.realtime.transcriptionStream(.init())
+        let socket = try #require(rig.connector.sockets.first)
+        try #require(await socket.waitUntilEnded(), "the session kept growing a queue nobody read")
+        var events: [ElevenLabsTranscriptionStreamEvent] = []
+        for await event in stream.events { events.append(event) }
+        #expect(events.count <= 9)
+        guard case .ended(let close) = events.last else {
+            Issue.record("the last event was \(String(describing: events.last))")
+            return
+        }
+        #expect(close.code == 1011)
+        #expect(close.reason == "This app fell behind reading the session")
+        #expect(socket.closedByClient?.code == 1011)
+    }
+
+    @Test func aConversationWhoseReaderFallsBehindEndsItself() async throws {
+        var rig = RealtimeRig(server: RealtimeRig.agentServer { socket in
+            for _ in 0..<50 { socket.push(["type": "vad_score", "vad_score_event": ["vad_score": 0.5]]) }
+        })
+        rig.realtime.limits.maximumWaitingEvents = 8
+        defer { rig.clean() }
+        let conversation = try await rig.realtime.agentConversation(.init(agentID: "agent_1", auth: .publicAgent))
+        let socket = try #require(rig.connector.sockets.first)
+        try #require(await socket.waitUntilEnded(), "the conversation kept growing a queue nobody read")
+        var last: ElevenLabsAgentEvent?
+        for await event in conversation.events { last = event }
+        #expect(last == .ended(ElevenLabsSocketClose(code: 1011, reason: "This app fell behind reading the session")))
+        #expect(socket.closedByClient?.code == 1011)
+    }
 }

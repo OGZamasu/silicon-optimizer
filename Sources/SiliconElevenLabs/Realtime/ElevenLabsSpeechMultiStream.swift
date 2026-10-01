@@ -24,7 +24,7 @@ public final class ElevenLabsSpeechMultiStream: @unchecked Sendable {
 
     public let config: ElevenLabsSpeechStreamConfig
     public let events: AsyncStream<ElevenLabsSpeechMultiStreamEvent>
-    private let continuation: AsyncStream<ElevenLabsSpeechMultiStreamEvent>.Continuation
+    private let continuation: ElevenLabsEventQueue<ElevenLabsSpeechMultiStreamEvent>
     private let channel: ElevenLabsRealtimeChannel
     private let meter = UsageMeter()
     private let lock = NSLock()
@@ -32,14 +32,19 @@ public final class ElevenLabsSpeechMultiStream: @unchecked Sendable {
     private var abandoned: Set<String> = []
     private var closingSocket = false
 
-    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsSpeechStreamConfig) {
+    private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsSpeechStreamConfig, waitingEvents: Int) {
         self.channel = channel
         self.config = config
-        (events, continuation) = AsyncStream<ElevenLabsSpeechMultiStreamEvent>.makeStream(bufferingPolicy: .unbounded)
+        continuation = ElevenLabsEventQueue(capacity: waitingEvents, channel: channel)
+        events = continuation.stream
     }
 
-    static func start(on socket: any ElevenLabsSocket, config: ElevenLabsSpeechStreamConfig) -> ElevenLabsSpeechMultiStream {
-        let stream = ElevenLabsSpeechMultiStream(channel: ElevenLabsRealtimeChannel(socket: socket), config: config)
+    static func start(
+        on socket: any ElevenLabsSocket, config: ElevenLabsSpeechStreamConfig, waitingEvents: Int = ElevenLabsRealtime.Limits.defaultWaitingEvents
+    ) -> ElevenLabsSpeechMultiStream {
+        let stream = ElevenLabsSpeechMultiStream(
+            channel: ElevenLabsRealtimeChannel(socket: socket), config: config, waitingEvents: waitingEvents
+        )
         stream.channel.start(
             onFrame: { [weak stream] frame in stream?.receive(frame) },
             onEnd: { [weak stream] failure in stream?.end(failure) }
@@ -200,7 +205,6 @@ public final class ElevenLabsSpeechMultiStream: @unchecked Sendable {
         } else {
             ElevenLabsSocketClose(code: 0, reason: failure.description)
         }
-        continuation.yield(.ended(close))
-        continuation.finish()
+        continuation.finish(with: .ended(close))
     }
 }
