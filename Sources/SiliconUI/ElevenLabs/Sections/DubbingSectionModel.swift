@@ -662,23 +662,41 @@ final class DubbingSectionModel {
 
     // MARK: Transcripts
 
-    func loadSourceTranscript() async {
+    /// Loads the source transcript. The owner's own "Load the original" (`sent` nil) drops every
+    /// unsaved edit. After a change (`sent` is what that change sent, empty for one that sent no
+    /// edits) the edits typed since stay over the fresh segments; an edit that was sent, whose
+    /// segment is gone, or that the fresh text now matches is dropped.
+    func loadSourceTranscript(keepingEditsBut sent: [String: String]? = nil) async {
         guard let project = selectedProject,
               let json = await actions.perform("dubbing_transcript_get", ["project_id": .string(project.id)], quietly: true)?
                 .voicesStudioJSON, selectedProject?.id == project.id else { return }
         sourceSegments = (json["segments"].arrayValue ?? []).compactMap(DubbingSegment.init(json:))
-        sourceEdits = [:]
+        sourceEdits = sent.map { Self.unsaved(sourceEdits, sent: $0, over: sourceSegments) { $0.text } } ?? [:]
     }
 
-    func loadTargetTranscript(_ languageID: String) async {
+    /// The target transcript of `languageID`; `sent` as for `loadSourceTranscript`.
+    func loadTargetTranscript(_ languageID: String, keepingEditsBut sent: [String: String]? = nil) async {
         guard let project = selectedProject,
               let json = await actions.perform(
                 "dubbing_target_transcript_get",
                 ["project_id": .string(project.id), "language_id": .string(languageID)], quietly: true
               )?.voicesStudioJSON, selectedProject?.id == project.id else { return }
+        let sameLanguage = selectedLanguageID == languageID
         selectedLanguageID = languageID
         targetSegments = (json["segments"].arrayValue ?? []).compactMap(DubbingSegment.init(json:))
-        targetEdits = [:]
+        targetEdits = sameLanguage
+            ? sent.map { Self.unsaved(targetEdits, sent: $0, over: targetSegments) { $0.translation ?? "" } } ?? [:]
+            : [:]
+    }
+
+    /// `edits` less those `sent` carried, those whose segment is gone and those `text` of the
+    /// fresh segment now matches: what the owner typed that is still unsaved.
+    static func unsaved(
+        _ edits: [String: String], sent: [String: String], over segments: [DubbingSegment],
+        text: (DubbingSegment) -> String
+    ) -> [String: String] {
+        let fresh = Dictionary(segments.map { ($0.id, text($0)) }, uniquingKeysWith: { first, _ in first })
+        return edits.filter { id, edit in sent[id] != edit && fresh[id].map { $0 != edit } == true }
     }
 
     /// One edit goes through the single-segment route; several go in one request.
@@ -705,18 +723,21 @@ final class DubbingSectionModel {
     }
 
     func saveSourceEdits() async {
+        let sent = sourceEdits
         guard let call = sourceSaveCall(), let projectID = selectedProject?.id,
               await actions.perform(call.operationID, call.arguments, title: "Transcript edits") != nil,
               isOpen(projectID) else { return }
-        await loadSourceTranscript()
+        // Edits typed while the save was on its way are not part of it, and stay.
+        await loadSourceTranscript(keepingEditsBut: sent)
     }
 
     func saveTargetEdits() async {
+        let sent = targetEdits
         guard let call = targetSaveCall(), let languageID = selectedLanguageID, let projectID = selectedProject?.id,
               await actions.perform(call.operationID, call.arguments, title: "Translation edits") != nil else { return }
         // Reload only while the same project and language are open.
         guard isOpen(projectID), selectedLanguageID == languageID else { return }
-        await loadTargetTranscript(languageID)
+        await loadTargetTranscript(languageID, keepingEditsBut: sent)
     }
 
     func deleteSegment(_ segment: DubbingSegment) async {
@@ -726,7 +747,7 @@ final class DubbingSectionModel {
                 ["project_id": .string(project.id), "segment_id": .string(segment.id)],
                 subject: "the segment “\(segment.text.prefix(40))”"
               ) != nil, isOpen(project.id) else { return }
-        await loadSourceTranscript()
+        await loadSourceTranscript(keepingEditsBut: [:])
     }
 
     func addSegmentArguments() -> [String: JSONValue]? {
@@ -745,7 +766,7 @@ final class DubbingSectionModel {
               isOpen(projectID)
         else { return }
         newSegment = DubbingSegmentDraft()
-        await loadSourceTranscript()
+        await loadSourceTranscript(keepingEditsBut: [:])
     }
 
     /// What the last regeneration charged, as its answer says: seconds charged and the free

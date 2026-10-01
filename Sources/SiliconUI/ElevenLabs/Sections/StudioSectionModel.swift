@@ -233,6 +233,20 @@ struct StudioEditDraft: Hashable, Sendable {
         paragraphVoiceID = project.defaultParagraphVoiceID ?? ""
         volumeNormalization = project.volumeNormalization
     }
+
+    /// `fresh`'s fields, except those the owner changed since the form held `base` — what it was
+    /// filled with, or what a save sent: that typing is kept.
+    func merged(over fresh: StudioEditDraft, base: StudioEditDraft) -> StudioEditDraft {
+        var result = fresh
+        if name != base.name { result.name = name }
+        if title != base.title { result.title = title }
+        if author != base.author { result.author = author }
+        if isbn != base.isbn { result.isbn = isbn }
+        if titleVoiceID != base.titleVoiceID { result.titleVoiceID = titleVoiceID }
+        if paragraphVoiceID != base.paragraphVoiceID { result.paragraphVoiceID = paragraphVoiceID }
+        if volumeNormalization != base.volumeNormalization { result.volumeNormalization = volumeNormalization }
+        return result
+    }
 }
 
 // MARK: - Model
@@ -257,6 +271,13 @@ final class StudioSectionModel {
     private(set) var loadedOnce = false
     private(set) var selected: StudioProject?
     var editDraft = StudioEditDraft()
+    /// What the settings form held when it was last filled from the project, or what a save
+    /// sent: a field that differs from it is the owner's typing, kept when the project is
+    /// fetched again.
+    @ObservationIgnored private var editBase = StudioEditDraft()
+    /// Counts the times the settings form was filled afresh (another project chosen): a save
+    /// that went out before a refill does not speak for the form any more.
+    @ObservationIgnored private var editFills = 0
     var draft = StudioProjectDraft()
     var showsNewProject = false
     private(set) var projectSnapshots: [StudioSnapshot] = []
@@ -482,7 +503,7 @@ final class StudioSectionModel {
         }
         if selected?.id != projectID {
             selected = projects.first { $0.id == projectID }
-            if let selected { editDraft = StudioEditDraft(project: selected) }
+            if let selected { fillEdit(from: selected) }
             chapter = nil
             projectSnapshots = []
             chapterSnapshots = []
@@ -504,7 +525,17 @@ final class StudioSectionModel {
         if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
         guard wantedProject == projectID else { return }
         selected = project
+        // Field by field: what the owner typed since the form was filled (or since a save went
+        // out, typing while it was on its way) stays; untouched fields take the fresh values.
+        let fresh = StudioEditDraft(project: project)
+        editDraft = editDraft.merged(over: fresh, base: editBase)
+        editBase = fresh
+    }
+
+    private func fillEdit(from project: StudioProject) {
         editDraft = StudioEditDraft(project: project)
+        editBase = editDraft
+        editFills += 1
     }
 
     /// After a change to `projectID`: fetch it again, onto the screen (and into its settings
@@ -549,8 +580,12 @@ final class StudioSectionModel {
     }
 
     func saveEdit() async {
+        let sent = editDraft
+        let fills = editFills
         guard let arguments = editArguments(), let projectID = arguments["project_id"]?.stringValue,
               await actions.perform("edit_project", arguments, title: "Edit \(editDraft.name)") != nil else { return }
+        // The project now holds what was sent; anything else in the form was typed since.
+        if isOpen(projectID), editFills == fills { editBase = sent }
         await refetch(projectID)
     }
 
@@ -841,7 +876,7 @@ final class StudioSectionModel {
         self.projects = projects
         self.selected = selected
         wantedProject = selected?.id
-        if let selected { editDraft = StudioEditDraft(project: selected) }
+        if let selected { fillEdit(from: selected) }
         projectSnapshots = snapshots
         self.chapter = chapter
         chapterName = chapter?.name ?? ""

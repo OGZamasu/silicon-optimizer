@@ -213,6 +213,19 @@ struct VoicesEditDraft: Hashable, Sendable {
         description = voice.description ?? ""
         labels = VoicesSectionModel.labelsText(voice.labels)
     }
+
+    /// `fresh`'s fields, except those the owner changed since the form held `base` — what it was
+    /// filled with, or what a save sent: that typing is kept. The files and the noise switch are
+    /// the owner's picks and stay as they are.
+    func merged(over fresh: VoicesEditDraft, base: VoicesEditDraft) -> VoicesEditDraft {
+        var result = fresh
+        if name != base.name { result.name = name }
+        if description != base.description { result.description = description }
+        if labels != base.labels { result.labels = labels }
+        result.files = files
+        result.removeBackgroundNoise = removeBackgroundNoise
+        return result
+    }
 }
 
 /// Instant voice cloning: `POST /v1/voices/add` (multipart).
@@ -305,6 +318,12 @@ final class VoicesSectionModel {
     private(set) var selected: VoicesVoice?
     var settingsDraft: VoicesSettings?
     var editDraft = VoicesEditDraft()
+    /// What the edit form held when it was last filled from the voice, or what a save sent: a
+    /// field that differs from it is the owner's typing, kept when the voice is fetched again.
+    @ObservationIgnored private var editBase = VoicesEditDraft()
+    /// Counts the times the edit form was filled afresh (another voice chosen): a save that went
+    /// out before a refill does not speak for the form any more.
+    @ObservationIgnored private var editFills = 0
     /// Played sample audio, by sample id.
     private(set) var sampleFiles: [String: URL] = [:]
     var replicateWorkspaceID = ""
@@ -582,6 +601,8 @@ final class VoicesSectionModel {
             settingsDraft = selected?.settings
             if let selected {
                 editDraft = VoicesEditDraft(voice: selected)
+                editBase = editDraft
+                editFills += 1
                 if selected.isProfessional { professional = VoicesProfessionalDraft(voice: selected) }
             }
             sampleFiles = [:]
@@ -626,7 +647,11 @@ final class VoicesSectionModel {
             settingsDraft = VoicesSettings(json: json)
         }
         guard selected?.id == voice.id else { return }
-        editDraft = VoicesEditDraft(voice: voice)
+        // Field by field: what the owner typed since the form was filled (or since a save went
+        // out, typing while it was on its way) stays; untouched fields take the fresh values.
+        let fresh = VoicesEditDraft(voice: voice)
+        editDraft = editDraft.merged(over: fresh, base: editBase)
+        editBase = fresh
         if voice.isProfessional { professional = VoicesProfessionalDraft(voice: voice) }
         for sample in voice.samples where sampleDrafts[sample.id] == nil {
             sampleDrafts[sample.id] = VoicesSampleDraft(sample: sample)
@@ -650,10 +675,16 @@ final class VoicesSectionModel {
 
     func saveEdit() async {
         guard let voice = selected else { return }
-        let (arguments, files) = Self.editArguments(voiceID: voice.id, draft: editDraft)
+        let sent = editDraft
+        let fills = editFills
+        let (arguments, files) = Self.editArguments(voiceID: voice.id, draft: sent)
         guard await actions.perform("edit_voice", arguments, files: files, title: "Edit \(voice.name)") != nil
         else { return }
-        if isOpen(voice.id) { editDraft.files = [] }
+        if isOpen(voice.id) {
+            editDraft.files = []
+            // The voice now holds what was sent; anything else in the form was typed since.
+            if editFills == fills { editBase = sent }
+        }
         await refetch(voice.id)
         await directory.refresh()
     }
@@ -913,6 +944,8 @@ final class VoicesSectionModel {
         settingsDraft = selected?.settings
         if let selected {
             editDraft = VoicesEditDraft(voice: selected)
+            editBase = editDraft
+            editFills += 1
             if selected.isProfessional { professional = VoicesProfessionalDraft(voice: selected) }
             for sample in selected.samples { sampleDrafts[sample.id] = VoicesSampleDraft(sample: sample) }
         }

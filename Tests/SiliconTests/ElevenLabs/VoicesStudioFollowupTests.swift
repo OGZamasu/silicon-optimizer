@@ -57,8 +57,6 @@ struct VoicesStudioFollowupTests {
 
     // MARK: - Helpers
 
-    static let slow: Duration = .milliseconds(600)
-
     /// Starts `action`, answers any question it puts on screen, and returns once its call is on
     /// the wire.
     func sending(
@@ -70,11 +68,6 @@ struct VoicesStudioFollowupTests {
             return actions.runner(operationID)?.isRunning == true
         }
         return task
-    }
-
-    /// A JSON answer that takes `delay` to arrive.
-    static func late(_ value: JSONValue, _ delay: Duration) -> FakeElevenLabsTransport.Reply {
-        .init(status: 200, headers: ["content-type": "application/json"], body: value.encoded(), delay: delay)
     }
 
     // MARK: - N1: each changed item is fetched again on its own runner
@@ -199,5 +192,147 @@ struct VoicesStudioFollowupTests {
                 "A's fetch after its rename was abandoned")
         #expect(model.selected?.id == "d-a")
         #expect(model.selected?.name == "Dict A renamed")
+    }
+
+    // MARK: - N2: typing on the item being saved survives the fetch after the save
+
+    /// Save is pressed on voice A's new name; while it is on its way (the fake holds it until the
+    /// typing is done) the owner types a description. The fetch after the save keeps the
+    /// description typed, takes the saved name, and takes a field nobody touched (labels changed
+    /// elsewhere) from the answer.
+    @Test func typingOnAVoiceWhileItsSaveIsOnItsWayIsKept() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_voice":
+                await signals.wait(for: "typed")
+                return .json(["status": "ok"])
+            case "get_voice_by_id":
+                return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed", labels: ["accent": "irish"]))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A")))
+        model.load(rows: [a], selected: a)
+        model.editDraft.name = "Voice A renamed"
+        let saving = try await sending(model.actions, "edit_voice") { await model.saveEdit() }
+        model.editDraft.description = "typed while the save was on its way"
+        signals.note("typed")
+        await saving.value
+        #expect(fixture.sent("get_voice_by_id").count == 1)
+        #expect(model.editDraft.description == "typed while the save was on its way",
+                "typing after Save was replaced: “\(model.editDraft.description)”")
+        #expect(model.editDraft.name == "Voice A renamed")
+        #expect(model.editDraft.labels == VoicesSectionModel.labelsText(["accent": "irish"]),
+                "an untouched field takes the fresh value")
+        #expect(model.selected?.name == "Voice A renamed")
+    }
+
+    /// The owner saves A's new name, opens B and comes back to A while the save is on its way:
+    /// the form was filled afresh from A's old values meanwhile, so those are not taken for
+    /// typing — the fetch after the save puts the saved name in.
+    @Test func aVoiceLeftAndReopenedDuringItsSaveTakesTheSavedValues() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_voice":
+                await signals.wait(for: "back on A")
+                return .json(["status": "ok"])
+            case "get_voice_by_id" where request.url.path.hasSuffix("/v-b"):
+                return .json(VoicesStudioFakes.voice("v-b", "Voice B"))
+            case "get_voice_by_id":
+                let name = signals.note("get v-a") == 1 ? "Voice A" : "Voice A renamed"
+                return .json(VoicesStudioFakes.voice("v-a", name))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A")))
+        let b = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-b", "Voice B")))
+        model.load(rows: [a, b], selected: a)
+        model.editDraft.name = "Voice A renamed"
+        let saving = try await sending(model.actions, "edit_voice") { await model.saveEdit() }
+        await model.select("v-b")
+        await model.select("v-a")
+        #expect(model.editDraft.name == "Voice A", "reopened: the form shows A as it is before the save lands")
+        signals.note("back on A")
+        await saving.value
+        #expect(model.editDraft.name == "Voice A renamed", "the saved name: “\(model.editDraft.name)”")
+    }
+
+    /// Studio: the project's settings saved; the author typed while the save is on its way stays,
+    /// untouched fields take the answer's values.
+    @Test func typingInAProjectsSettingsWhileItsSaveIsOnItsWayIsKept() async throws {
+        let signals = Signals()
+        let saved = VoicesStudioStudioTests.project("p-a", name: "Renamed")
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_project":
+                await signals.wait(for: "typed")
+                return .json(["project": saved])
+            case "get_project_by_id":
+                return .json(saved)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        var before = VoicesStudioStudioTests.project("p-a", name: "First")
+        if case .object(var fields) = before {
+            fields["title"] = "An older title"
+            before = .object(fields)
+        }
+        let project = try #require(StudioProject(json: before))
+        model.load(projects: [project], selected: project)
+        model.editDraft.name = "Renamed"
+        let saving = try await sending(model.actions, "edit_project") { await model.saveEdit() }
+        model.editDraft.author = "typed while saving"
+        signals.note("typed")
+        await saving.value
+        #expect(model.editDraft.author == "typed while saving", "typing after Save was replaced: “\(model.editDraft.author)”")
+        #expect(model.editDraft.name == "Renamed")
+        #expect(model.editDraft.title == "The Long Road", "an untouched field takes the fresh value")
+    }
+
+    nonisolated static func segment(_ id: String, _ text: String) -> JSONValue {
+        ["id": .string(id), "speaker_id": "speaker_1", "start_s": 0, "end_s": 2, "text": .string(text)]
+    }
+
+    /// Dubbing: one segment's edit is saved; another segment edited while the save is on its
+    /// way keeps its edit after the transcript is loaded again. The saved edit is gone (it is the
+    /// transcript now).
+    @Test func transcriptEditsTypedWhileASaveIsOnItsWayAreKept() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "dubbing_transcript_segment_update":
+                await signals.wait(for: "typed")
+                return .json(["status": "ok"])
+            case "dubbing_transcript_get":
+                return .json(["segments": [Self.segment("s1", "Hello there"), Self.segment("s2", "World")]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = DubbingSectionModel(environment: fixture.environment)
+        let project = try #require(DubbingProject(json: ["project_id": "p-a", "status": "ready", "language_ids": []]))
+        let first = try #require(DubbingSegment(json: Self.segment("s1", "Hello")))
+        let second = try #require(DubbingSegment(json: Self.segment("s2", "World")))
+        model.load(projects: [project], selected: project, source: [first, second])
+        model.sourceEdits["s1"] = "Hello there"
+        let saving = try await sending(model.actions, "dubbing_transcript_segment_update") { await model.saveSourceEdits() }
+        model.sourceEdits["s2"] = "World, typed while saving"
+        signals.note("typed")
+        await saving.value
+        #expect(fixture.sent("dubbing_transcript_get").count == 1)
+        #expect(model.sourceEdits == ["s2": "World, typed while saving"], "unsaved edits were dropped: \(model.sourceEdits)")
+        #expect(model.sourceSegments.map(\.text) == ["Hello there", "World"])
     }
 }
