@@ -22,6 +22,8 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
     private var _captureStarts = 0
     private var _releases = 0
     private var deviceHandler: (@Sendable () -> Void)?
+    private var _claims = 0
+    private var _staleReleases = 0
     var captureFailure: (any Error)?
 
     init(permission: Bool = true) {
@@ -89,6 +91,25 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
         }
         for callback in callbacks { callback() }
     }
+
+    func claim() -> Int {
+        lock.withLock {
+            _claims += 1
+            return _claims
+        }
+    }
+
+    /// As the engine: only the newest claim lets go; an older one is counted and ignored.
+    func release(claim: Int) {
+        let newest = lock.withLock {
+            if claim != _claims { _staleReleases += 1 }
+            return claim == _claims
+        }
+        if newest { release() }
+    }
+
+    /// Releases asked for under a claim another session had overtaken (and ignored).
+    var staleReleases: Int { lock.withLock { _staleReleases } }
 
     func onDeviceChange(_ handler: (@Sendable () -> Void)?) {
         lock.withLock { deviceHandler = handler }

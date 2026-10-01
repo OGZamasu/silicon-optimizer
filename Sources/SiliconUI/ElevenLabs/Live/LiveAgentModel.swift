@@ -154,6 +154,8 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     @ObservationIgnored private var toolLines: [String: Int] = [:]
     /// The devices were touched this conversation and must be let go when it ends.
     @ObservationIgnored private var holdsAudio = false
+    /// This session's claim on the devices (`LiveAudioIO.claim()`), shared by its playback.
+    @ObservationIgnored private var audioClaim = 0
     /// The connect in progress, cancelled by Cancel, leaving or another account.
     @ObservationIgnored private var connecting: Task<ElevenLabsAgentConversation, any Error>?
 
@@ -355,8 +357,9 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         Task { await watch(token: token) }
         guard !textOnly, let metadata = conversation.startedWith else { return }
         holdsAudio = true
+        audioClaim = context.audio().claim()
         if let output = metadata.outputEncoding {
-            playback = LivePlayback(audio: context.audio(), encoding: output)
+            playback = LivePlayback(audio: context.audio(), encoding: output, claim: audioClaim)
         }
         guard let input = metadata.inputEncoding,
               let converter = LiveCaptureConverter(target: input, chunkMilliseconds: 100)
@@ -595,7 +598,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         conversation = nil
         playback = nil
         if holdsAudio {
-            context.audio().release()
+            context.audio().release(claim: audioClaim)
             holdsAudio = false
         }
         question = nil

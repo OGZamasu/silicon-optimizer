@@ -138,7 +138,7 @@ struct LiveAudioTests {
     @MainActor
     @Test func playbackStartsAfterThePrebufferAndAnInterruptionSilencesIt() async throws {
         let audio = FakeLiveAudio()
-        let playback = LivePlayback(audio: audio, encoding: .pcm(rate: 16_000))
+        let playback = LivePlayback(audio: audio, encoding: .pcm(rate: 16_000), claim: audio.claim())
         playback.append(LiveSignal.pcm(seconds: 0.1))
         #expect(audio.scheduled.isEmpty, "100 ms is under the prebuffer")
         playback.append(LiveSignal.pcm(seconds: 0.1))

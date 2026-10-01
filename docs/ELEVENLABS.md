@@ -618,6 +618,11 @@ opens it with that agent chosen). On all three:
   not reconnected; leaving the screen ends it; a new key, another region or Disconnect ends it at
   once (the pane's reset, and the screen's own check of the client), and while a session is open
   Settings refuses a new key or region, as it does for a billable run;
+- the three screens share one set of devices, and each session lets go of them only under its own
+  claim: a stream's last audio playing out, a transcription waiting for its last text or a
+  conversation waiting on its socket cannot stop the microphone, voice processing or the engine of a
+  session started since on another screen; leaving Live speech while its last audio plays silences
+  the rest and lets go then;
 - every line shown is redacted of anything key-shaped.
 
 Talk to an agent asks before starting an agent that can act on ElevenLabs' side — webhooks (named

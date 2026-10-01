@@ -194,7 +194,12 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
 
     /// Leaving the screen ends the session: nothing keeps talking where it cannot be seen.
     func leave() {
-        guard isOpen else { return }
+        // Ended, its last audio still playing out: that release does not stay armed after the
+        // screen is gone.
+        guard isOpen else {
+            playback?.stopIfReleasePending()
+            return
+        }
         let stopping = stream
         end(.ended(LiveOutcome.leftScreen))
         Task { await stopping?.close() }
@@ -262,7 +267,9 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
             // The last session's audio may still be playing out; it no longer gets to let go of
             // the devices this one is about to use.
             playback?.cancelPendingRelease()
-            playback = config.outputEncoding.map { LivePlayback(audio: context.audio(), encoding: $0) }
+            playback = config.outputEncoding.map {
+                LivePlayback(audio: context.audio(), encoding: $0, claim: context.audio().claim())
+            }
             phase = .live
             Task { await consume(stream, token: token) }
             Task { await watch(token: token) }
@@ -317,8 +324,7 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
         refresh()
         // The devices are let go: at once when silenced, once the last audio has played otherwise.
         if silence {
-            playback?.interrupt()
-            if playback != nil { context.audio().release() }
+            playback?.stopAndRelease()
         } else {
             playback?.finishThenRelease()
         }

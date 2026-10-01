@@ -372,9 +372,16 @@ protocol LiveAudioIO: AnyObject, Sendable {
     func flushPlayback()
     /// Lets go of the devices: the tap removed, the speaker stopped, the engine stopped and macOS
     /// voice processing turned off — so the system's microphone indicator goes out and other
-    /// apps' audio is no longer ducked. Every live screen calls it when its session ends.
-    /// It also forgets the `onDeviceChange` handler.
+    /// apps' audio is no longer ducked. It also forgets the `onDeviceChange` handler.
+    /// Unconditional: for the app quitting. A session lets go with `release(claim:)`.
     func release()
+    /// Takes the devices for a session that is about to capture or play; returns its claim.
+    /// The newest claim owns the devices.
+    func claim() -> Int
+    /// `release()`, but only while `claim` is the newest claim: a session that ends — or a
+    /// stream whose last audio finishes playing — after another screen's session started cannot
+    /// take that session's microphone, engine or voice processing.
+    func release(claim: Int)
     /// `handler` is called (on any thread) when the devices change under the microphone —
     /// headphones plugged in, another default input — which stops the engine and so the
     /// capture. The screen whose session holds the microphone sets it; `release()` clears it.
@@ -391,6 +398,7 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
     private var capturing = false
     private var voiceProcessing = false
     private var deviceChanged: (@Sendable () -> Void)?
+    private var claims = 0
 
     init() {
         engine.attach(player)
@@ -403,6 +411,20 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
         ) { [weak self] _ in self?.configurationChanged() }
+    }
+
+    func claim() -> Int {
+        lock.withLock {
+            claims += 1
+            return claims
+        }
+    }
+
+    func release(claim: Int) {
+        lock.withLock {
+            guard claim == claims else { return }
+            releaseLocked()
+        }
     }
 
     func onDeviceChange(_ handler: (@Sendable () -> Void)?) {
@@ -475,16 +497,18 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
     }
 
     func release() {
-        lock.withLock {
-            deviceChanged = nil
-            if capturing { engine.inputNode.removeTap(onBus: 0) }
-            capturing = false
-            player.stop()
-            engine.stop()
-            if voiceProcessing {
-                try? engine.inputNode.setVoiceProcessingEnabled(false)
-                voiceProcessing = false
-            }
+        lock.withLock { releaseLocked() }
+    }
+
+    private func releaseLocked() {
+        deviceChanged = nil
+        if capturing { engine.inputNode.removeTap(onBus: 0) }
+        capturing = false
+        player.stop()
+        engine.stop()
+        if voiceProcessing {
+            try? engine.inputNode.setVoiceProcessingEnabled(false)
+            voiceProcessing = false
         }
     }
 }
@@ -496,6 +520,8 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
 @MainActor
 final class LivePlayback {
     private let audio: any LiveAudioIO
+    /// The claim of the session this plays for: its releases act only while that is the newest.
+    private let claim: Int
     private var decoder: LivePlaybackDecoder
     private var jitter = LiveJitterBuffer()
     /// Bumped by every flush: a buffer that finishes after it does not count.
@@ -505,8 +531,9 @@ final class LivePlayback {
     /// Set by `finishThenRelease()`: once the last buffer has played, the devices are let go.
     private var releasesWhenDrained = false
 
-    init(audio: any LiveAudioIO, encoding: ElevenLabsAudioEncoding) {
+    init(audio: any LiveAudioIO, encoding: ElevenLabsAudioEncoding, claim: Int) {
         self.audio = audio
+        self.claim = claim
         decoder = LivePlaybackDecoder(encoding: encoding)
     }
 
@@ -537,10 +564,24 @@ final class LivePlayback {
         releasesWhenDrained = false
     }
 
+    /// Silence now and let go now (under this playback's claim).
+    func stopAndRelease() {
+        releasesWhenDrained = false
+        interrupt()
+        audio.release(claim: claim)
+    }
+
+    /// The screen is left while its last audio plays out: the pending release is not left armed
+    /// — the rest is silenced and the devices let go now.
+    func stopIfReleasePending() {
+        guard releasesWhenDrained else { return }
+        stopAndRelease()
+    }
+
     private func releaseIfDrained() {
         guard releasesWhenDrained, jitter.held.isEmpty, jitter.queuedSeconds <= 0.001 else { return }
         releasesWhenDrained = false
-        audio.release()
+        audio.release(claim: claim)
     }
 
     /// An interruption: silence now, and nothing held or half-decoded survives.

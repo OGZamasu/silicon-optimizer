@@ -91,6 +91,8 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     @ObservationIgnored private var nextSegmentID = 0
     /// The devices were touched this session and must be let go when it ends.
     @ObservationIgnored private var holdsAudio = false
+    /// This session's claim on the devices (`LiveAudioIO.claim()`).
+    @ObservationIgnored private var audioClaim = 0
     /// The Start in progress, so one that was stopped (and perhaps started again) while it
     /// read its file or asked for the microphone does nothing more.
     @ObservationIgnored private var starting = UUID()
@@ -217,6 +219,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         case .microphone:
             do {
                 holdsAudio = true
+                audioClaim = context.audio().claim()
                 try context.audio().startCapture(echoCancellation: false) { buffer in
                     for chunk in converter.process(buffer) { queue.yield(chunk) }
                 }
@@ -436,7 +439,7 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         if microphoneOn { context.audio().stopCapture() }
         microphoneOn = false
         if holdsAudio {
-            context.audio().release()
+            context.audio().release(claim: audioClaim)
             holdsAudio = false
         }
         chunks?.finish()
