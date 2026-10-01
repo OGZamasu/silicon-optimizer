@@ -824,4 +824,41 @@ struct VoicesStudioStaleValueTests {
         #expect(model.editBlockReason(keyA) == nil, "A's read was abandoned by B's: A's key stays locked")
         #expect(keyA.permissions == ["all"])
     }
+
+    // MARK: - Round 4 sweep: a workspace member's seat and lock, while the members are read again
+
+    /// A seat change answers; while the members are read again, the row shows the seat sent —
+    /// so going back to the previous seat is a change the picker offers, not one it hides — and
+    /// a lock shows as locked (its button offers Unlock).
+    @Test func aMembersSeatAndLockShowWhatWasSentWhileTheMembersAreReadAgain() async throws {
+        let signals = Signals()
+        let member = VoicesStudioWorkspaceTests.member
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_workspace_member":
+                return .json(["status": "ok"])
+            case "get_workspace_members":
+                try await signals.wait(for: "checked")
+                return .json([member])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        let row = try #require(WorkspaceMember(json: member))
+        model.load(members: [row])
+        model.seatEdits[row.id] = "workspace_admin"
+        let changing = Task { try await answering(model.actions) { await model.changeSeat(row) } }
+        try await voicesStudioWait { fixture.sent("get_workspace_members").count == 1 }
+        #expect(model.members.first?.seatType == "workspace_admin", "the row still shows the seat from before")
+        let current = try #require(model.members.first)
+        let locking = Task { try await answering(model.actions) { await model.setLocked(current, true) } }
+        // The lock has answered once the members are being read again after it.
+        try await voicesStudioWait { fixture.sent("get_workspace_members").count == 2 }
+        #expect(model.members.first?.isLocked == true, "the row still shows the member unlocked")
+        signals.note("checked")
+        try await changing.value
+        try await locking.value
+    }
 }

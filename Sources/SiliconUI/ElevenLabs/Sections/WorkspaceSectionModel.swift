@@ -287,6 +287,9 @@ final class WorkspaceSectionModel {
             )
         ) != nil else { return }
         seatEdits[member.id] = nil
+        // The member holds the seat sent from now on: the row says so at once, so its picker does
+        // not start from the seat before (picking that one to go back would look like no change).
+        if let index = members.firstIndex(where: { $0.id == member.id }) { members[index].seatType = seat }
         await refreshMembers()
     }
 
@@ -300,6 +303,7 @@ final class WorkspaceSectionModel {
                 : VoicesStudioQuestion("Let \(member.email) back into the workspace?", button: "Unlock",
                                        consequence: "\(member.email) can use this workspace again.")
         ) != nil else { return }
+        if let index = members.firstIndex(where: { $0.id == member.id }) { members[index].isLocked = locked }
         await refreshMembers()
     }
 
