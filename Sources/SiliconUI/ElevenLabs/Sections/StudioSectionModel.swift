@@ -495,6 +495,30 @@ final class StudioSectionModel {
     @ObservationIgnored private var wantedProject: String?
     @ObservationIgnored private var wantedChapter: String?
 
+    /// Changes to each project that have answered, by project id. A read asked before one of
+    /// them answered is older than it — even when it answers later, on another runner — and is
+    /// dropped whole: the fetch after the change brings the newer project.
+    @ObservationIgnored private var landed: [String: Int] = [:]
+
+    /// The project whose own details the settings form and the dictionary switches show: until
+    /// they arrive, they show the list row's values, which may be older than ElevenLabs'.
+    private(set) var detailsIn: String?
+
+    /// Whether the open project's details are in, so its settings and dictionaries may be saved:
+    /// those calls send every field (every attached dictionary), and before then the untouched
+    /// ones would be the list row's.
+    var detailsAreIn: Bool {
+        guard let id = selected?.id else { return false }
+        return detailsIn == id && wantedProject == id
+    }
+
+    /// Why the open project's settings cannot be saved yet, when they cannot.
+    var waitingForDetails: String? {
+        guard selected != nil, !detailsAreIn else { return nil }
+        return actions.problem("get_project_by_id") == nil
+            ? "Waiting for this project's details." : "Its details could not be read — open it again."
+    }
+
     func select(_ projectID: String?) async {
         wantedProject = projectID
         guard let projectID else {
@@ -503,6 +527,7 @@ final class StudioSectionModel {
         }
         if selected?.id != projectID {
             selected = projects.first { $0.id == projectID }
+            detailsIn = nil
             if let selected { fillEdit(from: selected) }
             chapter = nil
             projectSnapshots = []
@@ -517,10 +542,13 @@ final class StudioSectionModel {
     }
 
     func reloadSelected(_ projectID: String? = nil, slot: String? = nil) async {
-        guard let projectID = projectID ?? selected?.id,
-              let json = await actions.perform("get_project_by_id", ["project_id": .string(projectID)], quietly: true,
+        guard let projectID = projectID ?? selected?.id else { return }
+        let changesBefore = landed[projectID, default: 0]
+        guard let json = await actions.perform("get_project_by_id", ["project_id": .string(projectID)], quietly: true,
                                                slot: slot)?
-                .voicesStudioJSON, let project = StudioProject(json: json)
+                .voicesStudioJSON, let project = StudioProject(json: json),
+              // Asked before a change to the project answered: older than it, dropped whole.
+              landed[projectID, default: 0] == changesBefore
         else { return }
         if let index = projects.firstIndex(where: { $0.id == project.id }) { projects[index] = project }
         guard wantedProject == projectID else { return }
@@ -530,6 +558,7 @@ final class StudioSectionModel {
         let fresh = StudioEditDraft(project: project)
         editDraft = editDraft.merged(over: fresh, base: editBase)
         editBase = fresh
+        detailsIn = project.id
     }
 
     private func fillEdit(from project: StudioProject) {
@@ -542,6 +571,7 @@ final class StudioSectionModel {
     /// form) only while it is still the project open — its own runner, so the read of a project
     /// opened meanwhile is not abandoned.
     private func refetch(_ projectID: String) async {
+        landed[projectID, default: 0] += 1
         await reloadSelected(projectID, slot: VoicesStudioActions.afterChange(of: projectID))
     }
 
@@ -580,6 +610,7 @@ final class StudioSectionModel {
     }
 
     func saveEdit() async {
+        guard detailsAreIn else { return }
         let sent = editDraft
         let fills = editFills
         guard let arguments = editArguments(), let projectID = arguments["project_id"]?.stringValue,
@@ -652,7 +683,8 @@ final class StudioSectionModel {
     }
 
     func setDictionary(_ dictionary: StudioDictionary, attached: Bool) async {
-        guard var locators = selected?.dictionaries else { return }
+        // The call replaces every attached dictionary: it starts from the project's own list.
+        guard detailsAreIn, var locators = selected?.dictionaries else { return }
         locators.removeAll { $0.id == dictionary.id }
         if attached { locators.append(StudioDictionaryLocator(id: dictionary.id, versionID: dictionary.latestVersionID)) }
         guard let arguments = attachArguments(locators), let projectID = arguments["project_id"]?.stringValue,
@@ -876,6 +908,7 @@ final class StudioSectionModel {
         self.projects = projects
         self.selected = selected
         wantedProject = selected?.id
+        detailsIn = selected?.id
         if let selected { fillEdit(from: selected) }
         projectSnapshots = snapshots
         self.chapter = chapter

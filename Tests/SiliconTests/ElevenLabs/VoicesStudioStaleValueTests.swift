@@ -110,6 +110,41 @@ struct VoicesStudioStaleValueTests {
         #expect(model.selected?.settings?.stability == 0.9)
     }
 
+    /// Studio: a slow read of project A, then its settings renamed and saved; the older read
+    /// answers last and is dropped.
+    @Test func aProjectReadAskedBeforeASaveIsDroppedWhenItAnswersAfter() async throws {
+        let signals = Signals()
+        let renamed = VoicesStudioStudioTests.project("p-a", name: "Renamed")
+        let first = VoicesStudioStudioTests.project("p-a", name: "First")
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_project":
+                return .json(["project": renamed])
+            case "get_project_by_id":
+                if signals.note("get") == 1 {
+                    await signals.wait(for: "saved")
+                    return .json(first)
+                }
+                return .json(renamed)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: first))
+        model.load(projects: [project], selected: project)
+        let tryingAgain = Task { await model.reloadSelected() }
+        try await voicesStudioWait { fixture.sent("get_project_by_id").count == 1 }
+        model.editDraft.name = "Renamed"
+        await model.saveEdit()
+        signals.note("saved")
+        await tryingAgain.value
+        #expect(model.editDraft.name == "Renamed", "the older read put the old name back in the form")
+        #expect(model.selected?.name == "Renamed")
+        #expect(model.projects.first?.name == "Renamed")
+    }
+
     /// Voice A opened, its details slow: the forms hold the list row's values, so none of them
     /// can be saved yet — nothing is sent, and the screen says why. Once the details are in, the
     /// typed name stays and the description is ElevenLabs' (changed on the website), not the
@@ -188,5 +223,57 @@ struct VoicesStudioStaleValueTests {
         let sent = body(fixture, "edit_pvc_voice")
         #expect(sent.contains("Pro renamed") && sent.contains("irish"))
     }
+
+    /// Studio: project A opened, its details slow — its settings and dictionaries cannot be saved
+    /// yet (a dictionary switch sends every attached dictionary, and the row has none listed).
+    @Test func nothingIsSavedFromAProjectBeforeItsDetailsArrive() async throws {
+        let signals = Signals()
+        var server = VoicesStudioStudioTests.project("p-a", name: "First")
+        if case .object(var fields) = server {
+            fields["author"] = "Changed on the website"
+            fields["pronunciation_dictionary_locators"] = [["pronunciation_dictionary_id": "d-kept", "version_id": "v1"]]
+            server = .object(fields)
+        }
+        let fresh = server
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_project":
+                return .json(["project": fresh])
+            case "update_pronunciation_dictionaries":
+                return .json(["status": "ok"])
+            case "get_project_by_id":
+                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                return .json(fresh)
+            case "get_project_snapshots":
+                return .json(["snapshots": []])
+            case "get_project_muted_tracks_endpoint":
+                return .json(["chapter_ids": []])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let row = try #require(StudioProject(json: VoicesStudioStudioTests.project("p-a", name: "First")))
+        let added = StudioDictionary(id: "d-new", name: "New", latestVersionID: "v1")
+        model.load(projects: [row], dictionaries: [added])
+        let opening = Task { await model.select("p-a") }
+        try await voicesStudioWait { fixture.sent("get_project_by_id").count == 1 }
+        #expect(!model.detailsAreIn)
+        model.editDraft.name = "Renamed"
+        await model.saveEdit()
+        try await declining(model.actions) { await model.setDictionary(added, attached: true) }
+        #expect(fixture.sent("edit_project").isEmpty, "the row's settings went out")
+        #expect(fixture.sent("update_pronunciation_dictionaries").isEmpty, "the row's (empty) dictionary list went out")
+        signals.note("tried")
+        await opening.value
+        #expect(model.detailsAreIn)
+        #expect(model.editDraft.author == "Changed on the website")
+        await model.setDictionary(added, attached: true)
+        let locators = body(fixture, "update_pronunciation_dictionaries")
+        #expect(locators.contains("d-kept") && locators.contains("d-new"), "a dictionary attached elsewhere was dropped")
+    }
+
+    // MARK: - The rename field of another dictionary
 
 }

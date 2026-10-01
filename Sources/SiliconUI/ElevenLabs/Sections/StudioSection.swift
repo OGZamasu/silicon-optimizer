@@ -239,10 +239,13 @@ struct StudioProjectCard: View {
                                           directory: model.directory)
                     Toggle("Normalise volume for audiobook platforms", isOn: $model.editDraft.volumeNormalization)
                     HStack {
+                        if let waiting = model.waitingForDetails {
+                            Text(waiting).font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer()
                         Button("Save settings") { Task { await model.saveEdit() } }
                             .disabled(model.editDraft.name.isEmpty || model.editDraft.titleVoiceID.isEmpty
-                                      || model.editDraft.paragraphVoiceID.isEmpty)
+                                      || model.editDraft.paragraphVoiceID.isEmpty || !model.detailsAreIn)
                     }
                 }
                 .textFieldStyle(.roundedBorder)
@@ -274,6 +277,7 @@ struct StudioProjectCard: View {
                                 get: { project.dictionaries.contains { $0.id == dictionary.id } },
                                 set: { on in Task { await model.setDictionary(dictionary, attached: on) } }
                             ))
+                            .disabled(!model.detailsAreIn)
                         }
                         Toggle("Mark affected text for conversion again", isOn: $model.invalidateAffectedText)
                             .help(VoicesStudioSchema.description("update_pronunciation_dictionaries", "invalidate_affected_text"))
