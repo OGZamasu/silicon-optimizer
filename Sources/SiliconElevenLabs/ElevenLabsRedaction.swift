@@ -96,18 +96,37 @@ public enum ElevenLabsRedaction {
     /// not appear in anything shown or logged, so URLs are masked through `maskingQuerySecrets`.
     static let secretQueryParameters: Set<String> = ["token", "conversation_signature"]
 
-    /// `url` as text with the values of `secretQueryParameters` replaced. What "Show API call",
-    /// "Copy as curl" and a request's `description` use; the request itself keeps the real URL.
+    /// `url` as text with the values of `secretQueryParameters` replaced, and any `sk_…` key the
+    /// owner typed into another value (a search, an id) scrubbed as it is from a body. What
+    /// "Show API call", "Copy as curl" and a request's `description` use; the request itself
+    /// keeps the real URL.
     public static func maskingQuerySecrets(in url: URL) -> String {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let items = components.percentEncodedQueryItems, !items.isEmpty
-        else { return url.absoluteString }
+        else { return redactKeys(inURL: url.absoluteString) }
         components.percentEncodedQueryItems = items.map { item in
             secretQueryParameters.contains(item.name.lowercased())
-                ? URLQueryItem(name: item.name, value: "%E2%80%B9redacted%E2%80%BA") : item
+                ? URLQueryItem(name: item.name, value: urlPlaceholder) : item
         }
-        return components.string ?? url.absoluteString
+        return redactKeys(inURL: components.string ?? url.absoluteString)
     }
+
+    /// The placeholder as it stands in a URL.
+    static let urlPlaceholder = "%E2%80%B9redacted%E2%80%BA"
+
+    /// `sk_…` keys in a URL. A key typed after a space or a symbol follows that character's
+    /// percent-escape there (`search=for%20sk_…`), so an escape counts as a boundary too.
+    static func redactKeys(inURL text: String) -> String {
+        guard text.contains("sk_") else { return text }
+        return urlKeyPattern.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text),
+            withTemplate: NSRegularExpression.escapedTemplate(for: urlPlaceholder)
+        )
+    }
+
+    private static let urlKeyPattern = try! NSRegularExpression(
+        pattern: #"(?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))sk_[A-Za-z0-9_\-]{8,}"#
+    )
 
     /// Request fields that are secrets only in one operation, because their name alone says
     /// nothing: a secret's `value`, and an environment variable's `values` (plain strings feed

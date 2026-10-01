@@ -433,6 +433,26 @@ struct CoreReviewFixesTests {
         #expect(masked.contains("next_page_token=cursor-1"), "a pagination cursor is not a secret")
     }
 
+    /// A body is scrubbed of `sk_…` keys in every string; the URL is too — a key pasted into a
+    /// search box or an id field is the owner's typing, and Show API call is copied around.
+    @Test func aKeyTypedIntoAQueryOrPathValueIsScrubbedFromTheDescribedURL() async throws {
+        let rig = CoreClientTests.Rig(replies: [.json([:])])
+        defer { rig.cleanUp() }
+        let search = try rig.client.describe("get_user_voices_v2", arguments: [
+            "search": .string("voices for \(Self.key)"), "page_size": 10,
+        ])
+        #expect(!search.url.contains(Self.key))
+        #expect(search.url.contains("search=voices%20for%20%E2%80%B9redacted%E2%80%BA"))
+        #expect(search.url.contains("page_size=10"), "the rest of the query is shown as sent")
+        let byID = try rig.client.describe("get_voice_by_id", arguments: ["voice_id": .string(Self.key)])
+        #expect(!byID.url.contains(Self.key))
+
+        _ = try await rig.client.call("get_user_voices_v2", arguments: ["search": .string(Self.key)])
+        let sent = try #require(rig.transport.requests.first)
+        #expect(sent.url.absoluteString.contains(Self.key), "ElevenLabs still receives what was typed")
+        #expect(!"\(sent)".contains(Self.key) && !String(reflecting: sent).contains(Self.key))
+    }
+
     @Test func aSlashBackslashOrNULInAPathValueIsRefusedBeforeAnythingIsSent() async throws {
         // "P/convert" would reach a different (billing) route once the server decodes %2F.
         for bad in ["P/convert", "a\\b", "a\0b", String(repeating: "x", count: 513)] {
