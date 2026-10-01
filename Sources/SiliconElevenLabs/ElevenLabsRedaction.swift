@@ -27,15 +27,16 @@ public enum ElevenLabsRedaction {
     ///
     /// `revealingCredentialFields` is the owner's switch: it hands an agent the fields the risk
     /// table names for this one operation (a new API key, a webhook secret, a signed URL) and
-    /// nothing else. The account's own key preview, any `sk_…` key and plain-string header values
-    /// stay masked either way — the switch allows the action, it does not open the vault.
+    /// nothing else. The account's own key preview and any `sk_…` key stay masked either way —
+    /// the switch allows the action, it does not open the vault.
     ///
     /// Plain-string header values (`Authorization: Bearer …` in a tool, MCP server or webhook)
-    /// follow the same switch by default: masked unless the owner let agents see credentials,
-    /// because an agent that edits a tool must send its whole `tool_config` back, headers
-    /// included, and a masked value cannot be sent back. `maskingHeaderValues` overrides that:
-    /// the app's own runner passes `false`, because the owner's editor needs the real config to
-    /// write back and the header values are not credentials the API "will not show again".
+    /// are masked by default and follow the same switch: masked unless the owner let agents see
+    /// credentials, because an agent that edits a tool must send its whole `tool_config` back,
+    /// headers included, and a masked value cannot be sent back. `maskingHeaderValues` overrides
+    /// the switch for them: the app's own runner passes `false`, because the owner's editor needs
+    /// the real config to write back and the header values are not credentials the API "will not
+    /// show again". An `sk_…` key inside a header value is masked whatever either says.
     public static func redactCredentials(
         in value: JSONValue, for operation: ElevenLabsOperation,
         revealingCredentialFields: Bool = false, maskingHeaderValues: Bool? = nil
