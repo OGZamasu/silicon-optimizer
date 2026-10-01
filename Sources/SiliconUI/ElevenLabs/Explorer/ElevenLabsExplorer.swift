@@ -175,6 +175,18 @@ struct ElevenLabsExplorerDetail: View {
                 Divider()
                 ElevenLabsOperationForm(form: session.form)
                 Divider()
+                if let held = explorer.hold(for: operation.id) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(held, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("I have checked") { explorer.acknowledgeHold(operation.id) }
+                            .controlSize(.small)
+                    }
+                    .padding(10)
+                    .background(.orange.opacity(0.08), in: .rect(cornerRadius: 8))
+                }
                 controls
                 if !curlProblems.isEmpty {
                     ElevenLabsProblemList(problems: curlProblems)
@@ -259,7 +271,9 @@ struct ElevenLabsExplorerDetail: View {
                 .fixedSize()
             }
             // The Explorer's Run is the page's one action: Return may press it, for reads only.
-            ElevenLabsRunButton(runner: session.runner, title: "Run", respondsToReturn: true) { explorer.run(session) }
+            ElevenLabsRunButton(runner: session.runner, title: "Run", disabled: explorer.hold(for: session.operation.id) != nil,
+                                disabledReason: explorer.hold(for: session.operation.id).map { _ in "Held until you have checked" },
+                                respondsToReturn: true) { explorer.run(session) }
             Button(copiedCurl ? "Copied" : "Copy as curl") { copyCurl() }
                 .help("The command without your key: it reads $ELEVENLABS_API_KEY")
             Button("Reset form") {
