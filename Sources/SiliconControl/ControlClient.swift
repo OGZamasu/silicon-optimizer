@@ -104,7 +104,7 @@ public struct ControlClient: Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw Self.transportError(error)
+            throw Self.transportError(error) { isSameApp(as: handshake) }
         }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? 500
@@ -116,20 +116,39 @@ public struct ControlClient: Sendable {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    static func transportError(_ error: Error) -> Error {
+    /// Whether the app that published `earlier` is still the one answering: its handshake is
+    /// still there, its process is alive, and it names the same process, port and token — a
+    /// token is new every launch, so a relaunched app is a different one.
+    private func isSameApp(as earlier: ControlAPI.Handshake) -> Bool {
+        guard let now = try? handshake() else { return false }
+        return now.pid == earlier.pid && now.port == earlier.port && now.token == earlier.token
+    }
+
+    /// - Parameter appStillUp: Asked only when the connection closed without an answer, which
+    ///   is how both a busy server and an app that quit or crashed mid-call look from here.
+    static func transportError(_ error: Error, appStillUp: () -> Bool = { true }) -> Error {
         guard let urlError = error as? URLError else { return error }
         switch urlError.code {
         case .cannotConnectToHost, .cannotFindHost:
             return ClientError.appNotRunning
         case .networkConnectionLost:
-            // What a control server out of connections looks like from here: past its budget it
-            // closes a connection unread. (A request still running when the app quits ends the
-            // same way.)
+            // A request the app was working on when it quit or crashed may have been done —
+            // and billed — before it stopped. "Busy, try again" would invite paying twice.
+            guard appStillUp() else {
+                return ClientError.transport(
+                    "Silicon Optimizer stopped (it quit or crashed) before answering. It may "
+                    + "have done some or all of the work first: a paid call may already have "
+                    + "run and been billed, so check before asking again."
+                )
+            }
+            // The same app is still up, so this is most likely a control server out of
+            // connections: past its budget it closes a connection unread.
             return ClientError.transport(
                 "Silicon Optimizer closed the connection without answering. It is most likely "
                 + "busy, with too many requests open at once (each MCP bridge can hold eight): "
-                + "wait for some to finish, then try again. If this keeps happening, check that "
-                + "the app is still running."
+                + "wait for some to finish, then try again. If this was a paid call it may "
+                + "still have run, so check before repeating it. If this keeps happening, check "
+                + "that the app is still running."
             )
         case .timedOut:
             return ClientError.transport(
