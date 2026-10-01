@@ -114,8 +114,7 @@ struct MCPServer: Sendable {
         case "notifications/cancelled":
             // The client has given up on a call: end it, and answer nothing, not even an error
             // — it has moved on. An id that is unknown or already answered is ignored.
-            if case .object(let params)? = request.params,
-               let id = params["requestId"], id != .null {
+            if let id = request.cancelledID, id != .null {
                 calls.cancel(id)
             }
 
@@ -253,7 +252,7 @@ private final class FrameWriter: @unchecked Sendable {
 }
 
 /// The tool calls in flight, each under the id its client gave it. Ids are compared as JSON
-/// values: `7` and `7.0` are one id, `7` and `"7"` are two.
+/// values: `7` and `7.0` are one id, `7` and `"7"` are two (see `RequestID`).
 final class CallRegistry: @unchecked Sendable {
 
     struct Ticket: Hashable, Sendable {
@@ -269,7 +268,7 @@ final class CallRegistry: @unchecked Sendable {
     }
 
     private struct Call {
-        let id: JSONValue
+        let id: RequestID
         var task: Task<Void, Never>?
         /// Cancelled — by the client, or by its hanging up — and never to be answered.
         var cancelled = false
@@ -288,7 +287,7 @@ final class CallRegistry: @unchecked Sendable {
     /// A slot for a call, or why there is none. A cancelled call still unwinding keeps its slot
     /// but not its id. A call without an id (a notification) can be neither duplicated nor
     /// cancelled.
-    func admit(_ id: JSONValue, limit: Int) -> Admission {
+    func admit(_ id: RequestID, limit: Int) -> Admission {
         lock.withLock {
             if id != .null, calls.values.contains(where: { $0.id == id && $0.isOpen }) {
                 return .duplicate
@@ -322,7 +321,7 @@ final class CallRegistry: @unchecked Sendable {
     }
 
     /// Cancels the call the client knows as `id`, if one is running and unanswered.
-    func cancel(_ id: JSONValue) {
+    func cancel(_ id: RequestID) {
         let task: Task<Void, Never>? = lock.withLock {
             guard let ticket = calls.first(where: { $0.value.id == id && $0.value.isOpen })?.key
             else { return nil }
@@ -364,7 +363,52 @@ struct ControlTools: ToolRunner {
 
 // MARK: - JSON-RPC types
 
-private extension JSONValue {
+/// A request id as the client wrote it: a string or a number, kept exact. `JSONValue` holds
+/// numbers as `Double`, which cannot tell 2^53 from 2^53 + 1 — two calls the client numbered
+/// apart would share an id, a cancel could stop the wrong one, and the answer would carry an id
+/// the client never sent. So an integer an `Int64` holds is kept as one.
+enum RequestID: Codable, Equatable, Sendable {
+    case integer(Int64)
+    /// A string, a fraction, null, or anything else a client sends, as JSON.
+    case value(JSONValue)
+
+    static let null = RequestID.value(.null)
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let integer = try? container.decode(Int64.self) {
+            self = .integer(integer)
+        } else {
+            self = .value(try JSONValue(from: decoder))
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        switch self {
+        case .integer(let integer):
+            var container = encoder.singleValueContainer()
+            try container.encode(integer)
+        case .value(let value):
+            try value.encode(to: encoder)
+        }
+    }
+
+    /// Compared as JSON values: `7` and `7.0` are one id, `7` and `"7"` are two.
+    static func == (lhs: RequestID, rhs: RequestID) -> Bool {
+        switch (lhs.normalized, rhs.normalized) {
+        case (.integer(let left), .integer(let right)): left == right
+        case (.value(let left), .value(let right)): left == right
+        default: false
+        }
+    }
+
+    private var normalized: RequestID {
+        if case .value(.number(let number)) = self, let integer = Int64(exactly: number) {
+            return .integer(integer)
+        }
+        return self
+    }
+
     /// As it reads on the wire, for a message that names it.
     var wireText: String {
         (try? JSONEncoder().encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -372,26 +416,33 @@ private extension JSONValue {
 }
 
 struct RPCRequest: Decodable {
-    var id: JSONValue
+    var id: RequestID
     var method: String
     var params: JSONValue?
+    /// `params.requestId` of a `notifications/cancelled`, read as exactly as `id` is.
+    var cancelledID: RequestID?
 
     private enum CodingKeys: String, CodingKey { case id, method, params }
+    private enum CancelKeys: String, CodingKey { case requestId }
 
     // Synthesized decoding would demand an `id` key even with a default value,
     // which made every id-less notification a "Parse error" on the wire —
     // exactly the noise a strict client (Claude Desktop) logs at the user.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(JSONValue.self, forKey: .id) ?? .null
+        id = try container.decodeIfPresent(RequestID.self, forKey: .id) ?? .null
         method = try container.decode(String.self, forKey: .method)
         params = try container.decodeIfPresent(JSONValue.self, forKey: .params)
+        if method == "notifications/cancelled",
+           let cancel = try? container.nestedContainer(keyedBy: CancelKeys.self, forKey: .params) {
+            cancelledID = try? cancel.decodeIfPresent(RequestID.self, forKey: .requestId)
+        }
     }
 }
 
 struct RPCResponse: Encodable {
     var jsonrpc = "2.0"
-    var id: JSONValue
+    var id: RequestID
     var result: JSONValue?
     var error: RPCError?
 
@@ -400,12 +451,12 @@ struct RPCResponse: Encodable {
         var message: String
     }
 
-    init(id: JSONValue, result: JSONValue) {
+    init(id: RequestID, result: JSONValue) {
         self.id = id
         self.result = result
     }
 
-    init(id: JSONValue, error: RPCError) {
+    init(id: RequestID, error: RPCError) {
         self.id = id
         self.error = error
     }

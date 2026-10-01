@@ -300,6 +300,36 @@ struct MCPServerConcurrencyTests {
         try await bridge.end()
     }
 
+    /// Ids past 2^53, where a `Double` no longer tells neighbours apart, are still two calls,
+    /// each cancelled and answered under its own exact id.
+    @Test func idsPastTwoToTheFiftyThirdStayExact() async throws {
+        let bridge = Bridge()
+        let odd = "9007199254740993", even = "9007199254740992"
+        bridge.send(#"{"jsonrpc":"2.0","id":\#(odd),"method":"tools/call","params":{"name":"wait","arguments":{"tag":"odd"}}}"#)
+        bridge.send(#"{"jsonrpc":"2.0","id":\#(even),"method":"tools/call","params":{"name":"wait","arguments":{"tag":"even"}}}"#)
+        try await running(bridge, "odd", "even")
+
+        bridge.send(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":\#(odd)}}"#)
+        try await eventually(.seconds(10), "the odd id's call to be cancelled") {
+            bridge.tools.fate("odd") == .cancelled ? true : nil
+        }
+        try await bridge.sync()
+        #expect(bridge.tools.fate("even") == .running)
+
+        bridge.tools.release("even", with: "even done")
+        func carries(_ line: String, _ id: String) -> Bool {
+            line.contains(#""id":\#(id),"#) || line.contains(#""id":\#(id)}"#)
+        }
+        try await eventually(.seconds(10), "the even id's answer") {
+            bridge.frames.lines.contains { carries($0, even) } ? true : nil
+        }
+        let answers = bridge.frames.lines.filter { !$0.contains("sync-") }
+        #expect(answers.count == 1)
+        #expect(answers.allSatisfy { carries($0, even) && $0.contains("even done") })
+        #expect(!bridge.frames.lines.contains { $0.contains(odd) })
+        try await bridge.end()
+    }
+
     /// A cancel ends only `generate_video`'s wait and the agent conversation; every
     /// `POST /elevenlabs/call` runs to its end in the app. A model that cancels a paid call and
     /// asks again pays twice, so each paid ElevenLabs tool says so where the model reads it.
