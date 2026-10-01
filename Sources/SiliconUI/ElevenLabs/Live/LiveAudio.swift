@@ -408,9 +408,14 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
         ) { [weak self] _ in self?.release() }
         // A device change stops the engine: the capture would go silent while the screen still
         // says the microphone is on (and an agent keeps billing), so the session is told.
+        // Handled off the posting thread: the handler takes the lock that `startCapture` and
+        // `release` hold while they reconfigure the engine, and AVFoundation may post from
+        // inside those calls.
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in self?.configurationChanged() }
+        ) { [weak self] _ in
+            DispatchQueue.global(qos: .userInitiated).async { self?.configurationChanged() }
+        }
     }
 
     func claim() -> Int {

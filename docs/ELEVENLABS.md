@@ -728,8 +728,11 @@ or the ElevenLabs dashboard) before step 1 and after the last step you run.
    one message, read the answer, End. *Settles:* bare `agent_id` for a public agent, the initiation and
    metadata, `error` vs `client_error`, the ping cadence. **Watch for:** the agent's Conversations
    (Agents → the agent → Conversations, or the ElevenLabs dashboard) shows **exactly one** new
-   conversation, ended. Then start one more and press Cancel while it says Connecting: Conversations
-   should still show only that one more at most, ended — never one left running.
+   conversation, ended. Note how it records the End — "ended" or "disconnected"/"failed": the app
+   always asks to close with 1000, but under load macOS can drop the connection without sending
+   that close frame, and ElevenLabs then sees a disconnect (the conversation still ends and stops
+   billing). Then start one more and press Cancel while it says Connecting: Conversations should
+   still show only that one more at most, ended — never one left running.
 4. **The MCP tool** — *costs about the same as step 3: a minute of agent time plus LLM.* With the
    switch on, call `elevenlabs_agent_converse` with that agent, one message and `confirm: true`. The
    answer should carry the transcript, `"ended"` and a `duration_seconds` of a few seconds; Conversations
@@ -745,5 +748,11 @@ or the ElevenLabs dashboard) before step 1 and after the last step you run.
    `dropsAudioAtTheInterruptedEvent` to `false` in
    `Sources/SiliconElevenLabs/Realtime/ElevenLabsAgentConversation.swift` and turn round the
    expectations of `RealtimeSessionTests.audioOfAnInterruptedResponseIsDropped` (with `<`, the
-   interrupted chunk is dropped only below its id). **Watch for:** after End, the microphone
-   indicator goes out and music in other apps is no longer quieter (voice processing is off).
+   interrupted chunk is dropped only below its id). **Watch for:** the conversation must **not end
+   within a second of Start with "The audio device changed"** — that would be voice processing's
+   own reconfiguration taken for a device change (plugging headphones in mid-conversation should
+   end it with that message; nothing else should). After End, the microphone indicator goes out and
+   music in other apps is no longer quieter (voice processing is off). Then play a long Live speech
+   text, press Finish and, while it is still playing, go to Live transcription and Start: leaving
+   Live speech silences the rest of its audio, and the transcription keeps the microphone (the
+   indicator stays on) and keeps transcribing.
