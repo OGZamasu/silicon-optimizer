@@ -143,6 +143,11 @@ enum LiveOutcome: Equatable, Sendable {
 
 /// Seconds as "0:42" or "1:02:03".
 enum LiveClock {
+    /// An amount of audio: "4.3 s" under a minute, the clock above.
+    static func amount(_ seconds: TimeInterval) -> String {
+        seconds < 60 ? String(format: "%.1f s", max(0, seconds)) : text(seconds)
+    }
+
     static func text(_ seconds: TimeInterval) -> String {
         let whole = max(0, Int(seconds.rounded(.down)))
         let hours = whole / 3_600, minutes = whole / 60 % 60, rest = whole % 60
