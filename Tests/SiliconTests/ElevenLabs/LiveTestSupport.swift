@@ -253,9 +253,11 @@ final class LiveRig {
         context.limits.agentStartTimeout = 5
         // Every fake server here answers a commit, so Stop's wait for the last text ends when it
         // arrives; the app's four seconds are a deadline a busy run can overrun before the
-        // answer is read. A file is sent fast.
-        LiveTranscriptionModel.finalWait = .seconds(60)
-        LiveTranscriptionModel.filePace = .milliseconds(5)
+        // answer is read. A file is sent fast; the quiet after the last text at pauses is short.
+        // (Per rig, not app-wide: a test may set its own.)
+        context.transcription.finalWait = .seconds(60)
+        context.transcription.filePace = .milliseconds(5)
+        context.transcription.finalQuiet = .milliseconds(500)
     }
 
     static func makeClient(

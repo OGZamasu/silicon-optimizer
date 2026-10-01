@@ -96,16 +96,14 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     /// The Start in progress, so one that was stopped (and perhaps started again) while it
     /// read its file or asked for the microphone does nothing more.
     @ObservationIgnored private var starting = UUID()
-    @ObservationIgnored private var awaitingFinal = false
-    @ObservationIgnored private var finalArrived = false
+    /// Committed transcripts received this session (one answers each commit sent), and when the
+    /// last one came — what Stop waits on for the last text.
+    @ObservationIgnored private var committedReceived = 0
+    @ObservationIgnored private var lastCommittedAt: ContinuousClock.Instant?
 
-    /// Seconds of audio between commits when committing by hand (ElevenLabs commits on its own
-    /// after about 36 s, and asks for one every 20–30 s).
-    static let commitEvery: Double = 20
-    /// How fast a file is sent: a second of audio every this many seconds.
-    static var filePace: Duration = .milliseconds(100)
-    /// How long Stop waits for the last committed text.
-    static var finalWait: Duration = .seconds(4)
+    /// What the outcome adds when Stop's wait for the last text runs out.
+    static let lastWordsMayBeMissing =
+        "The last words may be missing — they were sent and billed, but their text did not arrive in time."
 
     init(context: LiveContext) {
         self.context = context
@@ -211,7 +209,15 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             Task { @MainActor in self?.microphoneFellBehind(token) }
         }
         self.chunks = queue
-        sender = Task.detached { for await chunk in queue.chunks { try? await stream.sendAudio(chunk) } }
+        // Committing by hand, the microphone commits every `commitEvery` seconds of audio too, as
+        // a file does, so ElevenLabs never commits on its own.
+        let commitEvery = config.commitStrategy == .manual ? context.transcription.commitEvery : nil
+        sender = Task.detached {
+            for await chunk in queue.chunks {
+                try? await stream.sendAudio(chunk)
+                if let commitEvery, stream.secondsSinceCommit >= commitEvery { try? await stream.commit() }
+            }
+        }
         phase = .live
         Task { await consume(stream, token: token) }
         Task { await watch(token: token) }
@@ -331,8 +337,8 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     private func send(_ decoded: [Data], total: Double, converter: LiveCaptureConverter, token: UUID) async {
         fileProgress = (0, total)
         var sentSeconds = 0.0
-        var sinceCommit = 0.0
         let bytesPerSecond = Double(converter.target.bytesPerSecond ?? 32_000)
+        let timing = context.transcription
         for chunk in decoded {
             guard guardian.isCurrent(token), phase == .live, let stream else { return }
             do {
@@ -340,15 +346,12 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             } catch {
                 return
             }
-            let seconds = Double(chunk.count) / bytesPerSecond
-            sentSeconds += seconds
-            sinceCommit += seconds
+            sentSeconds += Double(chunk.count) / bytesPerSecond
             fileProgress = (sentSeconds, total)
-            if sinceCommit >= Self.commitEvery {
+            if stream.secondsSinceCommit >= timing.commitEvery {
                 try? await stream.commit()
-                sinceCommit = 0
             }
-            try? await Task.sleep(for: Self.filePace)
+            try? await Task.sleep(for: timing.filePace)
         }
         guard guardian.isCurrent(token), phase == .live else { return }
         await finishSending(commit: true)
@@ -364,16 +367,37 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         chunks?.finish()
         await sender?.value
         guard guardian.isCurrent(token) else { return }
-        // The text for the last stretch comes as a committed transcript after this commit.
-        awaitingFinal = true
-        finalArrived = false
-        if commit { try? await stream.commit() }
-        let deadline = ContinuousClock.now + Self.finalWait
-        while guardian.isCurrent(token), !finalArrived, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
+        let timing = context.transcription
+        let manual = stream.config.commitStrategy == .manual
+        // Words on screen not yet committed: what a lost last text would take with it.
+        let pendingWords = !partial.isEmpty
+        let receivedBefore = committedReceived
+        // Committing by hand, a commit with no audio since the last one is not sent: nothing
+        // would answer it. At pauses, ElevenLabs' own commits are not counted, so Stop commits.
+        let commits = commit && (!manual || stream.secondsSinceCommit > 0)
+        if commits { try? await stream.commit() }
+        // By hand, every commit is answered by one committed transcript, in order: the last text
+        // is the answer to the last commit — not just the first text after Stop, which can be the
+        // answer to an earlier commit. At pauses, an automatic commit's text can land just after
+        // Stop's commit: the first text after it, then a quiet moment.
+        let expected = stream.usage.commits
+        let deadline = ContinuousClock.now + timing.finalWait
+        var answered = false
+        while guardian.isCurrent(token), ContinuousClock.now < deadline {
+            let after = committedReceived > receivedBefore
+            if manual {
+                answered = committedReceived >= expected && (after || !commits)
+            } else {
+                answered = after && (lastCommittedAt.map { ContinuousClock.now - $0 >= timing.finalQuiet } ?? false)
+            }
+            if answered { break }
+            try? await Task.sleep(for: .milliseconds(20))
         }
         guard guardian.isCurrent(token) else { return }
-        await close(.ended(summary()))
+        // Ran out of time: say so when text was owed — by hand, a commit unanswered; at pauses,
+        // words on screen not yet committed and no text since Stop.
+        let owed = manual ? committedReceived < expected : (pendingWords && committedReceived == receivedBefore)
+        await close(.ended(answered || !owed ? summary() : summary() + " " + Self.lastWordsMayBeMissing))
     }
 
     private func close(_ outcome: LiveOutcome) async {
@@ -392,7 +416,8 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
                 partial = ElevenLabsRedaction.redact(text)
             case .committed(let text):
                 partial = ""
-                if awaitingFinal { finalArrived = true }
+                committedReceived += 1
+                lastCommittedAt = .now
                 guard !text.isEmpty else { continue }
                 segments.append(Segment(id: nextSegmentID, text: ElevenLabsRedaction.redact(text)))
                 nextSegmentID += 1
@@ -459,8 +484,8 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     }
 
     private func resetSession() {
-        awaitingFinal = false
-        finalArrived = false
+        committedReceived = 0
+        lastCommittedAt = nil
         segments = []
         partial = ""
         warnings = []

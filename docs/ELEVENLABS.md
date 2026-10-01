@@ -635,6 +635,17 @@ PDFs can go with a typed message (uploaded to the conversation with `upload_file
 uses `cancel_file_upload_route`, which asks first). When the conversation ends its transcript is
 saved to the output folder; ElevenLabs keeps it too (Conversations).
 
+Live transcription's Stop commits what is left and waits for **the text of that commit** — the
+last stretch was sent and billed, so it must reach the screen and the export. Committing by hand
+(always for a file), every commit is answered by one committed transcript, in order, so Stop waits
+for the answer to its own commit, the last one — not the first text after it, which can be the
+late answer to an earlier commit (a file commits every 20 s of audio, and so does the microphone
+when committing by hand, so ElevenLabs never commits on its own after its ~36 s). Committing at
+pauses, ElevenLabs' own commits cannot be counted: Stop waits for the first text after its commit
+and then for 0.75 s of quiet, so an automatic commit's text landing just before Stop's does not end
+the wait. Either way the wait is 4 s at most; if it runs out with text still owed, the outcome says
+"The last words may be missing — they were sent and billed".
+
 ### Audio
 
 Microphone buffers (any rate, one or two channels) are converted to the socket's format —
@@ -722,7 +733,9 @@ or the ElevenLabs dashboard) before step 1 and after the last step you run.
    a sentence for about ten seconds, press Stop. Partial text should turn into a committed line; with
    Word timings on, times appear. *Settles:* the transcription socket's header auth, chunking, commit
    and the `warning`/error shapes. **Watch for:** the menu-bar microphone indicator (the orange dot)
-   goes out within a second of Stop.
+   goes out within a second of Stop; the last words you said are on screen; and Stop pressed after a
+   pause (nothing left to commit) does not say "The last words may be missing" — if it does,
+   ElevenLabs sends nothing for an empty commit, and the app should not wait for one.
 3. **Talk to an agent, text only** — *costs about a minute of agent time plus the agent's LLM use.*
    With a public test agent that allows text-only (or is text-only), start a text conversation, send
    one message, read the answer, End. *Settles:* bare `agent_id` for a public agent, the initiation and

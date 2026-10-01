@@ -18,6 +18,8 @@ struct LiveContext {
     var limits = ElevenLabsRealtime.Limits()
     /// How many microphone chunks may wait for a socket that has stopped taking them.
     var microphoneQueueCapacity = LiveMicrophoneQueue.defaultCapacity
+    /// Live transcription's commits and its wait for the last text.
+    var transcription = LiveTranscriptionTiming()
 
     @MainActor static func app(_ model: AppModel) -> LiveContext {
         LiveContext(
@@ -44,6 +46,21 @@ struct LiveContext {
     @MainActor func realtime() -> ElevenLabsRealtime? {
         client().map { ElevenLabsRealtime(client: $0, connector: connector(), limits: limits) }
     }
+}
+
+/// Live transcription's commits and Stop's wait for the last text.
+struct LiveTranscriptionTiming: Sendable {
+    /// Seconds of audio between commits when committing by hand. ElevenLabs recommends one every
+    /// 20–30 s, and commits on its own after about 36 s of audio — which would be a committed
+    /// transcript nobody asked for, and so throw off the count Stop waits on.
+    var commitEvery: Double = 20
+    /// How fast a file is sent: a second of audio every this long.
+    var filePace: Duration = .milliseconds(100)
+    /// How long Stop waits for the last text at most.
+    var finalWait: Duration = .seconds(4)
+    /// Committing at pauses: after the first text that follows Stop's commit, how long nothing more
+    /// must arrive — an automatic commit's text can land just before Stop's own.
+    var finalQuiet: Duration = .milliseconds(750)
 }
 
 /// The app's one set of audio devices, made when a live screen first needs them.

@@ -263,6 +263,8 @@ public final class ElevenLabsTranscriptionStream: @unchecked Sendable {
     private let lock = NSLock()
     private var sentFirst = false
     private var closing = false
+    /// Seconds of audio sent when the last commit went.
+    private var secondsAtCommit = 0.0
 
     private init(channel: ElevenLabsRealtimeChannel, config: ElevenLabsTranscriptionStreamConfig, waitingEvents: Int) {
         self.channel = channel
@@ -303,10 +305,18 @@ public final class ElevenLabsTranscriptionStream: @unchecked Sendable {
     }
 
     /// Commits what was said since the last commit: an empty chunk with `commit: true`.
+    /// ElevenLabs answers each commit with one committed transcript.
     public func commit() async throws {
         try checkOpen()
         try await sendChunk(Data(), commit: true)
+        let sent = meter.snapshot.audioSecondsSent
+        lock.withLock { secondsAtCommit = sent }
         meter.update { $0.commits += 1 }
+    }
+
+    /// Seconds of audio sent since the last commit (or since the start).
+    public var secondsSinceCommit: Double {
+        meter.snapshot.audioSecondsSent - lock.withLock { secondsAtCommit }
     }
 
     /// Closes the socket (1000).
