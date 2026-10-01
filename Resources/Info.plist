@@ -38,7 +38,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Silicon Optimizer talks to your other Silicon nodes (like a Windows PC running LATO.2) over your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Live transcription listens to your microphone and turns what you say into text — entirely on this Mac.</string>
+	<string>Live transcription listens to your microphone and turns what you say into text on this Mac. The ElevenLabs live screens, once you press Start there, send it to ElevenLabs.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>SUEnableAutomaticChecks</key>

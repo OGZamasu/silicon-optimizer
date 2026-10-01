@@ -85,6 +85,12 @@ final class ElevenLabsPaneState {
     @ObservationIgnored private var runners: [WeakRunner] = []
     /// Runners with a shown-once secret on screen: forgotten when the owner leaves.
     @ObservationIgnored private var credentialHolders: [WeakRunner] = []
+    /// The live screens' sessions (`ElevenLabs/Live/`), weakly: ended with the account.
+    @ObservationIgnored private var liveWork: [WeakLiveWork] = []
+
+    private struct WeakLiveWork {
+        weak var work: (any ElevenLabsLiveWork)?
+    }
 
     private struct WeakRunner {
         weak var runner: ElevenLabsRunner?
@@ -191,6 +197,7 @@ final class ElevenLabsPaneState {
             if runner.isRunning, runner.operation.risk != .read { cutOff = true }
             runner.cancel()
         }
+        for work in liveWork.compactMap(\.work) where work.endForAccountChange() { cutOff = true }
         if cutOff { previousAccountNotice = Self.previousAccountMessage }
     }
 
@@ -297,6 +304,12 @@ final class ElevenLabsPaneState {
     func track(_ runner: ElevenLabsRunner) {
         runners.removeAll { $0.runner == nil }
         if !runners.contains(where: { $0.runner === runner }) { runners.append(WeakRunner(runner: runner)) }
+    }
+
+    /// A live session is open with this pane: it is ended when the account changes.
+    func trackLive(_ work: any ElevenLabsLiveWork) {
+        liveWork.removeAll { $0.work == nil }
+        if !liveWork.contains(where: { $0.work === work }) { liveWork.append(WeakLiveWork(work: work)) }
     }
 
     func billableRunStarted() {
