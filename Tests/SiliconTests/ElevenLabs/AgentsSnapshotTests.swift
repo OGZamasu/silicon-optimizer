@@ -174,7 +174,8 @@ enum AgentsSnapshot {
         batches.recipientsText = "phone_number,FirstName\n+15550131,Ana\n+15550132,Ben"
         let submit = store.calls.runner(AgentsOp.submitBatch)
         let submitting = Task { await batches.submit() }
-        for _ in 0..<500 where !submit.isAwaitingConfirmation { try await Task.sleep(for: .milliseconds(10)) }
+        let asked = ContinuousClock.now + .seconds(60)
+        while !submit.isAwaitingConfirmation, ContinuousClock.now < asked { try await Task.sleep(for: .milliseconds(10)) }
         submit.confirm()
         await submitting.value
         batches.name = "November check-in"

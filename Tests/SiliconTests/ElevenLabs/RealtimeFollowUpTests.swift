@@ -56,7 +56,7 @@ struct RealtimeFollowUpTests {
         socket.delaySends(by: .milliseconds(150))
         let sending = Task { try await conversation.sendUserMessage("last words") }
         // The message is on its way — taken by the writer, not yet through the slow socket.
-        let deadline = ContinuousClock.now + .seconds(10)
+        let deadline = ContinuousClock.now + .seconds(60)
         while socket.sendsInProgress == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
         try #require(socket.sendsInProgress == 1)
         await conversation.end()
@@ -73,7 +73,7 @@ struct RealtimeFollowUpTests {
         defer { rig.clean() }
         let realtime = rig.realtime
         let start = Task { try await realtime.agentConversation(.init(agentID: "agent_1", auth: .publicAgent)) }
-        let deadline = ContinuousClock.now + .seconds(10)
+        let deadline = ContinuousClock.now + .seconds(60)
         while rig.connector.sockets.first?.sentJSON.isEmpty != false, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }

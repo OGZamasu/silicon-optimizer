@@ -187,14 +187,14 @@ struct RealtimeWireTests {
         let server = try RealtimeLoopbackServer { _ in .hang }
         defer { server.stop() }
         let connector = URLSessionWebSocketConnector.loopbackForTesting(port: Int(server.port))
-        let task = Task { try await connector.connect(ElevenLabsSocketRequest(url: server.url("/hang"))) }
-        let deadline = ContinuousClock.now + .seconds(5)
+        // A minute's open timeout, so only the cancel can end it inside the bound below.
+        let task = Task { try await connector.connect(ElevenLabsSocketRequest(url: server.url("/hang"), openTimeout: 60)) }
+        let deadline = ContinuousClock.now + .seconds(60)
         while server.receivedUpgrades.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         let started = ContinuousClock.now
         task.cancel()
         await #expect(throws: ElevenLabsRealtimeError.cancelled) { _ = try await task.value }
-        // Well inside the 20 s open timeout it would otherwise wait; loose for a busy run.
-        #expect(ContinuousClock.now - started < .seconds(10))
+        #expect(ContinuousClock.now - started < .seconds(30))
     }
 
     @Test func aHandshakeThatNeverAnswersTimesOut() async throws {

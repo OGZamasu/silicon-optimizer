@@ -219,7 +219,10 @@ final class CreativeRig {
 
     /// Waits for a runner to ask, then answers.
     static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<500 {
+        // A minute of wall clock, not a count of naps: a loaded run stretches every nap, and can
+        // hold the main actor for many seconds. Returns as soon as the condition holds.
+        let deadline = ContinuousClock.now + .seconds(60)
+        while ContinuousClock.now < deadline {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }

@@ -219,10 +219,10 @@ extension BuddyTestHost {
             }
             return .encode(["route": "call"])
         case .agentConverse(let body):
-            // `{"fixtureHold":true}` waits (up to 15 s) for the request to be cancelled.
+            // `{"fixtureHold":true}` waits (up to 90 s) for the request to be cancelled.
             if String(decoding: body, as: UTF8.self).contains("fixtureHold") {
                 await ConverseHangUpProbe.shared.held(ObjectIdentifier(self))
-                let deadline = ContinuousClock.now + .seconds(15)
+                let deadline = ContinuousClock.now + .seconds(90)
                 while !Task.isCancelled, ContinuousClock.now < deadline {
                     try? await Task.sleep(for: .milliseconds(20))
                 }

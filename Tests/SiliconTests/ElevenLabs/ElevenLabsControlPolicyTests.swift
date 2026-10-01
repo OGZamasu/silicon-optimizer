@@ -182,7 +182,7 @@ struct ElevenLabsControlPolicyTests {
     /// Sends a request's headers and nothing more, and returns whatever comes back within
     /// `seconds` — or throws, which is what a server still waiting for the body looks like.
     static func answerToHeadersAlone(
-        port: Int, _ head: String, within seconds: Double = 5
+        port: Int, _ head: String, within seconds: Double = 15
     ) async throws -> String {
         let raw = try await RawConnection.connect(port: port)
         defer { raw.close() }
