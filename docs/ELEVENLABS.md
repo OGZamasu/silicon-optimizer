@@ -460,9 +460,17 @@ apply, `operation`, `risk`, `summary`, `setting`, `closeMatches`, `problems`, `u
 Client errors become statuses a caller can act on: invalid arguments 400 with every problem;
 ElevenLabs's 404/409/413 as they are and 422 as 400; a refused key, a permission error or an
 ElevenLabs outage 502 with `upstreamStatus`; rate limits 429 with `retryAfterSeconds`; an unreadable
-Keychain 503; a call cut short because its caller went away 499, saying ElevenLabs may have done
-(and billed) the work anyway. Every message is redacted of anything key-shaped and of every upload
-path. A value an earlier answer masked (`‹redacted›`) is refused if an agent sends it back.
+Keychain 503; a call the app itself cancelled before it finished 499, saying ElevenLabs may have
+done (and billed) the work anyway — a caller going away does not cancel one (below). Every message
+is redacted of anything key-shaped and of every upload path. A value an earlier answer masked
+(`‹redacted›`) is refused if an agent sends it back.
+
+**Hanging up does not stop a call.** The control server watches for a caller going away only on
+`/video/generate` and the agent conversation. A `POST /elevenlabs/call` whose caller hangs up — an
+MCP client cancelling the tool call, or quitting — runs to its end in the app: ElevenLabs does the
+work and bills it if it costs anything, and a file answer is saved under `ElevenLabs/<date>/` as
+usual. Only the answer is lost, so check the history (or the resource) before asking again. The
+paid curated tools and `elevenlabs_call` say so in their descriptions.
 
 ### What a call answers
 
@@ -715,8 +723,9 @@ conversation with one of the owner's agents.
   conversation:** the control server keeps a read pending on the request's connection (as for
   `/video/generate`), and its closing cancels the route, which ends the conversation at once. A
   caller that keeps its connection open and stops reading is bounded by the 300 s cap, and holds
-  the one-at-a-time lane until then — do not retry into it. (The MCP bridge does not yet act on an
-  MCP-level cancel; the cap bounds that too.)
+  the one-at-a-time lane until then — do not retry into it. An MCP client that cancels the call
+  (`notifications/cancelled`) or quits hangs up this way: the bridge closes the call's request, so
+  the conversation ends at once, and answers nothing for it.
 - The answer: the transcript, the tools used (server tools marked "ran on ElevenLabs' side"; client
   and MCP tools with their parameters, masked), errors, how it ended, the duration and a cost note —
   never a signed URL, a token or anything key-shaped. The bridge prints the agent's words inside a

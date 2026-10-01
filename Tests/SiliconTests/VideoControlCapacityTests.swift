@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import SiliconControl
+@testable import SiliconMCP
 
 @Suite("Video control connection capacity")
 struct VideoControlCapacityTests {
@@ -275,4 +276,161 @@ private actor WaitingVideoHost: ControlHost {
         throw TestControlError.unexpectedRoute
     }
     func beginEventUpdates(postingTo hub: BuddyEventHub) async {}
+
+    // An agent conversation, for `MCPBridgeCancelTests`: it runs until its caller hangs up,
+    // as a real one does up to its time limit.
+    var conversations = 0
+    var cancelledConversations = 0
+
+    func elevenLabs(_ request: ElevenLabsControlRequest) async -> ElevenLabsControlResponse {
+        guard case .agentConverse = request.route else {
+            return .error(501, ElevenLabsControl.notOnThisHost)
+        }
+        conversations += 1
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch {
+            cancelledConversations += 1
+        }
+        return .error(500, "The fixture conversation ended.")
+    }
+}
+
+/// From an MCP client's `notifications/cancelled` to the work behind the call, the whole way:
+/// the bridge's own loop, tools and `ControlClient`, against a control server of the test's own.
+@Suite("MCP bridge cancel reaches the control server")
+struct MCPBridgeCancelTests {
+    @Test func cancelledCallsHangUpTheirRendersAndTheirConversation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mcp-cancel-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handshakeURL = directory.appendingPathComponent("control.json")
+        let host = WaitingVideoHost()
+        let server = ControlServer.inTemporaryFolder(directory, host: host)
+        let (lines, input) = AsyncStream.makeStream(of: String.self)
+        let frames = Frames()
+        do {
+            try await server.start()
+            try await waitUntil { FileManager.default.fileExists(atPath: handshakeURL.path) }
+            let bridge = MCPServer(
+                lines: lines, write: { frames.append($0) },
+                tools: ControlTools(client: ControlClient(handshakeURL: handshakeURL))
+            )
+            let running = Task { await bridge.run() }
+
+            // As many calls as the bridge runs at once, each holding its connection open: every
+            // one of them has to reach the app, not wait in the client for a free connection.
+            let calls = MCPServer.maximumConcurrentCalls
+            for id in 1..<calls {
+                input.yield(#"{"jsonrpc":"2.0","id":\#(id),"method":"tools/call","params":{"name":"generate_video","arguments":{"prompt":"fixture \#(id)"}}}"#)
+            }
+            input.yield(#"{"jsonrpc":"2.0","id":\#(calls),"method":"tools/call","params":{"name":"elevenlabs_agent_converse","arguments":{"agent_id":"agent_fixture","messages":["Hello"],"confirm":true}}}"#)
+            try await waitUntil {
+                let accepted = await host.accepted, conversations = await host.conversations
+                return accepted == calls - 1 && conversations == 1
+            }
+
+            for id in 1...calls {
+                input.yield(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":\#(id),"reason":"The user stopped it."}}"#)
+            }
+            try await waitUntil {
+                let waits = await host.cancelledWaits, conversations = await host.cancelledConversations
+                return waits == calls - 1 && conversations == 1
+            }
+            input.finish()
+            await running.value
+            // Nothing answered: a cancelled request gets no response.
+            #expect(frames.lines.isEmpty)
+            // Cancelling ended the waits and the conversation; it took back nothing the app had
+            // accepted.
+            #expect(await host.accepted == calls - 1)
+            await server.stop()
+        } catch {
+            input.finish()
+            await host.releaseAll(failing: true)
+            await server.stop()
+            throw error
+        }
+    }
+
+    private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw TestControlError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+/// What the bridge wrote to its client.
+private final class Frames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var written: [String] = []
+
+    var lines: [String] { lock.withLock { written } }
+
+    func append(_ line: String) { lock.withLock { written.append(line) } }
+}
+
+/// Each MCP bridge may hold eight connections now, so loopback's budget of sixty-four can be
+/// spent by a handful of busy sessions. Past it the server closes a connection unread; the
+/// caller should hear that the app is busy, not that the network failed.
+@Suite("Control client against a full control server")
+struct ControlClientBusyTests {
+    @Test func aServerOutOfConnectionsReadsAsBusy() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("control-full-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handshakeURL = directory.appendingPathComponent("control.json")
+        let server = ControlServer.inTemporaryFolder(directory, host: WaitingVideoHost())
+        var sockets: [Int32] = []
+        defer { for socket in sockets { close(socket) } }
+        do {
+            try await server.start()
+            try await waitUntil { FileManager.default.fileExists(atPath: handshakeURL.path) }
+            let handshake = try JSONDecoder().decode(
+                ControlAPI.Handshake.self, from: Data(contentsOf: handshakeURL)
+            )
+            // Every loopback slot, held by a connection that never sends a request.
+            for _ in 0..<ControlServer.ConnectionBudget.perListener {
+                let socket = socket(AF_INET, SOCK_STREAM, 0)
+                sockets.append(socket)
+                var address = sockaddr_in()
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = in_port_t(UInt16(handshake.port).bigEndian)
+                address.sin_addr.s_addr = inet_addr("127.0.0.1")
+                let connected = withUnsafePointer(to: &address) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        connect(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                try #require(connected == 0)
+            }
+            let client = ControlClient(handshakeURL: handshakeURL)
+            // The server takes its slots as it accepts, a moment after the connects return.
+            let deadline = ContinuousClock.now + .seconds(5)
+            var refusal: (any Error)?
+            while refusal == nil, ContinuousClock.now < deadline {
+                do {
+                    _ = try await client.get("/status") as ControlAPI.Status
+                    try await Task.sleep(for: .milliseconds(20))
+                } catch {
+                    refusal = error
+                }
+            }
+            let message = try #require(refusal).localizedDescription
+            #expect(message.contains("most likely busy"), "\(message)")
+            #expect(!message.contains("network connection was lost"))
+            await server.stop()
+        } catch {
+            await server.stop()
+            throw error
+        }
+    }
+
+    private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw TestControlError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
 }

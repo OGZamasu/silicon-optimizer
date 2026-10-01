@@ -4,4 +4,4 @@ import Foundation
 // written to stdout except protocol frames.
 setvbuf(stdout, nil, _IOLBF, 0)
 
-await MCPServer().run()
+await MCPServer.overStandardIO().run()
