@@ -370,3 +370,67 @@ private final class Frames: @unchecked Sendable {
 
     func append(_ line: String) { lock.withLock { written.append(line) } }
 }
+
+/// Each MCP bridge may hold eight connections now, so loopback's budget of sixty-four can be
+/// spent by a handful of busy sessions. Past it the server closes a connection unread; the
+/// caller should hear that the app is busy, not that the network failed.
+@Suite("Control client against a full control server")
+struct ControlClientBusyTests {
+    @Test func aServerOutOfConnectionsReadsAsBusy() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("control-full-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handshakeURL = directory.appendingPathComponent("control.json")
+        let server = ControlServer.inTemporaryFolder(directory, host: WaitingVideoHost())
+        var sockets: [Int32] = []
+        defer { for socket in sockets { close(socket) } }
+        do {
+            try await server.start()
+            try await waitUntil { FileManager.default.fileExists(atPath: handshakeURL.path) }
+            let handshake = try JSONDecoder().decode(
+                ControlAPI.Handshake.self, from: Data(contentsOf: handshakeURL)
+            )
+            // Every loopback slot, held by a connection that never sends a request.
+            for _ in 0..<ControlServer.ConnectionBudget.perListener {
+                let socket = socket(AF_INET, SOCK_STREAM, 0)
+                sockets.append(socket)
+                var address = sockaddr_in()
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = in_port_t(UInt16(handshake.port).bigEndian)
+                address.sin_addr.s_addr = inet_addr("127.0.0.1")
+                let connected = withUnsafePointer(to: &address) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        connect(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                try #require(connected == 0)
+            }
+            let client = ControlClient(handshakeURL: handshakeURL)
+            // The server takes its slots as it accepts, a moment after the connects return.
+            let deadline = ContinuousClock.now + .seconds(5)
+            var refusal: (any Error)?
+            while refusal == nil, ContinuousClock.now < deadline {
+                do {
+                    _ = try await client.get("/status") as ControlAPI.Status
+                    try await Task.sleep(for: .milliseconds(20))
+                } catch {
+                    refusal = error
+                }
+            }
+            let message = try #require(refusal).localizedDescription
+            #expect(message.contains("most likely busy"), "\(message)")
+            #expect(!message.contains("network connection was lost"))
+            await server.stop()
+        } catch {
+            await server.stop()
+            throw error
+        }
+    }
+
+    private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw TestControlError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}

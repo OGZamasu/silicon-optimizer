@@ -121,6 +121,16 @@ public struct ControlClient: Sendable {
         switch urlError.code {
         case .cannotConnectToHost, .cannotFindHost:
             return ClientError.appNotRunning
+        case .networkConnectionLost:
+            // What a control server out of connections looks like from here: past its budget it
+            // closes a connection unread. (A request still running when the app quits ends the
+            // same way.)
+            return ClientError.transport(
+                "Silicon Optimizer closed the connection without answering. It is most likely "
+                + "busy, with too many requests open at once (each MCP bridge can hold eight): "
+                + "wait for some to finish, then try again. If this keeps happening, check that "
+                + "the app is still running."
+            )
         case .timedOut:
             return ClientError.transport(
                 "The request exceeded its time limit. The app or node may still be working; "
