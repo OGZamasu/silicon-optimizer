@@ -276,4 +276,43 @@ struct VoicesStudioLostAnswerTests {
         try await answering(model.actions) { await model.createConnection() }
         #expect(made.count("create_auth_connection") == 2)
     }
+
+    // MARK: - Dubbing: a segment whose answer was lost
+
+    /// "Add segment", carried out, its answer lost: a second Add would add it twice. The
+    /// transcript is read again at once, the section says the segment may have been added, and
+    /// the fields stay as typed (as do unsaved edits). (Before: nothing was read or said.)
+    @Test func aSegmentAddedWithItsAnswerLostIsReadAgainAndSaidSo() async throws {
+        let made = Made()
+        made.lose("dubbing_transcript_segment_add")
+        let segments: JSONValue = ["segments": [VoicesStudioFollowupTests.segment("s1", "Hello"),
+                                                VoicesStudioFollowupTests.segment("s2", "Added")]]
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "dubbing_transcript_segment_add":
+                return made.answer(request.operationID, .json(["status": "ok"]))
+            case "dubbing_transcript_get":
+                return .json(segments)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = DubbingSectionModel(environment: fixture.environment)
+        let project = try #require(DubbingProject(json: ["project_id": "p-a", "status": "ready", "language_ids": []]))
+        let first = try #require(DubbingSegment(json: VoicesStudioFollowupTests.segment("s1", "Hello")))
+        model.load(projects: [project], selected: project, source: [first])
+        model.sourceEdits["s1"] = "Hello, unsaved"
+        model.newSegment.speaker = "speaker_1"
+        model.newSegment.start = "2"
+        model.newSegment.end = "3"
+        model.newSegment.text = "Added"
+        try await answering(model.actions) { await model.addSegment() }
+        #expect(made.count("dubbing_transcript_segment_add") == 1)
+        #expect(fixture.sent("dubbing_transcript_get").count == 1, "the transcript was not read after a lost answer")
+        #expect(model.sourceSegments.map(\.text) == ["Hello", "Added"])
+        #expect(model.segmentNote == DubbingSectionModel.lostSegmentMessage)
+        #expect(model.newSegment.text == "Added", "the fields were cleared")
+        #expect(model.sourceEdits == ["s1": "Hello, unsaved"], "unsaved edits were dropped")
+    }
 }

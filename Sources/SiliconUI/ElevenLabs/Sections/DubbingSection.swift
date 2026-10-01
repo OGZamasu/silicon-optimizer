@@ -443,6 +443,12 @@ struct DubbingTranscriptEditor: View {
                 }
                 .textFieldStyle(.roundedBorder)
                 .font(.callout)
+                if let note = model.segmentNote {
+                    Label(note, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let languageID = model.selectedLanguageID,
                let language = model.languages.first(where: { $0.id == languageID }) {
