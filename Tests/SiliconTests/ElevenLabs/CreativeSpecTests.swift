@@ -27,12 +27,14 @@ struct CreativeSpecTests {
         }
     }
 
-    /// The sections this builder owns: the pane's Create category, exactly.
+    /// The sections this builder owns: the pane's Create category, exactly — but for the live
+    /// (WebSocket) sections, which the realtime wave owns.
     @Test func theCreativeScreensAreTheCreateCategory() {
-        #expect(ElevenLabsSectionCategory.create.sections
+        let curated = ElevenLabsSectionCategory.create.sections.filter { !$0.isLive }
+        #expect(curated
                 == [.speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation, .transcription,
                     .alignment, .history, .models])
-        for section in ElevenLabsSectionCategory.create.sections {
+        for section in curated {
             #expect(Self.model(for: section) != nil, "\(section) has no screen model")
         }
     }

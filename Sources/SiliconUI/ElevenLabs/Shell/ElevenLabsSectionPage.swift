@@ -9,12 +9,14 @@ struct ElevenLabsSectionContent: View {
     var body: some View {
         switch section {
         case .speech: SpeechSection()
+        case .liveSpeech: LiveSpeechSection()
         case .dialogue: DialogueSection()
         case .voiceChanger: VoiceChangerSection()
         case .soundEffects: SoundEffectsSection()
         case .music: MusicSection()
         case .isolation: IsolationSection()
         case .transcription: TranscriptionSection()
+        case .liveTranscription: LiveTranscriptionSection()
         case .alignment: AlignmentSection()
         case .history: HistorySection()
         case .models: ModelsSection()
@@ -28,6 +30,7 @@ struct ElevenLabsSectionContent: View {
         case .pronunciation: PronunciationSection()
         case .audioNative: AudioNativeSection()
         case .agents: AgentsSection()
+        case .liveAgent: LiveAgentSection()
         case .agentConversations: AgentConversationsSection()
         case .agentKnowledge: AgentKnowledgeSection()
         case .agentTools: AgentToolsSection()

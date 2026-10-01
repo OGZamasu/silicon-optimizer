@@ -215,10 +215,17 @@ struct ElevenLabsPaneSidebar: View {
             HStack {
                 Text(section.title)
                 Spacer(minLength: 4)
-                Text("\(section.operations.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("\(section.operations.count) operations")
+                if section.isLive {
+                    Text("live")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("realtime")
+                } else {
+                    Text("\(section.operations.count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("\(section.operations.count) operations")
+                }
             }
         } icon: {
             Image(systemName: section.systemImage)
