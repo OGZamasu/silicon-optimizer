@@ -70,13 +70,40 @@ struct RealtimeSpecTests {
         #expect(drift.output.contains("asyncapi agents-conversation: no drift"))
     }
 
-    /// A local OpenAPI comparison stays local: the socket check runs only when asked for.
+    /// A local OpenAPI comparison stays local: the socket check runs only when asked for. Run
+    /// with a `curl` on PATH that only notes it was called and fails, so a regression shows here
+    /// as a call, not as a fetch.
     @Test func anOpenAPIComparisonAloneDoesNotCheckTheSockets() throws {
-        let pinned = Self.repository.appendingPathComponent("Scripts/elevenlabs/openapi.json")
-        let result = try Self.run(["Scripts/check-elevenlabs-spec.sh", "--against", pinned.path])
-        #expect(result.status == 0, "\(result.output)")
-        #expect(result.output.contains("no drift"))
-        #expect(!result.output.contains("asyncapi"))
+        try Self.withCurlShim { environment, calls in
+            let pinned = Self.repository.appendingPathComponent("Scripts/elevenlabs/openapi.json")
+            let result = try Self.run(["Scripts/check-elevenlabs-spec.sh", "--against", pinned.path], environment: environment)
+            #expect(result.status == 0, "\(result.output)")
+            #expect(result.output.contains("no drift"))
+            #expect(!result.output.contains("asyncapi"))
+            #expect(calls() == 0, "curl was called")
+        }
+    }
+
+    /// Every local comparison is local; and `--only-asyncapi` next to `--against` — which
+    /// promises no network but gives nothing local for the sockets — is refused, not fetched.
+    @Test func noLocalComparisonFetches() throws {
+        try Self.withCurlShim { environment, calls in
+            let pinned = Self.repository.appendingPathComponent("Scripts/elevenlabs/openapi.json").path
+            let folder = Self.pinnedFolder.path
+            for arguments in [
+                ["--against", pinned, "--asyncapi-against", folder],
+                ["--only-asyncapi", "--asyncapi-against", folder],
+            ] {
+                let result = try Self.run(["Scripts/check-elevenlabs-spec.sh"] + arguments, environment: environment)
+                #expect(result.status == 0, "\(arguments): \(result.output)")
+            }
+            let refused = try Self.run(
+                ["Scripts/check-elevenlabs-spec.sh", "--against", pinned, "--only-asyncapi"], environment: environment
+            )
+            #expect(refused.status == 2, "\(refused.output)")
+            #expect(refused.output.contains("--asyncapi-against"))
+            #expect(calls() == 0, "curl was called")
+        }
     }
 
     // MARK: - Fidelity: the sessions speak the pinned spec
@@ -200,11 +227,12 @@ struct RealtimeSpecTests {
     }
 
     /// Runs a repository script on local files only.
-    static func run(_ arguments: [String]) throws -> (status: Int32, output: String) {
+    static func run(_ arguments: [String], environment: [String: String]? = nil) throws -> (status: Int32, output: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = arguments
         process.currentDirectoryURL = repository
+        if let environment { process.environment = environment }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -212,6 +240,24 @@ struct RealtimeSpecTests {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    /// The environment with a `curl` first on PATH that writes a line to a file and exits 1, and
+    /// a count of those lines. The folder is a scratch folder, removed afterwards.
+    static func withCurlShim(_ body: (_ environment: [String: String], _ calls: () -> Int) throws -> Void) throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-curl-shim-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let log = folder.appendingPathComponent("calls")
+        let shim = folder.appendingPathComponent("curl")
+        try "#!/bin/sh\necho called >> \"\(log.path)\"\nexit 1\n".write(to: shim, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = folder.path + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
+        try body(environment) {
+            ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").count
+        }
     }
 
     /// `path = value` lines of a pinned snapshot, through the drift script's own reader.

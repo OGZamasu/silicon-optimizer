@@ -9,7 +9,9 @@
 #   Scripts/check-elevenlabs-spec.sh --asyncapi-against DIR
 #                                                      # compare the AsyncAPI with DIR/<name>.md or
 #                                                      # .yaml (no network)
-#   --only-asyncapi                                    # skip the OpenAPI part
+#   --only-asyncapi                                    # skip the OpenAPI part (with --against
+#                                                      # alone it is refused: nothing local to
+#                                                      # compare, and --against means no network)
 #
 # The live specs are public: no key is sent, and the fetches go only to api.elevenlabs.io and
 # elevenlabs.io over https. This is for the owner or the orchestrator; the test suite runs it only
@@ -47,7 +49,7 @@ while [ $# -gt 0 ]; do
         --asyncapi-against) ASYNCAPI_AGAINST=${2:?--asyncapi-against needs a folder}; shift 2 ;;
         --asyncapi-pinned) ASYNCAPI_PINNED=${2:?--asyncapi-pinned needs a folder}; shift 2 ;;
         --only-asyncapi) ONLY_ASYNCAPI=1; shift ;;
-        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -60,10 +62,15 @@ scratch() {
     fi
 }
 
-# The live AsyncAPI check runs on a live run, or when a folder is given; never next to a local
-# OpenAPI comparison alone, which must not touch the network.
+# The AsyncAPI check runs against a folder when one is given, live on a live run, and never next
+# to a local OpenAPI comparison: --against means no network.
+if [ "$ONLY_ASYNCAPI" = 1 ] && [ -n "$AGAINST" ] && [ -z "$ASYNCAPI_AGAINST" ]; then
+    echo "--only-asyncapi with --against has nothing local to compare: add --asyncapi-against DIR (no network)," \
+        "or drop --against for a live run" >&2
+    exit 2
+fi
 RUN_ASYNCAPI=0
-if [ -n "$ASYNCAPI_AGAINST" ] || { [ -z "$AGAINST" ] && [ "$ONLY_ASYNCAPI" = 0 ]; } || [ "$ONLY_ASYNCAPI" = 1 ]; then
+if [ -n "$ASYNCAPI_AGAINST" ] || [ -z "$AGAINST" ]; then
     RUN_ASYNCAPI=1
 fi
 
