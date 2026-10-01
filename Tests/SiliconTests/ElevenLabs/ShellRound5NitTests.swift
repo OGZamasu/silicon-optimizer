@@ -40,8 +40,9 @@ struct ShellRound5NitTests {
         #expect(text.hasPrefix("export "))
     }
 
-    /// A key or certificate file: regular, at most 256 KB, text — a named pipe would block the
-    /// read forever, and it is read off the main actor anyway.
+    /// A key or certificate file: regular, at most 256 KB, text, and it is read off the main
+    /// actor anyway. (No named pipe here: a regression in the check would block the read — and
+    /// the test process — forever. `ShellFollowupTests` covers the other kinds of file.)
     @Test func aKeyFileIsReadWithLimits() throws {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("elevenlabs-keyfile-\(UUID().uuidString)", isDirectory: true)
@@ -55,10 +56,6 @@ struct ShellRound5NitTests {
         let big = folder.appendingPathComponent("big.pem")
         try Data(count: ElevenLabsSecretFile.sizeLimit + 1).write(to: big)
         #expect((try? ElevenLabsSecretFile.read(big).get()) == nil)
-
-        let pipe = folder.appendingPathComponent("pipe")
-        #expect(mkfifo(pipe.path, 0o600) == 0)
-        #expect((try? ElevenLabsSecretFile.read(pipe).get()) == nil)
 
         #expect((try? ElevenLabsSecretFile.read(folder).get()) == nil)
     }
