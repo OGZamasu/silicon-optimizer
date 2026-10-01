@@ -154,7 +154,7 @@ struct RealtimeControlTests {
         defer { rig.clean() }
         // The agent greets: the wait for its greeting ends when it arrives, so it may be long — a
         // greeting read after a short wait would be taken for the first answer.
-        rig.timing.greeting = .seconds(15)
+        rig.timing.greeting = .seconds(60)
         let (status, answer) = await rig.converse([
             "agent_id": "agent_2", "messages": ["What are your hours?", "Thanks"],
             "dynamic_variables": ["user_name": "Ada"], "confirm": true,

@@ -189,7 +189,7 @@ struct RealtimeWireTests {
         let connector = URLSessionWebSocketConnector.loopbackForTesting(port: Int(server.port))
         // A minute's open timeout, so only the cancel can end it inside the bound below.
         let task = Task { try await connector.connect(ElevenLabsSocketRequest(url: server.url("/hang"), openTimeout: 60)) }
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while server.receivedUpgrades.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         let started = ContinuousClock.now
         task.cancel()

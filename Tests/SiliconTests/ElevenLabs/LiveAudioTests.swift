@@ -154,7 +154,7 @@ struct LiveAudioTests {
         #expect(abs(audio.scheduledSeconds - 0.25) < 0.001)
         audio.finishPlaying()
         // Completions come back through the main actor: waited for, not slept for.
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while abs(playback.playedSeconds - 0.05) >= 0.001, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }

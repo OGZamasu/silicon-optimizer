@@ -401,7 +401,7 @@ struct CoreClientTests {
             if received == 3 { break }
         }
         // The transport hears of it on its own task: waited for, not slept for.
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while rig.transport.cancelledStreams == 0, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }

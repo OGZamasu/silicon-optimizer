@@ -280,10 +280,11 @@ final class LiveRig {
         transport.removeTemporaryFiles()
     }
 
-    /// Waits until `condition` holds (or fifteen seconds pass: in a full run other suites can
-    /// hold the main actor for seconds, and this returns as soon as it holds anyway).
+    /// Waits until `condition` holds (or a minute passes: in a loaded full run other suites can
+    /// hold the main actor for many seconds — a loop of every ElevenLabs suite under twelve busy
+    /// threads once held one past fifteen — and this returns as soon as it holds anyway).
     func until(_ condition: () -> Bool) async {
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while !condition(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
     }
 }

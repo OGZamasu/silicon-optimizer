@@ -291,7 +291,7 @@ final class LoopbackServer: @unchecked Sendable {
     }
 
     private func waitUntil(_ condition: @escaping @Sendable () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while !condition() {
             guard ContinuousClock.now < deadline else {
                 Issue.record("timed out waiting on the loopback server")

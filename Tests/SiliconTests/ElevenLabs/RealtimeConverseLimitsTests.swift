@@ -164,7 +164,7 @@ struct RealtimeConverseLimitsTests {
         defer { rig.clean() }
         let body: JSONValue = ["agent_id": "agent_1", "messages": ["Hi"], "confirm": true]
         let first = Task { await rig.converse(body) }
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while rig.connector.sockets.isEmpty, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -219,13 +219,13 @@ struct RealtimeConverseHangUpTests {
                     "POST", path, token: fixture.local.token, body: #"{"fixtureHold":true}"#
                 )
             }
-            let deadline = ContinuousClock.now + .seconds(15)
+            let deadline = ContinuousClock.now + .seconds(60)
             while await ConverseHangUpProbe.shared.count(id).held == 0, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
             try #require(await ConverseHangUpProbe.shared.count(id).held == 1)
             call.cancel()
-            let cancelDeadline = ContinuousClock.now + .seconds(15)
+            let cancelDeadline = ContinuousClock.now + .seconds(60)
             while await ConverseHangUpProbe.shared.count(id).cancelled == 0, ContinuousClock.now < cancelDeadline {
                 try await Task.sleep(for: .milliseconds(10))
             }

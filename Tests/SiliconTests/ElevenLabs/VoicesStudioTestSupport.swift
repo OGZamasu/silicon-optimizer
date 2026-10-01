@@ -138,8 +138,9 @@ struct VoicesStudioScratch {
 /// Waits for a condition the main actor will make true, failing the test after a while.
 @MainActor
 func voicesStudioWait(_ condition: @MainActor () -> Bool) async throws {
-    // Fifteen seconds of wall clock, not a count of naps: a loaded run stretches every nap.
-    let deadline = ContinuousClock.now + .seconds(15)
+    // A minute of wall clock, not a count of naps: a loaded run stretches every nap, and can
+        // hold the main actor for many seconds. Returns as soon as the condition holds.
+    let deadline = ContinuousClock.now + .seconds(60)
     while ContinuousClock.now < deadline {
         if condition() { return }
         try await Task.sleep(for: .milliseconds(10))

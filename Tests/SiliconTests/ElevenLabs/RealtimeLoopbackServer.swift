@@ -62,7 +62,7 @@ final class RealtimeLoopbackServer: @unchecked Sendable {
     }
 
     func waitForConnections(_ count: Int) async -> Bool {
-        let deadline = ContinuousClock.now + .seconds(15)
+        let deadline = ContinuousClock.now + .seconds(60)
         while ContinuousClock.now < deadline {
             if openedConnections.count >= count { return true }
             try? await Task.sleep(for: .milliseconds(10))
@@ -167,7 +167,7 @@ final class RealtimeLoopbackConnection: @unchecked Sendable {
     func cancel() { connection.cancel() }
 
     /// Waits for the client's `count`th text frame.
-    func text(_ index: Int, timeout: Duration = .seconds(15)) async -> String? {
+    func text(_ index: Int, timeout: Duration = .seconds(60)) async -> String? {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             let texts = texts
@@ -178,7 +178,7 @@ final class RealtimeLoopbackConnection: @unchecked Sendable {
         return nil
     }
 
-    func waitForClose(timeout: Duration = .seconds(15)) async -> (code: Int?, reason: String)? {
+    func waitForClose(timeout: Duration = .seconds(60)) async -> (code: Int?, reason: String)? {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if let close = closeFrame { return close }
