@@ -275,16 +275,13 @@ public enum ElevenLabsRealtimeRedaction {
 
     /// `text` with every URL in it described as `describe` would (its query masked by the
     /// allowlist), every `signature`/`token`-like parameter masked wherever it stands — `name=`,
-    /// a JSON field `"name":"…"`, `name: …` — and anything key-shaped redacted: what every realtime
-    /// error, close reason and outcome goes through. Percent-encoded text is decoded first, so an
-    /// encoded URL or parameter is found too.
+    /// a JSON field `"name":"…"`, `name: …`, single-quoted — the credential after
+    /// `Authorization: Bearer|Basic|Token` and after a lone `Bearer`, and anything key-shaped
+    /// redacted: what every realtime error, close reason and outcome goes through. Percent-encoded
+    /// runs are decoded first, each on its own, so an encoded URL or parameter is found even where
+    /// a stray `%` elsewhere in the text is not an escape.
     public static func scrub(_ text: String, knownKey: String? = nil) -> String {
-        var result = text
-        // Up to three rounds of percent-decoding (a URL inside a URL is encoded twice).
-        for _ in 0..<3 {
-            guard result.contains("%"), let decoded = result.removingPercentEncoding, decoded != result else { break }
-            result = decoded
-        }
+        var result = percentDecoded(text)
         let range = NSRange(result.startIndex..., in: result)
         let urls = urlPattern.matches(in: result, range: range).reversed()
         for match in urls {
@@ -300,20 +297,57 @@ public enum ElevenLabsRealtimeRedaction {
             }
             result.replaceSubrange(swiftRange, with: shown)
         }
+        result = authorizationSchemePattern.stringByReplacingMatches(
+            in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1$2$3 " + ElevenLabsRedaction.placeholder
+        )
+        result = bearerPattern.stringByReplacingMatches(
+            in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "Bearer " + ElevenLabsRedaction.placeholder
+        )
         result = secretParameterPattern.stringByReplacingMatches(
             in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1$2" + ElevenLabsRedaction.placeholder
         )
         return ElevenLabsRedaction.redact(result, knownKey: knownKey)
     }
 
+    /// `text` with every run of `%XX` escapes decoded on its own — up to three rounds, for a URL
+    /// encoded inside a URL — and every `%` that is not an escape left as it is. (Decoding the
+    /// whole text at once gives up on all of it at the first stray `%`.)
+    static func percentDecoded(_ text: String) -> String {
+        var result = text
+        for _ in 0..<3 {
+            guard result.contains("%") else { break }
+            var changed = false
+            let runs = percentRunPattern.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
+            for match in runs {
+                guard let range = Range(match.range, in: result) else { continue }
+                let run = String(result[range])
+                guard let decoded = run.removingPercentEncoding, decoded != run else { continue }
+                result.replaceSubrange(range, with: decoded)
+                changed = true
+            }
+            if !changed { break }
+        }
+        return result
+    }
+
+    private static let percentRunPattern = try! NSRegularExpression(pattern: #"(?:%[0-9A-Fa-f]{2})+"#)
+    /// `Authorization: Bearer|Basic|Token <credential>`: the credential, not the scheme, is the secret.
+    private static let authorizationSchemePattern = try! NSRegularExpression(
+        pattern: #"(?i)\b(authorization)(["']?\s*[=:]\s*["']?)(bearer|basic|token)\s+(?!‹)[^\s"'<>,)]+"#
+    )
+    /// A lone `Bearer <token>`, as a header value is quoted in an error.
+    private static let bearerPattern = try! NSRegularExpression(
+        pattern: #"\bBearer\s+(?!‹)[A-Za-z0-9._~+/=-]{8,}"#
+    )
+
     /// A URL; its query runs on past commas (a value can hold one) up to whitespace, a quote, an
     /// angle bracket or a closing parenthesis.
     private static let urlPattern = try! NSRegularExpression(
         pattern: #"(?i)\b(?:wss?|https?)://[^\s"'<>,)?]+(?:\?[^\s"'<>)]*)?"#
     )
-    /// A secret-named parameter: `name=value`, `"name":"value"`, `name: value`.
+    /// A secret-named parameter: `name=value`, `"name":"value"`, `'name': 'value'`, `name: value`.
     private static let secretParameterPattern = try! NSRegularExpression(
-        pattern: #"(?i)\b(conversation_signature|single_use_token|signature|token|xi-api-key|xi_api_key|authorization)("?\s*[=:]\s*"?)(?!‹)[^&\s"'<>)]+"#
+        pattern: #"(?i)\b(conversation_signature|single_use_token|signature|token|xi-api-key|xi_api_key|authorization)(["']?\s*[=:]\s*["']?)(?!‹)[^&\s"'<>)]+"#
     )
 
     /// `url` as text: scheme, host, path, and the query with every value not on the allowlist
