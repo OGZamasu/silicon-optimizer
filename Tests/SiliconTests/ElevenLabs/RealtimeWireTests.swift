@@ -103,32 +103,41 @@ struct RealtimeWireTests {
         }
     }
 
-    /// The client's close frame carries the code and reason. Under a heavily loaded test run
-    /// URLSession now and then tears the TCP connection down before the server has read the frame
-    /// — even three sockets in a row — and the server sees the connection end with no frame. So up
-    /// to three sockets are tried; a frame that is read must carry exactly 1000 and the reason, and
-    /// none being read at all is a known, intermittent Foundation behaviour rather than a failure.
-    /// (Either way the socket has ended: the receive after it throws.)
+    /// The client's close frame carries the code and reason.
+    ///
+    /// What a busy process does: in a full test run, URLSession now and then ends the TCP
+    /// connection with a FIN and no close frame at all (the server reads zero frames, then the
+    /// FIN) — measured at 2–6 sockets in 8 in full runs, never in a run of the wire tests alone.
+    /// It is Foundation's, not the server's reading (the server's end is a clean FIN, not a reset),
+    /// and the socket has ended either way. So, as in a session — whose reader always has a
+    /// receive pending when it closes — each socket here has one, and sockets are tried until a
+    /// frame is read (twenty at most, a little apart, since the losses come in runs). A frame read
+    /// must carry exactly 1000 and the reason; none read in twenty is a failure: a close that
+    /// sends no frame fails every time.
     @Test func closingSendsTheCodeAndReason() async throws {
         let server = try RealtimeLoopbackServer { _ in .accept { _ in } }
         defer { server.stop() }
         let connector = URLSessionWebSocketConnector.loopbackForTesting(port: Int(server.port))
         var seen: (code: Int?, reason: String)?
-        for attempt in 0..<3 where seen == nil {
+        var lost: [String] = []
+        for attempt in 0..<20 where seen == nil {
+            if attempt > 0 { try await Task.sleep(for: .milliseconds(50)) }
             let socket = try await connector.connect(ElevenLabsSocketRequest(url: server.url("/bye")))
-            await socket.close(code: 1000, reason: "User ended conversation")
-            #expect(await server.waitForConnections(attempt + 1))
-            seen = await server.openedConnections[attempt].waitForClose()
-            await #expect(throws: ElevenLabsRealtimeError.self) { _ = try await socket.receive() }
-        }
-        if let seen {
-            #expect(seen.code == 1000)
-            #expect(seen.reason == "User ended conversation")
-        } else {
-            withKnownIssue("URLSession closed three sockets without the server reading a close frame", isIntermittent: true) {
-                Issue.record("no close frame was read")
+            let pending = Task { () -> Bool in
+                do { _ = try await socket.receive(); return false } catch { return true }
             }
+            try await Task.sleep(for: .milliseconds(20))
+            await socket.close(code: 1000, reason: "User ended conversation")
+            try #require(await server.waitForConnections(attempt + 1))
+            let connection = server.openedConnections[attempt]
+            seen = await connection.waitForClose()
+            if seen == nil { lost.append(connection.endedBy) }
+            // Either way the socket has ended: the pending receive throws.
+            #expect(await pending.value)
         }
+        let frame = try #require(seen, "no close frame was read from 20 sockets (their ends: \(lost))")
+        #expect(frame.code == 1000)
+        #expect(frame.reason == "User ended conversation")
     }
 
     @Test func aPingIsAnswered() async throws {

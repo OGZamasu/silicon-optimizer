@@ -140,6 +140,9 @@ final class RealtimeLoopbackConnection: @unchecked Sendable {
     private var fragments = Data()
     private var fragmentOpcode: UInt8 = 0
     private var ended = false
+    private var _endedBy = ""
+    /// How the TCP connection ended, for diagnosis: "fin", or the error.
+    var endedBy: String { lock.withLock { _endedBy } }
 
     init(connection: NWConnection, queue: DispatchQueue, buffer: Data) {
         self.connection = connection
@@ -223,7 +226,10 @@ final class RealtimeLoopbackConnection: @unchecked Sendable {
                 self.parse()
             }
             if error != nil || (complete && data == nil) {
-                self.lock.withLock { self.ended = true }
+                self.lock.withLock {
+                    self.ended = true
+                    self._endedBy = error.map { "\($0)" } ?? "fin"
+                }
                 return
             }
             self.read()
