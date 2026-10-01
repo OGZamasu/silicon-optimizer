@@ -35,6 +35,36 @@ struct RealtimeControlTests {
         #expect(ControlServer.Caller.control.mayReach(method: "POST", path: ElevenLabsControl.agentConversePath))
     }
 
+    /// On the wire: this Mac's control token on loopback reaches the host with the body as sent;
+    /// a full-scope phone, a chat phone and a swarm peer are refused with the one sentence, and
+    /// the host never hears of them.
+    @MainActor
+    @Test func onlyThisMacsTokenReachesTheConversationRoute() async throws {
+        let swarmSecret = "swarm-fixture-secret"
+        let host = BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false)
+        await ElevenLabsControlHostLog.shared.clear(host)
+        let body = #"{"agent_id":"agent_1","messages":["Hi"],"confirm":true}"#
+        try await withServer(host: host, swarmToken: swarmSecret) { fixture in
+            let full = try await fixture.pair(name: "Full phone", scope: .full).token
+            let chat = try await fixture.pair(name: "Chat phone", scope: .chat).token
+            try await fixture.server.setTailnetAccess(address: "127.0.0.1", port: fixture.phone.port, for: .swarm)
+            for (token, client) in [(full, fixture.phone), (chat, fixture.phone), (swarmSecret, fixture.phone), (swarmSecret, fixture.local)] {
+                let (status, answer) = try await client.call("POST", ElevenLabsControl.agentConversePath, token: token, body: body)
+                #expect(status == 403)
+                let refusal = try JSONDecoder().decode(ControlAPI.ErrorResponse.self, from: answer)
+                #expect(refusal.error == ElevenLabsControl.onlyThisMac)
+            }
+            #expect(await ElevenLabsControlHostLog.shared.requests(for: host).isEmpty)
+            let (status, answer) = try await fixture.local.call(
+                "POST", ElevenLabsControl.agentConversePath, token: fixture.local.token, body: body
+            )
+            #expect(status == 200)
+            #expect(String(decoding: answer, as: UTF8.self).contains(#""route":"agentConverse""#))
+            let seen = await ElevenLabsControlHostLog.shared.requests(for: host)
+            #expect(seen.map(\.route) == [.agentConverse(body: Data(body.utf8))])
+        }
+    }
+
     // MARK: - Gate and link
 
     /// Real-world: only confirm: true with the owner's switch on proceeds; every other
