@@ -30,6 +30,27 @@ struct LiveAudioTests {
         #expect(converter.level > 0.7)
     }
 
+    /// Every PCM rate an agent or the transcription socket can ask for, from the two device
+    /// rates Macs run at (and a 16 kHz headset): the right chunk size, the right length, the
+    /// same tone.
+    @Test(arguments: [8_000, 16_000, 22_050, 24_000, 44_100, 48_000], [44_100.0, 48_000.0, 16_000.0])
+    func everyPCMRateIsConvertedFromEveryDeviceRate(target: Int, device: Double) throws {
+        let converter = try #require(LiveCaptureConverter(target: .pcm(rate: target), chunkMilliseconds: 100))
+        #expect(converter.chunkBytes == target * 2 / 10)
+        var sent = Data()
+        for _ in 0..<10 {
+            for chunk in converter.process(LiveSignal.sine(seconds: 0.1, frequency: 440, rate: device, channels: 1)) {
+                #expect(chunk.count == converter.chunkBytes)
+                sent.append(chunk)
+            }
+        }
+        if let rest = converter.flush() { sent.append(rest) }
+        let samples = LiveSignal.samples(sent)
+        #expect(abs(samples.count - target) < max(200, target / 50), "\(samples.count) samples for a second at \(target)")
+        let frequency = LiveSignal.frequency(samples.map { Float($0) / 32_768 }, rate: Double(target))
+        #expect(abs(frequency - 440) < 25, "\(frequency) Hz at \(target) from \(device)")
+    }
+
     @Test func eightKilohertzMuLawIsG711() throws {
         let converter = try #require(LiveCaptureConverter(target: .ulaw, chunkMilliseconds: 100))
         #expect(converter.chunkBytes == 800)
