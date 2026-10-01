@@ -521,6 +521,26 @@ struct RealtimeSessionTests {
         #expect(ElevenLabsAgentPreflight(agentID: "a", json: [:]).tools.isEmpty)
     }
 
+    /// A caller's own `conversation.text_only` never reaches the agent: text-only stays text-only.
+    @Test func aCallersOverrideCannotTurnTextOnlyOff() throws {
+        func preflight(textOnly: Bool, allowed: Bool) -> ElevenLabsAgentPreflight {
+            ElevenLabsAgentPreflight(agentID: "a", json: [
+                "platform_settings": ["overrides": ["conversation_config_override": ["conversation": ["text_only": .bool(allowed)]]]],
+                "conversation_config": ["conversation": ["text_only": .bool(textOnly)]],
+            ])
+        }
+        var config = ElevenLabsAgentConversationConfig(agentID: "a", textOnly: true)
+        config.overrides = ["conversation": ["text_only": false, "max_duration_seconds": 120], "agent": ["language": "en"]]
+        let byDefault = try config.initiation(preflight: preflight(textOnly: true, allowed: true))
+        #expect(byDefault["conversation_config_override"]["conversation"] == ["max_duration_seconds": 120])
+        #expect(byDefault["conversation_config_override"]["agent"] == ["language": "en"])
+        let overridden = try config.initiation(preflight: preflight(textOnly: false, allowed: true))
+        #expect(overridden["conversation_config_override"]["conversation"] == ["text_only": true, "max_duration_seconds": 120])
+        config.overrides = ["conversation": ["text_only": false]]
+        let only = try config.initiation(preflight: preflight(textOnly: true, allowed: false))
+        #expect(only["conversation_config_override"] == .null)
+    }
+
     @Test func anAgentThatDoesNotSayWhetherItNeedsAuthGetsASignedURL() {
         #expect(ElevenLabsAgentPreflight(agentID: "a", json: [:]).requiresAuthentication)
         #expect(!ElevenLabsAgentPreflight(agentID: "a", json: ["platform_settings": ["auth": ["enable_auth": false]]]).requiresAuthentication)

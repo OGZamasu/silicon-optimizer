@@ -351,7 +351,11 @@ struct ConverseRequest: Sendable {
         var overrides: JSONValue?
         switch object["overrides"] {
         case nil, .null?: break
-        case .object(let given)?: overrides = .object(given)
+        case .object(let given)?:
+            overrides = .object(given)
+            if given["conversation"]?.objectValue?["text_only"] != nil {
+                problems.append("overrides.conversation.text_only cannot be set: this conversation is always text-only.")
+            }
         default: problems.append("overrides must be an object of conversation_config_override sections.")
         }
         var variables: [String: JSONValue] = [:]

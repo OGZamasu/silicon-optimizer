@@ -64,6 +64,12 @@ public struct ElevenLabsAgentConversationConfig: Sendable, Hashable {
     func initiation(preflight: ElevenLabsAgentPreflight?) throws -> JSONValue {
         var override = overrides?.objectValue ?? [:]
         if textOnly {
+            // Whatever the caller's overrides say, a text-only conversation stays text-only: their
+            // own `conversation.text_only` is dropped, and set to true here where it is needed.
+            if var conversation = override["conversation"]?.objectValue {
+                conversation.removeValue(forKey: "text_only")
+                override["conversation"] = conversation.isEmpty ? nil : .object(conversation)
+            }
             if preflight?.textOnlyByDefault == true {
                 // Already text-only: no override needed, and none that could be refused.
             } else if preflight == nil || preflight?.textOnlyOverrideAllowed == true {

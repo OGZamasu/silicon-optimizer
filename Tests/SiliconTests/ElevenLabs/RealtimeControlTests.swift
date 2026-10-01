@@ -116,6 +116,8 @@ struct RealtimeControlTests {
             (["agent_id": "a", "messages": ["x"], "confirm": "yes"], "confirm must be true or false"),
             (["agent_id": "a", "messages": ["x"], "dynamic_variables": ["n": ["deep": 1]], "confirm": true], "dynamic_variables.n"),
             (["agent_id": "a/../b", "messages": ["x"], "confirm": true], "agent_id must be an id"),
+            (["agent_id": "a", "messages": ["x"], "overrides": ["conversation": ["text_only": false]], "confirm": true],
+             "text_only cannot be set"),
         ]
         for (body, words) in cases {
             let (status, answer) = await rig.converse(body)
