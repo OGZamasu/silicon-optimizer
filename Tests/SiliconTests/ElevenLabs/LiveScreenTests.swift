@@ -319,6 +319,7 @@ struct LiveScreenTests {
         let screen = LiveTranscriptionModel(context: rig.context)
         screen.source = .file
         screen.file = url
+        #expect(screen.costLines.first?.contains("This file is 2.5 s long.") == true)
         await screen.start()
         await rig.until { screen.phase == .ended }
         #expect(!rig.audio.capturing)
@@ -681,6 +682,110 @@ struct LiveScreenTests {
         guard case .notStarted(let text) = screen.outcome else { Issue.record("\(String(describing: screen.outcome))"); return }
         #expect(text.contains("does not allow text-only"))
         #expect(rig.pane.billableRunsInFlight == 0)
+    }
+
+    /// The agent was read from one account; the question is answered after another was linked:
+    /// nothing starts, on either account.
+    @Test func aQuestionAnsweredAfterTheAccountChangedStartsNothing() async throws {
+        let tools: JSONValue = [["type": "webhook", "name": "lookup", "api_schema": ["url": "https://hooks.example.com/x"]]]
+        let rig = LiveRig(replies: Self.agentReplies(tools: tools), server: Self.agent())
+        defer { rig.clean() }
+        let screen = LiveAgentModel(context: rig.context)
+        await screen.loadAgents()
+        await screen.requestStart()
+        #expect(screen.phase == .asking)
+        rig.switchAccount()
+        await screen.confirmStart()
+        #expect(rig.connector.requests.isEmpty)
+        #expect(screen.outcome == .notStarted(LiveAgentModel.accountChangedBeforeStart))
+        // Through Settings (the pane resets), the question goes at once.
+        await screen.requestStart()
+        #expect(screen.phase == .asking)
+        rig.pane.reset()
+        #expect(screen.question == nil)
+        #expect(screen.phase == .idle)
+        #expect(rig.connector.requests.isEmpty)
+    }
+
+    /// An image goes up to the conversation and with the next message; removing one asks first,
+    /// naming the file, and a declined question deletes nothing.
+    @Test func anAttachmentGoesWithTheNextMessageAndRemovingOneAsksFirst() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-live-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let image = folder.appendingPathComponent("receipt.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: image)
+        let uploads = Counter(0)
+        let base = Self.agentReplies()
+        let rig = LiveRig(replies: { request in
+            switch request.operationID {
+            case "upload_file_route":
+                return .json(["file_id": .string(uploads.take() ? "file_x" : "file_\(UUID().uuidString.prefix(4))")])
+            case "cancel_file_upload_route":
+                return .json(["file_id": .string(request.url.lastPathComponent)])
+            default:
+                return try await base(request)
+            }
+        }, server: Self.agent())
+        defer { rig.clean() }
+        let screen = LiveAgentModel(context: rig.context)
+        await screen.loadAgents()
+        screen.textOnly = true
+        await screen.requestStart()
+        await screen.attach(image)
+        let first = try #require(screen.attachments.first)
+        let upload = try #require(rig.transport.recorded.first { $0.request.operationID == "upload_file_route" })
+        #expect(upload.request.url.path == "/v1/convai/conversations/conv_42/files")
+        #expect(String(decoding: upload.body, as: UTF8.self).contains("filename=\"receipt.png\""))
+        screen.message = "What is this?"
+        await screen.sendMessage()
+        let socket = try #require(rig.connector.sockets.first)
+        #expect(socket.sentJSON.last == [
+            "type": "multimodal_message", "text": ["type": "user_message", "text": "What is this?"],
+            "files": [["type": "file_input", "file_id": .string(first.id)]],
+        ])
+        #expect(screen.attachments.isEmpty)
+
+        await screen.attach(image)
+        let second = try #require(screen.attachments.first)
+        let removing = Task { await screen.removeAttachment(second.id) }
+        await rig.until { rig.pane.confirming != nil }
+        let question = try #require(rig.pane.confirming?.confirmation)
+        #expect(question.title == "Delete “receipt.png” from this conversation?")
+        rig.pane.confirming?.decline()
+        await removing.value
+        #expect(!rig.transport.requests.contains { $0.operationID == "cancel_file_upload_route" })
+        #expect(screen.attachments.map(\.id) == [second.id])
+        let again = Task { await screen.removeAttachment(second.id) }
+        await rig.until { rig.pane.confirming != nil }
+        rig.pane.confirming?.confirm()
+        await again.value
+        let delete = try #require(rig.transport.requests.first { $0.operationID == "cancel_file_upload_route" })
+        #expect(delete.method == "DELETE")
+        #expect(delete.url.path == "/v1/convai/conversations/conv_42/files/\(second.id)")
+        #expect(screen.attachments.isEmpty)
+        await screen.end()
+    }
+
+    @Test func anythingKeyShapedIsRedactedOnScreen() async throws {
+        let key = "sk_" + String(repeating: "screenleak", count: 3)
+        let rig = LiveRig(replies: Self.agentReplies(), server: Self.agent { socket in
+            socket.push(["type": "agent_response", "agent_response_event": ["agent_response": .string("Your key is \(key)."), "event_id": 1]])
+            socket.push(["type": "mcp_tool_call", "mcp_tool_call": [
+                "service_id": "mcp_1", "tool_call_id": "c", "tool_name": "store", "state": "awaiting_approval",
+                "parameters": ["value": .string(key)]]])
+        })
+        defer { rig.clean() }
+        let screen = LiveAgentModel(context: rig.context)
+        await screen.loadAgents()
+        screen.textOnly = true
+        await screen.requestStart()
+        await rig.until { !screen.waitingApprovals.isEmpty && !screen.lines.isEmpty }
+        #expect(screen.lines.allSatisfy { !$0.text.contains(key) })
+        #expect(screen.lines.first?.text == "Your key is ‹redacted›.")
+        #expect(screen.waitingApprovals.first?.parameters == ["value": "‹redacted›"])
+        await screen.end()
     }
 
     @Test func leavingTheScreenEndsTheConversation() async throws {

@@ -45,7 +45,11 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
     // MARK: Settings
 
     var source: Source = .microphone
-    var file: URL?
+    var file: URL? {
+        didSet { fileSeconds = file.flatMap { try? AVAudioFile(forReading: $0) }.map { Double($0.length) / $0.processingFormat.sampleRate } }
+    }
+    /// The chosen file's length, for the cost note before anything is sent.
+    private(set) var fileSeconds: Double?
     var languageCode = ""
     var commitStrategy: ElevenLabsTranscriptionStreamConfig.CommitStrategy = .vad
     var includeTimestamps = true
@@ -126,7 +130,9 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
 
     /// What the settings add to the bill, in ElevenLabs' words.
     var costLines: [String] {
-        ["ElevenLabs bills realtime transcription by the length of the audio sent."] + config.costAddOns
+        var lead = "ElevenLabs bills realtime transcription by the length of the audio sent."
+        if source == .file, let seconds = fileSeconds { lead += " This file is \(LiveClock.amount(seconds)) long." }
+        return [lead] + config.costAddOns
     }
 
     var fullText: String {
@@ -340,23 +346,25 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
             case .started:
                 break
             case .partial(let text):
-                partial = text
+                partial = ElevenLabsRedaction.redact(text)
             case .committed(let text):
                 partial = ""
                 if awaitingFinal { finalArrived = true }
                 guard !text.isEmpty else { continue }
-                segments.append(Segment(id: nextSegmentID, text: text))
+                segments.append(Segment(id: nextSegmentID, text: ElevenLabsRedaction.redact(text)))
                 nextSegmentID += 1
             case .committedWithTimestamps(let text, let language, let words):
-                if let index = segments.lastIndex(where: { $0.text == text }) {
+                if let index = segments.lastIndex(where: { $0.text == ElevenLabsRedaction.redact(text) }) {
                     segments[index].words = words
                     segments[index].languageCode = language
                 }
             case .entities(let text, let entities):
-                if let index = segments.lastIndex(where: { $0.text == text }) { segments[index].entities = entities }
+                if let index = segments.lastIndex(where: { $0.text == ElevenLabsRedaction.redact(text) }) { segments[index].entities = entities }
             case .edited(let text, let edited):
                 // May arrive out of commit order: matched by the committed text.
-                if let index = segments.lastIndex(where: { $0.text == text }) { segments[index].edited = edited }
+                if let index = segments.lastIndex(where: { $0.text == ElevenLabsRedaction.redact(text) }) {
+                    segments[index].edited = ElevenLabsRedaction.redact(edited)
+                }
             case .warning(let text):
                 warnings.append(text)
             case .error(let type, let message):

@@ -1,5 +1,7 @@
+import AppKit
 import SiliconElevenLabs
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Talk to an agent: the section the pane shows.
 struct LiveAgentSection: View {
@@ -155,7 +157,37 @@ struct LiveAgentScreen: View {
                 if let saved = screen.savedTranscript { LiveSavedFile(url: saved) }
                 transcript
                 if screen.phase == .live {
+                    if !screen.attachments.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(screen.attachments) { file in
+                                HStack(spacing: 4) {
+                                    Image(systemName: "doc")
+                                    Text(file.name).lineLimit(1).truncationMode(.middle)
+                                    Button {
+                                        Task { await screen.removeAttachment(file.id) }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("Delete it from this conversation")
+                                }
+                                .font(.caption)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                            }
+                            Text("Sent with the next message.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     HStack {
+                        Button {
+                            chooseAttachment()
+                        } label: {
+                            Image(systemName: screen.uploading ? "hourglass" : "paperclip")
+                        }
+                        .disabled(screen.uploading || screen.attachments.count >= LiveAgentModel.maximumAttachments)
+                        .help("Attach an image or PDF to the next message (at most \(LiveAgentModel.maximumAttachments))")
+                        // Return sends a message in a conversation already open; it never starts one.
                         TextField("Type a message", text: $screen.message)
                             .onSubmit { Task { await screen.sendMessage() } }
                         Button("Send") { Task { await screen.sendMessage() } }
@@ -194,6 +226,14 @@ struct LiveAgentScreen: View {
                 }
             }
         }
+    }
+
+    private func chooseAttachment() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .pdf]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url { Task { await screen.attach(url) } }
     }
 
     private func label(_ role: LiveAgentModel.Line.Role) -> String {

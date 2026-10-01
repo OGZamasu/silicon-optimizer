@@ -149,6 +149,8 @@ final class LiveSpeechModel: ElevenLabsLiveWork {
         } catch {
             guard guardian.isCurrent(token) else { return }
             serverMessage = ElevenLabsRealtimeError(wrapping: error).description
+            // Not lost: back in the box, to send again once a stream is open.
+            if text.isEmpty { text = words }
         }
         refresh()
     }

@@ -123,6 +123,17 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     private(set) var queueStatus: String?
     private(set) var savedTranscript: URL?
     private(set) var now = Date()
+    /// Images and PDFs uploaded to this conversation, to go with the next typed message.
+    private(set) var attachments: [Attachment] = []
+    private(set) var uploading = false
+    /// Removing an uploaded file asks first (it is deleted from the conversation).
+    @ObservationIgnored private var removers: [String: ElevenLabsRunner] = [:]
+
+    struct Attachment: Identifiable, Equatable, Sendable {
+        let id: String
+        let name: String
+        let session: UUID
+    }
 
     let context: LiveContext
     @ObservationIgnored private let guardian: LiveSessionGuard
@@ -135,6 +146,8 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     @ObservationIgnored private var nextLineID = 0
     @ObservationIgnored private var listToken = UUID()
     @ObservationIgnored private var preparing = UUID()
+    /// The account the agent was read from: a question answered after it changed starts nothing.
+    @ObservationIgnored private var preparedFor: LiveAccountBinding?
     /// Agent audio at or below this event id is not played: the owner pressed "Stop talking".
     @ObservationIgnored private var silencedThrough: Int?
     @ObservationIgnored private var lastAgentEventID: Int?
@@ -142,6 +155,10 @@ final class LiveAgentModel: ElevenLabsLiveWork {
 
     /// How long an approval waits when ElevenLabs does not say.
     static let defaultApprovalTimeout: TimeInterval = 300
+    static let accountChangedBeforeStart =
+        "The ElevenLabs account or region changed while the agent was being read, so nothing was started."
+    /// ElevenLabs takes at most five files with a message.
+    static let maximumAttachments = 5
 
     init(context: LiveContext) {
         self.context = context
@@ -217,6 +234,10 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         phase = .preparing
         let token = UUID()
         preparing = token
+        let binding = LiveAccountBinding(client: realtime.client, pane: context.pane)
+        preparedFor = binding
+        // The pane ends this with the account, question included.
+        context.pane?.trackLive(self)
         let preflight: ElevenLabsAgentPreflight
         do {
             preflight = try await realtime.agentPreflight(agentID: agentID)
@@ -233,6 +254,11 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         }
         let servers = await LiveMCPServer.list(with: realtime.client)
         guard preparing == token, phase == .preparing else { return }
+        guard binding.isCurrent(in: context) else {
+            phase = .ended
+            outcome = .notStarted(Self.accountChangedBeforeStart)
+            return
+        }
         let reaching = preflight.realWorldTools
         if reaching.isEmpty {
             await begin(agentID: agentID, agentName: agentName, textOnly: textOnly, preflight: preflight, servers: servers)
@@ -249,6 +275,11 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     func confirmStart() async {
         guard phase == .asking, let question else { return }
         self.question = nil
+        guard preparedFor?.isCurrent(in: context) == true else {
+            phase = .ended
+            outcome = .notStarted(Self.accountChangedBeforeStart)
+            return
+        }
         await begin(agentID: question.agentID, agentName: question.agentName, textOnly: question.textOnly,
                     preflight: question.preflight, servers: question.servers)
     }
@@ -341,14 +372,21 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         guard phase == .live, let conversation, !text.isEmpty else { return }
         message = ""
         let token = guardian.token
+        let files = attachments.filter { $0.session == token }
+        attachments = []
         // On screen before it goes, so the agent's answer always comes after it.
-        let line = append(.user, text)
+        let line = append(.user, files.isEmpty ? text : text + " [" + files.map(\.name).joined(separator: ", ") + "]")
         do {
-            try await conversation.sendUserMessage(text)
+            if files.isEmpty {
+                try await conversation.sendUserMessage(text)
+            } else {
+                try await conversation.sendMultimodal(text: text, fileIDs: files.map(\.id))
+            }
         } catch {
             guard guardian.isCurrent(token) else { return }
             lines.removeAll { $0.id == line }
             message = text
+            attachments = files + attachments
             note("The message was not sent: \(ElevenLabsRealtimeError(wrapping: error).description)")
         }
     }
@@ -380,6 +418,51 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         let sent = await conversation.answerApproval(approvalID, approved: approved)
         guard let after = approvals.firstIndex(where: { $0.id == approvalID && $0.session == session }) else { return }
         approvals[after].state = sent ? (approved ? .approved : .declined("by you")) : .movedOn
+    }
+
+    /// Uploads an image or PDF to this conversation (`upload_file_route`, through the account the
+    /// conversation runs on) to go with the next message. At most five.
+    func attach(_ url: URL) async {
+        guard phase == .live, let id = conversationID, !uploading,
+              attachments.count < Self.maximumAttachments, guardian.accountIsCurrent, let client = context.client()
+        else { return }
+        let token = guardian.token
+        uploading = true
+        defer { uploading = false }
+        do {
+            let answer = try ElevenLabsClient.json(await client.call(
+                "upload_file_route", arguments: ["conversation_id": .string(id)],
+                files: ["file": [ElevenLabsFile(url: url)]]
+            ))
+            guard guardian.isCurrent(token) else { return }
+            guard let fileID = answer["file_id"].stringValue else {
+                note("ElevenLabs took the file but did not say its id, so it cannot be sent.")
+                return
+            }
+            attachments.append(Attachment(id: fileID, name: url.lastPathComponent, session: token))
+        } catch {
+            guard guardian.isCurrent(token) else { return }
+            note("“\(url.lastPathComponent)” could not be attached: \(ElevenLabsRunnerFailure(error).message)")
+        }
+    }
+
+    /// Deletes an uploaded file from the conversation (`cancel_file_upload_route`, which asks
+    /// first, naming the file) and stops it going with the next message.
+    func removeAttachment(_ fileID: String) async {
+        guard let attachment = attachments.first(where: { $0.id == fileID }), let conversationID,
+              let operation = ElevenLabsCatalog.operation("cancel_file_upload_route")
+        else { return }
+        let runner = removers[fileID] ?? ElevenLabsRunner(operation: operation, context: ElevenLabsRunner.Context(
+            client: context.client, pane: context.pane
+        ))
+        removers[fileID] = runner
+        runner.recordsResults = false
+        let answer = await runner.perform(
+            arguments: ["conversation_id": .string(conversationID), "file_id": .string(fileID)],
+            title: "Delete “\(attachment.name)” from this conversation?", confirmLabel: "Delete file"
+        )
+        if answer != nil { attachments.removeAll { $0.id == fileID } }
+        removers[fileID] = nil
     }
 
     /// Likes or dislikes an agent answer (or clears it).
@@ -512,7 +595,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             if let index = lines.lastIndex(where: { $0.role == .agent }) { lines[index].interrupted = true }
         case .userTranscript(let text, let eventID):
             if let index = lines.lastIndex(where: { $0.role == .user && $0.tentative }) {
-                lines[index].text = text
+                lines[index].text = ElevenLabsRedaction.redact(text)
                 lines[index].tentative = false
                 lines[index].eventID = eventID
             } else {
@@ -520,14 +603,14 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             }
         case .tentativeUserTranscript(let text, let eventID):
             if let index = lines.lastIndex(where: { $0.role == .user && $0.tentative }) {
-                lines[index].text = text
+                lines[index].text = ElevenLabsRedaction.redact(text)
             } else {
                 append(.user, text, eventID: eventID, tentative: true)
             }
         case .agentResponse(let text, let eventID, _):
             if let eventID { lastAgentEventID = max(lastAgentEventID ?? eventID, eventID) }
             if let index = lines.lastIndex(where: { $0.role == .agent && $0.tentative }) {
-                lines[index].text = text
+                lines[index].text = ElevenLabsRedaction.redact(text)
                 lines[index].tentative = false
                 lines[index].eventID = eventID
             } else {
@@ -535,7 +618,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             }
         case .agentResponseCorrection(_, let corrected, _):
             if let index = lines.lastIndex(where: { $0.role == .agent }) {
-                lines[index].text = corrected
+                lines[index].text = ElevenLabsRedaction.redact(corrected)
                 lines[index].interrupted = true
             }
         case .agentResponsePart(let text, let kind, let eventID, _):
@@ -544,12 +627,12 @@ final class LiveAgentModel: ElevenLabsLiveWork {
                 append(.agent, text, eventID: eventID, tentative: true)
             case "stop":
                 if let index = lines.lastIndex(where: { $0.role == .agent && $0.tentative }) {
-                    lines[index].text += text
+                    lines[index].text = ElevenLabsRedaction.redact(lines[index].text + text)
                     lines[index].tentative = false
                 }
             default:
                 if let index = lines.lastIndex(where: { $0.role == .agent && $0.tentative }) {
-                    lines[index].text += text
+                    lines[index].text = ElevenLabsRedaction.redact(lines[index].text + text)
                 } else {
                     append(.agent, text, eventID: eventID, tentative: true)
                 }
@@ -606,7 +689,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
                 id: call.toolCallID, session: token, agentName: sessionAgentName ?? "The agent",
                 toolName: call.toolName, toolDescription: call.toolDescription,
                 serverName: server?.name ?? "an MCP server (\(call.serviceID ?? "no id"))",
-                serverHost: server?.host, parameters: call.parameters,
+                serverHost: server?.host, parameters: Self.scrubbed(call.parameters),
                 deadline: now.addingTimeInterval(call.approvalTimeout ?? Self.defaultApprovalTimeout)
             ))
             append(.tool, "“\(call.toolName)” on \(server?.name ?? "an MCP server") asks for your approval.")
@@ -622,7 +705,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
 
     private func toolLine(_ activity: ElevenLabsAgentToolActivity, text: String) {
         if let id = activity.toolCallID, let lineID = toolLines[id], let index = lines.firstIndex(where: { $0.id == lineID }) {
-            lines[index].text = text
+            lines[index].text = ElevenLabsRedaction.redact(text)
         } else {
             let id = append(.tool, text)
             if let callID = activity.toolCallID { toolLines[callID] = id }
@@ -638,11 +721,12 @@ final class LiveAgentModel: ElevenLabsLiveWork {
 
     // MARK: Small things
 
+    /// Every line is shown redacted of anything key-shaped, whoever said it.
     @discardableResult
     private func append(_ role: Line.Role, _ text: String, eventID: Int? = nil, tentative: Bool = false) -> Int {
         let id = nextLineID
         nextLineID += 1
-        lines.append(Line(id: id, role: role, text: text, eventID: eventID, tentative: tentative))
+        lines.append(Line(id: id, role: role, text: ElevenLabsRedaction.redact(text), eventID: eventID, tentative: tentative))
         if lines.count > 1_000 { lines.removeFirst(lines.count - 1_000) }
         return id
     }
@@ -652,6 +736,7 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     }
 
     private func resetSession() {
+        attachments = []
         lines = []
         approvals = []
         outcome = nil
@@ -680,6 +765,16 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             Data(text.utf8), name: "agent-conversation", ext: "txt", contentType: "text/plain",
             operation: ElevenLabsLiveOperations.conversation, sink: sink
         )
+    }
+
+    /// `value` with anything key-shaped in its strings redacted, for the screen.
+    static func scrubbed(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .string(let text): .string(ElevenLabsRedaction.redact(text))
+        case .array(let items): .array(items.map(scrubbed))
+        case .object(let object): .object(object.mapValues(scrubbed))
+        case .null, .bool, .number: value
+        }
     }
 
     static func describe(_ tool: ElevenLabsAgentToolSummary, servers: [String: LiveMCPServer]) -> String {
