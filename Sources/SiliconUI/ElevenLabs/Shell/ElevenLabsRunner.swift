@@ -468,7 +468,9 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
     case offline(String)
     /// The Keychain would not hand the key over.
     case credentialUnavailable(String)
-    /// Any other answer from ElevenLabs, or a local problem.
+    /// Any other error answer from ElevenLabs: its HTTP status, and what it said.
+    case api(status: Int, message: String)
+    /// A local problem, or an answer that never came whole.
     case other(String)
 
     init(_ error: any Error) {
@@ -485,7 +487,24 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
         case .rateLimited: self = .rateLimited(message)
         case .network: self = .offline(message)
         case .credentialUnavailable: self = .credentialUnavailable(message)
-        case .api, .unknownOperation, .refusedHost, .tooLarge, .cancelled: self = .other(message)
+        case .api(let status, _, _, _): self = .api(status: status, message: message)
+        case .unknownOperation, .refusedHost, .tooLarge, .cancelled: self = .other(message)
+        }
+    }
+
+    /// Whether this failure proves ElevenLabs did not act on the request: it was never sent (no
+    /// key, the arguments refused, the Keychain said no), or ElevenLabs refused it — a 401, a 403,
+    /// a 429 (a refusal before any work, as the client's retry rule has it) or another 4xx. A 408
+    /// (the request timed out on its way in), a 5xx, a lost connection, a cancel after sending
+    /// and anything without a status are left unknown: it may have been carried out.
+    var provesNothingWasDone: Bool {
+        switch self {
+        case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden, .rateLimited:
+            true
+        case .api(let status, _):
+            (400..<500).contains(status) && status != 408
+        case .offline, .other:
+            false
         }
     }
 
@@ -499,7 +518,7 @@ enum ElevenLabsRunnerFailure: Equatable, Sendable {
         case .keyRejected(let message):
             message + " The key may have been revoked; reconnect in Settings → ElevenLabs."
         case .forbidden(let message), .rateLimited(let message), .offline(let message),
-             .credentialUnavailable(let message), .other(let message):
+             .credentialUnavailable(let message), .api(_, let message), .other(let message):
             message
         }
     }

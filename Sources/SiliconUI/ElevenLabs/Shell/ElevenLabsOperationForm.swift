@@ -578,8 +578,12 @@ struct ElevenLabsProblemList: View {
     }
 }
 
-/// Reads a key or certificate file for a secret field: a regular file (a named pipe would
-/// block the read forever), small enough to be one (256 KB), and text.
+/// Reads a key or certificate file for a secret field: a regular file (a named pipe or a device
+/// would block the read or never end), not empty, small enough to be one (256 KB), and text.
+///
+/// The file is opened once and everything is checked on that descriptor, so the file checked is
+/// the file read; and no more than 256 KB + 1 bytes are ever read from it, whatever it grows to
+/// after the check. A symbolic link the owner picked is followed to its file first.
 enum ElevenLabsSecretFile {
     static let sizeLimit = 256 * 1024
 
@@ -587,18 +591,39 @@ enum ElevenLabsSecretFile {
         var message: String
     }
 
-    static func read(_ url: URL) -> Result<String, Problem> {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              attributes[.type] as? FileAttributeType == .typeRegular else {
-            return .failure(Problem(message: "\(url.lastPathComponent) is not a regular file."))
+    /// - Parameter afterCheck: Runs between the descriptor's check and the read — where a test
+    ///   makes the file grow.
+    static func read(_ url: URL, afterCheck: (() -> Void)? = nil) -> Result<String, Problem> {
+        let name = url.lastPathComponent
+        let tooBig = Problem(message: "\(name) is too big for a key or certificate (over 256 KB).")
+        let empty = Problem(message: "\(name) is empty.")
+        // Non-blocking, so a named pipe with no writer opens at once (and is then refused)
+        // instead of waiting for one; links were resolved above, so one appearing now is refused.
+        let descriptor = open(url.resolvingSymlinksInPath().path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return .failure(Problem(message: "\(name) could not be opened.")) }
+        defer { close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG else {
+            return .failure(Problem(message: "\(name) is not a regular file."))
         }
-        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
-        guard size <= sizeLimit else {
-            return .failure(Problem(message: "\(url.lastPathComponent) is too big for a key or certificate (over 256 KB)."))
+        guard status.st_size <= sizeLimit else { return .failure(tooBig) }
+        guard status.st_size > 0 else { return .failure(empty) }
+        afterCheck?()
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while data.count <= sizeLimit {
+            let wanted = min(buffer.count, sizeLimit + 1 - data.count)
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, wanted) }
+            if count < 0, errno == EINTR { continue }
+            guard count >= 0 else { return .failure(Problem(message: "\(name) could not be read.")) }
+            if count == 0 { break }
+            data.append(contentsOf: buffer[0..<count])
         }
-        guard let data = try? Data(contentsOf: url), data.count <= sizeLimit,
-              let text = String(data: data, encoding: .utf8) else {
-            return .failure(Problem(message: "\(url.lastPathComponent) could not be read as text."))
+        guard data.count <= sizeLimit else { return .failure(tooBig) }
+        guard !data.isEmpty else { return .failure(empty) }
+        guard let text = String(data: data, encoding: .utf8) else {
+            return .failure(Problem(message: "\(name) could not be read as text."))
         }
         return .success(text)
     }

@@ -234,6 +234,25 @@ struct CoreReviewFixesTests {
         }
     }
 
+    /// A transfer's post-dial digits can be a conference PIN or an account passcode, and its SIP
+    /// UUI payload carries CRM identifiers: both are the owner's typing and masked. A dynamic
+    /// post-dial value names a variable and stays; so does the number transferred to.
+    @Test func aTransfersPostDialDigitsAndUUIPayloadAreMaskedInTheDescribedCall() {
+        let request: JSONValue = ["tool_config": ["params": ["transfers": [
+            ["transfer_destination": ["type": "phone", "phone_number": "+15550100"],
+             "post_dial_digits": ["type": "static", "value": "ww1234#"],
+             "uui": ["data": "crm-case-4471-escalated", "protocol_discriminator": "00"]],
+            ["post_dial_digits": ["type": "dynamic", "value": "conference_pin"]],
+        ]]]]
+        let text = (try? ElevenLabsRedaction.maskingRequestSecrets(in: request, operationID: "add_tool_route")
+            .jsonString()) ?? ""
+        #expect(!text.contains("ww1234#"), "post-dial digits must be masked")
+        #expect(!text.contains("crm-case-4471"), "the UUI payload must be masked")
+        for kept in ["+15550100", "conference_pin", "protocol_discriminator", "static"] {
+            #expect(text.contains(kept), "\(kept) is not a secret and must stay")
+        }
+    }
+
     @Test func anEnvironmentVariablesPlainValuesAreMaskedButItsReferencesStay() {
         let request: JSONValue = ["label": "backend", "values": [
             "production": "https://internal.example.com/?key=abc123", "staging": ["secret_id": "s-1"],
@@ -431,6 +450,48 @@ struct CoreReviewFixesTests {
             in: try #require(URL(string: "https://api.elevenlabs.io/v1/speech-to-text?token=\(token)&next_page_token=cursor-1")))
         #expect(!masked.contains(token))
         #expect(masked.contains("next_page_token=cursor-1"), "a pagination cursor is not a secret")
+    }
+
+    /// A body is scrubbed of `sk_…` keys in every string; the URL is too — a key pasted into a
+    /// search box or an id field is the owner's typing, and Show API call is copied around.
+    @Test func aKeyTypedIntoAQueryOrPathValueIsScrubbedFromTheDescribedURL() async throws {
+        let rig = CoreClientTests.Rig(replies: [.json([:])])
+        defer { rig.cleanUp() }
+        let search = try rig.client.describe("get_user_voices_v2", arguments: [
+            "search": .string("voices for \(Self.key)"), "page_size": 10,
+        ])
+        #expect(!search.url.contains(Self.key))
+        #expect(search.url.contains("search=voices%20for%20%E2%80%B9redacted%E2%80%BA"))
+        #expect(search.url.contains("page_size=10"), "the rest of the query is shown as sent")
+        let byID = try rig.client.describe("get_voice_by_id", arguments: ["voice_id": .string(Self.key)])
+        #expect(!byID.url.contains(Self.key))
+
+        _ = try await rig.client.call("get_user_voices_v2", arguments: ["search": .string(Self.key)])
+        let sent = try #require(rig.transport.requests.first)
+        #expect(sent.url.absoluteString.contains(Self.key), "ElevenLabs still receives what was typed")
+        #expect(!"\(sent)".contains(Self.key) && !String(reflecting: sent).contains(Self.key))
+    }
+
+    /// The query mask fails closed — a URL it cannot take apart is shown without its query — and
+    /// sees through a percent-encoded or upper-case name and a fragment. The client never builds
+    /// such URLs; the mask must not depend on that.
+    @Test func theQueryMaskFailsClosedAndSeesThroughEncodedNamesAndFragments() throws {
+        func masked(_ text: String) throws -> String {
+            ElevenLabsRedaction.maskingQuerySecrets(in: try #require(URL(string: text)))
+        }
+        let base = "https://api.elevenlabs.io/v1/speech-to-text"
+        let encoded = try masked("\(base)?%74oken=encoded-name-value&TOKEN=upper-case-value&enable_logging=false")
+        #expect(!encoded.contains("encoded-name-value") && !encoded.contains("upper-case-value"))
+        #expect(encoded.contains("enable_logging=false"), "other parameters are shown as sent")
+
+        let fragment = try masked("\(base)?x=1#token=fragment-value")
+        #expect(!fragment.contains("fragment-value"))
+        #expect(fragment.hasPrefix("\(base)?x=1#"))
+
+        let unread = ElevenLabsRedaction.maskingQuerySecrets(
+            in: "\(base)?token=raw-value&x=1#more", components: nil)
+        #expect(unread == "\(base)?%E2%80%B9redacted%E2%80%BA", "nothing after the path when the URL cannot be read")
+        #expect(ElevenLabsRedaction.maskingQuerySecrets(in: "\(base)/\(Self.key)", components: nil) == "\(base)/%E2%80%B9redacted%E2%80%BA")
     }
 
     @Test func aSlashBackslashOrNULInAPathValueIsRefusedBeforeAnythingIsSent() async throws {

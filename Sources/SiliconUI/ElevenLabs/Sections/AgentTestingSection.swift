@@ -311,6 +311,11 @@ final class AgentTestingModel {
         return .of(loaded: !isLoadingTest, runner: calls.runner(AgentsOp.getTest, slot: selectedID))
     }
 
+    /// Whether the editor's fields are on screen: for a new test, or once the selected test's
+    /// details are in. While they load, or after their fetch failed, the card says which, and
+    /// there are no empty fields to type into that are not the test's.
+    var showsEditor: Bool { testLoad.isLoaded }
+
     /// The editor card's title: the test's name once it is in, else where its fetch stands.
     var editorTitle: String {
         guard selectedID != nil else { return "New test" }
@@ -573,17 +578,34 @@ private struct AgentTestEditor: View {
                     AgentsFact(label: "ID", value: id, monospaced: true)
                     AgentsDetailLoadProblem(load: load)
                 }
-                Form {
-                    TextField("Name", text: $model.draft.name, prompt: Text("Refund request is escalated"))
-                    Picker("Kind", selection: $model.draft.type) {
-                        Text("Response — the agent's next reply is judged").tag("llm")
-                        Text("Simulation — a simulated caller with a goal").tag("simulation")
-                        Text("Tool call — the agent calls the right tool").tag("tool")
+                if model.showsEditor {
+                    Form {
+                        TextField("Name", text: $model.draft.name, prompt: Text("Refund request is escalated"))
+                        Picker("Kind", selection: $model.draft.type) {
+                            Text("Response — the agent's next reply is judged").tag("llm")
+                            Text("Simulation — a simulated caller with a goal").tag("simulation")
+                            Text("Tool call — the agent calls the right tool").tag("tool")
+                        }
+                        .disabled(model.selectedID != nil)
                     }
-                    .disabled(model.selectedID != nil)
+                    .formStyle(.columns)
                 }
-                .formStyle(.columns)
             }
+            if model.showsEditor {
+                AgentTestEditorCards(model: model, runner: runner)
+            }
+        }
+    }
+}
+
+/// The editor's cards below its title: the conversation or caller, what counts as success, and
+/// Save — drawn only once the test is loaded (or new).
+private struct AgentTestEditorCards: View {
+    @Bindable var model: AgentTestingModel
+    let runner: ElevenLabsRunner
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
             if model.draft.type == "simulation" {
                 AgentsCard("The caller", subtitle: "Who the simulated caller is and what they want; the agent is judged on how the conversation goes.") {
                     TextEditor(text: $model.draft.scenario)
@@ -641,6 +663,7 @@ private struct AgentTestEditor: View {
                 }
             }
             AgentsCard("Save") {
+                let load = model.testLoad
                 if load.isLoaded {
                     ElevenLabsProblemList(problems: model.draft.problems)
                 }

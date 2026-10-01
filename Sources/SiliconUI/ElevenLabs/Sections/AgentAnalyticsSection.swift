@@ -48,6 +48,18 @@ final class AgentAnalyticsModel {
     @ObservationIgnored unowned let store: AgentsPlatformStore
     var calls: AgentsCalls { store.calls }
 
+    /// A ticket's priorities, least urgent first, as the spec lists them.
+    static var priorities: [String] { AgentsSchema.choices(AgentsOp.updateTicket, "priority") }
+
+    static func color(forPriority priority: String) -> Color {
+        switch priority {
+        case "urgent": .red
+        case "high": .orange
+        case "medium": .blue
+        default: .secondary
+        }
+    }
+
     var agentID = ""
 
     // Live
@@ -68,11 +80,17 @@ final class AgentAnalyticsModel {
     // Tickets
     var ticketScope: TicketScope = .workspace
     var ticketStatus = ""
+    /// One agent's tickets only (the workspace list has neither): a priority to filter by, and
+    /// most urgent first.
+    var ticketPriority = ""
+    var ticketsByPriority = false
     let tickets: AgentsPagedList<AgentsTicket>
     private(set) var ticket: AgentsTicket?
     private(set) var assignableUsers: [AgentsWorkspaceUser] = []
     var newTicketConversationID = ""
     var newTicketComment = ""
+    /// How urgent a new ticket is; empty for none.
+    var newTicketPriority = ""
     var ticketComment = ""
     var turnIndex = 0
     var turnComment = ""
@@ -161,6 +179,8 @@ final class AgentAnalyticsModel {
         if ticketScope == .agent, !agentID.isEmpty {
             operation = AgentsOp.listAgentTickets
             arguments["agent_id"] = .string(agentID)
+            if !ticketPriority.isEmpty { arguments["priorities"] = [.string(ticketPriority)] }
+            if ticketsByPriority { arguments["sort_by"] = "priority" }
         } else {
             operation = AgentsOp.listTickets
         }
@@ -193,20 +213,23 @@ final class AgentAnalyticsModel {
         let comment = newTicketComment.trimmingCharacters(in: .whitespacesAndNewlines)
         let conversation = newTicketConversationID.trimmingCharacters(in: .whitespaces)
         guard !comment.isEmpty else { return }
+        let priority: JSONValue? = newTicketPriority.isEmpty ? nil : .string(newTicketPriority)
         let json: JSONValue?
         if !conversation.isEmpty {
-            json = await calls.json(AgentsOp.createTicket, [
-                "conversation_id": .string(conversation), "qa_comment": .string(comment),
-            ], title: "Ticket about a conversation")
+            var arguments: [String: JSONValue] = ["conversation_id": .string(conversation), "qa_comment": .string(comment)]
+            arguments["priority"] = priority
+            json = await calls.json(AgentsOp.createTicket, arguments, title: "Ticket about a conversation")
         } else {
             guard !agentID.isEmpty else { return }
-            json = await calls.json(AgentsOp.createManualTicket, [
-                "agent_id": .string(agentID), "qa_comment": .string(comment),
-            ], title: "Ticket for “\(store.directory.agentName(agentID))”")
+            var arguments: [String: JSONValue] = ["agent_id": .string(agentID), "qa_comment": .string(comment)]
+            arguments["priority"] = priority
+            json = await calls.json(AgentsOp.createManualTicket, arguments,
+                                    title: "Ticket for “\(store.directory.agentName(agentID))”")
         }
         guard let json else { return }
         newTicketComment = ""
         newTicketConversationID = ""
+        newTicketPriority = ""
         if let ticket = AgentsTicket(json: json) {
             tickets.upsert(ticket)
             openingTicketID = ticket.id
@@ -216,11 +239,13 @@ final class AgentAnalyticsModel {
         }
     }
 
-    func updateTicket(status: String? = nil, assignee: String? = nil) async {
+    /// Changes the open ticket. An empty assignee or priority clears it (sent as null).
+    func updateTicket(status: String? = nil, assignee: String? = nil, priority: String? = nil) async {
         guard let ticket else { return }
         var arguments: [String: JSONValue] = ["agentqa_ticket_id": .string(ticket.id)]
         if let status { arguments["status"] = .string(status) }
         if let assignee { arguments["assignee_user_id"] = assignee.isEmpty ? .null : .string(assignee) }
+        if let priority { arguments["priority"] = priority.isEmpty ? .null : .string(priority) }
         guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticket.id) != nil else { return }
         if openingTicketID == ticket.id { await openTicket(ticket.id) }
     }
@@ -332,11 +357,14 @@ final class AgentAnalyticsModel {
         AgentsArgument(AgentsOp.listTickets, "cursor"),
         AgentsArgument(AgentsOp.listAgentTickets, "agent_id"), AgentsArgument(AgentsOp.listAgentTickets, "page_size"),
         AgentsArgument(AgentsOp.listAgentTickets, "status"), AgentsArgument(AgentsOp.listAgentTickets, "cursor"),
+        AgentsArgument(AgentsOp.listAgentTickets, "priorities"), AgentsArgument(AgentsOp.listAgentTickets, "sort_by"),
         AgentsArgument(AgentsOp.getTicket, "agentqa_ticket_id"), AgentsArgument(AgentsOp.assignableUsers, "agent_id"),
         AgentsArgument(AgentsOp.createTicket, "conversation_id"), AgentsArgument(AgentsOp.createTicket, "qa_comment"),
+        AgentsArgument(AgentsOp.createTicket, "priority"),
         AgentsArgument(AgentsOp.createManualTicket, "agent_id"), AgentsArgument(AgentsOp.createManualTicket, "qa_comment"),
+        AgentsArgument(AgentsOp.createManualTicket, "priority"),
         AgentsArgument(AgentsOp.updateTicket, "agentqa_ticket_id"), AgentsArgument(AgentsOp.updateTicket, "status"),
-        AgentsArgument(AgentsOp.updateTicket, "assignee_user_id"),
+        AgentsArgument(AgentsOp.updateTicket, "assignee_user_id"), AgentsArgument(AgentsOp.updateTicket, "priority"),
         AgentsArgument(AgentsOp.commentTicket, "agentqa_ticket_id"), AgentsArgument(AgentsOp.commentTicket, "comment"),
         AgentsArgument(AgentsOp.commentTicketTurn, "agentqa_ticket_id"), AgentsArgument(AgentsOp.commentTicketTurn, "turn_index"),
         AgentsArgument(AgentsOp.commentTicketTurn, "comment"),
@@ -486,6 +514,19 @@ private struct AgentTicketsCard: View {
             }
             .onChange(of: model.ticketScope) { Task { await model.tickets.refresh() } }
             .onChange(of: model.ticketStatus) { Task { await model.tickets.refresh() } }
+            .onChange(of: model.ticketPriority) { Task { await model.tickets.refresh() } }
+            .onChange(of: model.ticketsByPriority) { Task { await model.tickets.refresh() } }
+            if model.ticketScope == .agent {
+                // One agent's list only: the workspace list takes neither.
+                HStack {
+                    Picker("Priority", selection: $model.ticketPriority) {
+                        Text("Any priority").tag("")
+                        ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
+                    }
+                    .fixedSize()
+                    Toggle("Most urgent first", isOn: $model.ticketsByPriority).fixedSize()
+                }
+            }
             AgentsListBody(model.tickets, runner: calls.runner(model.ticketScope == .agent ? AgentsOp.listAgentTickets : AgentsOp.listTickets),
                            empty: "No tickets.") { ticket in
                 AgentsRow(selected: model.ticket?.id == ticket.id) {
@@ -498,6 +539,9 @@ private struct AgentTicketsCard: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
+                        if let priority = ticket.priority {
+                            AgentsBadge(text: AgentsFormat.words(priority), color: AgentAnalyticsModel.color(forPriority: priority))
+                        }
                         AgentsBadge(text: AgentsFormat.words(ticket.status), color: AgentsBadge.color(forStatus: ticket.status))
                     }
                 }
@@ -513,6 +557,11 @@ private struct AgentTicketsCard: View {
             TextField("What went wrong, or what to do", text: $model.newTicketComment, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
+            Picker("Priority", selection: $model.newTicketPriority) {
+                Text("None").tag("")
+                ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
+            }
+            .fixedSize()
             let manual = model.newTicketConversationID.trimmingCharacters(in: .whitespaces).isEmpty
             AgentsRunButton(runner: calls.runner(manual ? AgentsOp.createManualTicket : AgentsOp.createTicket), title: "Raise ticket",
                                 disabled: model.newTicketComment.isEmpty || (manual && model.agentID.isEmpty)) {
@@ -551,6 +600,13 @@ private struct AgentTicketDetail: View {
                     Task { await model.updateTicket(status: status) }
                 })) {
                     ForEach(AgentsSchema.choices(AgentsOp.updateTicket, "status"), id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
+                }
+                .fixedSize()
+                Picker("Priority", selection: Binding(get: { ticket.priority ?? "" }, set: { priority in
+                    Task { await model.updateTicket(priority: priority) }
+                })) {
+                    Text("None").tag("")
+                    ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                 }
                 .fixedSize()
                 Picker("Assignee", selection: Binding(get: { ticket.assigneeID ?? "" }, set: { user in

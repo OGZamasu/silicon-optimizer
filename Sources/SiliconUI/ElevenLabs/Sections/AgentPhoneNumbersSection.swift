@@ -381,7 +381,8 @@ final class AgentPhoneNumbersModel {
         arguments["phone_number_id"] = .string(account.id)
         guard await calls.json(
             AgentsOp.updateWhatsAppAccount, arguments, slot: account.id,
-            subject: "\(account.number)", consequence: what, confirmLabel: "Save"
+            subject: "\(account.number)", consequence: what,
+            question: "Save the WhatsApp settings of \(account.number)?", confirmLabel: "Save"
         ) != nil else { return }
         await refreshWhatsAppAccount(account.id)
     }

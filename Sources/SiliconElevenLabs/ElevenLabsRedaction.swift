@@ -27,15 +27,16 @@ public enum ElevenLabsRedaction {
     ///
     /// `revealingCredentialFields` is the owner's switch: it hands an agent the fields the risk
     /// table names for this one operation (a new API key, a webhook secret, a signed URL) and
-    /// nothing else. The account's own key preview, any `sk_…` key and plain-string header values
-    /// stay masked either way — the switch allows the action, it does not open the vault.
+    /// nothing else. The account's own key preview and any `sk_…` key stay masked either way —
+    /// the switch allows the action, it does not open the vault.
     ///
     /// Plain-string header values (`Authorization: Bearer …` in a tool, MCP server or webhook)
-    /// follow the same switch by default: masked unless the owner let agents see credentials,
-    /// because an agent that edits a tool must send its whole `tool_config` back, headers
-    /// included, and a masked value cannot be sent back. `maskingHeaderValues` overrides that:
-    /// the app's own runner passes `false`, because the owner's editor needs the real config to
-    /// write back and the header values are not credentials the API "will not show again".
+    /// are masked by default and follow the same switch: masked unless the owner let agents see
+    /// credentials, because an agent that edits a tool must send its whole `tool_config` back,
+    /// headers included, and a masked value cannot be sent back. `maskingHeaderValues` overrides
+    /// the switch for them: the app's own runner passes `false`, because the owner's editor needs
+    /// the real config to write back and the header values are not credentials the API "will not
+    /// show again". An `sk_…` key inside a header value is masked whatever either says.
     public static func redactCredentials(
         in value: JSONValue, for operation: ElevenLabsOperation,
         revealingCredentialFields: Bool = false, maskingHeaderValues: Bool? = nil
@@ -95,18 +96,58 @@ public enum ElevenLabsRedaction {
     /// not appear in anything shown or logged, so URLs are masked through `maskingQuerySecrets`.
     static let secretQueryParameters: Set<String> = ["token", "conversation_signature"]
 
-    /// `url` as text with the values of `secretQueryParameters` replaced. What "Show API call",
-    /// "Copy as curl" and a request's `description` use; the request itself keeps the real URL.
+    /// `url` as text with the values of `secretQueryParameters` replaced, and any `sk_…` key the
+    /// owner typed into another value (a search, an id) scrubbed as it is from a body. What
+    /// "Show API call", "Copy as curl" and a request's `description` use; the request itself
+    /// keeps the real URL.
     public static func maskingQuerySecrets(in url: URL) -> String {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let items = components.percentEncodedQueryItems, !items.isEmpty
-        else { return url.absoluteString }
-        components.percentEncodedQueryItems = items.map { item in
-            secretQueryParameters.contains(item.name.lowercased())
-                ? URLQueryItem(name: item.name, value: "%E2%80%B9redacted%E2%80%BA") : item
-        }
-        return components.string ?? url.absoluteString
+        maskingQuerySecrets(in: url.absoluteString, components: URLComponents(url: url, resolvingAgainstBaseURL: false))
     }
+
+    /// The same for a URL's text and its parts. It fails closed: when the parts could not be read
+    /// (nil) or put back together, nothing after the path is shown. A parameter's name counts
+    /// however it is written (`Token`, `%74oken`), and a fragment — which never reaches the server,
+    /// and which the client never builds — is not shown at all.
+    static func maskingQuerySecrets(in text: String, components: URLComponents?) -> String {
+        guard var components else {
+            let end = text.firstIndex { $0 == "?" || $0 == "#" } ?? text.endIndex
+            return redactKeys(inURL: String(text[..<end]) + (end < text.endIndex ? "?" + urlPlaceholder : ""))
+        }
+        if let items = components.percentEncodedQueryItems, !items.isEmpty {
+            components.percentEncodedQueryItems = items.map { item in
+                isSecretQueryName(item.name) ? URLQueryItem(name: item.name, value: urlPlaceholder) : item
+            }
+        }
+        if let fragment = components.percentEncodedFragment, !fragment.isEmpty {
+            components.percentEncodedFragment = urlPlaceholder
+        }
+        guard let shown = components.string else { return maskingQuerySecrets(in: text, components: nil) }
+        return redactKeys(inURL: shown)
+    }
+
+    /// Whether a query parameter's name, as written in the URL, is one of `secretQueryParameters`
+    /// in any case or percent-encoding. A name that cannot be decoded counts as one.
+    static func isSecretQueryName(_ encoded: String) -> Bool {
+        guard let name = encoded.removingPercentEncoding else { return true }
+        return secretQueryParameters.contains(name.lowercased())
+    }
+
+    /// The placeholder as it stands in a URL.
+    static let urlPlaceholder = "%E2%80%B9redacted%E2%80%BA"
+
+    /// `sk_…` keys in a URL. A key typed after a space or a symbol follows that character's
+    /// percent-escape there (`search=for%20sk_…`), so an escape counts as a boundary too.
+    static func redactKeys(inURL text: String) -> String {
+        guard text.contains("sk_") else { return text }
+        return urlKeyPattern.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text),
+            withTemplate: NSRegularExpression.escapedTemplate(for: urlPlaceholder)
+        )
+    }
+
+    private static let urlKeyPattern = try! NSRegularExpression(
+        pattern: #"(?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))sk_[A-Za-z0-9_\-]{8,}"#
+    )
 
     /// Request fields that are secrets only in one operation, because their name alone says
     /// nothing: a secret's `value`, and an environment variable's `values` (plain strings feed
@@ -120,10 +161,17 @@ public enum ElevenLabsRedaction {
         "update_environment_variable": ["values"],
     ]
 
+    /// Objects one of whose fields is what the owner typed for a phone transfer: the DTMF digits
+    /// sent once it connects (an extension, but also a conference PIN or an account passcode) and
+    /// the SIP User-to-User payload (CRM identifiers, an escalation reason). That field is masked;
+    /// a `dynamic` post-dial value names a variable rather than holding digits, and stays.
+    static let requestSecretSubfields: [String: String] = ["post_dial_digits": "value", "uui": "data"]
+
     /// A request body as "Show API call" and "Copy as curl" may show it: what the owner typed
     /// that is a secret — a secret's value, a Twilio or Exotel auth token, a SIP password, a
-    /// literal `Authorization` header — replaced by a placeholder, keys and everything else as
-    /// typed, and `sk_…` keys scrubbed from every string.
+    /// literal `Authorization` header, a transfer's post-dial digits and UUI payload — replaced
+    /// by a placeholder, keys and everything else as typed, and `sk_…` keys scrubbed from every
+    /// string.
     public static func maskingRequestSecrets(in value: JSONValue, operationID: String) -> JSONValue {
         let extra = requestSecretFieldsByOperation[operationID] ?? []
         let maps = requestSecretMapsByOperation[operationID] ?? []
@@ -138,6 +186,20 @@ public enum ElevenLabsRedaction {
                     }
                     if headerMapFields.contains(name) || maps.contains(name) {
                         return (key, maskHeaderValues(mask(inner)))
+                    }
+                    if let field = requestSecretSubfields[name] {
+                        switch mask(inner) {
+                        case .string(let text) where !text.isEmpty:
+                            return (key, .string(placeholder))
+                        case .object(var fields):
+                            if case .string(let text)? = fields[field], !text.isEmpty,
+                               fields["type"] != .string("dynamic") {
+                                fields[field] = .string(placeholder)
+                            }
+                            return (key, .object(fields))
+                        case let other:
+                            return (key, other)
+                        }
                     }
                     return (key, mask(inner))
                 }))
@@ -187,6 +249,22 @@ public enum ElevenLabsRedaction {
             return value
         }
     }
+
+    /// A text answer as the app shows it: every `sk_…` key and every legacy key — exactly 32 hex
+    /// digits standing alone — replaced. Unlike `redact`, which is for error text, a longer hex
+    /// run stays: ElevenLabs' public user and owner ids are 64 hex digits, and an export that
+    /// lost them would be useless. A UUID's groups are shorter and stay too; a UUID written
+    /// without its dashes is 32 hex digits, the legacy key's shape, and is masked.
+    public static func redactAnswerText(_ text: String) -> String {
+        let keysOut = redactKeys(text)
+        return legacyKeyPattern.stringByReplacingMatches(
+            in: keysOut, range: NSRange(keysOut.startIndex..., in: keysOut), withTemplate: placeholder
+        )
+    }
+
+    private static let legacyKeyPattern = try! NSRegularExpression(
+        pattern: #"(?<![A-Za-z0-9])[0-9a-fA-F]{32}(?![A-Za-z0-9])"#
+    )
 
     /// Only `sk_…` keys: what a JSON answer is scrubbed of.
     static func redactKeys(_ text: String) -> String {

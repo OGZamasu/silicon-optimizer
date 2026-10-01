@@ -946,8 +946,10 @@ struct ElevenLabsControlHandler: Sendable {
     }
 
     /// Every string under a field whose name says it holds a secret — except, when `masked` is
-    /// given, a field the core masks there and did not mask in `value`: that is one the owner's
-    /// switch revealed, and the switch is the owner's to give.
+    /// given, a string the core masks there and did not mask in `value`: that is one the owner's
+    /// switch revealed, and the switch is the owner's to give. Only a string is spared: a
+    /// revealed field holding an object is walked like any other, so a `password` or a
+    /// `client_secret` inside it stays masked.
     static func maskSecretFields(
         _ value: ElevenLabsJSON, sparing masked: ElevenLabsJSON? = nil
     ) -> ElevenLabsJSON {
@@ -956,7 +958,8 @@ struct ElevenLabsControlHandler: Sendable {
             return .object(Dictionary(uniqueKeysWithValues: object.map { key, inner in
                 let reference = masked?.objectValue?[key]
                 if let reference, reference == .string(ElevenLabsRedaction.placeholder), inner != reference {
-                    return (key, inner)
+                    if case .string = inner { return (key, inner) }
+                    return (key, maskSecretFields(inner))
                 }
                 if case .string = inner, looksLikeSecret(key) {
                     return (key, .string(ElevenLabsRedaction.placeholder))
