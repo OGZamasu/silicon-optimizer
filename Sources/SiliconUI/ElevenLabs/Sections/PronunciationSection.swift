@@ -145,7 +145,9 @@ struct PronunciationDictionaryCard: View {
                 }
                 Button("Edit all in the editor") { model.editCurrentRules() }
                     .controlSize(.small)
-                    .disabled(dictionary.rules.isEmpty)
+                    .disabled(dictionary.rules.isEmpty || !model.rulesAreIn)
+                    .help(model.rulesAreIn ? "Copy every rule into the editor, to change and replace them"
+                          : "Waiting for this dictionary's rules as they are now")
             }
             ForEach(dictionary.rules) { rule in
                 Toggle(isOn: Binding(

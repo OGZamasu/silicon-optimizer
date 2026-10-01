@@ -20,7 +20,7 @@ extension VoicesStudioFixture {
 
 /// The voices-and-studio critic's last nits, taken after the merge. Hermetic: the section
 /// fixture (fake transport, fake key, temporary sink).
-@Suite("ElevenLabs voices & studio follow-ups", .timeLimit(.minutes(1)))
+@Suite("ElevenLabs voices & studio follow-ups", .timeLimit(.minutes(3)))
 @MainActor
 struct VoicesStudioFollowupTests {
 
@@ -93,9 +93,15 @@ struct VoicesStudioFollowupTests {
 
         func has(_ name: String) -> Bool { lock.withLock { seen.contains(name) } }
 
-        /// Waits (up to 5 s) until `name` has been noted.
+        /// Waits until `name` has been noted — for as long as a loaded machine takes to get the
+        /// test there. The cap is only a backstop for a regression in which the signal never
+        /// comes (the test then fails on what it expected instead of hanging): it is far longer
+        /// than any step takes, so the answer it holds is never let go early. (Five seconds was
+        /// not: under a load average near 100 a test took longer than that to note its signal,
+        /// and the held answer arrived first.)
         func wait(for name: String) async {
-            for _ in 0..<500 where !has(name) { try? await Task.sleep(for: .milliseconds(10)) }
+            let deadline = ContinuousClock.now + .seconds(90)
+            while !has(name), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
         }
     }
 
@@ -137,8 +143,12 @@ struct VoicesStudioFollowupTests {
         await model.select("v-a")
         model.editDraft.name = "Voice A renamed"
         let saving = Task { await model.saveEdit() }
+        // Should A's save end without fetching A again (a regression), B's delete — held until
+        // that fetch arrives — is let go at once, so the test fails now rather than at the backstop.
+        let releasing = Task { await saving.value; signals.note("refetch v-a") }
         await deleting.value
         await saving.value
+        await releasing.value
         #expect(fixture.sent("get_voice_by_id").count == 3)
         #expect(model.rows.first { $0.id == "v-a" }?.name == "Voice A renamed",
                 "A's fetch after its own edit was abandoned: the row still reads “\(model.rows.first { $0.id == "v-a" }?.name ?? "")”")
@@ -188,8 +198,11 @@ struct VoicesStudioFollowupTests {
         await model.select("d-a")
         model.rename = "Dict A renamed"
         let renaming = Task { await model.saveName() }
+        // As above: a rename that ends without fetching A again lets B's add go at once.
+        let releasing = Task { await renaming.value; signals.note("refetch d-a") }
         await adding.value
         await renaming.value
+        await releasing.value
         #expect(fixture.sent("get_pronunciation_dictionary_metadata").count == 3)
         #expect(model.dictionaries.first { $0.id == "d-a" }?.name == "Dict A renamed",
                 "A's fetch after its rename was abandoned")

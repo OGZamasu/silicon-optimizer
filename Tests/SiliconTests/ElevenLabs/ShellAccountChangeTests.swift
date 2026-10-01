@@ -183,7 +183,7 @@ struct ShellAccountChangeDetectionTests {
         box.client = ShellSharedPartsTests.client(region: .us, transport: transport, sink: sink)
         runner.confirm()
         #expect(await running.value == nil)
-        #expect(runner.failure == .other(ElevenLabsRunner.accountChangedMessage))
+        #expect(runner.failure == .accountChanged)
         #expect(transport.requests.isEmpty)
     }
 
