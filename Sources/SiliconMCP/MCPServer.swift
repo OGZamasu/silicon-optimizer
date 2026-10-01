@@ -13,24 +13,48 @@ import SiliconControl
 ///
 /// The frames in, the frames out and the tools are all given to it: `overStandardIO()` is the
 /// bridge a client spawns, and a test drives the same loop with lines it types and fake tools.
+///
+/// Each `tools/call` runs in a task of its own while the loop goes on reading, so a render or an
+/// ElevenLabs conversation that takes minutes neither delays `ping` and `tools/list` nor hides
+/// the client's `notifications/cancelled`. Cancelling the task cancels its request to the app,
+/// and the app stops waiting on the render or ends the conversation when that connection closes.
 struct MCPServer: Sendable {
 
     static let protocolVersion = "2025-06-18"
 
+    /// Tool calls running at once. One more is refused with an error rather than queued: a
+    /// queue would only hide that the client is waiting on work that has not started.
+    static let maximumConcurrentCalls = 8
+
+    /// How long the calls of a client that hung up get to close their requests before the
+    /// bridge exits anyway.
+    static let shutdownGrace: Duration = .seconds(2)
+
     /// One line per frame, as the client sent them. The stream ending is the client hanging up.
     let lines: AsyncStream<String>
-    /// Writes one whole frame, without its newline, to the client.
-    let write: @Sendable (String) -> Void
     let tools: any ToolRunner
+    let maximumConcurrentCalls: Int
+    let shutdownGrace: Duration
+    private let output: FrameWriter
+    private let calls = CallRegistry()
 
+    /// - Parameter write: Writes one whole frame, without its newline, to the client. It is
+    ///   never called again before an earlier call has returned.
     init(
         lines: AsyncStream<String>, write: @escaping @Sendable (String) -> Void,
-        tools: any ToolRunner = ControlTools()
+        tools: any ToolRunner = ControlTools(),
+        maximumConcurrentCalls: Int = MCPServer.maximumConcurrentCalls,
+        shutdownGrace: Duration = MCPServer.shutdownGrace
     ) {
         self.lines = lines
-        self.write = write
+        self.output = FrameWriter(write)
         self.tools = tools
+        self.maximumConcurrentCalls = maximumConcurrentCalls
+        self.shutdownGrace = shutdownGrace
     }
+
+    /// Tool calls whose tasks have not ended yet, cancelled ones still unwinding included.
+    var callsInFlight: Int { calls.count }
 
     /// The bridge as a client spawns it: frames in on stdin, out on stdout, every tool a request
     /// to the running app.
@@ -65,11 +89,16 @@ struct MCPServer: Sendable {
                 emit(RPCResponse(id: .null, error: .init(code: -32_700, message: "Parse error")))
                 continue
             }
-            await handle(request)
+            handle(request)
         }
+        // The client hung up. Nobody is left to read an answer, and a render or a conversation
+        // it started must not outlive it: cancel every call, give their requests a moment to
+        // close, then return — and the process exits.
+        await unwind(calls.cancelAll())
     }
 
-    private func handle(_ request: RPCRequest) async {
+    /// Never waits on a tool: those run in tasks of their own, so the next line is read at once.
+    private func handle(_ request: RPCRequest) {
         switch request.method {
         case "initialize":
             emit(RPCResponse(id: request.id, result: .object([
@@ -80,6 +109,14 @@ struct MCPServer: Sendable {
                     "version": .string("0.1.0"),
                 ]),
             ])))
+
+        case "notifications/cancelled":
+            // The client has given up on a call: end it, and answer nothing, not even an error
+            // — it has moved on. An id that is unknown or already answered is ignored.
+            if case .object(let params)? = request.params,
+               let id = params["requestId"], id != .null {
+                calls.cancel(id)
+            }
 
         case let method where method.hasPrefix("notifications/"):
             break   // notifications carry no id and take no response — any of them
@@ -93,7 +130,7 @@ struct MCPServer: Sendable {
             ])))
 
         case "tools/call":
-            await callTool(request)
+            startCall(request)
 
         default:
             emit(RPCResponse(
@@ -103,7 +140,7 @@ struct MCPServer: Sendable {
         }
     }
 
-    private func callTool(_ request: RPCRequest) async {
+    private func startCall(_ request: RPCRequest) {
         guard case .object(let params)? = request.params,
               case .string(let name)? = params["name"] else {
             emit(RPCResponse(
@@ -116,33 +153,192 @@ struct MCPServer: Sendable {
             return [:]
         }()
 
-        do {
-            let text = try await tools.run(name, arguments: arguments)
-            emit(RPCResponse(id: request.id, result: .object([
-                "content": .array([.object([
-                    "type": .string("text"),
-                    "text": .string(text),
-                ])]),
-                "isError": .bool(false),
-            ])))
-        } catch {
-            // MCP wants tool failures reported as results with isError, not as protocol errors:
-            // that way the model can read the message and adapt instead of the call just dying.
-            emit(RPCResponse(id: request.id, result: .object([
-                "content": .array([.object([
-                    "type": .string("text"),
-                    "text": .string(error.localizedDescription),
-                ])]),
-                "isError": .bool(true),
-            ])))
+        let ticket: CallRegistry.Ticket
+        switch calls.admit(request.id, limit: maximumConcurrentCalls) {
+        case .admitted(let admitted):
+            ticket = admitted
+        case .duplicate:
+            // Cancelling by id has to name one call, so a second call under the id of one that
+            // is still running is refused, and the first runs on untouched.
+            emit(RPCResponse(id: request.id, error: .init(
+                code: -32_600,
+                message: "Request id \(request.id.wireText) belongs to a tool call that is "
+                    + "still running. Give each request an id of its own."
+            )))
+            return
+        case .busy:
+            emit(RPCResponse(id: request.id, error: .init(
+                code: -32_000,
+                message: "\(maximumConcurrentCalls) tool calls are already running, as many as "
+                    + "this bridge runs at once. Wait for one to finish, or cancel one, then "
+                    + "call again."
+            )))
+            return
         }
+
+        let task = Task {
+            // The slot is held until the task has ended, cancelled or not, so calls that are
+            // slow to unwind still count against the cap.
+            defer { calls.release(ticket) }
+            let response: RPCResponse
+            do {
+                let text = try await tools.run(name, arguments: arguments)
+                response = RPCResponse(id: request.id, result: .object([
+                    "content": .array([.object([
+                        "type": .string("text"),
+                        "text": .string(text),
+                    ])]),
+                    "isError": .bool(false),
+                ]))
+            } catch {
+                // MCP wants tool failures reported as results with isError, not as protocol
+                // errors: that way the model can read the message and adapt instead of the call
+                // just dying.
+                response = RPCResponse(id: request.id, result: .object([
+                    "content": .array([.object([
+                        "type": .string("text"),
+                        "text": .string(error.localizedDescription),
+                    ])]),
+                    "isError": .bool(true),
+                ]))
+            }
+            // A cancelled call answers nothing. `claim` settles that under the same lock as
+            // `cancel`, so a call that finishes just as it is cancelled answers at most once.
+            if calls.claim(ticket) { emit(response) }
+        }
+        calls.attach(task, to: ticket)
+    }
+
+    /// Waits for `tasks` to end, but no longer than `shutdownGrace`: a call that ignores its
+    /// cancellation must not keep a bridge whose client has gone running.
+    private func unwind(_ tasks: [Task<Void, Never>]) async {
+        guard !tasks.isEmpty else { return }
+        let (ended, end) = AsyncStream.makeStream(of: Void.self)
+        let grace = shutdownGrace
+        let waiting = Task {
+            for task in tasks { await task.value }
+            end.finish()
+        }
+        let timer = Task {
+            try? await Task.sleep(for: grace)
+            end.finish()
+        }
+        for await _ in ended {}
+        waiting.cancel()
+        timer.cancel()
     }
 
     private func emit(_ response: RPCResponse) {
         guard response.id != .null || response.error != nil else { return }
         guard let data = try? JSONEncoder().encode(response),
               let line = String(data: data, encoding: .utf8) else { return }
-        write(line)
+        output.write(line)
+    }
+}
+
+/// The one way out to the client. Answers finish in any order, from any task; each frame is
+/// written whole under one lock, so two can never interleave.
+private final class FrameWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sink: @Sendable (String) -> Void
+
+    init(_ sink: @escaping @Sendable (String) -> Void) {
+        self.sink = sink
+    }
+
+    func write(_ frame: String) {
+        lock.withLock { sink(frame) }
+    }
+}
+
+/// The tool calls in flight, each under the id its client gave it. Ids are compared as JSON
+/// values: `7` and `7.0` are one id, `7` and `"7"` are two.
+final class CallRegistry: @unchecked Sendable {
+
+    struct Ticket: Hashable, Sendable {
+        fileprivate let number: UInt64
+    }
+
+    enum Admission: Equatable {
+        case admitted(Ticket)
+        /// A call under this id is still running.
+        case duplicate
+        /// As many calls are running as the limit allows.
+        case busy
+    }
+
+    private struct Call {
+        let id: JSONValue
+        var task: Task<Void, Never>?
+        /// Cancelled — by the client, or by its hanging up — and never to be answered.
+        var cancelled = false
+        /// Its answer has been claimed: the call is over as far as the client is concerned.
+        var answered = false
+
+        var isOpen: Bool { !cancelled && !answered }
+    }
+
+    private let lock = NSLock()
+    private var calls: [Ticket: Call] = [:]
+    private var issued: UInt64 = 0
+
+    var count: Int { lock.withLock { calls.count } }
+
+    /// A slot for a call, or why there is none. A cancelled call still unwinding keeps its slot
+    /// but not its id. A call without an id (a notification) can be neither duplicated nor
+    /// cancelled.
+    func admit(_ id: JSONValue, limit: Int) -> Admission {
+        lock.withLock {
+            if id != .null, calls.values.contains(where: { $0.id == id && $0.isOpen }) {
+                return .duplicate
+            }
+            guard calls.count < limit else { return .busy }
+            issued += 1
+            let ticket = Ticket(number: issued)
+            calls[ticket] = Call(id: id)
+            return .admitted(ticket)
+        }
+    }
+
+    /// Hands over the call's task once it exists. A task that has already ended has nothing
+    /// left to attach to.
+    func attach(_ task: Task<Void, Never>, to ticket: Ticket) {
+        lock.withLock { calls[ticket]?.task = task }
+    }
+
+    /// Whether the call may answer: true once at most, and never once it has been cancelled.
+    func claim(_ ticket: Ticket) -> Bool {
+        lock.withLock {
+            guard calls[ticket]?.isOpen == true else { return false }
+            calls[ticket]?.answered = true
+            return true
+        }
+    }
+
+    /// The call's task has ended; its slot is free.
+    func release(_ ticket: Ticket) {
+        lock.withLock { calls[ticket] = nil }
+    }
+
+    /// Cancels the call the client knows as `id`, if one is running and unanswered.
+    func cancel(_ id: JSONValue) {
+        let task: Task<Void, Never>? = lock.withLock {
+            guard let ticket = calls.first(where: { $0.value.id == id && $0.value.isOpen })?.key
+            else { return nil }
+            calls[ticket]?.cancelled = true
+            return calls[ticket]?.task
+        }
+        task?.cancel()
+    }
+
+    /// Cancels every call, for a client that has hung up, and returns their tasks.
+    func cancelAll() -> [Task<Void, Never>] {
+        let tasks: [Task<Void, Never>] = lock.withLock {
+            for ticket in calls.keys { calls[ticket]?.cancelled = true }
+            return calls.values.compactMap(\.task)
+        }
+        for task in tasks { task.cancel() }
+        return tasks
     }
 }
 
@@ -166,6 +362,13 @@ struct ControlTools: ToolRunner {
 }
 
 // MARK: - JSON-RPC types
+
+private extension JSONValue {
+    /// As it reads on the wire, for a message that names it.
+    var wireText: String {
+        (try? JSONEncoder().encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
+}
 
 struct RPCRequest: Decodable {
     var id: JSONValue

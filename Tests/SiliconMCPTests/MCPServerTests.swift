@@ -84,10 +84,17 @@ final class Bridge: Sendable {
     private let input: AsyncStream<String>.Continuation
     private let exited = Flag()
 
-    init(tools: FakeTools = FakeTools()) {
+    init(
+        tools: FakeTools = FakeTools(),
+        maximumConcurrentCalls: Int = MCPServer.maximumConcurrentCalls,
+        shutdownGrace: Duration = MCPServer.shutdownGrace
+    ) {
         let (lines, input) = AsyncStream.makeStream(of: String.self)
         let frames = FrameLog()
-        let server = MCPServer(lines: lines, write: { frames.write($0) }, tools: tools)
+        let server = MCPServer(
+            lines: lines, write: { frames.write($0) }, tools: tools,
+            maximumConcurrentCalls: maximumConcurrentCalls, shutdownGrace: shutdownGrace
+        )
         self.server = server
         self.frames = frames
         self.tools = tools
@@ -151,6 +158,7 @@ final class FrameLog: Sendable {
 
     private struct State {
         var lines: [String] = []
+        var parsed: [JSONValue] = []
         var writing = 0
         var overlaps = 0
     }
@@ -175,12 +183,13 @@ final class FrameLog: Sendable {
 
     /// Every frame, parsed. A line that is not one JSON object parses as `.null`.
     var all: [JSONValue] {
-        lines.map { line in
-            guard !line.contains("\n"),
-                  let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)),
-                  value.objectValue != nil
-            else { return .null }
-            return value
+        state.withLock { state in
+            // Parsed once each: a test polls this while frames are still arriving.
+            for line in state.lines.dropFirst(state.parsed.count) {
+                let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
+                state.parsed.append(!line.contains("\n") && value?.objectValue != nil ? value! : .null)
+            }
+            return state.parsed
         }
     }
 
