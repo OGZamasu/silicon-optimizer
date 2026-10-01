@@ -115,7 +115,9 @@ the spec, and a test walks those schemas again:
 removes the key preview in `GET /v1/user`, and any `sk_…` string. Signed download URLs for the
 owner's own files (Studio assets, knowledge-base sources, Productions deliverables) are not
 credentials to the account, so they are not listed. JSON answers keep 64-hex strings, because
-ElevenLabs' public user and owner ids look like that. Error text loses those as well.
+ElevenLabs' public user and owner ids look like that. Text answers in the app keep them too
+(`redactAnswerText`): they lose `sk_…` keys and a lone run of exactly 32 hex digits, the legacy key's
+shape. Error text loses any run of 32 or more.
 
 ### The client
 
