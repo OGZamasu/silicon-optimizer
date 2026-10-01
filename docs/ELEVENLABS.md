@@ -657,7 +657,8 @@ saved to the output folder; ElevenLabs keeps it too (Conversations).
 Live transcription's Stop commits what is left and waits for **the text of that commit** — the
 last stretch was sent and billed, so it must reach the screen and the export. Committing by hand
 (always for a file), every commit is answered by one committed transcript, in order, so Stop waits
-for the answer to its own commit, the last one — not the first text after it, which can be the
+for the answer to its own commit, the last one, and then 0.75 s of quiet (a duplicate answer, or
+one sent unasked, cannot stand in for it) — not the first text after it, which can be the
 late answer to an earlier commit (a file commits every 20 s of audio, and so does the microphone
 when committing by hand, so ElevenLabs never commits on its own after its ~36 s). Committing at
 pauses, ElevenLabs' own commits cannot be counted: Stop waits for the first text after its commit

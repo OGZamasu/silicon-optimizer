@@ -378,17 +378,20 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         if commits { try? await stream.commit() }
         // By hand, every commit is answered by one committed transcript, in order: the last text
         // is the answer to the last commit — not just the first text after Stop, which can be the
-        // answer to an earlier commit. At pauses, an automatic commit's text can land just after
-        // Stop's commit: the first text after it, then a quiet moment.
+        // answer to an earlier commit — and then a quiet moment, so a duplicate answer (or one
+        // ElevenLabs sent unasked) cannot stand in for Stop's own. At pauses, an automatic
+        // commit's text can land just after Stop's commit: the first text after it, then a quiet
+        // moment.
         let expected = stream.usage.commits
         let deadline = ContinuousClock.now + timing.finalWait
         var answered = false
         while guardian.isCurrent(token), ContinuousClock.now < deadline {
             let after = committedReceived > receivedBefore
+            let quiet = lastCommittedAt.map { ContinuousClock.now - $0 >= timing.finalQuiet } ?? true
             if manual {
-                answered = committedReceived >= expected && (after || !commits)
+                answered = committedReceived >= expected && (after || !commits) && quiet
             } else {
-                answered = after && (lastCommittedAt.map { ContinuousClock.now - $0 >= timing.finalQuiet } ?? false)
+                answered = after && quiet
             }
             if answered { break }
             try? await Task.sleep(for: .milliseconds(20))

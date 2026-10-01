@@ -73,6 +73,43 @@ struct LiveTranscriptionFinalTextTests {
         #expect(exported.contains("the first twenty seconds"))
     }
 
+    /// The critic's round-3 probe: the held periodic commit is answered twice, both landing after
+    /// Stop's commit, and Stop's own answer 400 ms later. The duplicate brings the count up to the
+    /// commits sent; Stop still waits for a quiet moment, so its own answer is not lost.
+    @Test func aDuplicateAnswerAfterStopDoesNotEndTheWait() async throws {
+        let folder = try Self.scratch()
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let url = try Self.wav(seconds: 1.5, in: folder)
+        let rig = LiveRig(server: { socket in
+            socket.push(["message_type": "session_started", "session_id": "s1", "config": [:]])
+            var commits = 0
+            while let message = await socket.nextSent(timeout: .seconds(60)) {
+                guard message["commit"] == true else { continue }
+                commits += 1
+                guard commits == 2 else { continue }
+                socket.push(["message_type": "committed_transcript", "text": "part one"])
+                socket.push(["message_type": "committed_transcript", "text": "part one"])
+                try? await Task.sleep(for: .milliseconds(400))
+                socket.push(["message_type": "committed_transcript", "text": "the last part"])
+            }
+        })
+        defer { rig.clean() }
+        var context = rig.context
+        context.transcription.commitEvery = 1
+        // The quiet after the count is reached, far longer than the 400 ms to Stop's own answer.
+        context.transcription.finalQuiet = .seconds(3)
+        let screen = LiveTranscriptionModel(context: context)
+        screen.source = .file
+        screen.file = url
+        await screen.start()
+        await rig.until { screen.phase == .ended }
+        try #require(screen.phase == .ended)
+        #expect(screen.segments.last?.text == "the last part", "\(screen.segments.map(\.text))")
+        #expect(screen.outcome.map { !$0.message.contains("may be missing") } == true)
+        let exported = try await Self.exportedText(screen)
+        #expect(exported.contains("the last part"))
+    }
+
     /// Committing by hand from the microphone, the app commits every `commitEvery` seconds too, so
     /// ElevenLabs never commits on its own (which would add an answer nobody counted).
     @Test func theMicrophoneCommittingByHandCommitsAsItGoes() async throws {
