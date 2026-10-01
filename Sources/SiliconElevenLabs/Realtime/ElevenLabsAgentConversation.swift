@@ -105,13 +105,13 @@ public struct ElevenLabsAgentPreflight: Sendable, Hashable {
     /// The formats the agent is configured with (the metadata event has the final word).
     public var outputAudioFormat: String?
     public var inputAudioFormat: String?
-    /// Tool names and kinds the agent has, for naming what it may do.
-    public var tools: [String]
+    /// The tools the agent has, for naming what it may do before a conversation starts.
+    public var tools: [ElevenLabsAgentToolSummary]
 
     public init(
         agentID: String, name: String? = nil, requiresAuthentication: Bool, textOnlyByDefault: Bool = false,
         textOnlyOverrideAllowed: Bool = false, outputAudioFormat: String? = nil, inputAudioFormat: String? = nil,
-        tools: [String] = []
+        tools: [ElevenLabsAgentToolSummary] = []
     ) {
         self.agentID = agentID
         self.name = name
@@ -135,10 +135,98 @@ public struct ElevenLabsAgentPreflight: Sendable, Hashable {
         textOnlyOverrideAllowed = agent["platform_settings"]["overrides"]["conversation_config_override"]["conversation"]["text_only"].looseBool ?? false
         outputAudioFormat = agent["conversation_config"]["tts"]["agent_output_audio_format"].stringValue
         inputAudioFormat = agent["conversation_config"]["asr"]["user_input_audio_format"].stringValue
-        let prompt = agent["conversation_config"]["agent"]["prompt"]
-        tools = (prompt["tools"].arrayValue ?? []).compactMap { tool in
-            tool["name"].stringValue.map { name in tool["type"].stringValue.map { "\(name) (\($0))" } ?? name }
+        tools = ElevenLabsAgentToolSummary.all(in: agent["conversation_config"]["agent"]["prompt"])
+    }
+
+    /// The tools that can reach outside the conversation on ElevenLabs' side.
+    public var realWorldTools: [ElevenLabsAgentToolSummary] { tools.filter(\.actsInTheRealWorld) }
+}
+
+/// One of an agent's tools, as far as saying what it may do needs it.
+public struct ElevenLabsAgentToolSummary: Sendable, Hashable {
+    public enum Kind: String, Sendable, Hashable {
+        /// Calls a URL from ElevenLabs' servers.
+        case webhook
+        /// Asks this app to run something (it runs nothing; see the live screen).
+        case client
+        /// A built-in system tool: end call, transfer, keypad tones, language…
+        case system
+        /// A tool on an outside MCP server.
+        case mcp
+        /// An integration (a connected account) ElevenLabs calls.
+        case integration
+        /// A workspace tool, by id: what it does is not in the agent's settings.
+        case workspace
+        case other
+    }
+
+    public var name: String
+    public var kind: Kind
+    /// Where it reaches: a webhook's host, an MCP server's name or id.
+    public var host: String?
+    /// Whether running it reaches outside the conversation: a URL, a phone call or transfer,
+    /// keypad tones, an MCP server, or a workspace tool this app cannot see into.
+    public var actsInTheRealWorld: Bool
+
+    public init(name: String, kind: Kind, host: String? = nil, actsInTheRealWorld: Bool) {
+        self.name = name
+        self.kind = kind
+        self.host = host
+        self.actsInTheRealWorld = actsInTheRealWorld
+    }
+
+    /// System tools that act beyond the conversation itself.
+    static let realWorldSystemTools: Set<String> = [
+        "transfer_to_number", "transfer_to_agent", "play_keypad_touch_tone", "voicemail_detection",
+    ]
+
+    /// Every tool an agent's `prompt` names: inline tools, built-in tools, workspace tool ids and
+    /// MCP servers.
+    static func all(in prompt: JSONValue) -> [ElevenLabsAgentToolSummary] {
+        var tools: [ElevenLabsAgentToolSummary] = []
+        for tool in prompt["tools"].arrayValue ?? [] {
+            let name = tool["name"].stringValue ?? "unnamed tool"
+            switch tool["type"].stringValue ?? "" {
+            case "webhook":
+                tools.append(.init(name: name, kind: .webhook, host: host(of: tool["api_schema"]["url"].stringValue),
+                                   actsInTheRealWorld: true))
+            case "client":
+                tools.append(.init(name: name, kind: .client, actsInTheRealWorld: false))
+            case "system":
+                let type = tool["params"]["system_tool_type"].stringValue ?? name
+                tools.append(.init(name: name, kind: .system, actsInTheRealWorld: realWorldSystemTools.contains(type)))
+            case "mcp":
+                tools.append(.init(name: tool["mcp_tool_name"].stringValue ?? name, kind: .mcp,
+                                   host: tool["mcp_server_name"].stringValue ?? tool["mcp_server_id"].stringValue,
+                                   actsInTheRealWorld: true))
+            case "api_integration_webhook":
+                tools.append(.init(name: name, kind: .integration, actsInTheRealWorld: true))
+            default:
+                tools.append(.init(name: name, kind: .other, actsInTheRealWorld: true))
+            }
         }
+        for (name, config) in (prompt["built_in_tools"].objectValue ?? [:]).sorted(by: { $0.key < $1.key })
+        where config != .null {
+            tools.append(.init(name: name, kind: .system, actsInTheRealWorld: realWorldSystemTools.contains(name)))
+        }
+        for id in (prompt["tool_ids"].arrayValue ?? []).compactMap(\.stringValue) {
+            tools.append(.init(name: id, kind: .workspace, actsInTheRealWorld: true))
+        }
+        for key in ["mcp_server_ids", "native_mcp_server_ids"] {
+            for id in (prompt[key].arrayValue ?? []).compactMap(\.stringValue) {
+                tools.append(.init(name: "tools of MCP server \(id)", kind: .mcp, host: id, actsInTheRealWorld: true))
+            }
+        }
+        return tools
+    }
+
+    /// The host of a URL written with `{placeholders}` (which `URL` refuses).
+    static func host(of url: String?) -> String? {
+        guard let url, let range = url.range(of: "://") else { return nil }
+        let authority = url[range.upperBound...].prefix { $0 != "/" && $0 != "?" && $0 != "#" }
+        let host = authority.split(separator: "@").last.map(String.init) ?? ""
+        let bare = host.hasPrefix("[") ? host : String(host.prefix { $0 != ":" })
+        return bare.isEmpty ? nil : bare.lowercased()
     }
 }
 

@@ -484,6 +484,43 @@ struct RealtimeSessionTests {
         #expect(voice == ["type": "conversation_initiation_client_data"])
     }
 
+    /// Before a conversation, every tool the agent has is named with where it reaches, and the
+    /// ones that act beyond the conversation are marked: webhooks (their host), transfers, keypad
+    /// tones, MCP servers, workspace tools this app cannot see into.
+    @Test func anAgentsToolsAreNamedWithWhereTheyReach() {
+        let preflight = ElevenLabsAgentPreflight(agentID: "a", json: ["conversation_config": ["agent": ["prompt": [
+            "tools": [
+                ["type": "webhook", "name": "lookup_order", "api_schema": ["url": "https://API.example.com:8443/orders/{order_id}?x=1"]],
+                ["type": "client", "name": "open_page"],
+                ["type": "system", "name": "end_call", "params": ["system_tool_type": "end_call"]],
+                ["type": "system", "name": "transfer", "params": ["system_tool_type": "transfer_to_number"]],
+                ["type": "mcp", "name": "x", "mcp_tool_name": "send_email", "mcp_server_name": "Mail", "mcp_server_id": "mcp_1"],
+                ["type": "api_integration_webhook", "name": "crm_update"],
+                ["type": "something_new", "name": "mystery"],
+            ],
+            "built_in_tools": ["play_keypad_touch_tone": ["name": "play_keypad_touch_tone"], "language_detection": ["name": "x"], "skip_turn": nil],
+            "tool_ids": ["tool_9"],
+            "mcp_server_ids": ["mcp_2"],
+        ]]]])
+        #expect(preflight.tools == [
+            .init(name: "lookup_order", kind: .webhook, host: "api.example.com", actsInTheRealWorld: true),
+            .init(name: "open_page", kind: .client, actsInTheRealWorld: false),
+            .init(name: "end_call", kind: .system, actsInTheRealWorld: false),
+            .init(name: "transfer", kind: .system, actsInTheRealWorld: true),
+            .init(name: "send_email", kind: .mcp, host: "Mail", actsInTheRealWorld: true),
+            .init(name: "crm_update", kind: .integration, actsInTheRealWorld: true),
+            .init(name: "mystery", kind: .other, actsInTheRealWorld: true),
+            .init(name: "language_detection", kind: .system, actsInTheRealWorld: false),
+            .init(name: "play_keypad_touch_tone", kind: .system, actsInTheRealWorld: true),
+            .init(name: "tool_9", kind: .workspace, actsInTheRealWorld: true),
+            .init(name: "tools of MCP server mcp_2", kind: .mcp, host: "mcp_2", actsInTheRealWorld: true),
+        ])
+        #expect(preflight.realWorldTools.count == 8)
+        #expect(ElevenLabsAgentToolSummary.host(of: "https://user:pw@hooks.example.com/x") == "hooks.example.com")
+        #expect(ElevenLabsAgentToolSummary.host(of: "not a url") == nil)
+        #expect(ElevenLabsAgentPreflight(agentID: "a", json: [:]).tools.isEmpty)
+    }
+
     @Test func anAgentThatDoesNotSayWhetherItNeedsAuthGetsASignedURL() {
         #expect(ElevenLabsAgentPreflight(agentID: "a", json: [:]).requiresAuthentication)
         #expect(!ElevenLabsAgentPreflight(agentID: "a", json: ["platform_settings": ["auth": ["enable_auth": false]]]).requiresAuthentication)
