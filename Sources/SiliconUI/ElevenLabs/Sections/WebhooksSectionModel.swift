@@ -148,7 +148,9 @@ final class WebhooksSectionModel {
     @ObservationIgnored private var wantedEdit: String?
 
     /// Opens the editor, listing the webhooks with their usages first so the events shown (and
-    /// any change to them) start from what ElevenLabs holds.
+    /// any change to them) start from what ElevenLabs holds. When that list cannot be read the
+    /// editor is not opened: a save sends the name and whether the webhook is off, and the row
+    /// drawn earlier may be older than ElevenLabs (turned off on the website since, say).
     func startEditing(_ webhook: WorkspaceWebhook) async {
         wantedEdit = webhook.id
         let json = await actions.perform(
@@ -167,7 +169,9 @@ final class WebhooksSectionModel {
             problems = []
             edit(fresh, eventsKnown: true)
         } else {
-            edit(webhook, eventsKnown: false)
+            // An editor already open on this webhook (from a read that worked) stays as it is.
+            if editing?.id != webhook.id { edit(nil) }
+            problems = ["“\(webhook.name)” could not be read again, so it was not opened for editing: press Edit to try again."]
         }
     }
 
