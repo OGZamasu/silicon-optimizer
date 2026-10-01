@@ -51,6 +51,12 @@ final class AgentAnalyticsModel {
     /// A ticket's priorities, least urgent first, as the spec lists them.
     static var priorities: [String] { AgentsSchema.choices(AgentsOp.updateTicket, "priority") }
 
+    /// The one agent's list's "most urgent first" order, as the spec names it; nil (and no
+    /// control) if a spec refresh renames it.
+    static var mostUrgentFirst: String? {
+        AgentsSchema.choices(AgentsOp.listAgentTickets, "sort_by").first { $0 == "priority" }
+    }
+
     static func color(forPriority priority: String) -> Color {
         switch priority {
         case "urgent": .red
@@ -91,6 +97,17 @@ final class AgentAnalyticsModel {
     var newTicketComment = ""
     /// How urgent a new ticket is; empty for none.
     var newTicketPriority = ""
+
+    /// What a priority on a ticket about a conversation also does, as the spec says it
+    /// (`create_agent_conversation_ticket_route`, `priority`: "If the conversation already has an
+    /// open ticket, it is raised to this priority when lower."). Nil for a follow-up task, or when
+    /// no priority is chosen.
+    var newTicketPriorityNote: String? {
+        guard !newTicketPriority.isEmpty,
+              !newTicketConversationID.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return "If this conversation already has an open ticket, ElevenLabs raises that ticket to "
+            + "\(AgentsFormat.words(newTicketPriority).lowercased()) priority when it is lower."
+    }
     var ticketComment = ""
     var turnIndex = 0
     var turnComment = ""
@@ -180,7 +197,7 @@ final class AgentAnalyticsModel {
             operation = AgentsOp.listAgentTickets
             arguments["agent_id"] = .string(agentID)
             if !ticketPriority.isEmpty { arguments["priorities"] = [.string(ticketPriority)] }
-            if ticketsByPriority { arguments["sort_by"] = "priority" }
+            if ticketsByPriority, let order = Self.mostUrgentFirst { arguments["sort_by"] = .string(order) }
         } else {
             operation = AgentsOp.listTickets
         }
@@ -239,15 +256,15 @@ final class AgentAnalyticsModel {
         }
     }
 
-    /// Changes the open ticket. An empty assignee or priority clears it (sent as null).
-    func updateTicket(status: String? = nil, assignee: String? = nil, priority: String? = nil) async {
-        guard let ticket else { return }
-        var arguments: [String: JSONValue] = ["agentqa_ticket_id": .string(ticket.id)]
+    /// Changes the ticket `ticketID` — the one whose picker was changed, whichever ticket is
+    /// open by the time this runs. An empty assignee or priority clears it (sent as null).
+    func updateTicket(_ ticketID: String, status: String? = nil, assignee: String? = nil, priority: String? = nil) async {
+        var arguments: [String: JSONValue] = ["agentqa_ticket_id": .string(ticketID)]
         if let status { arguments["status"] = .string(status) }
         if let assignee { arguments["assignee_user_id"] = assignee.isEmpty ? .null : .string(assignee) }
         if let priority { arguments["priority"] = priority.isEmpty ? .null : .string(priority) }
-        guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticket.id) != nil else { return }
-        if openingTicketID == ticket.id { await openTicket(ticket.id) }
+        guard await calls.json(AgentsOp.updateTicket, arguments, slot: ticketID) != nil else { return }
+        if openingTicketID == ticketID { await openTicket(ticketID) }
     }
 
     func comment() async {
@@ -524,7 +541,9 @@ private struct AgentTicketsCard: View {
                         ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                     }
                     .fixedSize()
-                    Toggle("Most urgent first", isOn: $model.ticketsByPriority).fixedSize()
+                    if AgentAnalyticsModel.mostUrgentFirst != nil {
+                        Toggle("Most urgent first", isOn: $model.ticketsByPriority).fixedSize()
+                    }
                 }
             }
             AgentsListBody(model.tickets, runner: calls.runner(model.ticketScope == .agent ? AgentsOp.listAgentTickets : AgentsOp.listTickets),
@@ -562,6 +581,9 @@ private struct AgentTicketsCard: View {
                 ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
             }
             .fixedSize()
+            if let note = model.newTicketPriorityNote {
+                Text(note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             let manual = model.newTicketConversationID.trimmingCharacters(in: .whitespaces).isEmpty
             AgentsRunButton(runner: calls.runner(manual ? AgentsOp.createManualTicket : AgentsOp.createTicket), title: "Raise ticket",
                                 disabled: model.newTicketComment.isEmpty || (manual && model.agentID.isEmpty)) {
@@ -597,20 +619,20 @@ private struct AgentTicketDetail: View {
             }
             HStack {
                 Picker("Status", selection: Binding(get: { ticket.status }, set: { status in
-                    Task { await model.updateTicket(status: status) }
+                    Task { await model.updateTicket(ticket.id, status: status) }
                 })) {
                     ForEach(AgentsSchema.choices(AgentsOp.updateTicket, "status"), id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                 }
                 .fixedSize()
                 Picker("Priority", selection: Binding(get: { ticket.priority ?? "" }, set: { priority in
-                    Task { await model.updateTicket(priority: priority) }
+                    Task { await model.updateTicket(ticket.id, priority: priority) }
                 })) {
                     Text("None").tag("")
                     ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                 }
                 .fixedSize()
                 Picker("Assignee", selection: Binding(get: { ticket.assigneeID ?? "" }, set: { user in
-                    Task { await model.updateTicket(assignee: user) }
+                    Task { await model.updateTicket(ticket.id, assignee: user) }
                 })) {
                     Text("Nobody").tag("")
                     ForEach(model.assignableUsers) { user in

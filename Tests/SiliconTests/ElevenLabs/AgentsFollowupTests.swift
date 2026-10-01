@@ -132,6 +132,9 @@ extension AgentsSectionsTests {
                                   resolvingAgainstBaseURL: false)?.queryItems ?? []
         #expect(query.contains(URLQueryItem(name: "priorities", value: "urgent")))
         #expect(query.contains(URLQueryItem(name: "sort_by", value: "priority")))
+        let orders = AgentsSchema.choices(AgentsOp.listAgentTickets, "sort_by")
+        #expect(orders == ["created_at", "priority"], "the order the screen sends comes from the catalog: \(orders)")
+        #expect(AgentAnalyticsModel.mostUrgentFirst == "priority")
         #expect(model.tickets.items.first?.priority == "high")
 
         model.ticketScope = .workspace
@@ -151,11 +154,11 @@ extension AgentsSectionsTests {
 
         await model.openTicket("tkt_1")
         #expect(model.ticket?.priority == "high")
-        await model.updateTicket(priority: "low")
+        await model.updateTicket("tkt_1", priority: "low")
         let lowered = try #require(rig.body(AgentsOp.updateTicket))
         #expect(lowered == ["priority": "low"])
         #expect(try AgentsSpec.shared().unresolved(body: lowered, operationID: AgentsOp.updateTicket).isEmpty)
-        await model.updateTicket(priority: "")
+        await model.updateTicket("tkt_1", priority: "")
         #expect(rig.body(AgentsOp.updateTicket) == ["priority": .null], "None clears it")
     }
 
@@ -178,5 +181,81 @@ extension AgentsSectionsTests {
         #expect(body["max_depth"] == .null, "a deprecated no-op was sent: \(body)")
         #expect(body["url"] == "https://example.com/help" && body["max_pages"] == 50)
         #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.createCrawl).isEmpty)
+    }
+
+    @MainActor final class ClientBox { var client: ElevenLabsClient? }
+
+    /// A real-world send whose question is answered yes after the account or region changed:
+    /// the runner stops before the request starts and says so. Nothing went out, so the send
+    /// guard is ready again — as voices & studio already counted it — rather than asking the
+    /// owner to check for calls that cannot have been placed.
+    @Test func aSendRefusedForAnAccountChangeLeavesTheGuardReady() async throws {
+        let box = ClientBox()
+        let transport = FakeElevenLabsTransport(replies: [.json(["status": "ok"])])
+        let sink = TemporaryFileSink()
+        defer { transport.removeTemporaryFiles(); sink.removeAll() }
+        box.client = ShellSharedPartsTests.client(transport: transport, sink: sink)
+        let runner = try #require(ElevenLabsRunner(operationID: "delete_voice", context: .init(client: { box.client }, sink: { sink })))
+        let guardian = AgentsSendGuard()
+        let sending = Task {
+            await guardian.send(runner: runner, what: "The call", check: "Conversations") {
+                await runner.perform(arguments: ["voice_id": "v1"]).flatMap(AgentsCalls.json(of:))
+            }
+        }
+        try await waitUntil { runner.phase == .awaitingConfirmation }
+        box.client = ShellSharedPartsTests.client(region: .us, transport: transport, sink: sink)
+        runner.confirm()
+        #expect(await sending.value == nil)
+        #expect(runner.failure == .accountChanged)
+        #expect(transport.requests.isEmpty, "nothing was sent")
+        #expect(guardian.canSend, "a refusal before sending cannot have placed anything")
+        #expect(guardian.warning == nil)
+    }
+
+    /// A ticket's picker changed, and another ticket opened before the change runs: the change
+    /// goes to the ticket whose picker it was, not to the one now open.
+    @Test func aTicketChangeGoesToTheTicketWhosePickerChanged() async throws {
+        var second = AgentsFixtures.ticket
+        if case .object(var fields) = second {
+            fields["agentqa_ticket_id"] = "tkt_2"
+            fields["qa_comment"] = "Another ticket"
+            second = .object(fields)
+        }
+        let other = second
+        let rig = AgentsFixtures.Rig { request in
+            if request.operationID == AgentsOp.getTicket, request.url.lastPathComponent == "tkt_2" { return .json(other) }
+            return try await AgentsFixtures.reply(request)
+        }
+        defer { rig.clean() }
+        let model = rig.store.analytics
+        await model.openTicket("tkt_1")
+        let first = try #require(model.ticket)
+        await model.openTicket("tkt_2")
+        #expect(model.ticket?.id == "tkt_2")
+        await model.updateTicket(first.id, priority: "urgent")
+        let sent = try #require(rig.requests(AgentsOp.updateTicket).last)
+        #expect(sent.request.url.lastPathComponent == "tkt_1", "the change went to \(sent.request.url.lastPathComponent)")
+        #expect(model.ticket?.id == "tkt_2", "the ticket open stays open")
+    }
+
+    /// The spec says a priority on a ticket about a conversation that already has an open ticket
+    /// raises that ticket (when lower). The form says so for a ticket about a conversation with a
+    /// priority — and not for a follow-up task, or with no priority. If the spec stops saying it,
+    /// this fails and the words are looked at again.
+    @Test func theNewTicketFormSaysAPriorityRaisesAnOpenTicket() throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+        let operation = try #require(ElevenLabsCatalog.operation(AgentsOp.createTicket))
+        let said = operation.body?.schema["properties"]["priority"]["description"].stringValue ?? ""
+        #expect(said.contains("If the conversation already has an open ticket, it is raised to this priority when lower."),
+                "the spec's words changed: \(said)")
+        let model = rig.store.analytics
+        model.newTicketPriority = "high"
+        #expect(model.newTicketPriorityNote == nil, "a follow-up task is not about a conversation")
+        model.newTicketConversationID = "conv_0002"
+        #expect(model.newTicketPriorityNote
+                == "If this conversation already has an open ticket, ElevenLabs raises that ticket to high priority when it is lower.")
+        model.newTicketPriority = ""
+        #expect(model.newTicketPriorityNote == nil)
     }
 }

@@ -428,9 +428,18 @@ def main():
     args.out.write_text(text)
     groups = sorted({op["group"] for op in operations})
     print(f"spec sha256 {digest}")
-    print(f"{len(operations)} operations in {len(groups)} groups -> {args.out.relative_to(ROOT)} "
+    print(f"{len(operations)} operations in {len(groups)} groups -> {shown(args.out)} "
           f"({len(text.encode()) // 1024} KiB)")
     return 0
+
+
+def shown(path):
+    """`path` relative to the repository when it is inside it, else as given (an `--out`
+    elsewhere, such as a scratch folder for comparing)."""
+    try:
+        return path.resolve().relative_to(ROOT)
+    except ValueError:
+        return path
 
 
 if __name__ == "__main__":

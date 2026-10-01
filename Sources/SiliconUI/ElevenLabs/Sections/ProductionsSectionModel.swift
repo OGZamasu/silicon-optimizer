@@ -246,8 +246,14 @@ final class ProductionsSectionModel {
     /// never takes the screen.
     private(set) var wantedOrder: String?
 
-    /// Why the chosen order's details could not be read, if they could not.
-    var orderProblem: String? { actions.problem("public_get_order") }
+    /// Why the chosen order's details could not be read, if they could not — by its opening
+    /// read, or by the fetch after a change to it (its own runner), which the screen waits on
+    /// when the opening read was older than that change.
+    var orderProblem: String? {
+        if let problem = actions.problem("public_get_order") { return problem }
+        guard let id = wantedOrder, selected?.id != id else { return nil }
+        return actions.problem("public_get_order", slot: VoicesStudioActions.afterChange(of: id))
+    }
 
     func select(_ orderID: String?) async {
         wantedOrder = orderID
@@ -269,15 +275,23 @@ final class ProductionsSectionModel {
     /// After a change to `orderID`: fetch it again on a runner of its own, so the read of an
     /// order opened meanwhile is not abandoned; the screen takes it only while it is open.
     private func refetch(_ orderID: String) async {
+        landed[orderID, default: 0] += 1
         await fetch(orderID, slot: VoicesStudioActions.afterChange(of: orderID))
     }
+
+    /// Changes to each order that have answered, by order id. A read asked before one of them
+    /// answered is older than it — even when it answers later, on another runner — and is dropped
+    /// whole: it would put the old name back in the field, for the next Save to send.
+    @ObservationIgnored private var landed: [String: Int] = [:]
 
     /// Fetches one order into the list, and onto the screen only while it is still the chosen
     /// one — so a save that finishes after another order was chosen does not take the screen back.
     private func fetch(_ orderID: String, slot: String? = nil) async {
+        let changesBefore = landed[orderID, default: 0]
         guard let json = await actions.perform("public_get_order", ["order_id": .string(orderID)], quietly: true,
                                                slot: slot)?
-            .voicesStudioJSON, let order = ProductionsOrder(json: json) else { return }
+            .voicesStudioJSON, let order = ProductionsOrder(json: json),
+              landed[orderID, default: 0] == changesBefore else { return }
         if let index = orders.firstIndex(where: { $0.id == order.id }) { orders[index] = order } else { orders.insert(order, at: 0) }
         guard wantedOrder == orderID else { return }
         selected = order
