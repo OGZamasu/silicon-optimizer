@@ -179,4 +179,33 @@ extension AgentsSectionsTests {
         #expect(body["url"] == "https://example.com/help" && body["max_pages"] == 50)
         #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.createCrawl).isEmpty)
     }
+
+    @MainActor final class ClientBox { var client: ElevenLabsClient? }
+
+    /// A real-world send whose question is answered yes after the account or region changed:
+    /// the runner stops before the request starts and says so. Nothing went out, so the send
+    /// guard is ready again — as voices & studio already counted it — rather than asking the
+    /// owner to check for calls that cannot have been placed.
+    @Test func aSendRefusedForAnAccountChangeLeavesTheGuardReady() async throws {
+        let box = ClientBox()
+        let transport = FakeElevenLabsTransport(replies: [.json(["status": "ok"])])
+        let sink = TemporaryFileSink()
+        defer { transport.removeTemporaryFiles(); sink.removeAll() }
+        box.client = ShellSharedPartsTests.client(transport: transport, sink: sink)
+        let runner = try #require(ElevenLabsRunner(operationID: "delete_voice", context: .init(client: { box.client }, sink: { sink })))
+        let guardian = AgentsSendGuard()
+        let sending = Task {
+            await guardian.send(runner: runner, what: "The call", check: "Conversations") {
+                await runner.perform(arguments: ["voice_id": "v1"]).flatMap(AgentsCalls.json(of:))
+            }
+        }
+        try await waitUntil { runner.phase == .awaitingConfirmation }
+        box.client = ShellSharedPartsTests.client(region: .us, transport: transport, sink: sink)
+        runner.confirm()
+        #expect(await sending.value == nil)
+        #expect(runner.failure == .accountChanged)
+        #expect(transport.requests.isEmpty, "nothing was sent")
+        #expect(guardian.canSend, "a refusal before sending cannot have placed anything")
+        #expect(guardian.warning == nil)
+    }
 }

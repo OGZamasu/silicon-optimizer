@@ -359,7 +359,7 @@ struct VoicesStudioReviewFixesTests {
         model.actions.answer(true)
         await task.value
         #expect(two.transport.recorded.isEmpty && one.transport.recorded.isEmpty)
-        #expect(model.actions.runner("disable")?.failure == .other(ElevenLabsRunner.accountChangedMessage))
+        #expect(model.actions.runner("disable")?.failure == .accountChanged)
         #expect(model.actions.unknownOutcomes.isEmpty, "nothing was sent, so nothing is unknown")
     }
 

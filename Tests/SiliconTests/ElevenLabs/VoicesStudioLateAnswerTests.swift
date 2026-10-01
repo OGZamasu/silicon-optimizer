@@ -547,7 +547,7 @@ struct VoicesStudioLateAnswerTests {
         await task.value
         #expect(one.sent("public_submit_order").isEmpty && two.transport.recorded.isEmpty)
         let runner = try #require(model.actions.runner("public_submit_order"))
-        #expect(runner.failure == .other(ElevenLabsRunner.accountChangedMessage))
+        #expect(runner.failure == .accountChanged)
         #expect(model.actions.unknownOutcomes.isEmpty)
         #expect(model.actions.blockReason(runner) == nil, "a refusal before sending held the next spending call")
     }

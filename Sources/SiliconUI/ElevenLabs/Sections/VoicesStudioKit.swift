@@ -263,9 +263,8 @@ final class VoicesStudioActions {
         case .cancelled:
             return true
         case .failed:
+            // A question confirmed after the account changed sent nothing: `provesNothingWasDone`.
             guard let failure = runner.failure else { return false }
-            // A question confirmed after the account changed sent nothing.
-            if failure == .other(ElevenLabsRunner.accountChangedMessage) { return false }
             return !failure.provesNothingWasDone
         default:
             return false
