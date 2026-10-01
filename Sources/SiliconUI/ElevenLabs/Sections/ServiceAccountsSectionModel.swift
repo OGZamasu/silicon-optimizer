@@ -238,6 +238,10 @@ final class ServiceAccountsSectionModel {
     /// another's; a read asked before a key change of its account answered is dropped.
     func refreshKeys(_ accountID: String? = nil) async {
         guard let accountID = accountID ?? selected?.id else { return }
+        // Today every read of an account's keys runs here, on that account's runner, and the
+        // read a change asks for abandons any older one before its answer is used — so this
+        // check cannot be seen to act. It is kept for a future read of the same account made off
+        // that runner (an accounts list carries keys too, and has its own check in `refresh`).
         let changesBefore = keyChanges[accountID, default: 0]
         guard let json = await actions.perform(
                 "get_service_account_api_keys_route", ["service_account_user_id": .string(accountID)], quietly: true,
