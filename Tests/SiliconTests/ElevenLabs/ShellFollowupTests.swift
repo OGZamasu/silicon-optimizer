@@ -91,6 +91,30 @@ struct ShellFollowupTests {
         #expect(Self.problem(result)?.contains("too big") == true)
     }
 
+    // MARK: - Failures carry their status
+
+    /// A failed run keeps ElevenLabs' HTTP status, so the sections judge "did anything happen?"
+    /// by it instead of parsing words: a 4xx refusal proves nothing was done; a 408, a 429, a
+    /// 5xx, a lost connection and a cancel do not.
+    @Test func aFailureCarriesItsHTTPStatusAndSaysWhetherAnythingWasDone() {
+        func failure(_ status: Int) -> ElevenLabsRunnerFailure {
+            ElevenLabsRunnerFailure(ElevenLabsError.api(status: status, code: nil, message: "No", requestID: nil))
+        }
+        #expect(failure(422) == .api(status: 422, message: "ElevenLabs answered 422: No"))
+        #expect(failure(422).message == "ElevenLabs answered 422: No")
+        for refused in [400, 401, 403, 404, 409, 413, 422] {
+            #expect(failure(refused).provesNothingWasDone, "\(refused) is a refusal")
+        }
+        for unknown in [408, 500, 502, 503, 504] {
+            #expect(!failure(unknown).provesNothingWasDone, "\(unknown) may have been carried out")
+        }
+        #expect(!ElevenLabsRunnerFailure(ElevenLabsError.rateLimited(retryAfter: 3)).provesNothingWasDone)
+        #expect(!ElevenLabsRunnerFailure(ElevenLabsError.network("timed out")).provesNothingWasDone)
+        #expect(!ElevenLabsRunnerFailure(ElevenLabsError.cancelled).provesNothingWasDone)
+        #expect(ElevenLabsRunnerFailure(ElevenLabsError.invalidArguments(["x"])).provesNothingWasDone)
+        #expect(ElevenLabsRunnerFailure(ElevenLabsError.notLinked).provesNothingWasDone)
+    }
+
     // MARK: - Connect
 
     /// Return in the key field while a key is being checked: the second Connect is refused with
