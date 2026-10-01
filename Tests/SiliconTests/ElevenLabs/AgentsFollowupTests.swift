@@ -40,4 +40,26 @@ extension AgentsSectionsTests {
             }
         }
     }
+
+    /// A test whose details could not be fetched shows no editor: no empty, editable fields
+    /// under "Could not load the test" (the Name field's placeholder read like a value). The
+    /// editor is back once the test loads, and for a new test.
+    @Test func aTestThatCannotBeLoadedShowsNoEditor() async throws {
+        let rig = AgentsFixtures.Rig { request in
+            if request.operationID == AgentsOp.getTest, request.url.lastPathComponent == "test_sim02" {
+                return .init(status: 404, headers: ["content-type": "application/json"],
+                             body: Data(#"{"detail":{"status":"not_found","message":"Not found"}}"#.utf8))
+            }
+            return try await AgentsFixtures.reply(request)
+        }
+        defer { rig.clean() }
+        let model = rig.store.testing
+        await model.select("test_sim02")
+        #expect(model.editorTitle == "Could not load the test")
+        #expect(!model.showsEditor, "the editor's fields are drawn under a test that did not load")
+        await model.select(AgentsFixtures.testID)
+        #expect(model.showsEditor)
+        model.startCreating()
+        #expect(model.showsEditor, "a new test has its editor")
+    }
 }
