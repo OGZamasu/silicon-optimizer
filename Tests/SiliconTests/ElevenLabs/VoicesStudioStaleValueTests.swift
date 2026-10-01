@@ -12,7 +12,7 @@ import Testing
 ///     field the owner had not touched.
 ///
 /// Every answer that must come late is held on a signal, never on a delay.
-@Suite("ElevenLabs voices & studio — stale values", .timeLimit(.minutes(1)))
+@Suite("ElevenLabs voices & studio — stale values", .timeLimit(.minutes(3)))
 @MainActor
 struct VoicesStudioStaleValueTests {
     typealias Signals = VoicesStudioFollowupTests.Signals
@@ -357,7 +357,8 @@ struct VoicesStudioStaleValueTests {
             case "patch_pronunciation_dictionary":
                 return .json(["id": "d-b"])
             case "get_pronunciation_dictionary_metadata":
-                await signals.wait(for: "checked")
+                // Only B's opening read is held; the fetch after a rename answers at once.
+                if signals.note("get") == 1 { await signals.wait(for: "checked") }
                 return .json(VoicesStudioFollowupTests.dictionary("d-b", name: "Dict B"))
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)

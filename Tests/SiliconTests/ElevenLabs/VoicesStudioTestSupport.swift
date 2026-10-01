@@ -135,10 +135,13 @@ struct VoicesStudioScratch {
     }
 }
 
-/// Waits for a condition the main actor will make true, failing the test after a while.
+/// Waits for a condition the main actor will make true, failing the test after a while. The
+/// limit is a backstop for a condition that never comes, not a measure of how long a step
+/// should take: on a machine under heavy load a step takes seconds, so it is generous.
 @MainActor
 func voicesStudioWait(_ condition: @MainActor () -> Bool) async throws {
-    for _ in 0..<500 {
+    let deadline = ContinuousClock.now + .seconds(60)
+    while ContinuousClock.now < deadline {
         if condition() { return }
         try await Task.sleep(for: .milliseconds(10))
     }

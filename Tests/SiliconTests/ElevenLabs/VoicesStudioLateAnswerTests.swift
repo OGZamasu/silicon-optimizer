@@ -7,7 +7,7 @@ import Testing
 /// late; meanwhile the owner picks something else, and the late answer must land with its own
 /// item — never on the one now chosen, never taking the screen back, never marking the wrong
 /// thing done.
-@Suite("ElevenLabs voices and studio sections: late answers", .timeLimit(.minutes(1)))
+@Suite("ElevenLabs voices and studio sections: late answers", .timeLimit(.minutes(3)))
 @MainActor
 struct VoicesStudioLateAnswerTests {
     static let late: Duration = .milliseconds(600)

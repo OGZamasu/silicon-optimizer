@@ -20,7 +20,7 @@ extension VoicesStudioFixture {
 
 /// The voices-and-studio critic's last nits, taken after the merge. Hermetic: the section
 /// fixture (fake transport, fake key, temporary sink).
-@Suite("ElevenLabs voices & studio follow-ups", .timeLimit(.minutes(1)))
+@Suite("ElevenLabs voices & studio follow-ups", .timeLimit(.minutes(3)))
 @MainActor
 struct VoicesStudioFollowupTests {
 
@@ -93,9 +93,15 @@ struct VoicesStudioFollowupTests {
 
         func has(_ name: String) -> Bool { lock.withLock { seen.contains(name) } }
 
-        /// Waits (up to 5 s) until `name` has been noted.
+        /// Waits until `name` has been noted — for as long as a loaded machine takes to get the
+        /// test there. The cap is only a backstop for a regression in which the signal never
+        /// comes (the test then fails on what it expected instead of hanging): it is far longer
+        /// than any step takes, so the answer it holds is never let go early. (Five seconds was
+        /// not: under a load average near 100 a test took longer than that to note its signal,
+        /// and the held answer arrived first.)
         func wait(for name: String) async {
-            for _ in 0..<500 where !has(name) { try? await Task.sleep(for: .milliseconds(10)) }
+            let deadline = ContinuousClock.now + .seconds(90)
+            while !has(name), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
         }
     }
 

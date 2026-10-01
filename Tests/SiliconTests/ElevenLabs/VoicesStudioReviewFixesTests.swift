@@ -5,7 +5,7 @@ import Testing
 
 /// The review of the voices-and-studio sections: each test pins one finding (named in its
 /// comment) and failed before its fix.
-@Suite("ElevenLabs voices and studio sections: review fixes", .timeLimit(.minutes(1)))
+@Suite("ElevenLabs voices and studio sections: review fixes", .timeLimit(.minutes(3)))
 @MainActor
 struct VoicesStudioReviewFixesTests {
 
