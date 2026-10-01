@@ -512,10 +512,15 @@ final class StudioSectionModel {
         return detailsIn == id && wantedProject == id
     }
 
-    /// Why the open project's settings cannot be saved yet, when they cannot.
+    /// Why the open project's settings cannot be saved yet, when they cannot: waiting for its
+    /// read — the one that opened it, or the one after a change — or that read failed with
+    /// nothing reading it any more.
     var waitingForDetails: String? {
-        guard selected != nil, !detailsAreIn else { return nil }
-        return actions.problem("get_project_by_id") == nil
+        guard let id = selected?.id, !detailsAreIn else { return nil }
+        let afterChange = VoicesStudioActions.afterChange(of: id)
+        let reading = actions.isRunning("get_project_by_id") || actions.isRunning("get_project_by_id", slot: afterChange)
+        let failed = actions.problem("get_project_by_id") ?? actions.problem("get_project_by_id", slot: afterChange)
+        return reading || failed == nil
             ? "Waiting for this project's details." : "Its details could not be read — open it again."
     }
 
@@ -687,9 +692,18 @@ final class StudioSectionModel {
         guard detailsAreIn, var locators = selected?.dictionaries else { return }
         locators.removeAll { $0.id == dictionary.id }
         if attached { locators.append(StudioDictionaryLocator(id: dictionary.id, versionID: dictionary.latestVersionID)) }
-        guard let arguments = attachArguments(locators), let projectID = arguments["project_id"]?.stringValue,
-              await actions.perform("update_pronunciation_dictionaries", arguments,
-                                    title: "Dictionaries of \(selected?.name ?? "")") != nil else { return }
+        guard let arguments = attachArguments(locators), let projectID = arguments["project_id"]?.stringValue else { return }
+        guard await actions.perform("update_pronunciation_dictionaries", arguments,
+                                    title: "Dictionaries of \(selected?.name ?? "")") != nil else {
+            // No answer, yet it may have been carried out (a 5xx, a lost answer, a cancel after
+            // sending): the list on screen may be older than ElevenLabs', and the next switch,
+            // which sends the whole list, would undo this one. The switches wait for the project
+            // to be read again, and it is — nothing sent is claimed.
+            guard actions.outcomeWasUnknown("update_pronunciation_dictionaries") else { return }
+            if detailsIn == projectID { detailsIn = nil }
+            await refetch(projectID)
+            return
+        }
         // ElevenLabs now holds exactly the list just sent. Until the fetch below lands, the list on
         // screen would be the one before this change — and the next switch, which sends the whole
         // list, would undo it — so the project takes the list sent at once.

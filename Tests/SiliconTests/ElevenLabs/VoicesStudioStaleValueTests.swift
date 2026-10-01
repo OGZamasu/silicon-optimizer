@@ -1360,4 +1360,85 @@ struct VoicesStudioStaleValueTests {
         model.edit(try #require(model.selected?.items.first))
         #expect(model.item.instructions == "Bright", "Edit started from the instructions before the change")
     }
+
+    /// d-new switched on: carried out, but the answer is a 500. The project's list on screen is
+    /// the one from before, and the next switch — which sends the whole list — would drop d-new.
+    /// The switches wait while the project is read again; then switching d-two on keeps d-new.
+    /// (Before: nothing was read, and the second switch sent the list without d-new.)
+    @Test func aDictionarySwitchWhoseAnswerWasLostIsReadAgainBeforeTheNext() async throws {
+        final class Locators: @unchecked Sendable {
+            let lock = NSLock()
+            var ids = ["d-kept"]
+            var answersToLose = 1
+        }
+        let signals = Signals()
+        let server = Locators()
+        let base = Self.project("p-a", dictionaries: [])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_pronunciation_dictionaries":
+                let sent = (Self.body(request)["pronunciation_dictionary_locators"].arrayValue ?? [])
+                    .compactMap { $0["pronunciation_dictionary_id"].stringValue }
+                let lose = server.lock.withLock {
+                    server.ids = sent
+                    defer { server.answersToLose = max(0, server.answersToLose - 1) }
+                    return server.answersToLose > 0
+                }
+                if lose { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }   // carried out; answer lost
+                return .json(["status": "ok"])
+            case "get_project_by_id":
+                if signals.note("get") == 1 { try await signals.wait(for: "looked") }
+                guard case .object(var fields) = base else { return .jsonText("{}", status: 500) }
+                fields["pronunciation_dictionary_locators"] = .array(server.lock.withLock { server.ids }.map {
+                    ["pronunciation_dictionary_id": .string($0), "version_id": "v1"]
+                })
+                return .json(.object(fields))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: Self.project("p-a", dictionaries: ["d-kept"])))
+        let new = StudioDictionary(id: "d-new", name: "New", latestVersionID: "v1")
+        let two = StudioDictionary(id: "d-two", name: "Two", latestVersionID: "v1")
+        model.load(projects: [project], selected: project, dictionaries: [new, two])
+        let switching = Task { try await answering(model.actions) { await model.setDictionary(new, attached: true) } }
+        // Should no read be made (a regression), the switch ends at once, and so does this wait.
+        let releasing = Task { _ = try? await switching.value; signals.note("looked") }
+        try await voicesStudioWait { fixture.sent("get_project_by_id").count == 1 || signals.has("looked") }
+        #expect(server.lock.withLock { server.ids } == ["d-kept", "d-new"])
+        #expect(fixture.sent("get_project_by_id").count == 1, "the project was not read again after a lost answer")
+        #expect(!model.detailsAreIn, "the switches did not wait for the project to be read again")
+        #expect(model.selected?.dictionaries.map(\.id) == ["d-kept"], "a switch whose answer was lost was claimed")
+        signals.note("looked")
+        try await switching.value
+        await releasing.value
+        #expect(model.detailsAreIn)
+        #expect(model.selected?.dictionaries.map(\.id) == ["d-kept", "d-new"])
+        try await answering(model.actions) { await model.setDictionary(two, attached: true) }
+        let held = server.lock.withLock { server.ids }
+        #expect(held == ["d-kept", "d-new", "d-two"], "the next switch dropped the dictionary whose answer was lost: \(held)")
+    }
+
+    /// The read after a dictionary switch whose answer was lost fails too: nothing is reading the
+    /// project, so the panel says its details could not be read (not "Waiting…").
+    @Test func aFailedReadAfterALostSwitchAnswerIsShownNotWaitedFor() async throws {
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_pronunciation_dictionaries", "get_project_by_id":
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: Self.project("p-a", dictionaries: ["d-kept"])))
+        let new = StudioDictionary(id: "d-new", name: "New", latestVersionID: "v1")
+        model.load(projects: [project], selected: project, dictionaries: [new])
+        try await answering(model.actions) { await model.setDictionary(new, attached: true) }
+        #expect(fixture.sent("get_project_by_id").count == 1)
+        #expect(model.waitingForDetails == "Its details could not be read — open it again.", "\(model.waitingForDetails ?? "-")")
+    }
 }
