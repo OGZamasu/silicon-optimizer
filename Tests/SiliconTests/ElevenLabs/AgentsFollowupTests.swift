@@ -62,4 +62,45 @@ extension AgentsSectionsTests {
         model.startCreating()
         #expect(model.showsEditor, "a new test has its editor")
     }
+
+    /// Questions the shell would title "<the operation's summary>: <subject>?" ("Create MCP
+    /// server tool approval: …", "Update tool: …") are worded by the screen instead. Each is
+    /// declined: nothing is sent.
+    @Test func questionsBuiltFromSummariesHaveTheirOwnTitles() async throws {
+        let rig = AgentsFixtures.Rig()
+        defer { rig.clean() }
+
+        let servers = rig.store.mcpServers
+        await servers.select(AgentsFixtures.serverID)
+        await servers.loadTools()
+        let tool = try #require(servers.tools.last)
+        let approve = rig.store.calls.runner(AgentsOp.approveMCPTool, slot: "\(AgentsFixtures.serverID)/\(tool.name)")
+        let approving = Task { await servers.setApproval(tool, autoApproved: true) }
+        try await waitUntil { approve.isAwaitingConfirmation }
+        #expect(approve.confirmation?.title == "Let “\(tool.name)” run without asking?")
+        approve.decline()
+        await approving.value
+
+        servers.settings.approvalPolicy = "auto_approve_all"
+        let update = rig.store.calls.runner(AgentsOp.updateMCPServer, slot: AgentsFixtures.serverID)
+        let updating = Task { await servers.saveSettings() }
+        try await waitUntil { update.isAwaitingConfirmation }
+        #expect(update.confirmation?.title.hasPrefix("Let every tool on “") == true, "\(update.confirmation?.title ?? "")")
+        #expect(update.confirmation?.title.hasSuffix("” run without asking?") == true)
+        update.decline()
+        await updating.value
+
+        let tools = rig.store.tools
+        await tools.select(AgentsFixtures.toolID)
+        tools.editor.description = "Finds an order by its number, quickly"
+        let save = rig.store.calls.runner(AgentsOp.updateTool, slot: AgentsFixtures.toolID)
+        let saving = Task { await tools.save() }
+        try await waitUntil { save.isAwaitingConfirmation }
+        #expect(save.confirmation?.title == "Save the tool “lookup_order” calling api.example.com?")
+        save.decline()
+        await saving.value
+
+        #expect(rig.requests(AgentsOp.approveMCPTool).isEmpty && rig.requests(AgentsOp.updateMCPServer).isEmpty
+                && rig.requests(AgentsOp.updateTool).isEmpty)
+    }
 }
