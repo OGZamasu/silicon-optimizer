@@ -1274,10 +1274,12 @@ struct AgentsRunButton: View {
                     ElevenLabsRiskBadge(risk: runner.operation.risk)
                 }
                 if disabled, let disabledReason, !disabledReason.isEmpty {
+                    // Wrapped, never cut: beside a risk badge, with another button in the row, two
+                    // lines are not always enough for the reason.
                     Label(disabledReason, systemImage: "exclamationmark.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if let note = ElevenLabsCostNote.text(for: runner.operation) {
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }
