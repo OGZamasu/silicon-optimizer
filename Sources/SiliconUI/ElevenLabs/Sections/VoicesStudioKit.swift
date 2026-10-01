@@ -328,8 +328,8 @@ final class VoicesStudioActions {
     }
 
     /// The failure of a quiet run, in words, for the place its list is drawn.
-    func problem(_ operationID: String) -> String? {
-        guard let runner = runners[operationID], runner.phase == .failed else { return nil }
+    func problem(_ operationID: String, slot: String? = nil) -> String? {
+        guard let runner = runners[Self.key(operationID, slot)], runner.phase == .failed else { return nil }
         return runner.errorMessage
     }
 

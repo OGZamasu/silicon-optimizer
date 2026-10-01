@@ -497,4 +497,45 @@ struct VoicesStudioStaleValueTests {
         model.editCurrentRules()
         #expect(model.rules.map(\.stringToReplace) == ["Nguyen", "Siobhan"], "the rules as they are now")
     }
+
+    // MARK: - Round 3: the sliders when the settings cannot be read
+
+    /// The voice's details answer without its settings, and the settings route then fails: the
+    /// sliders still hold the list row's values. They cannot be saved, the screen says why and
+    /// offers Try again; once the settings are read, Save sends them.
+    @Test func theSlidersAreNotSavedWhenTheVoicesSettingsCannotBeRead() async throws {
+        let signals = Signals()
+        let saved: JSONValue = ["stability": 0.6, "similarity_boost": 0.8, "style": 0.1, "speed": 1.0, "use_speaker_boost": true]
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_voice_by_id":
+                return .json(VoicesStudioFakes.voice("v-a", "Voice A"))              // no settings
+            case "get_voice_settings":
+                if signals.note("settings") == 1 { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                return .json(saved)
+            case "edit_voice_settings":
+                return .json(["status": "ok"])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let row = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
+        model.load(rows: [row])
+        await model.select("v-a")
+        #expect(model.detailsAreIn, "the voice's own details are in")
+        #expect(!model.settingsAreIn)
+        #expect(model.waitingForSettings == "Its settings could not be read — try again.")
+        model.settingsDraft?.speed = 1.2
+        try await answering(model.actions) { await model.saveSettings() }
+        #expect(fixture.sent("edit_voice_settings").isEmpty, "the list row's sliders were saved after the settings read failed")
+        await model.reloadSelected()                      // Try again
+        #expect(model.settingsAreIn && model.waitingForSettings == nil)
+        #expect(model.settingsDraft?.stability == 0.6, "an untouched slider takes the voice's own value")
+        #expect(model.settingsDraft?.speed == 1.2, "the slider moved stays where it was put")
+        try await answering(model.actions) { await model.saveSettings() }
+        let sent = body(fixture, "edit_voice_settings")
+        #expect(sent.contains("0.6") && !sent.contains("0.4"), "the row's stability was sent: \(sent)")
+    }
 }

@@ -236,8 +236,16 @@ struct VoicesSettingsEditor: View {
                     .help("Put the account's default settings in the sliders; Save keeps them")
                 Button("Save settings") { Task { await model.saveSettings() } }
                     .controlSize(.small)
-                    .disabled(model.settingsDraft == nil || !model.detailsAreIn)
-                    .help(model.waitingForDetails ?? "Save these settings to the voice")
+                    .disabled(model.settingsDraft == nil || !model.settingsAreIn)
+                    .help(model.waitingForSettings ?? "Save these settings to the voice")
+            }
+            if model.settingsDraft != nil, let waiting = model.waitingForSettings {
+                HStack(spacing: 8) {
+                    Text(waiting).font(.caption).foregroundStyle(model.settingsProblem == nil ? Color.secondary : Color.red)
+                    if model.settingsProblem != nil || model.detailProblem != nil {
+                        Button("Try again") { Task { await model.reloadSelected() } }.controlSize(.small)
+                    }
+                }
             }
             if let draft = Binding($model.settingsDraft) {
                 VoicesStudioSlider(title: "Stability", value: draft.stability, range: VoicesSectionModel.stabilityRange,

@@ -653,6 +653,7 @@ final class VoicesSectionModel {
         if selected?.id != voiceID {
             selected = rows.first { $0.id == voiceID }
             detailsIn = nil
+            settingsIn = nil
             settingsDraft = selected?.settings
             settingsBase = settingsDraft
             if let selected {
@@ -703,11 +704,11 @@ final class VoicesSectionModel {
         // The answer's `settings` may be null (and `with_settings` is deprecated and ignored):
         // then the settings route says them.
         if let settings = voice.settings {
-            takeSettings(settings)
+            takeSettings(settings, of: voice.id)
         } else if let json = await actions.perform(
             "get_voice_settings", ["voice_id": .string(voice.id)], quietly: true, slot: slot
         )?.voicesStudioJSON, selected?.id == voice.id, landed[voiceID, default: 0] == changesBefore {
-            takeSettings(VoicesSettings(json: json))
+            takeSettings(VoicesSettings(json: json), of: voice.id)
         }
         guard selected?.id == voice.id, landed[voiceID, default: 0] == changesBefore else { return }
         // Field by field: what the owner typed since the form was filled (or since a save went
@@ -728,17 +729,40 @@ final class VoicesSectionModel {
 
     /// Fresh settings for the open voice, merged slider by slider: one the owner moved since the
     /// sliders were filled (or since a save sent them) stays where it is.
-    private func takeSettings(_ fresh: VoicesSettings) {
+    private func takeSettings(_ fresh: VoicesSettings, of voiceID: String) {
         if let current = settingsDraft, let base = settingsBase {
             settingsDraft = current.merged(over: fresh, base: base)
         } else {
             settingsDraft = fresh
         }
         settingsBase = fresh
+        settingsIn = voiceID
+    }
+
+    /// The voice whose own settings the sliders hold. The details may answer without them, and
+    /// the settings route may then fail: the sliders would still hold the list row's values.
+    private(set) var settingsIn: String?
+
+    /// Whether the open voice's settings are in, so the sliders may be saved — every slider is
+    /// sent, and until then the untouched ones would be the list row's.
+    var settingsAreIn: Bool { detailsAreIn && settingsIn == selected?.id }
+
+    /// Why the open voice's settings could not be read, if they could not.
+    var settingsProblem: String? {
+        guard let id = selected?.id else { return nil }
+        return actions.problem("get_voice_settings")
+            ?? actions.problem("get_voice_settings", slot: VoicesStudioActions.afterChange(of: id))
+    }
+
+    /// Why the sliders cannot be saved yet, when they cannot.
+    var waitingForSettings: String? {
+        guard selected != nil, !settingsAreIn else { return nil }
+        if let waiting = waitingForDetails { return waiting }
+        return settingsProblem == nil ? "Waiting for this voice's settings." : "Its settings could not be read — try again."
     }
 
     func saveSettings() async {
-        guard detailsAreIn, let voice = selected, let sent = settingsDraft else { return }
+        guard settingsAreIn, let voice = selected, let sent = settingsDraft else { return }
         let fills = editFills
         var arguments = sent.arguments
         arguments["voice_id"] = .string(voice.id)
@@ -1031,6 +1055,7 @@ final class VoicesSectionModel {
         self.selected = selected
         wantedVoice = selected?.id
         detailsIn = selected?.id
+        settingsIn = selected?.settings == nil ? nil : selected?.id
         settingsDraft = selected?.settings
         settingsBase = settingsDraft
         if let selected {
