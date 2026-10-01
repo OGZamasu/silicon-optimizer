@@ -33,20 +33,22 @@ struct LiveTranscriptionFinalTextTests {
 
     // MARK: - By hand: the answer to the last commit
 
-    /// A file longer than one commit interval (20 s): its periodic commit is answered only after
-    /// Stop's commit has gone. The first text after Stop is that earlier answer, not the last
-    /// text — Stop waits for the answer to its own commit, the second.
+    /// A file longer than one commit interval (20 s in the app; one second here, so the file is
+    /// one and a half seconds rather than twenty-one and a half — the same two commits, without
+    /// twenty sends for a busy run to hold up): its periodic commit is answered only after Stop's
+    /// commit has gone. The first text after Stop is that earlier answer, not the last text —
+    /// Stop waits for the answer to its own commit, the second.
     @Test func aFileWhoseEarlierCommitIsAnsweredLateKeepsItsLastText() async throws {
         let folder = try Self.scratch()
         defer { TemporaryFileSink.removeScratch(folder) }
-        let url = try Self.wav(seconds: 21.5, in: folder)
+        let url = try Self.wav(seconds: 1.5, in: folder)
         let rig = LiveRig(server: { socket in
             socket.push(["message_type": "session_started", "session_id": "s1", "config": [:]])
             var commits = 0
             while let message = await socket.nextSent(timeout: .seconds(60)) {
                 guard message["commit"] == true else { continue }
                 commits += 1
-                // The 20-second commit is held until Stop's has arrived, then both are answered.
+                // The periodic commit is held until Stop's has arrived, then both are answered.
                 guard commits == 2 else { continue }
                 socket.push(["message_type": "committed_transcript", "text": "the first twenty seconds"])
                 try? await Task.sleep(for: .milliseconds(100))
@@ -54,14 +56,16 @@ struct LiveTranscriptionFinalTextTests {
             }
         })
         defer { rig.clean() }
-        let screen = LiveTranscriptionModel(context: rig.context)
+        var context = rig.context
+        context.transcription.commitEvery = 1
+        let screen = LiveTranscriptionModel(context: context)
         screen.source = .file
         screen.file = url
         await screen.start()
         await rig.until { screen.phase == .ended }
         try #require(screen.phase == .ended)
         let socket = try #require(rig.connector.sockets.first)
-        #expect(socket.sentJSON.filter { $0["commit"] == true }.count == 2, "a commit at 20 s and Stop's")
+        #expect(socket.sentJSON.filter { $0["commit"] == true }.count == 2, "a periodic commit and Stop's")
         #expect(screen.segments.map(\.text) == ["the first twenty seconds", "and the last one and a half"])
         #expect(screen.outcome.map { !$0.message.contains("may be missing") } == true, "\(String(describing: screen.outcome))")
         let exported = try await Self.exportedText(screen)
