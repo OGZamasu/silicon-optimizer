@@ -289,19 +289,32 @@ struct VoicesStudioLateAnswerTests {
 
     // MARK: Round 3 — the critic's probes, and the sweep they led to
 
-    static func template(_ id: String) -> JSONValue {
+    nonisolated static func template(_ id: String) -> JSONValue {
         ["id": .string(id), "name": .string("Template \(id)"),
          "versions": [["version_id": "v1", "is_latest": true, "inputs": [], "outputs": []]]]
     }
 
     /// L1: a paid template run that answers after another template was opened is kept with its
     /// own template — not listed under the one open, not lost — and a notice says where it went.
+    ///
+    /// The run's answer is held until the other template is open — on a signal, not a delay, so
+    /// a busy main actor cannot make the answer arrive first.
     @Test func aTemplateRunAnsweredAfterAnotherTemplateOpenedStaysWithItsTemplate() async throws {
-        let fixture = VoicesStudioFixture([
-            "create_public_template_run": [.json(["id": "run-of-slow", "status": "pending", "version_id": "v1"])],
-            "get_public_template": [.json(Self.template("tmpl-two")), .json(Self.template("tmpl-slow"))],
-            "list_public_template_runs": [.json(["runs": []])],
-        ], late: ["tmpl-slow/runs": Self.late])
+        let signals = VoicesStudioFollowupTests.Signals()
+        let template = Self.template
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "create_public_template_run":
+                await signals.wait(for: "other template open")
+                return .json(["id": "run-of-slow", "status": "pending", "version_id": "v1"])
+            case "get_public_template":
+                return .json(template(signals.note("get") == 1 ? "tmpl-two" : "tmpl-slow"))
+            case "list_public_template_runs" where signals.note("list") == 1:
+                return .json(["runs": []])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
         defer { fixture.clean() }
         let model = FlowsSectionModel(environment: fixture.environment)
         let slow = try #require(FlowsTemplate(json: Self.template("tmpl-slow")))
@@ -309,6 +322,7 @@ struct VoicesStudioLateAnswerTests {
         model.load(templates: [slow, two], open: slow)
         let task = try await sending(model.actions, "create_public_template_run") { await model.run() }
         await model.open("tmpl-two")
+        signals.note("other template open")
         await task.value
         #expect(model.template?.id == "tmpl-two")
         #expect(model.runs.isEmpty, "the run started for tmpl-slow is listed under tmpl-two: \(model.runs.map(\.id))")
