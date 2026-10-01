@@ -23,9 +23,7 @@ struct VoicesStudioReviewFixesTests {
         let flag = Flag()
         let task = Task { await action(); flag.done = true }
         var asked: ElevenLabsConfirmationRequest?
-        // Up to a minute of wall clock: a question not answered here leaves the action waiting.
-        let deadline = ContinuousClock.now + .seconds(60)
-        while !flag.done, ContinuousClock.now < deadline {
+        for _ in 0..<500 where !flag.done {
             if let question = actions.presentedQuestion {
                 asked = question
                 actions.answer(false)

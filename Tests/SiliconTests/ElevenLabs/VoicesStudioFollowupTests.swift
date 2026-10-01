@@ -93,10 +93,9 @@ struct VoicesStudioFollowupTests {
 
         func has(_ name: String) -> Bool { lock.withLock { seen.contains(name) } }
 
-        /// Waits (up to a minute) until `name` has been noted.
+        /// Waits (up to 5 s) until `name` has been noted.
         func wait(for name: String) async {
-            let deadline = ContinuousClock.now + .seconds(60)
-            while !has(name), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+            for _ in 0..<500 where !has(name) { try? await Task.sleep(for: .milliseconds(10)) }
         }
     }
 
