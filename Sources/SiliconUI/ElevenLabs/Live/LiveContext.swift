@@ -66,6 +66,9 @@ struct LiveTranscriptionTiming: Sendable {
     /// Committing at pauses: after the first text that follows Stop's commit, how long nothing more
     /// must arrive — an automatic commit's text can land just before Stop's own.
     var finalQuiet: Duration = .milliseconds(750)
+    /// The clock Stop's wait reads — the limit and the quiet. A test steps its own, so the
+    /// quiet is a moment the test chooses rather than one a busy machine stretches.
+    var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
 
     /// Whether to commit by hand right after `chunk` went, `secondsSinceCommit` after the last
     /// commit: from `commitEvery` on at a quiet moment (`chunk`'s last 100 ms, 16-bit PCM, below

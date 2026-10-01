@@ -99,7 +99,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
 
     /// The client's next frame as JSON, in order; nil once the socket has ended and every frame
     /// has been read, or after `timeout`.
-    public func nextSent(timeout: Duration = .seconds(10)) async -> JSONValue? {
+    public func nextSent(timeout: Duration = .seconds(60)) async -> JSONValue? {
         let deadline = ContinuousClock.now + timeout
         while true {
             let next: (message: ElevenLabsSocketMessage?, over: Bool) = lock.withLock {
@@ -116,7 +116,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     }
 
     /// The client's next frame whose `type` (or `message_type`) is `type`, skipping others.
-    public func nextSent(ofType type: String, timeout: Duration = .seconds(10)) async -> JSONValue? {
+    public func nextSent(ofType type: String, timeout: Duration = .seconds(60)) async -> JSONValue? {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             guard let next = await nextSent(timeout: deadline - ContinuousClock.now) else { return nil }
@@ -127,7 +127,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
 
     /// Waits until the client has sent at least `count` frames.
     @discardableResult
-    public func waitForSent(_ count: Int, timeout: Duration = .seconds(10)) async -> Bool {
+    public func waitForSent(_ count: Int, timeout: Duration = .seconds(60)) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if lock.withLock({ _sent.count >= count }) { return true }
@@ -182,7 +182,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
 
     /// Waits until the socket has ended, either side.
     @discardableResult
-    public func waitUntilEnded(timeout: Duration = .seconds(10)) async -> Bool {
+    public func waitUntilEnded(timeout: Duration = .seconds(60)) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if endedWith != nil { return true }

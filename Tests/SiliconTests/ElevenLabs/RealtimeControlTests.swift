@@ -131,7 +131,7 @@ struct RealtimeControlTests {
     // MARK: - A conversation
 
     @Test func aConversationComesBackAsItsTranscriptAndItsTools() async throws {
-        let rig = ConverseRig(allowRisky: true, auth: true, server: { socket in
+        var rig = ConverseRig(allowRisky: true, auth: true, server: { socket in
             guard let first = await socket.nextSent(), first["type"] == "conversation_initiation_client_data" else { return }
             socket.push(ConverseRig.metadata)
             socket.push(ConverseRig.response("Hello, how can I help?", 1))
@@ -152,6 +152,9 @@ struct RealtimeControlTests {
             socket.push(ConverseRig.response("You're welcome.", 5))
         })
         defer { rig.clean() }
+        // The agent greets: the wait for its greeting ends when it arrives, so it may be long — a
+        // greeting read after a short wait would be taken for the first answer.
+        rig.timing.greeting = .seconds(60)
         let (status, answer) = await rig.converse([
             "agent_id": "agent_2", "messages": ["What are your hours?", "Thanks"],
             "dynamic_variables": ["user_name": "Ada"], "confirm": true,
