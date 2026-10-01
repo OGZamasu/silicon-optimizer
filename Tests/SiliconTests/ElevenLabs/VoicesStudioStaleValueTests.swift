@@ -538,4 +538,95 @@ struct VoicesStudioStaleValueTests {
         let sent = body(fixture, "edit_voice_settings")
         #expect(sent.contains("0.6") && !sent.contains("0.4"), "the row's stability was sent: \(sent)")
     }
+
+    // MARK: - Round 3: a failed fetch after a change, while the opening read was dropped
+
+    /// Voice A opened (its read held); a sample deleted meanwhile, and the fetch after it fails;
+    /// then the opening read answers — older than the delete, so it is dropped. Nothing is
+    /// loading any more: the screen says the details could not be read (not "Waiting…"), and a
+    /// click on the voice reads them again.
+    @Test func aFailedFetchAfterAChangeIsShownWhenTheOpeningReadWasDropped() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "delete_sample":
+                return .json(["status": "ok"])
+            case "get_voice_by_id":
+                switch signals.note("get") {
+                case 1:
+                    await signals.wait(for: "refetch failed")
+                    return .json(VoicesStudioFakes.voice("v-a", "Voice A"))
+                case 2:
+                    return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+                default:
+                    return .json(VoicesStudioFakes.voice("v-a", "Voice A"))
+                }
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let row = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", samples: [VoicesStudioFakes.sample("s1", "a.mp3")])))
+        model.load(rows: [row])
+        let opening = Task { await model.select("v-a") }
+        try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 1 }
+        let sample = try #require(model.selected?.samples.first)
+        try await answering(model.actions) { await model.deleteSample(sample) }
+        signals.note("refetch failed")
+        await opening.value
+        #expect(!model.detailsAreIn)
+        #expect(model.waitingForDetails == "Its details could not be read — try again.", "\(model.waitingForDetails ?? "-")")
+        await model.select("v-a")
+        #expect(model.detailsAreIn)
+    }
+
+    /// Productions: order A renamed (held), B opened and A again (its read held); the rename
+    /// lands, the fetch after it fails, and A's read — older than the rename — is dropped. The
+    /// order's card says it could not be read, with Try again, not "Loading the order…".
+    @Test func anOrderWhoseFetchAfterARenameFailsSaysSo() async throws {
+        let signals = Signals()
+        let order = Self.order
+        let fixture = VoicesStudioFixture(handler: { request in
+            let path = request.url.path
+            switch request.operationID {
+            case "public_update_order":
+                await signals.wait(for: "reopened")
+                return .json(["order_id": "o-a"])
+            case "public_get_order" where path.hasSuffix("/o-b"):
+                return .json(["order_id": "o-b", "name": "B", "state": "open", "sandbox": false, "items": []])
+            case "public_get_order":
+                switch signals.note("get a") {
+                case 1:
+                    signals.note("reopened")
+                    await signals.wait(for: "refetched")
+                    return .json(order("Old name"))
+                case 2:
+                    signals.note("refetched")
+                    return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
+                default:
+                    return .json(order("New name"))
+                }
+            case "public_get_available_languages":
+                return .json(["languages": []])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ProductionsSectionModel(environment: fixture.environment)
+        let a = try #require(ProductionsOrder(json: order("Old name")))
+        let b = try #require(ProductionsOrder(json: ["order_id": "o-b", "name": "B", "state": "open", "sandbox": false, "items": []]))
+        model.load(orders: [a, b], selected: a)
+        model.rename = "New name"
+        let renaming = Task { try await answering(model.actions) { await model.saveName() } }
+        try await voicesStudioWait { fixture.sent("public_update_order").count == 1 }
+        await model.select("o-b")
+        await model.select("o-a")
+        try await renaming.value
+        #expect(model.selected == nil, "A's older read was dropped")
+        #expect(model.orderProblem != nil, "nothing is loading: the card must say why")
+        await model.select("o-a")                         // Try again
+        #expect(model.selected?.name == "New name")
+    }
 }

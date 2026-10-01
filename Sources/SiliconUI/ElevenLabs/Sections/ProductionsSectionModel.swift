@@ -246,8 +246,14 @@ final class ProductionsSectionModel {
     /// never takes the screen.
     private(set) var wantedOrder: String?
 
-    /// Why the chosen order's details could not be read, if they could not.
-    var orderProblem: String? { actions.problem("public_get_order") }
+    /// Why the chosen order's details could not be read, if they could not — by its opening
+    /// read, or by the fetch after a change to it (its own runner), which the screen waits on
+    /// when the opening read was older than that change.
+    var orderProblem: String? {
+        if let problem = actions.problem("public_get_order") { return problem }
+        guard let id = wantedOrder, selected?.id != id else { return nil }
+        return actions.problem("public_get_order", slot: VoicesStudioActions.afterChange(of: id))
+    }
 
     func select(_ orderID: String?) async {
         wantedOrder = orderID

@@ -614,8 +614,14 @@ final class VoicesSectionModel {
     /// slow answer never puts an old voice (and its drafts) back on screen.
     @ObservationIgnored private var wantedVoice: String?
 
-    /// Why the selected voice's details or settings could not be read, if they could not.
-    var detailProblem: String? { actions.problem("get_voice_by_id") ?? actions.problem("get_voice_settings") }
+    /// Why the selected voice's details or settings could not be read, if they could not — by
+    /// its opening read, or (while its details are not in) by the fetch after a change to it,
+    /// which runs on a runner of its own.
+    var detailProblem: String? {
+        if let problem = actions.problem("get_voice_by_id") ?? actions.problem("get_voice_settings") { return problem }
+        guard let id = selected?.id, !detailsAreIn else { return nil }
+        return actions.problem("get_voice_by_id", slot: VoicesStudioActions.afterChange(of: id))
+    }
 
     /// Changes to each voice that have answered, by voice id. A read asked before one of them
     /// answered is older than it — even when it answers later, on another runner — and is dropped
