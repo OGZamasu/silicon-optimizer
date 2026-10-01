@@ -383,7 +383,10 @@ final class AgentMCPServersModel {
             question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect",
             holdIfUnknown: AgentsCreateHolds.lost("the MCP server “\(newName)”", check: "the MCP servers list")
         ) else {
-            if calls.outcomeWasUnknown(AgentsOp.createMCPServer) { await list.refresh() }
+            if calls.outcomeWasUnknown(AgentsOp.createMCPServer) {
+                calls.holds.onReadAgain(AgentsOp.createMCPServer) { [weak self] in await self?.list.refresh() }
+                await list.refresh()
+            }
             return
         }
         guard let server = AgentsMCPServer(json: json) else { return }

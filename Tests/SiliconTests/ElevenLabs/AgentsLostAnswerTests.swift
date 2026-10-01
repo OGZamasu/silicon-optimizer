@@ -98,6 +98,11 @@ extension AgentsSectionsTests {
             #expect(rig.requests(lost.listOperationID).count > listsBefore, "\(lost.operationID): its list was not read after a lost answer")
             #expect(store.calls.holds.notice(lost.operationID)?.contains("was lost, so it may have been made") == true,
                     "\(lost.operationID): \(store.calls.holds.notice(lost.operationID) ?? "not held")")
+            // "Read again" reads that list once more.
+            let listsAfter = rig.requests(lost.listOperationID).count
+            #expect(store.calls.holds.canReadAgain(lost.operationID), "\(lost.operationID): no Read again")
+            await store.calls.holds.readAgain(lost.operationID)
+            #expect(rig.requests(lost.listOperationID).count > listsAfter, "\(lost.operationID): Read again read nothing")
             try await confirming(runners) { await lost.create(store) }
             #expect(rig.requests(lost.operationID).count == 1, "\(lost.operationID): a second one was sent after the first one's answer was lost")
             store.calls.holds.acknowledge(lost.operationID)

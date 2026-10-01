@@ -354,6 +354,7 @@ final class AgentPhoneNumbersModel {
         ) else {
             // It may have been connected, with the credentials typed: the list shows whether.
             if calls.outcomeWasUnknown(AgentsOp.importPhoneNumber) {
+                calls.holds.onReadAgain(AgentsOp.importPhoneNumber) { [weak self] in await self?.list.refresh() }
                 store.directory.phoneNumbers.reset()
                 await list.refresh()
             }

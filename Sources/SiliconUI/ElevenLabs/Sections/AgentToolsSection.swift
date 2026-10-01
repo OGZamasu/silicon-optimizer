@@ -295,7 +295,10 @@ final class AgentToolsModel {
             question: "Create the tool \(wording.subject)?", confirmLabel: "Create tool",
             holdIfUnknown: AgentsCreateHolds.lost("the tool “\(newTool.name)”", check: "the tools list")
         ) else {
-            if calls.outcomeWasUnknown(AgentsOp.createTool) { await list.refresh() }
+            if calls.outcomeWasUnknown(AgentsOp.createTool) {
+                calls.holds.onReadAgain(AgentsOp.createTool) { [weak self] in await self?.list.refresh() }
+                await list.refresh()
+            }
             return
         }
         guard let tool = AgentsTool(json: json) else { return }

@@ -1390,6 +1390,8 @@ extension View {
 @Observable
 final class AgentsCreateHolds {
     private(set) var notices: [String: String] = [:]
+    /// How each hold's list is read again ("Read again"), set by the section that holds it.
+    @ObservationIgnored private var readers: [String: @MainActor () async -> Void] = [:]
 
     /// What holds `operationID`, when an earlier create of it may have been carried out unseen.
     func notice(_ operationID: String) -> String? { notices[operationID] }
@@ -1397,7 +1399,19 @@ final class AgentsCreateHolds {
     func hold(_ operationID: String, _ notice: String) { notices[operationID] = notice }
 
     /// The owner has looked at the list: `operationID` may run again.
-    func acknowledge(_ operationID: String) { notices[operationID] = nil }
+    func acknowledge(_ operationID: String) {
+        notices[operationID] = nil
+        readers[operationID] = nil
+    }
+
+    /// How the list showing whether `operationID` made something is read again.
+    func onReadAgain(_ operationID: String, _ read: @escaping @MainActor () async -> Void) { readers[operationID] = read }
+
+    /// Whether the hold on `operationID` can read its list again here.
+    func canReadAgain(_ operationID: String) -> Bool { readers[operationID] != nil }
+
+    /// Reads that list again ("Read again").
+    func readAgain(_ operationID: String) async { await readers[operationID]?() }
 
     /// The text for a create whose answer was lost.
     static func lost(_ what: String, check: String) -> String {
@@ -1419,7 +1433,12 @@ struct AgentsHeldCreateNotice: View {
                     .font(.callout)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("I have checked — allow creating again") { holds.acknowledge(operationID) }
+                HStack {
+                    if holds.canReadAgain(operationID) {
+                        Button("Read again") { Task { await holds.readAgain(operationID) } }
+                    }
+                    Button("I have checked — allow creating again") { holds.acknowledge(operationID) }
+                }
             }
             .padding(10)
             .background(.orange.opacity(0.1), in: .rect(cornerRadius: 8))

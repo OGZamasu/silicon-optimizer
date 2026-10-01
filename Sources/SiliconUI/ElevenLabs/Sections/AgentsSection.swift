@@ -333,7 +333,10 @@ final class AgentsModel {
             holdIfUnknown: AgentsCreateHolds.lost("the agent “\(newDraft.name)”", check: "the agents list")
         ) else {
             // It may have been made: the list shows whether it was; the new agent's form stays.
-            if calls.outcomeWasUnknown(AgentsOp.createAgent) { await list.refresh() }
+            if calls.outcomeWasUnknown(AgentsOp.createAgent) {
+                calls.holds.onReadAgain(AgentsOp.createAgent) { [weak self] in await self?.list.refresh() }
+                await list.refresh()
+            }
             return
         }
         guard let id = json["agent_id"].stringValue else { return }
