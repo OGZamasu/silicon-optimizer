@@ -709,10 +709,14 @@ final class MusicScreenModel: CreativeScreenModel {
         finetunesHaveMore = (value["has_more"].boolValue ?? false) && finetuneCursor != nil
     }
 
-    /// Opens a fine-tune's details (free) and fills the edit fields.
+    /// Opens a fine-tune's details (free) and fills the edit fields. Choosing the fine-tune
+    /// already open fetches its details again but keeps what was typed: the list's entry never
+    /// refills the fields over the owner's typing.
     func select(_ finetune: MusicFinetune) async {
-        selectedFinetune = finetune
-        fillEdit(from: finetune)
+        if selectedFinetune?.id != finetune.id {
+            selectedFinetune = finetune
+            fillEdit(from: finetune)
+        }
         let runner = runner(Self.getFinetune)
         guard CreativeRunGate.isKnown(runner) else { return }
         let savesBefore = saves[finetune.id, default: 0]
