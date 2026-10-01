@@ -335,6 +335,37 @@ struct MCPServerConcurrencyTests {
         try await bridge.end()
     }
 
+    /// A `get_status` cancelled while it reads the calibration gets nothing back — and that
+    /// nothing is not what the Mac has, so the next `get_status` asks again.
+    @Test func aCancelledCalibrationReadIsNotRemembered() async throws {
+        let cache = CalibrationCache()
+        let stored = CalibrationSummaryTests.calibration(applies: true)
+        let cancelled = Task {
+            await cache.current {
+                // The control request, which ends when its task is cancelled.
+                try await Task.sleep(for: .seconds(60))
+                return stored
+            }
+        }
+        cancelled.cancel()
+        #expect(await cancelled.value == nil)
+
+        let asked = Locked(0)
+        let next = await cache.current {
+            asked.withLock { $0 += 1 }
+            return stored
+        }
+        #expect(asked.withLock { $0 } == 1)
+        #expect(next == stored)
+        // And an answer that did arrive is remembered as before.
+        let again = await cache.current {
+            asked.withLock { $0 += 1 }
+            return stored
+        }
+        #expect(again == stored)
+        #expect(asked.withLock { $0 } == 1)
+    }
+
     /// A cancel ends only `generate_video`'s wait and the agent conversation; every
     /// `POST /elevenlabs/call` runs to its end in the app. A model that cancels a paid call and
     /// asks again pays twice, so each paid ElevenLabs tool says so where the model reads it.
