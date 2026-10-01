@@ -375,12 +375,20 @@ struct MCPServerConcurrencyTests {
             ["Spends credits", "spend credits", "voice slot"].contains { tool.description.contains($0) }
         }
         #expect(paid.count >= 10)
+        // Each says it as exactly as the tool costs.
+        let exceptions = [
+            "elevenlabs_clone_voice": ElevenLabsTools.cancelDoesNotStopTheClone,
+            "elevenlabs_call": ElevenLabsTools.cancelDoesNotStopTheOperation,
+        ]
         for tool in paid where tool.name != ElevenLabsRealtimeTools.converse.name {
-            #expect(tool.description.hasSuffix(ElevenLabsTools.cancelDoesNotStop), "\(tool.name)")
+            let note = exceptions[tool.name] ?? ElevenLabsTools.cancelDoesNotStop
+            #expect(tool.description.hasSuffix(note), "\(tool.name)")
         }
+        let clone = try #require(tools.first { $0.name == "elevenlabs_clone_voice" })
+        #expect(!clone.description.contains("billing"))
         let converse = try #require(tools.first { $0.name == ElevenLabsRealtimeTools.converse.name })
         #expect(converse.description.contains("Cancelling the call ends the conversation."))
-        #expect(!converse.description.contains(ElevenLabsTools.cancelDoesNotStop))
+        #expect(!converse.description.contains("does not stop"))
         let free = try #require(tools.first { $0.name == "elevenlabs_list_voices" })
         #expect(!free.description.contains("Cancelling"))
     }
