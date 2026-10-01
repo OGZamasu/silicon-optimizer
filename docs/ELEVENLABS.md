@@ -23,7 +23,7 @@ raw JSON between HTTP and the app, so the MCP process never holds the key.
 ### The catalog
 
 The catalog comes from a pinned copy of ElevenLabs' OpenAPI spec, `Scripts/elevenlabs/openapi.json`
-(SHA-256 `b3fe16f8d37a3b735df8514737e045b8d190f8618eb5c93f7caa7523feed80a0`). It holds 403
+(SHA-256 `0b2f5145d7e6d04db439123076de5780da7402bc7e763ba49783c918323f942b`). It holds 403
 operations: 159 GET, 168 POST, 32 PATCH, 43 DELETE and 1 PUT. The running app never fetches
 the spec.
 

@@ -7,7 +7,7 @@ import Testing
 @Suite("ElevenLabs catalog")
 struct CoreCatalogTests {
 
-    static let pinnedSHA256 = "b3fe16f8d37a3b735df8514737e045b8d190f8618eb5c93f7caa7523feed80a0"
+    static let pinnedSHA256 = "0b2f5145d7e6d04db439123076de5780da7402bc7e763ba49783c918323f942b"
 
     static let repository = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent()
