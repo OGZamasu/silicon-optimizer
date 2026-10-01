@@ -51,6 +51,12 @@ final class AgentAnalyticsModel {
     /// A ticket's priorities, least urgent first, as the spec lists them.
     static var priorities: [String] { AgentsSchema.choices(AgentsOp.updateTicket, "priority") }
 
+    /// The one agent's list's "most urgent first" order, as the spec names it; nil (and no
+    /// control) if a spec refresh renames it.
+    static var mostUrgentFirst: String? {
+        AgentsSchema.choices(AgentsOp.listAgentTickets, "sort_by").first { $0 == "priority" }
+    }
+
     static func color(forPriority priority: String) -> Color {
         switch priority {
         case "urgent": .red
@@ -180,7 +186,7 @@ final class AgentAnalyticsModel {
             operation = AgentsOp.listAgentTickets
             arguments["agent_id"] = .string(agentID)
             if !ticketPriority.isEmpty { arguments["priorities"] = [.string(ticketPriority)] }
-            if ticketsByPriority { arguments["sort_by"] = "priority" }
+            if ticketsByPriority, let order = Self.mostUrgentFirst { arguments["sort_by"] = .string(order) }
         } else {
             operation = AgentsOp.listTickets
         }
@@ -524,7 +530,9 @@ private struct AgentTicketsCard: View {
                         ForEach(AgentAnalyticsModel.priorities, id: \.self) { Text(AgentsFormat.words($0)).tag($0) }
                     }
                     .fixedSize()
-                    Toggle("Most urgent first", isOn: $model.ticketsByPriority).fixedSize()
+                    if AgentAnalyticsModel.mostUrgentFirst != nil {
+                        Toggle("Most urgent first", isOn: $model.ticketsByPriority).fixedSize()
+                    }
                 }
             }
             AgentsListBody(model.tickets, runner: calls.runner(model.ticketScope == .agent ? AgentsOp.listAgentTickets : AgentsOp.listTickets),

@@ -132,6 +132,9 @@ extension AgentsSectionsTests {
                                   resolvingAgainstBaseURL: false)?.queryItems ?? []
         #expect(query.contains(URLQueryItem(name: "priorities", value: "urgent")))
         #expect(query.contains(URLQueryItem(name: "sort_by", value: "priority")))
+        let orders = AgentsSchema.choices(AgentsOp.listAgentTickets, "sort_by")
+        #expect(orders == ["created_at", "priority"], "the order the screen sends comes from the catalog: \(orders)")
+        #expect(AgentAnalyticsModel.mostUrgentFirst == "priority")
         #expect(model.tickets.items.first?.priority == "high")
 
         model.ticketScope = .workspace
