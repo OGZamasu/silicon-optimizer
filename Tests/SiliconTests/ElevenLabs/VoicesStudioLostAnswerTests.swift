@@ -152,6 +152,27 @@ struct VoicesStudioLostAnswerTests {
         #expect(made.count("create_service_account") == 2)
     }
 
+    /// N5-1: the line saying a key change's answer was lost is about that account's keys; it
+    /// does not follow the owner to another account.
+    @Test func theLostAnswerLineStaysWithItsAccount() async throws {
+        let made = Made()
+        made.lose("edit_service_account_api_key")
+        let fixture = keysFixture(made)
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let a = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        let b = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-b", key: "kb")))
+        model.load(accounts: [a, b], selected: a)
+        model.edit(try #require(model.selected?.keys.first))
+        model.keyDraft.allPermissions = true
+        model.keyDraft.permissions = []
+        model.keyDraft.name = "Renamed"
+        try await answering(model.actions) { await model.saveKey() }
+        #expect(model.problems.first?.contains("was lost") == true, "\(model.problems)")
+        model.select("sa-b")
+        #expect(model.problems.isEmpty, "account A's lost answer is shown under account B: \(model.problems)")
+    }
+
     // MARK: - Webhooks
 
     /// "Create webhook", carried out, its answer lost: the webhook may exist (its signing secret

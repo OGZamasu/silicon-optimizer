@@ -171,8 +171,11 @@ final class ServiceAccountsSectionModel {
 
     func select(_ id: String?) {
         // A key shown once belongs to the account it was made for: it is not shown under the
-        // next one.
-        if selected?.id != id { actions.dismissCredentials() }
+        // next one. Nor is what was said about that account's keys (an answer that was lost).
+        if selected?.id != id {
+            actions.dismissCredentials()
+            problems = []
+        }
         selected = accounts.first { $0.id == id }
         editingKey = nil
         keyDraft = ServiceAccountKeyDraft()
