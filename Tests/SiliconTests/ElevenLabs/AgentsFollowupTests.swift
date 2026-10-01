@@ -103,4 +103,59 @@ extension AgentsSectionsTests {
         #expect(rig.requests(AgentsOp.approveMCPTool).isEmpty && rig.requests(AgentsOp.updateMCPServer).isEmpty
                 && rig.requests(AgentsOp.updateTool).isEmpty)
     }
+
+    /// The 2026-09-30 spec gave triage tickets a priority: one agent's tickets filter by it and
+    /// sort most urgent first; a new ticket, and a change to one, can set it (and clear it).
+    /// Every body sent resolves in the pinned spec.
+    @Test func ticketsCarryAPriorityFromTheRefreshedSpec() async throws {
+        var withPriority = AgentsFixtures.ticket
+        if case .object(var fields) = withPriority {
+            fields["priority"] = "high"
+            withPriority = .object(fields)
+        }
+        let rig = AgentsFixtures.Rig(overriding: [
+            AgentsOp.getTicket: .json(withPriority),
+            AgentsOp.listAgentTickets: .json(["agent_conversation_tickets": [withPriority], "has_more": false]),
+            AgentsOp.createManualTicket: .json(withPriority),
+            AgentsOp.updateTicket: .json(withPriority),
+        ])
+        defer { rig.clean() }
+        let model = rig.store.analytics
+        #expect(AgentAnalyticsModel.priorities == ["low", "medium", "high", "urgent"])
+
+        model.agentID = AgentsFixtures.agentID
+        model.ticketScope = .agent
+        model.ticketPriority = "urgent"
+        model.ticketsByPriority = true
+        await model.tickets.refresh()
+        let query = URLComponents(url: try #require(rig.requests(AgentsOp.listAgentTickets).last?.request.url),
+                                  resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(query.contains(URLQueryItem(name: "priorities", value: "urgent")))
+        #expect(query.contains(URLQueryItem(name: "sort_by", value: "priority")))
+        #expect(model.tickets.items.first?.priority == "high")
+
+        model.ticketScope = .workspace
+        await model.tickets.refresh()
+        let workspace = URLComponents(url: try #require(rig.requests(AgentsOp.listTickets).last?.request.url),
+                                      resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(!workspace.contains { $0.name == "priorities" || $0.name == "sort_by" },
+                "the workspace list has neither parameter")
+
+        model.newTicketComment = "Follow up on the refund window."
+        model.newTicketPriority = "high"
+        await model.createTicket()
+        let created = try #require(rig.body(AgentsOp.createManualTicket))
+        #expect(created["priority"] == "high")
+        #expect(try AgentsSpec.shared().unresolved(body: created, operationID: AgentsOp.createManualTicket).isEmpty)
+        #expect(model.newTicketPriority.isEmpty, "the form is cleared")
+
+        await model.openTicket("tkt_1")
+        #expect(model.ticket?.priority == "high")
+        await model.updateTicket(priority: "low")
+        let lowered = try #require(rig.body(AgentsOp.updateTicket))
+        #expect(lowered == ["priority": "low"])
+        #expect(try AgentsSpec.shared().unresolved(body: lowered, operationID: AgentsOp.updateTicket).isEmpty)
+        await model.updateTicket(priority: "")
+        #expect(rig.body(AgentsOp.updateTicket) == ["priority": .null], "None clears it")
+    }
 }
