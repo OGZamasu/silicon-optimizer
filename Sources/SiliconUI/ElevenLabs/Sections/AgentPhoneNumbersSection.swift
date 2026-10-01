@@ -348,8 +348,17 @@ final class AgentPhoneNumbersModel {
             consequence: "ElevenLabs will connect \(number) to your account using the \(importProvider.rawValue) credentials "
                 + "you entered, so agents can answer\(importOutbound ? " and place" : "") calls on it. "
                 + "The credentials are sent to ElevenLabs and not written to disk by this app.",
-            question: "Import \(number) from \(importProvider.rawValue)?", confirmLabel: "Import number"
-        ) else { return }
+            question: "Import \(number) from \(importProvider.rawValue)?", confirmLabel: "Import number",
+            holdIfUnknown: AgentsCreateHolds.lost("\(number) from \(importProvider.rawValue)", check: "the phone numbers list")
+                .replacingOccurrences(of: "The answer to creating", with: "The answer to importing")
+        ) else {
+            // It may have been connected, with the credentials typed: the list shows whether.
+            if calls.outcomeWasUnknown(AgentsOp.importPhoneNumber) {
+                store.directory.phoneNumbers.reset()
+                await list.refresh()
+            }
+            return
+        }
         twilioToken = ""
         sipPassword = ""
         exotelAPIKey = ""
@@ -666,7 +675,9 @@ private struct AgentPhoneImportCard: View {
                         Toggle("Place outgoing calls", isOn: $model.importOutbound)
                     }
                     .formStyle(.columns)
-                    AgentsRunButton(runner: runner, title: "Import…", disabled: model.importBody() == nil) {
+                    AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.importPhoneNumber)
+                    AgentsRunButton(runner: runner, title: "Import…", disabled: model.importBody() == nil
+                                        || model.calls.holds.notice(AgentsOp.importPhoneNumber) != nil) {
                         Task { await model.importNumberNow() }
                     }
                     AgentsRunnerOutput(runner: runner, showsResult: false)

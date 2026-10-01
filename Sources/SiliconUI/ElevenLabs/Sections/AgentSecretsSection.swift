@@ -165,8 +165,12 @@ final class AgentSecretsModel {
             title: "New secret “\(name)”", subject: "“\(name)”",
             consequence: "ElevenLabs stores the value in your workspace, where tools and MCP servers you point at it can use it. "
                 + "It cannot be read back, here or in ElevenLabs.",
-            question: "Store the secret “\(name)” in your workspace?", confirmLabel: "Store secret"
-        ) else { return }
+            question: "Store the secret “\(name)” in your workspace?", confirmLabel: "Store secret",
+            holdIfUnknown: AgentsCreateHolds.lost("the secret “\(name)”", check: "the secrets list")
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.createSecret) { await list.refresh() }
+            return
+        }
         newValue = ""
         newName = ""
         if let secret = AgentsSecret(json: json) {
@@ -290,8 +294,12 @@ final class AgentSecretsModel {
                 + ListFormatter.localizedString(byJoining: newVariableValues.map(\.environment).filter { !$0.isEmpty })
                 + " from their next conversation. The values themselves are not shown here again.",
             question: "Create the variable “\(label)” (\(AgentsFormat.words(newVariableType).lowercased()))?",
-            confirmLabel: "Create variable"
-        ) else { return }
+            confirmLabel: "Create variable",
+            holdIfUnknown: AgentsCreateHolds.lost("the variable “\(label)”", check: "the variables list")
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.createEnvironmentVariable) { await variables.refresh() }
+            return
+        }
         newVariableLabel = ""
         newVariableValues = [("production", "")]
         if let variable = AgentsEnvironmentVariable(json: json) { variables.upsert(variable) } else { await variables.refresh() }
@@ -398,8 +406,10 @@ private struct AgentSecretComposer: View {
                 SecureField("Value", text: $model.newValue)
             }
             .formStyle(.columns)
+            AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.createSecret)
             AgentsRunButton(runner: runner, title: "Store…",
-                                disabled: model.newName.trimmingCharacters(in: .whitespaces).isEmpty || model.newValue.isEmpty) {
+                                disabled: model.newName.trimmingCharacters(in: .whitespaces).isEmpty || model.newValue.isEmpty
+                                    || model.calls.holds.notice(AgentsOp.createSecret) != nil) {
                 Task { await model.create() }
             }
             AgentsRunnerOutput(runner: runner, showsResult: false)
@@ -460,8 +470,10 @@ private struct AgentEnvironmentVariablesCard: View {
                     }
                     valuesEditor($model.newVariableValues, type: model.newVariableType)
                     ElevenLabsProblemList(problems: model.newVariableProblems)
+                    AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.createEnvironmentVariable)
                     AgentsRunButton(runner: calls.runner(AgentsOp.createEnvironmentVariable), title: "Create…",
-                                        disabled: !model.newVariableProblems.isEmpty) {
+                                        disabled: !model.newVariableProblems.isEmpty
+                                            || model.calls.holds.notice(AgentsOp.createEnvironmentVariable) != nil) {
                         Task { await model.createVariable() }
                     }
                     AgentsRunnerOutput(runner: calls.runner(AgentsOp.createEnvironmentVariable), showsResult: false)

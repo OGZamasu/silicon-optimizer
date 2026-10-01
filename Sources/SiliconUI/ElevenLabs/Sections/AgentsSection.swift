@@ -298,9 +298,15 @@ final class AgentsModel {
 
     func create() async {
         let arguments = newDraft.createArguments()
-        guard let json = await calls.json(AgentsOp.createAgent, arguments, title: "Created agent “\(newDraft.name)”"),
-              let id = json["agent_id"].stringValue
-        else { return }
+        guard let json = await calls.json(
+            AgentsOp.createAgent, arguments, title: "Created agent “\(newDraft.name)”",
+            holdIfUnknown: AgentsCreateHolds.lost("the agent “\(newDraft.name)”", check: "the agents list")
+        ) else {
+            // It may have been made: the list shows whether it was; the new agent's form stays.
+            if calls.outcomeWasUnknown(AgentsOp.createAgent) { await list.refresh() }
+            return
+        }
+        guard let id = json["agent_id"].stringValue else { return }
         list.upsert(AgentsAgent(id: id, name: newDraft.name, voiceID: newDraft.voiceID, tags: newDraft.tags,
                                 createdAt: Date()))
         store.directory.agents.upsert(AgentsAgent(id: id, name: newDraft.name))
@@ -760,9 +766,11 @@ private struct AgentsNewAgentForm: View {
                 }
             }
             .formStyle(.columns)
+            AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.createAgent)
             HStack {
                 AgentsRunButton(runner: runner, title: "Create agent",
-                                    disabled: model.newDraft.name.trimmingCharacters(in: .whitespaces).isEmpty) {
+                                    disabled: model.newDraft.name.trimmingCharacters(in: .whitespaces).isEmpty
+                                        || model.calls.holds.notice(AgentsOp.createAgent) != nil) {
                     Task { await model.create() }
                 }
                 Button("Cancel") { model.cancelCreating() }

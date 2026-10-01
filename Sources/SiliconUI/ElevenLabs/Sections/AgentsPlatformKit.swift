@@ -18,6 +18,23 @@ import UniformTypeIdentifiers
 final class AgentsCalls {
     let context: ElevenLabsRunner.Context
     private var runners: [String: ElevenLabsRunner] = [:]
+    /// Creates held after their answer was lost: see `AgentsCreateHolds`.
+    let holds = AgentsCreateHolds()
+    /// The runners (operation, or operation and slot) whose last `run` gave no answer though what
+    /// it sent may have been carried out. See `outcomeWasUnknown`.
+    private var lastRunUnknown: Set<String> = []
+
+    private static func key(_ operationID: String, _ slot: String) -> String {
+        slot.isEmpty ? operationID : "\(operationID)#\(slot)"
+    }
+
+    /// Whether the last `run` of `operationID` (on `slot`) gave no answer, yet what it sent may
+    /// have been carried out: cancelled after it was sent, or its answer lost (a 5xx, a 408, no
+    /// connection). A refusal ElevenLabs gave, a question answered no, or a run refused before
+    /// sending is not. Recorded per call; read straight after the `run` that returned nil.
+    func outcomeWasUnknown(_ operationID: String, slot: String = "") -> Bool {
+        lastRunUnknown.contains(Self.key(operationID, slot))
+    }
 
     init(context: ElevenLabsRunner.Context) {
         self.context = context
@@ -31,7 +48,7 @@ final class AgentsCalls {
 
     /// The runner for `operationID`, made on first use.
     func runner(_ operationID: String, slot: String = "") -> ElevenLabsRunner {
-        let key = slot.isEmpty ? operationID : "\(operationID)#\(slot)"
+        let key = Self.key(operationID, slot)
         if let runner = runners[key] { return runner }
         let operation = ElevenLabsCatalog.operation(operationID) ?? Self.unavailable(operationID)
         let runner = ElevenLabsRunner(operation: operation, context: context)
@@ -50,21 +67,32 @@ final class AgentsCalls {
     ///   followed by `subject`, so a subject is a noun phrase ("3 real phone calls with “Support”").
     ///   - question/confirmLabel: The whole question and its button's verb, where the shell's
     ///   generic wording ("Run") would not say what happens ("Stop the batch “Monday”?", "Stop calls").
+    ///   - holdIfUnknown: For a create of something real (an agent, a tool, a secret, an MCP
+    ///   server, a phone number): what the owner should check if its answer is lost. Then that
+    ///   create is held (`holds`) until they say they have checked.
     @discardableResult
     func run(
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], slot: String = "", quiet: Bool = false,
         title: String? = nil, subject: String? = nil, consequence: String? = nil,
-        question: String? = nil, confirmLabel: String? = nil
+        question: String? = nil, confirmLabel: String? = nil, holdIfUnknown: String? = nil
     ) async -> ElevenLabsResult? {
-        guard Self.isAvailable(operationID) else { return nil }
+        let key = Self.key(operationID, slot)
+        // Only a run sent below can leave an unknown outcome; one refused before says nothing.
+        lastRunUnknown.remove(key)
+        guard Self.isAvailable(operationID), holds.notice(operationID) == nil else { return nil }
         let runner = runner(operationID, slot: slot)
         runner.recordsResults = !quiet
         if let title { runner.title = title }
-        return await runner.perform(
+        let result = await runner.perform(
             arguments: arguments, files: files, subject: subject, consequence: consequence,
             title: question, confirmLabel: confirmLabel
         )
+        if result == nil, VoicesStudioActions.outcomeIsUnknown(runner) {
+            lastRunUnknown.insert(key)
+            if let holdIfUnknown { holds.hold(operationID, holdIfUnknown) }
+        }
+        return result
     }
 
     /// `run`, for an operation that answers JSON: the JSON (`.null` for an empty answer).
@@ -73,11 +101,12 @@ final class AgentsCalls {
         _ operationID: String, _ arguments: [String: JSONValue] = [:],
         files: [String: [ElevenLabsFile]] = [:], slot: String = "", quiet: Bool = false,
         title: String? = nil, subject: String? = nil, consequence: String? = nil,
-        question: String? = nil, confirmLabel: String? = nil
+        question: String? = nil, confirmLabel: String? = nil, holdIfUnknown: String? = nil
     ) async -> JSONValue? {
         guard let result = await run(
             operationID, arguments, files: files, slot: slot, quiet: quiet, title: title,
-            subject: subject, consequence: consequence, question: question, confirmLabel: confirmLabel
+            subject: subject, consequence: consequence, question: question, confirmLabel: confirmLabel,
+            holdIfUnknown: holdIfUnknown
         ) else { return nil }
         return Self.json(of: result)
     }
@@ -1347,6 +1376,53 @@ extension View {
             Button("Cancel", role: .cancel) { Task { await box.answer(false) } }
         } message: { question in
             Text(question.message)
+        }
+    }
+}
+
+// MARK: - Creates whose answer was lost
+
+/// Creates of something real — an agent, a tool, a secret, an MCP server, an imported phone
+/// number, an environment variable — whose answer was lost though they may have been carried out.
+/// Each holds that create (only that one) until the owner says they have checked, so a second
+/// attempt does not make a second one unseen. The section reads its list again at once.
+@MainActor
+@Observable
+final class AgentsCreateHolds {
+    private(set) var notices: [String: String] = [:]
+
+    /// What holds `operationID`, when an earlier create of it may have been carried out unseen.
+    func notice(_ operationID: String) -> String? { notices[operationID] }
+
+    func hold(_ operationID: String, _ notice: String) { notices[operationID] = notice }
+
+    /// The owner has looked at the list: `operationID` may run again.
+    func acknowledge(_ operationID: String) { notices[operationID] = nil }
+
+    /// The text for a create whose answer was lost.
+    static func lost(_ what: String, check: String) -> String {
+        "The answer to creating \(what) was lost, so it may have been made. Check \(check) — delete it there if it "
+            + "is listed, or use it — before creating it again."
+    }
+}
+
+/// Beside a create's button: what may have been made after its answer was lost, and the owner's
+/// "I have checked".
+struct AgentsHeldCreateNotice: View {
+    let holds: AgentsCreateHolds
+    let operationID: String
+
+    var body: some View {
+        if let notice = holds.notice(operationID) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(notice, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("I have checked — allow creating again") { holds.acknowledge(operationID) }
+            }
+            .padding(10)
+            .background(.orange.opacity(0.1), in: .rect(cornerRadius: 8))
         }
     }
 }

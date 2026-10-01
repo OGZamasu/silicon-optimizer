@@ -365,8 +365,13 @@ final class AgentMCPServersModel {
             consequence: (warnings.isEmpty ? "" : "Careful: " + warnings.joined(separator: " ") + " ")
                 + "Agents you give it to can call its tools during conversations and send it what callers say. "
                 + tools + " Only connect servers you trust.",
-            question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect"
-        ), let server = AgentsMCPServer(json: json) else { return }
+            question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect",
+            holdIfUnknown: AgentsCreateHolds.lost("the MCP server “\(newName)”", check: "the MCP servers list")
+        ) else {
+            if calls.outcomeWasUnknown(AgentsOp.createMCPServer) { await list.refresh() }
+            return
+        }
+        guard let server = AgentsMCPServer(json: json) else { return }
         list.upsert(server)
         store.directory.mcpServers.upsert(server)
         creating = false
@@ -442,7 +447,9 @@ private struct AgentMCPServerComposer: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            AgentsRunButton(runner: runner, title: "Connect…", disabled: model.createArguments() == nil) {
+            AgentsHeldCreateNotice(holds: model.calls.holds, operationID: AgentsOp.createMCPServer)
+            AgentsRunButton(runner: runner, title: "Connect…", disabled: model.createArguments() == nil
+                                || model.calls.holds.notice(AgentsOp.createMCPServer) != nil) {
                 Task { await model.create() }
             }
             AgentsRunnerOutput(runner: runner, showsResult: false)
