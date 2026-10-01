@@ -166,4 +166,39 @@ struct LiveFollowUpTests {
         #expect(!rig.audio.holdsDevices)
         #expect(!rig.audio.voiceProcessing)
     }
+
+    /// Headphones plugged in mid-session stop the engine: the session ends and says why,
+    /// instead of showing "Microphone on" while nothing is heard (and an agent keeps billing).
+    @Test func aDeviceChangeEndsATranscription() async throws {
+        let rig = LiveRig(server: LiveReleaseTests.transcriptionServer(.stop))
+        defer { rig.clean() }
+        let screen = LiveTranscriptionModel(context: rig.context)
+        await screen.start()
+        #expect(screen.microphoneOn)
+        rig.audio.simulateDeviceChange()
+        await rig.until { screen.phase == .ended }
+        #expect(screen.outcome == .mayHaveBeenBilled(LiveContext.devicesChanged))
+        #expect(!screen.microphoneOn)
+        #expect(!rig.audio.holdsDevices)
+        let socket = try #require(rig.connector.sockets.first)
+        await rig.until { socket.closedByClient != nil }
+        #expect(socket.closedByClient != nil)
+    }
+
+    @Test func aDeviceChangeEndsAVoiceConversation() async throws {
+        let rig = LiveRig(replies: LiveScreenTests.agentReplies(), server: LiveScreenTests.agent())
+        defer { rig.clean() }
+        let screen = LiveAgentModel(context: rig.context)
+        await screen.loadAgents()
+        await screen.requestStart()
+        await rig.until { screen.microphoneOn }
+        rig.audio.simulateDeviceChange()
+        await rig.until { screen.phase == .ended }
+        #expect(screen.outcome == .mayHaveBeenBilled(LiveContext.devicesChanged))
+        #expect(!rig.audio.holdsDevices)
+        #expect(!rig.audio.voiceProcessing)
+        let socket = try #require(rig.connector.sockets.first)
+        await rig.until { socket.closedByClient != nil }
+        #expect(socket.closedByClient?.code == 1000)
+    }
 }

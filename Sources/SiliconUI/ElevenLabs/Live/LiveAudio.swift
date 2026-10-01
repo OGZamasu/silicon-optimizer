@@ -373,7 +373,12 @@ protocol LiveAudioIO: AnyObject, Sendable {
     /// Lets go of the devices: the tap removed, the speaker stopped, the engine stopped and macOS
     /// voice processing turned off — so the system's microphone indicator goes out and other
     /// apps' audio is no longer ducked. Every live screen calls it when its session ends.
+    /// It also forgets the `onDeviceChange` handler.
     func release()
+    /// `handler` is called (on any thread) when the devices change under the microphone —
+    /// headphones plugged in, another default input — which stops the engine and so the
+    /// capture. The screen whose session holds the microphone sets it; `release()` clears it.
+    func onDeviceChange(_ handler: (@Sendable () -> Void)?)
 }
 
 /// The devices, through one `AVAudioEngine` — one engine, so macOS voice processing on the input
@@ -385,6 +390,7 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
     private var playerFormat: AVAudioFormat?
     private var capturing = false
     private var voiceProcessing = false
+    private var deviceChanged: (@Sendable () -> Void)?
 
     init() {
         engine.attach(player)
@@ -392,6 +398,25 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: nil
         ) { [weak self] _ in self?.release() }
+        // A device change stops the engine: the capture would go silent while the screen still
+        // says the microphone is on (and an agent keeps billing), so the session is told.
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in self?.configurationChanged() }
+    }
+
+    func onDeviceChange(_ handler: (@Sendable () -> Void)?) {
+        lock.withLock { deviceChanged = handler }
+    }
+
+    private func configurationChanged() {
+        let handler: (@Sendable () -> Void)? = lock.withLock {
+            // A real change stops the engine; one this class made itself (voice processing,
+            // under the lock and followed by a start) finds it running again.
+            guard capturing, !engine.isRunning else { return nil }
+            return deviceChanged
+        }
+        handler?()
     }
 
     func requestMicrophone() async -> Bool {
@@ -451,6 +476,7 @@ final class LiveEngineAudio: LiveAudioIO, @unchecked Sendable {
 
     func release() {
         lock.withLock {
+            deviceChanged = nil
             if capturing { engine.inputNode.removeTap(onBus: 0) }
             capturing = false
             player.stop()

@@ -640,6 +640,18 @@ screen runs capture and playback on one `AVAudioEngine` with macOS voice process
 (`setVoiceProcessingEnabled(true)`), the agent's voice being its echo reference. Without it, an agent
 on the speakers hears itself and interrupts itself.
 
+**Device changes:** plugging in headphones or switching the default microphone stops the engine
+(`AVAudioEngineConfigurationChange`). A session holding the microphone (live transcription, a voice
+conversation) is then **ended with a message**, not restarted: the new device needs its format and,
+for an agent, voice processing set up again, and a session that silently switched microphones while
+billing is worse than one more Start. Live speech only plays, and the next audio starts the engine
+again on the new output.
+
+**Bounds:** a session's events wait in a queue of at most 2,048; a reader that falls behind (or a
+server that floods) ends the session with 1011 "This app fell behind reading the session". Microphone
+audio waiting for a socket that has stopped taking it is capped at thirty seconds; then the session
+ends — audio is never dropped from the middle, which would leave a hole in a transcript.
+
 ### Over MCP: `elevenlabs_agent_converse`
 
 MCP is request/response, so the realtime APIs reach a model as one tool: a short **text-only**

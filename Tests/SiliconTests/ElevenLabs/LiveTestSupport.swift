@@ -21,6 +21,7 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
     private var _flushes = 0
     private var _captureStarts = 0
     private var _releases = 0
+    private var deviceHandler: (@Sendable () -> Void)?
     var captureFailure: (any Error)?
 
     init(permission: Bool = true) {
@@ -89,8 +90,23 @@ final class FakeLiveAudio: LiveAudioIO, @unchecked Sendable {
         for callback in callbacks { callback() }
     }
 
+    func onDeviceChange(_ handler: (@Sendable () -> Void)?) {
+        lock.withLock { deviceHandler = handler }
+    }
+
+    /// Headphones plugged in, as the real engine meets it: the engine stops (the tap stays
+    /// installed, hearing nothing) and, while capturing, the handler is told.
+    func simulateDeviceChange() {
+        let handler: (@Sendable () -> Void)? = lock.withLock {
+            _running = false
+            return _tap ? deviceHandler : nil
+        }
+        handler?()
+    }
+
     func release() {
         let callbacks: [@Sendable () -> Void] = lock.withLock {
+            deviceHandler = nil
             _tap = false
             _running = false
             _voiceProcessing = false

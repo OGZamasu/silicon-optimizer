@@ -34,6 +34,13 @@ struct LiveContext {
     static let microphoneFellBehind = "The connection stopped taking microphone audio, so the session was ended rather "
         + "than leave a gap in what was said. What was sent may have been billed."
 
+    /// What a session whose microphone was stopped by a device change ends with. Ended, not
+    /// restarted: the new device needs its format and (for an agent) voice processing set up
+    /// again, and a session that silently switched microphones mid-bill is worse than one Start.
+    static let devicesChanged = "The audio device changed (headphones, or another microphone), which stops the "
+        + "microphone, so the session was ended rather than go on without hearing you. Start again to use the new "
+        + "device. What was sent may have been billed."
+
     @MainActor func realtime() -> ElevenLabsRealtime? {
         client().map { ElevenLabsRealtime(client: $0, connector: connector(), limits: limits) }
     }

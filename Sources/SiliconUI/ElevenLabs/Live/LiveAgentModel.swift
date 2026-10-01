@@ -375,6 +375,9 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             try context.audio().startCapture(echoCancellation: true) { buffer in
                 for chunk in converter.process(buffer) { queue.yield(chunk) }
             }
+            context.audio().onDeviceChange { [weak self] in
+                Task { @MainActor in self?.devicesChanged(token) }
+            }
             microphoneOn = true
         } catch {
             note("The microphone could not start (\(ElevenLabsRedaction.redact(error.localizedDescription))); talk by text instead.")
@@ -530,6 +533,13 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             return
         }
         end(.ended(LiveOutcome.leftScreen), closing: true)
+    }
+
+    /// A device change stopped the microphone (and the echo reference): ended, not left
+    /// billing a conversation that cannot hear.
+    private func devicesChanged(_ token: UUID) {
+        guard guardian.isCurrent(token), isOpen else { return }
+        end(.mayHaveBeenBilled(LiveContext.devicesChanged), closing: true)
     }
 
     /// The socket stopped taking audio for the queue's length: ended, not left with a gap.

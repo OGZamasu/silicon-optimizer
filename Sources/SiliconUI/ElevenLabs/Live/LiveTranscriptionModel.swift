@@ -220,6 +220,9 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
                 try context.audio().startCapture(echoCancellation: false) { buffer in
                     for chunk in converter.process(buffer) { queue.yield(chunk) }
                 }
+                context.audio().onDeviceChange { [weak self] in
+                    Task { @MainActor in self?.devicesChanged(token) }
+                }
                 microphoneOn = true
             } catch {
                 await close(.mayHaveBeenBilled("The microphone could not start: \(ElevenLabsRedaction.redact(error.localizedDescription))."))
@@ -227,6 +230,14 @@ final class LiveTranscriptionModel: ElevenLabsLiveWork {
         case .file:
             if let decodedFile { Task { await send(decodedFile.chunks, total: decodedFile.seconds, converter: converter, token: token) } }
         }
+    }
+
+    /// A device change stopped the microphone: ended, not left listening to nothing.
+    private func devicesChanged(_ token: UUID) {
+        guard guardian.isCurrent(token), isOpen else { return }
+        let closing = stream
+        end(.mayHaveBeenBilled(LiveContext.devicesChanged))
+        Task { await closing?.close() }
     }
 
     /// The socket stopped taking audio for the queue's length: ended, not left with a gap.
