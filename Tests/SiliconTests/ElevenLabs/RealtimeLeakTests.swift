@@ -60,6 +60,19 @@ struct RealtimeLeakTests {
         ("loose-comma", "conversation_signature=ab,SIGleakSECRETzz"),
         ("upper", "TOKEN=SIGleakSECRETzz"),
         ("no-scheme", "api.elevenlabs.io/v1/convai/conversation?agent_id=a&conversation_signature=SIGleakSECRETzz"),
+        // Round 3: a single-quoted value, a stray `%` before an encoded one, and an Authorization
+        // header's credential.
+        ("single-quoted", "conversation_signature='SIGleakSECRETzz'"),
+        ("single-quoted-json", "{'token': 'SIGleakSECRETzz'}"),
+        ("percent-then-invalid", "100% failed: conversation_signature%3DSIGleakSECRETzz"),
+        ("invalid-then-url", "50%off wss%3A%2F%2Fapi.elevenlabs.io%2Fv1%2Fconvai%2Fconversation%3Fconversation_signature%3DSIGleakSECRETzz"),
+        ("bearer", "Authorization: Bearer SIGleakSECRETzz"),
+        ("bearer-quoted", #"{"authorization": "Bearer SIGleakSECRETzz"}"#),
+        ("basic", "authorization=Basic SIGleakSECRETzz"),
+        ("token-scheme", "Authorization: Token SIGleakSECRETzz"),
+        ("lone-bearer", "the header was Bearer SIGleakSECRETzz"),
+        ("url-in-parens-with-comma", "(see wss://api.elevenlabs.io/v1/convai/conversation?agent_id=a&token=x,SIGleakSECRETzz)"),
+        ("nserror", #"Error Domain=NSPOSIXErrorDomain Code=57 "Socket is not connected" UserInfo={NSErrorFailingURLStringKey=wss://api.elevenlabs.io/v1/convai/conversation?agent_id=a&conversation_signature=SIGleakSECRETzz}"#),
     ])
     func aSignatureIsMaskedInEveryShape(name: String, text: String) {
         let scrubbed = ElevenLabsRealtimeRedaction.scrub(text)
@@ -69,7 +82,8 @@ struct RealtimeLeakTests {
 
     /// Ordinary text is left as it is: a percent sign, a colon, a word that only contains "token".
     @Test func ordinaryTextIsLeftAlone() {
-        for text in ["50% done", "next_page_token=keep", "status: ok", "agent_id=agent_1", "tokens used: 12"] {
+        for text in ["50% done", "next_page_token=keep", "status: ok", "agent_id=agent_1", "tokens used: 12",
+                     "100% of 50%", "the Basic plan", "the bearer of news", "Bearer of bad news"] {
             #expect(ElevenLabsRealtimeRedaction.scrub(text) == text, "\(text)")
         }
     }

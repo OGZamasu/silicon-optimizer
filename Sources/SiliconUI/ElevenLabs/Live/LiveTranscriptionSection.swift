@@ -54,7 +54,7 @@ struct LiveTranscriptionScreen: View {
                 } else {
                     Picker("Commit", selection: $screen.commitStrategy) {
                         Text("At pauses (recommended)").tag(ElevenLabsTranscriptionStreamConfig.CommitStrategy.vad)
-                        Text("When I press Stop").tag(ElevenLabsTranscriptionStreamConfig.CommitStrategy.manual)
+                        Text(screen.context.transcription.handCommitLabel).tag(ElevenLabsTranscriptionStreamConfig.CommitStrategy.manual)
                     }
                     .frame(maxWidth: 360)
                 }
