@@ -61,4 +61,29 @@ struct RealtimeFollowUpTests {
         #expect(socket.sentJSON.last == ["type": "user_message", "text": "last words"])
         #expect(socket.closedByClient?.code == 1000)
     }
+
+    /// A start that is cancelled while the agent has not answered yet ends at once — cancelled,
+    /// the socket closed — instead of waiting out the start timeout.
+    @Test func aCancelledStartDoesNotWaitForTheAgent() async throws {
+        var rig = RealtimeRig(server: { socket in _ = await socket.nextSent() })
+        rig.realtime.limits.agentStartTimeout = 10
+        defer { rig.clean() }
+        let realtime = rig.realtime
+        let start = Task { try await realtime.agentConversation(.init(agentID: "agent_1", auth: .publicAgent)) }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while rig.connector.sockets.first?.sentJSON.isEmpty != false, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let socket = try #require(rig.connector.sockets.first)
+        let cancelled = ContinuousClock.now
+        start.cancel()
+        let result = await start.result
+        #expect(ContinuousClock.now - cancelled < .seconds(2))
+        guard case .failure(let error) = result else {
+            Issue.record("a cancelled start came back with a conversation")
+            return
+        }
+        #expect(error as? ElevenLabsRealtimeError == .cancelled)
+        #expect(socket.closedByClient != nil)
+    }
 }

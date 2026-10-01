@@ -154,6 +154,8 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     @ObservationIgnored private var toolLines: [String: Int] = [:]
     /// The devices were touched this conversation and must be let go when it ends.
     @ObservationIgnored private var holdsAudio = false
+    /// The connect in progress, cancelled by Cancel, leaving or another account.
+    @ObservationIgnored private var connecting: Task<ElevenLabsAgentConversation, any Error>?
 
     /// How long an approval waits when ElevenLabs does not say.
     static let defaultApprovalTimeout: TimeInterval = 300
@@ -327,13 +329,21 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         let token = guardian.begin(client: realtime.client, work: self)
         var config = ElevenLabsAgentConversationConfig(agentID: agentID, auth: .automatic, textOnly: textOnly)
         config.userID = nil
+        // Its own task, so Cancel (or leaving, or another account) stops the connect itself:
+        // the socket is closed at once instead of being opened, initiated and ended later.
+        let connect = Task { try await realtime.agentConversation(config, preflight: preflight) }
+        connecting = connect
         let conversation: ElevenLabsAgentConversation
         do {
-            conversation = try await realtime.agentConversation(config, preflight: preflight)
+            conversation = try await connect.value
         } catch {
-            if guardian.isCurrent(token) { end(LiveOutcome.failedToStart(error), closing: false) }
+            if guardian.isCurrent(token) {
+                connecting = nil
+                end(LiveOutcome.failedToStart(error), closing: false)
+            }
             return
         }
+        if guardian.isCurrent(token) { connecting = nil }
         guard guardian.isCurrent(token), phase == .connecting else {
             await conversation.end()
             return
@@ -555,6 +565,8 @@ final class LiveAgentModel: ElevenLabsLiveWork {
     /// Ends the session here. `closing` ends the conversation on the socket too — declining every
     /// approval still waiting first.
     private func end(_ outcome: LiveOutcome, closing: Bool) {
+        connecting?.cancel()
+        connecting = nil
         if let conversation { usage = conversation.usage }
         let closingConversation = closing ? conversation : nil
         stopMicrophone()

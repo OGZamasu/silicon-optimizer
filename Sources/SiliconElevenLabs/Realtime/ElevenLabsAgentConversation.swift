@@ -680,19 +680,25 @@ public final class ElevenLabsAgentConversation: @unchecked Sendable {
 
     // MARK: Receiving
 
+    /// The metadata, the timeout, the socket's end, or the caller's cancellation — whichever
+    /// comes first. A cancelled start closes the socket at once rather than waiting the agent out.
     private func waitForMetadata(timeout: TimeInterval) async throws -> ElevenLabsAgentMetadata {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(Int(max(timeout, 0.1) * 1_000)))
             self?.settleStart(.failure(.timedOut("the agent did not start the conversation within \(Int(timeout)) seconds")))
         }
         defer { timer.cancel() }
-        return try await withCheckedThrowingContinuation { continuation in
-            let known: Result<ElevenLabsAgentMetadata, ElevenLabsRealtimeError>? = lock.withLock {
-                if let startResult { return startResult }
-                started = continuation
-                return nil
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let known: Result<ElevenLabsAgentMetadata, ElevenLabsRealtimeError>? = lock.withLock {
+                    if let startResult { return startResult }
+                    started = continuation
+                    return nil
+                }
+                if let known { continuation.resume(with: known.mapError { $0 as any Error }) }
             }
-            if let known { continuation.resume(with: known.mapError { $0 as any Error }) }
+        } onCancel: {
+            self.settleStart(.failure(.cancelled))
         }
     }
 

@@ -86,4 +86,34 @@ struct LiveFollowUpTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(rig.connector.requests.isEmpty)
     }
+
+    /// Cancel while connecting stops the connect itself: the socket is closed at once, not
+    /// held open until the agent's metadata arrives (seconds later) and ended then.
+    @Test func cancellingWhileConnectingClosesTheSocketAtOnce() async throws {
+        let rig = LiveRig(replies: LiveScreenTests.agentReplies(), server: { socket in
+            guard await socket.nextSent() != nil else { return }
+            // A slow agent: the metadata comes two seconds after the initiation.
+            try? await Task.sleep(for: .seconds(2))
+            socket.push(["type": "conversation_initiation_metadata", "conversation_initiation_metadata_event": [
+                "conversation_id": "conv_late", "agent_output_audio_format": "pcm_16000", "user_input_audio_format": "pcm_16000",
+            ]])
+        })
+        defer { rig.clean() }
+        let screen = LiveAgentModel(context: rig.context)
+        await screen.loadAgents()
+        screen.textOnly = true
+        let starting = Task { await screen.requestStart() }
+        await rig.until { rig.connector.sockets.first?.sentJSON.isEmpty == false }
+        let socket = try #require(rig.connector.sockets.first)
+        #expect(screen.phase == .connecting)
+        let cancelled = ContinuousClock.now
+        screen.cancelStart()
+        await rig.until { socket.closedByClient != nil }
+        #expect(socket.closedByClient != nil)
+        #expect(ContinuousClock.now - cancelled < .seconds(1), "the socket stayed open until the agent answered")
+        await starting.value
+        #expect(screen.phase == .ended)
+        #expect(screen.conversationID == nil)
+        #expect(rig.connector.requests.count == 1)
+    }
 }

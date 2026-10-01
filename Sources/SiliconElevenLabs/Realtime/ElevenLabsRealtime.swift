@@ -128,6 +128,11 @@ public struct ElevenLabsRealtime: Sendable {
         }
         // The signed URL lives in `request` for the length of this call and nowhere else.
         let socket = try await open(request)
+        // Cancelled while it opened: closed before anything is sent.
+        if Task.isCancelled {
+            await socket.close(code: ElevenLabsSocketClose.normalClosure, reason: "User ended conversation")
+            throw ElevenLabsRealtimeError.cancelled
+        }
         return try await ElevenLabsAgentConversation.start(
             on: socket, config: config, initiation: initiation, startTimeout: limits.agentStartTimeout
         )
