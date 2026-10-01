@@ -141,6 +141,11 @@ final class VoicesStudioActions {
     /// the read of an item the owner opened meanwhile, nor is abandoned by it.
     static let afterChange = "after-change"
 
+    /// `afterChange` for one item: a runner per item, so two changes to two items that finish
+    /// close together each fetch their own item again — the second never abandons the first's
+    /// read. A newer refetch of the same item still replaces an older one.
+    static func afterChange(of id: String) -> String { "\(afterChange)/\(id)" }
+
     private static func key(_ operationID: String, _ slot: String?) -> String {
         slot.map { "\(operationID)#\($0)" } ?? operationID
     }

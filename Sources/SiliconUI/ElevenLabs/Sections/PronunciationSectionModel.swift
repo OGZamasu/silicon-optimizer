@@ -244,7 +244,7 @@ final class PronunciationSectionModel {
     /// After a change to dictionary `id`: fetch it again on a runner of its own (the read of a
     /// dictionary opened meanwhile is not abandoned); the screen takes it only while it is open.
     private func refetch(_ id: String) async {
-        await fetch(id, slot: VoicesStudioActions.afterChange)
+        await fetch(id, slot: VoicesStudioActions.afterChange(of: id))
     }
 
     /// Whether dictionary `id` is still the one open — the only one whose rule editor and marks a

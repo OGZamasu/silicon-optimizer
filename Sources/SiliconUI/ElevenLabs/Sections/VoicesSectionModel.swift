@@ -598,7 +598,7 @@ final class VoicesSectionModel {
     /// After a change to `voiceID`: fetch it again, onto the screen only while it is still the
     /// one open (its own runner, so the read of a voice opened meanwhile is not abandoned).
     private func refetch(_ voiceID: String) async {
-        await reloadSelected(voiceID, slot: VoicesStudioActions.afterChange)
+        await reloadSelected(voiceID, slot: VoicesStudioActions.afterChange(of: voiceID))
     }
 
     /// Whether `voiceID` is still the voice the owner has open — the only one whose drafts a

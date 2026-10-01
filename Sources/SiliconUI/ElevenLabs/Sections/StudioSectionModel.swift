@@ -511,7 +511,7 @@ final class StudioSectionModel {
     /// form) only while it is still the project open — its own runner, so the read of a project
     /// opened meanwhile is not abandoned.
     private func refetch(_ projectID: String) async {
-        await reloadSelected(projectID, slot: VoicesStudioActions.afterChange)
+        await reloadSelected(projectID, slot: VoicesStudioActions.afterChange(of: projectID))
     }
 
     /// Whether `projectID` is still the project the owner has open — the only one whose chapter
