@@ -91,10 +91,13 @@ enum ElevenLabsTools {
         /// Arguments of which exactly one must be given (`file` or `source_url`).
         var oneOf: [String]? = nil
         var render: @Sendable (JSONValue) -> String = { ElevenLabsTools.describeResult($0) }
+        /// What a cancel does not stop, said last; nil for a tool that spends nothing.
+        var cancelNote: String? = ElevenLabsTools.cancelDoesNotStop
 
         var tool: Tools.Tool {
             Tools.Tool(
-                name: name, description: description,
+                name: name,
+                description: cancelNote.map { description + " " + $0 } ?? description,
                 properties: Dictionary(uniqueKeysWithValues: arguments.map { ($0.name, $0.schema) }),
                 required: arguments.filter(\.required).map(\.name)
             )
@@ -120,6 +123,16 @@ enum ElevenLabsTools {
 
     // MARK: - The tools
 
+    /// `POST /elevenlabs/call` runs to its end in the app whether or not its caller is still
+    /// there, so a cancel in the MCP client only drops the answer. Said as exactly as each tool
+    /// costs: credits, a voice slot, or — through `elevenlabs_call` — whatever the operation costs.
+    static let cancelDoesNotStop =
+        "Cancelling the call does not stop ElevenLabs from doing and billing it."
+    static let cancelDoesNotStopTheClone =
+        "Cancelling the call does not stop ElevenLabs from making the clone, which takes the voice slot."
+    static let cancelDoesNotStopTheOperation =
+        "Cancelling the call does not stop ElevenLabs from doing it, or from billing it if the operation costs anything."
+
     static let curated: [Curated] = [
         Curated(
             name: "elevenlabs_list_voices", operation: "get_user_voices_v2",
@@ -138,7 +151,8 @@ enum ElevenLabsTools {
                 .init(name: "sort", kind: .string, description: "created_at_unix or name."),
                 .init(name: "sort_direction", kind: .string, choices: ["asc", "desc"], description: "Sort order."),
             ],
-            render: { describeVoices($0) }
+            render: { describeVoices($0) },
+            cancelNote: nil
         ),
         Curated(
             name: "elevenlabs_speak", operation: "text_to_speech_full",
@@ -277,7 +291,8 @@ enum ElevenLabsTools {
                 .init(name: "description", kind: .string, description: "How the voice sounds."),
                 .init(name: "remove_background_noise", kind: .boolean, description: "Clean the samples first."),
                 .init(name: "labels", kind: .objectOrString, description: "language, accent, gender, age — e.g. {\"accent\": \"en-US\"}."),
-            ]
+            ],
+            cancelNote: cancelDoesNotStopTheClone
         ),
         Curated(
             name: "elevenlabs_design_voice", operation: "text_to_voice_design",
@@ -355,7 +370,7 @@ enum ElevenLabsTools {
             (deleting, phone calls, invitations, API keys, webhooks, secrets) run only with \
             confirm: true after the user has agreed, and only if the owner allows agents to in \
             Settings → ElevenLabs. A newly created API key is never shown over MCP; make it in \
-            the app.
+            the app. \(cancelDoesNotStopTheOperation)
             """,
         properties: [
             "operation": Tools.property("string", "The operation id, from elevenlabs_search_operations."),

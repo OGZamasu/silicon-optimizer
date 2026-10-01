@@ -21,16 +21,29 @@ public struct ControlClient: Sendable {
     }
 
     private let session: URLSession
+    private let handshakeURL: URL
 
     public init() {
-        self.session = URLSession(configuration: Self.sessionConfiguration())
+        self.init(handshakeURL: ControlAPI.handshakeURL)
     }
+
+    /// A client of whichever control server published `handshakeURL` — a test's own.
+    init(handshakeURL: URL) {
+        self.session = URLSession(configuration: Self.sessionConfiguration())
+        self.handshakeURL = handshakeURL
+    }
+
+    /// Requests that may be open at once. The MCP bridge runs up to eight tool calls side by
+    /// side, and a render or a conversation holds its connection for minutes; URLSession's
+    /// default of six per host would leave a seventh call queued inside it, unsent.
+    public static let maximumConnections = 8
 
     static func sessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         // The app holds /video/generate open through the node's queue and render.
         configuration.timeoutIntervalForRequest = TimeInterval(VideoGenerationBudget.controlSeconds)
         configuration.timeoutIntervalForResource = TimeInterval(VideoGenerationBudget.controlSeconds)
+        configuration.httpMaximumConnectionsPerHost = maximumConnections
         return configuration
     }
 
@@ -40,7 +53,7 @@ public struct ControlClient: Sendable {
 
     /// Reads the handshake the running app publishes. Absent file means the app is not running.
     private func handshake() throws -> ControlAPI.Handshake {
-        guard let data = try? Data(contentsOf: ControlAPI.handshakeURL),
+        guard let data = try? Data(contentsOf: handshakeURL),
               let handshake = try? JSONDecoder().decode(ControlAPI.Handshake.self, from: data)
         else { throw ClientError.appNotRunning }
 
@@ -91,7 +104,7 @@ public struct ControlClient: Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw Self.transportError(error)
+            throw Self.transportError(error) { isSameApp(as: handshake) }
         }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? 500
@@ -103,11 +116,40 @@ public struct ControlClient: Sendable {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    static func transportError(_ error: Error) -> Error {
+    /// Whether the app that published `earlier` is still the one answering: its handshake is
+    /// still there, its process is alive, and it names the same process, port and token — a
+    /// token is new every launch, so a relaunched app is a different one.
+    private func isSameApp(as earlier: ControlAPI.Handshake) -> Bool {
+        guard let now = try? handshake() else { return false }
+        return now.pid == earlier.pid && now.port == earlier.port && now.token == earlier.token
+    }
+
+    /// - Parameter appStillUp: Asked only when the connection closed without an answer, which
+    ///   is how both a busy server and an app that quit or crashed mid-call look from here.
+    static func transportError(_ error: Error, appStillUp: () -> Bool = { true }) -> Error {
         guard let urlError = error as? URLError else { return error }
         switch urlError.code {
         case .cannotConnectToHost, .cannotFindHost:
             return ClientError.appNotRunning
+        case .networkConnectionLost:
+            // A request the app was working on when it quit or crashed may have been done —
+            // and billed — before it stopped. "Busy, try again" would invite paying twice.
+            guard appStillUp() else {
+                return ClientError.transport(
+                    "Silicon Optimizer stopped (it quit or crashed) before answering. It may "
+                    + "have done some or all of the work first: a paid call may already have "
+                    + "run and been billed, so check before asking again."
+                )
+            }
+            // The same app is still up, so this is most likely a control server out of
+            // connections: past its budget it closes a connection unread.
+            return ClientError.transport(
+                "Silicon Optimizer closed the connection without answering. It is most likely "
+                + "busy, with too many requests open at once (each MCP bridge can hold eight): "
+                + "wait for some to finish, then try again. If this was a paid call it may "
+                + "still have run, so check before repeating it. If this keeps happening, check "
+                + "that the app is still running."
+            )
         case .timedOut:
             return ClientError.transport(
                 "The request exceeded its time limit. The app or node may still be working; "

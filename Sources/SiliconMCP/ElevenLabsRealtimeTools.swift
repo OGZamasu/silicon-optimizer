@@ -20,8 +20,9 @@ enum ElevenLabsRealtimeTools {
             must allow text-only conversations. Limits: at most \(ElevenLabsControl.maximumConverseMessages) \
             messages, \(ElevenLabsControl.converseTurnSeconds) s for each answer, \
             \(ElevenLabsControl.converseTotalSeconds) s for the whole conversation, and one conversation at a \
-            time (a second call while one runs is refused — do not retry a call that is still running). For \
-            speech or transcription use elevenlabs_speak and elevenlabs_transcribe instead.
+            time (a second call while one runs is refused — do not retry a call that is still running). \
+            Cancelling the call ends the conversation. For speech or transcription use elevenlabs_speak \
+            and elevenlabs_transcribe instead.
             """,
         properties: [
             "agent_id": Tools.property("string", "The agent, e.g. agent_…; list agents with elevenlabs_call get_agents_route."),
