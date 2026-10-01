@@ -158,4 +158,25 @@ extension AgentsSectionsTests {
         await model.updateTicket(priority: "")
         #expect(rig.body(AgentsOp.updateTicket) == ["priority": .null], "None clears it")
     }
+
+    /// The crawl form has no link-depth control: the spec marks `max_depth` a deprecated no-op,
+    /// so a stepper for it changed nothing. A crawl started from the screen does not send it,
+    /// and what it sends resolves in the spec. The operation stays whole in the Explorer.
+    @Test func aCrawlSendsNoDeprecatedLinkDepth() async throws {
+        let rig = AgentsFixtures.Rig(overriding: [AgentsOp.createCrawl: .json(["id": "crawl_new"])])
+        defer { rig.clean() }
+        let operation = try #require(ElevenLabsCatalog.operation(AgentsOp.createCrawl))
+        #expect(operation.body?.schema["properties"]["max_depth"]["deprecated"] == true,
+                "the catalog (and so the Explorer) still has max_depth, marked deprecated")
+        #expect(!AgentKnowledgeModel.arguments.contains(AgentsArgument(AgentsOp.createCrawl, "max_depth")))
+        let model = rig.store.knowledge
+        model.addKind = .crawl
+        model.addURL = "https://example.com/help"
+        model.crawlMaxPages = 50
+        await model.add()
+        let body = try #require(rig.body(AgentsOp.createCrawl))
+        #expect(body["max_depth"] == .null, "a deprecated no-op was sent: \(body)")
+        #expect(body["url"] == "https://example.com/help" && body["max_pages"] == 50)
+        #expect(try AgentsSpec.shared().unresolved(body: body, operationID: AgentsOp.createCrawl).isEmpty)
+    }
 }

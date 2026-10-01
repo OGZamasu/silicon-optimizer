@@ -108,7 +108,6 @@ final class AgentKnowledgeModel {
     var autoSync = false
     var syncDays = 7
     var crawlMaxPages = 100
-    var crawlMaxDepth = 3
 
     // Overview and crawls
     private(set) var overview: JSONValue = .null
@@ -219,7 +218,8 @@ final class AgentKnowledgeModel {
             operation = AgentsOp.createCrawl
             arguments["url"] = .string(addURL.trimmingCharacters(in: .whitespaces))
             arguments["max_pages"] = .number(Double(crawlMaxPages))
-            arguments["max_depth"] = .number(Double(crawlMaxDepth))
+            // No link depth: the spec marks `max_depth` a deprecated no-op, so a control for it
+            // would change nothing. The Explorer still reaches the whole operation.
             if autoSync {
                 arguments["enable_auto_sync"] = true
                 arguments["minimum_frequency_days"] = .number(Double(syncDays))
@@ -524,7 +524,7 @@ final class AgentKnowledgeModel {
         AgentsArgument(AgentsOp.createURLDocument, "enable_auto_sync"),
         AgentsArgument(AgentsOp.createURLDocument, "minimum_frequency_days"),
         AgentsArgument(AgentsOp.createCrawl, "url"), AgentsArgument(AgentsOp.createCrawl, "max_pages"),
-        AgentsArgument(AgentsOp.createCrawl, "max_depth"), AgentsArgument(AgentsOp.createCrawl, "parent_folder_id"),
+        AgentsArgument(AgentsOp.createCrawl, "parent_folder_id"),
         AgentsArgument(AgentsOp.createCrawl, "enable_auto_sync"), AgentsArgument(AgentsOp.createCrawl, "minimum_frequency_days"),
         AgentsArgument(AgentsOp.createTextDocument, "text"), AgentsArgument(AgentsOp.createTextDocument, "name"),
         AgentsArgument(AgentsOp.createTextDocument, "parent_folder_id"),
@@ -609,7 +609,6 @@ private struct AgentKnowledgeAddCard: View {
                         Stepper("At most \(model.crawlMaxPages) pages", value: $model.crawlMaxPages,
                                 in: Int(AgentsSchema.range(AgentsOp.createCrawl, "max_pages", fallback: 1...10_000).lowerBound)...Int(AgentsSchema.range(AgentsOp.createCrawl, "max_pages", fallback: 1...10_000).upperBound),
                                 step: 10)
-                        Stepper("Follow links \(model.crawlMaxDepth) deep", value: $model.crawlMaxDepth, in: 1...10)
                     }
                     Toggle("Keep it in sync with the site", isOn: $model.autoSync)
                     if model.autoSync {
