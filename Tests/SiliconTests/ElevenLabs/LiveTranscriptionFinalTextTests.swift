@@ -58,6 +58,7 @@ struct LiveTranscriptionFinalTextTests {
         defer { rig.clean() }
         var context = rig.context
         context.transcription.commitEvery = 1
+        context.transcription.commitCap = 1  // a loud sine: never quiet, so the cap commits
         let screen = LiveTranscriptionModel(context: context)
         screen.source = .file
         screen.file = url
@@ -71,6 +72,44 @@ struct LiveTranscriptionFinalTextTests {
         let exported = try await Self.exportedText(screen)
         #expect(exported.contains("and the last one and a half"))
         #expect(exported.contains("the first twenty seconds"))
+    }
+
+    /// The critic's round-3 probe: the held periodic commit is answered twice, both landing after
+    /// Stop's commit, and Stop's own answer 400 ms later. The duplicate brings the count up to the
+    /// commits sent; Stop still waits for a quiet moment, so its own answer is not lost.
+    @Test func aDuplicateAnswerAfterStopDoesNotEndTheWait() async throws {
+        let folder = try Self.scratch()
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let url = try Self.wav(seconds: 1.5, in: folder)
+        let rig = LiveRig(server: { socket in
+            socket.push(["message_type": "session_started", "session_id": "s1", "config": [:]])
+            var commits = 0
+            while let message = await socket.nextSent(timeout: .seconds(60)) {
+                guard message["commit"] == true else { continue }
+                commits += 1
+                guard commits == 2 else { continue }
+                socket.push(["message_type": "committed_transcript", "text": "part one"])
+                socket.push(["message_type": "committed_transcript", "text": "part one"])
+                try? await Task.sleep(for: .milliseconds(400))
+                socket.push(["message_type": "committed_transcript", "text": "the last part"])
+            }
+        })
+        defer { rig.clean() }
+        var context = rig.context
+        context.transcription.commitEvery = 1
+        context.transcription.commitCap = 1  // a loud sine: never quiet, so the cap commits
+        // The quiet after the count is reached, far longer than the 400 ms to Stop's own answer.
+        context.transcription.finalQuiet = .seconds(3)
+        let screen = LiveTranscriptionModel(context: context)
+        screen.source = .file
+        screen.file = url
+        await screen.start()
+        await rig.until { screen.phase == .ended }
+        try #require(screen.phase == .ended)
+        #expect(screen.segments.last?.text == "the last part", "\(screen.segments.map(\.text))")
+        #expect(screen.outcome.map { !$0.message.contains("may be missing") } == true)
+        let exported = try await Self.exportedText(screen)
+        #expect(exported.contains("the last part"))
     }
 
     /// Committing by hand from the microphone, the app commits every `commitEvery` seconds too, so
@@ -88,6 +127,7 @@ struct LiveTranscriptionFinalTextTests {
         defer { rig.clean() }
         var context = rig.context
         context.transcription.commitEvery = 0.3
+        context.transcription.commitCap = 0.3  // a loud sine: never quiet, so the cap commits
         let screen = LiveTranscriptionModel(context: context)
         screen.commitStrategy = .manual
         await screen.start()
@@ -197,5 +237,79 @@ struct LiveTranscriptionFinalTextTests {
             return
         }
         #expect(message.contains(LiveTranscriptionModel.lastWordsMayBeMissing) == pending, "\(message)")
+    }
+
+    // MARK: - Committing by hand at a quiet moment
+
+    /// The audio bytes sent before the first commit.
+    static func bytesBeforeFirstCommit(_ socket: FakeElevenLabsSocket) -> Int {
+        var bytes = 0
+        for message in socket.sentJSON {
+            if message["commit"] == true { return bytes }
+            bytes += Data(base64Encoded: message["audio_base_64"].stringValue ?? "")?.count ?? 0
+        }
+        return bytes
+    }
+
+    /// Past the interval while someone is speaking, the commit waits for the next quiet moment,
+    /// so the word is not cut.
+    @Test func aCommitByHandWaitsForAQuietMoment() async throws {
+        let rig = LiveRig(server: Self.answeringEveryCommit())
+        defer { rig.clean() }
+        var context = rig.context
+        context.transcription.commitEvery = 0.3
+        context.transcription.commitCap = 5
+        let screen = LiveTranscriptionModel(context: context)
+        screen.commitStrategy = .manual
+        await screen.start()
+        rig.audio.hear(seconds: 0.6, amplitude: 0.5)    // speech, past the 0.3 s interval
+        rig.audio.hear(seconds: 0.3, amplitude: 0.0005) // then a pause
+        let socket = try #require(rig.connector.sockets.first)
+        await rig.until { socket.sentJSON.contains { $0["commit"] == true } }
+        let bytes = Self.bytesBeforeFirstCommit(socket)
+        // Not at 0.3 s (9,600 bytes) mid-word: after the 0.6 s of speech (19,200), give or take
+        // the resampler's latency.
+        #expect(bytes >= 17_600, "committed after \(bytes) bytes, inside the speech")
+        await screen.stop()
+        #expect(screen.outcome.map { !$0.message.contains("may be missing") } == true)
+    }
+
+    /// A loud room is never quiet: the commit is made at the cap anyway, before ElevenLabs would
+    /// make its own.
+    @Test func aLoudRoomStillCommitsAtTheCap() async throws {
+        let rig = LiveRig(server: Self.answeringEveryCommit())
+        defer { rig.clean() }
+        var context = rig.context
+        context.transcription.commitEvery = 0.3
+        context.transcription.commitCap = 0.6
+        let screen = LiveTranscriptionModel(context: context)
+        screen.commitStrategy = .manual
+        await screen.start()
+        rig.audio.hear(seconds: 1.0, amplitude: 0.5)
+        let socket = try #require(rig.connector.sockets.first)
+        await rig.until { socket.sentJSON.contains { $0["commit"] == true } }
+        let bytes = Self.bytesBeforeFirstCommit(socket)
+        #expect((19_200...22_400).contains(bytes), "committed after \(bytes) bytes; the cap is 0.6 s (19,200)")
+        await screen.stop()
+    }
+
+    /// The picker says what committing by hand does now.
+    @Test func theHandCommitChoiceSaysItAlsoCommitsAsItGoes() {
+        let label = LiveTranscriptionTiming().handCommitLabel
+        #expect(label.contains("Stop"))
+        #expect(label.contains("20–28 s"))
+        #expect(label.contains("quiet"))
+    }
+
+    nonisolated static func answeringEveryCommit() -> FakeElevenLabsSocketConnector.Server {
+        { socket in
+            socket.push(["message_type": "session_started", "session_id": "s1", "config": [:]])
+            var commits = 0
+            while let message = await socket.nextSent(timeout: .seconds(60)) {
+                guard message["commit"] == true else { continue }
+                commits += 1
+                socket.push(["message_type": "committed_transcript", "text": .string("part \(commits)")])
+            }
+        }
     }
 }
