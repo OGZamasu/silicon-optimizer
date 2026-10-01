@@ -187,4 +187,72 @@ struct VoicesStudioLostAnswerTests {
         try await answering(model.actions) { await model.create() }
         #expect(fixture.sent("create_workspace_webhook_route").count == 2)
     }
+
+    // MARK: - Workspace: invitations and sign-in connections
+
+    func workspaceFixture(_ made: Made) -> VoicesStudioFixture {
+        VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "invite_user", "invite_users_bulk":
+                return made.answer(request.operationID, .json(["status": "ok"]))
+            case "create_auth_connection":
+                return made.answer(request.operationID, .json(["id": "ac-new"]))
+            case "list_auth_connections":
+                return .json(["auth_connections": []])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+    }
+
+    /// An invitation sent, its answer lost: it may have gone, and sending again would email
+    /// the same person twice. Inviting is held — one address or several — until the owner has
+    /// checked; the addresses stay typed. (Before: nothing was held.)
+    @Test func anInvitationWhoseAnswerWasLostHoldsInvitingUntilTheOwnerHasChecked() async throws {
+        let made = Made()
+        made.lose("invite_user")
+        let fixture = workspaceFixture(made)
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        model.inviteEmails = "sam@example.com"
+        try await answering(model.actions) { await model.invite() }
+        #expect(made.count("invite_user") == 1)
+        #expect(model.inviteEmails == "sam@example.com")
+        #expect(model.invitationsHeld == WorkspaceSectionModel.lostInviteMessage(["sam@example.com"]))
+        try await answering(model.actions) { await model.invite() }
+        #expect(fixture.sent("invite_user").count == 1, "the invitation was sent a second time")
+        model.inviteEmails = "sam@example.com, kim@example.com"
+        try await answering(model.actions) { await model.invite() }
+        #expect(fixture.sent("invite_users_bulk").isEmpty, "inviting several people was not held")
+        #expect(model.inviteProblems == [WorkspaceSectionModel.lostInviteMessage(["sam@example.com"])])
+        model.actions.acknowledgeHeldCreate("invite_user")
+        try await answering(model.actions) { await model.invite() }
+        #expect(fixture.sent("invite_users_bulk").count == 1)
+    }
+
+    /// A sign-in connection created, its answer lost: it may exist, holding the credentials
+    /// typed. The connections are read at once, the form keeps what was typed, and a second
+    /// create is held until the owner has checked.
+    @Test func aSignInConnectionCreatedWithItsAnswerLostIsHeldUntilTheOwnerHasChecked() async throws {
+        let made = Made()
+        made.lose("create_auth_connection")
+        let fixture = workspaceFixture(made)
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        model.newConnectionType = "bearer_auth"
+        let form = try #require(model.connectionForm("create_auth_connection", authType: "bearer_auth"))
+        for node in form.nodes where node.field.required {
+            if case .text = node.field.kind { node.text = node.field.name == "name" ? "Search API" : "value-for-test" }
+        }
+        try await answering(model.actions) { await model.createConnection() }
+        #expect(made.count("create_auth_connection") == 1)
+        #expect(fixture.sent("list_auth_connections").count == 1, "the connections were not read after a lost answer")
+        #expect(form.nodes.contains { $0.text == "Search API" }, "the form was cleared")
+        #expect(model.actions.heldCreate("create_auth_connection") == WorkspaceSectionModel.lostConnectionMessage("Search API"))
+        try await answering(model.actions) { await model.createConnection() }
+        #expect(made.count("create_auth_connection") == 1, "a second connection was made after the first one's answer was lost")
+        model.actions.acknowledgeHeldCreate("create_auth_connection")
+        try await answering(model.actions) { await model.createConnection() }
+        #expect(made.count("create_auth_connection") == 2)
+    }
 }

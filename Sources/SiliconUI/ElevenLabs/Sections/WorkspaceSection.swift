@@ -107,6 +107,8 @@ struct WorkspaceInvitesCard: View {
                 Button("Send invitations…") { Task { await model.invite() } }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
+                    .disabled(model.invitationsHeld != nil)
+                    .help(model.invitationsHeld ?? "Send the invitations")
             }
             Divider()
             Text("Withdraw an invitation").font(.headline)
@@ -283,6 +285,8 @@ struct WorkspaceConnectionsCard: View {
                 Button("Create connection…") { Task { await model.createConnection() } }
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
+                    .disabled(model.actions.heldCreate("create_auth_connection") != nil)
+                    .help(model.actions.heldCreate("create_auth_connection") ?? "Create the connection")
             }
         }
     }
