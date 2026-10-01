@@ -800,8 +800,15 @@ final class StudioSectionModel {
         return arguments
     }
 
+    /// Whether Save chapter has anything to send: a new name, or paragraphs edited in a chapter
+    /// whose content can be written back. Without either the call would carry only its ids.
+    var chapterHasChanges: Bool {
+        guard let arguments = chapterArguments() else { return false }
+        return arguments["name"] != nil || arguments["content"] != nil
+    }
+
     func saveChapter() async {
-        guard let arguments = chapterArguments(), let chapter, let projectID = selected?.id,
+        guard chapterHasChanges, let arguments = chapterArguments(), let chapter, let projectID = selected?.id,
               await actions.perform("edit_chapter", arguments, title: "Edit \(chapter.name)") != nil else { return }
         // Another project or chapter may be open by now: reopen this one only if it still is.
         guard isOpen(projectID) else { return }

@@ -629,4 +629,35 @@ struct VoicesStudioStaleValueTests {
         await model.select("o-a")                         // Try again
         #expect(model.selected?.name == "New name")
     }
+
+    // MARK: - Round 3: a chapter save with nothing to save
+
+    /// Save chapter with nothing changed (or only paragraphs of a chapter whose content cannot
+    /// be written back) would send `edit_chapter` with only its ids: it sends nothing.
+    @Test func aChapterSaveWithNothingChangedSendsNothing() async throws {
+        let blocks: [JSONValue] = [["block_id": "b1", "nodes": [["type": "tts_node", "text": "It was late.", "voice_id": "v2"]]]]
+        let chapter = VoicesStudioStudioTests.chapter("c1", name: "One", blocks: blocks)
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_chapter_by_id_endpoint": return .json(chapter)
+            case "get_chapter_snapshots": return .json(["snapshots": []])
+            case "get_chapters": return .json(["chapters": []])
+            case "edit_chapter": return .json(["status": "ok"])
+            default: return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: VoicesStudioStudioTests.project("p-a")))
+        model.load(projects: [project], selected: project)
+        await model.openChapter("c1")
+        #expect(!model.chapterHasChanges)
+        try await answering(model.actions) { await model.saveChapter() }
+        #expect(fixture.sent("edit_chapter").isEmpty, "a save with nothing to save went out")
+        model.chapterName = "One, renamed"
+        #expect(model.chapterHasChanges)
+        try await answering(model.actions) { await model.saveChapter() }
+        #expect(fixture.sent("edit_chapter").count == 1)
+        #expect(body(fixture, "edit_chapter").contains("One, renamed"))
+    }
 }

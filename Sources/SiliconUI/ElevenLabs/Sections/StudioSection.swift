@@ -376,7 +376,8 @@ struct StudioChapterEditor: View {
                 }
                 Spacer()
                 Button("Save chapter") { Task { await model.saveChapter() } }
-                    .disabled(model.blockEdits.isEmpty && model.chapterName == chapter.name)
+                    .disabled(!model.chapterHasChanges)
+                    .help(model.chapterHasChanges ? "Save the chapter's new name and edited paragraphs" : "Nothing to save")
             }
             if !model.chapterSnapshots.isEmpty {
                 Divider()
