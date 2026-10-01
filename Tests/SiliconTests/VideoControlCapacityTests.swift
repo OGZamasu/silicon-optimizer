@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import SiliconControl
+@testable import SiliconMCP
 
 @Suite("Video control connection capacity")
 struct VideoControlCapacityTests {
@@ -275,4 +276,97 @@ private actor WaitingVideoHost: ControlHost {
         throw TestControlError.unexpectedRoute
     }
     func beginEventUpdates(postingTo hub: BuddyEventHub) async {}
+
+    // An agent conversation, for `MCPBridgeCancelTests`: it runs until its caller hangs up,
+    // as a real one does up to its time limit.
+    var conversations = 0
+    var cancelledConversations = 0
+
+    func elevenLabs(_ request: ElevenLabsControlRequest) async -> ElevenLabsControlResponse {
+        guard case .agentConverse = request.route else {
+            return .error(501, ElevenLabsControl.notOnThisHost)
+        }
+        conversations += 1
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch {
+            cancelledConversations += 1
+        }
+        return .error(500, "The fixture conversation ended.")
+    }
+}
+
+/// From an MCP client's `notifications/cancelled` to the work behind the call, the whole way:
+/// the bridge's own loop, tools and `ControlClient`, against a control server of the test's own.
+@Suite("MCP bridge cancel reaches the control server")
+struct MCPBridgeCancelTests {
+    @Test func cancelledCallsHangUpTheirRendersAndTheirConversation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mcp-cancel-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let handshakeURL = directory.appendingPathComponent("control.json")
+        let host = WaitingVideoHost()
+        let server = ControlServer.inTemporaryFolder(directory, host: host)
+        let (lines, input) = AsyncStream.makeStream(of: String.self)
+        let frames = Frames()
+        do {
+            try await server.start()
+            try await waitUntil { FileManager.default.fileExists(atPath: handshakeURL.path) }
+            let bridge = MCPServer(
+                lines: lines, write: { frames.append($0) },
+                tools: ControlTools(client: ControlClient(handshakeURL: handshakeURL))
+            )
+            let running = Task { await bridge.run() }
+
+            // As many calls as the bridge runs at once, each holding its connection open: every
+            // one of them has to reach the app, not wait in the client for a free connection.
+            let calls = MCPServer.maximumConcurrentCalls
+            for id in 1..<calls {
+                input.yield(#"{"jsonrpc":"2.0","id":\#(id),"method":"tools/call","params":{"name":"generate_video","arguments":{"prompt":"fixture \#(id)"}}}"#)
+            }
+            input.yield(#"{"jsonrpc":"2.0","id":\#(calls),"method":"tools/call","params":{"name":"elevenlabs_agent_converse","arguments":{"agent_id":"agent_fixture","messages":["Hello"],"confirm":true}}}"#)
+            try await waitUntil {
+                let accepted = await host.accepted, conversations = await host.conversations
+                return accepted == calls - 1 && conversations == 1
+            }
+
+            for id in 1...calls {
+                input.yield(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":\#(id),"reason":"The user stopped it."}}"#)
+            }
+            try await waitUntil {
+                let waits = await host.cancelledWaits, conversations = await host.cancelledConversations
+                return waits == calls - 1 && conversations == 1
+            }
+            input.finish()
+            await running.value
+            // Nothing answered: a cancelled request gets no response.
+            #expect(frames.lines.isEmpty)
+            // Cancelling ended the waits and the conversation; it took back nothing the app had
+            // accepted.
+            #expect(await host.accepted == calls - 1)
+            await server.stop()
+        } catch {
+            input.finish()
+            await host.releaseAll(failing: true)
+            await server.stop()
+            throw error
+        }
+    }
+
+    private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else { throw TestControlError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+/// What the bridge wrote to its client.
+private final class Frames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var written: [String] = []
+
+    var lines: [String] { lock.withLock { written } }
+
+    func append(_ line: String) { lock.withLock { written.append(line) } }
 }

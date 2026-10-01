@@ -21,16 +21,29 @@ public struct ControlClient: Sendable {
     }
 
     private let session: URLSession
+    private let handshakeURL: URL
 
     public init() {
-        self.session = URLSession(configuration: Self.sessionConfiguration())
+        self.init(handshakeURL: ControlAPI.handshakeURL)
     }
+
+    /// A client of whichever control server published `handshakeURL` — a test's own.
+    init(handshakeURL: URL) {
+        self.session = URLSession(configuration: Self.sessionConfiguration())
+        self.handshakeURL = handshakeURL
+    }
+
+    /// Requests that may be open at once. The MCP bridge runs up to eight tool calls side by
+    /// side, and a render or a conversation holds its connection for minutes; URLSession's
+    /// default of six per host would leave a seventh call queued inside it, unsent.
+    public static let maximumConnections = 8
 
     static func sessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         // The app holds /video/generate open through the node's queue and render.
         configuration.timeoutIntervalForRequest = TimeInterval(VideoGenerationBudget.controlSeconds)
         configuration.timeoutIntervalForResource = TimeInterval(VideoGenerationBudget.controlSeconds)
+        configuration.httpMaximumConnectionsPerHost = maximumConnections
         return configuration
     }
 
@@ -40,7 +53,7 @@ public struct ControlClient: Sendable {
 
     /// Reads the handshake the running app publishes. Absent file means the app is not running.
     private func handshake() throws -> ControlAPI.Handshake {
-        guard let data = try? Data(contentsOf: ControlAPI.handshakeURL),
+        guard let data = try? Data(contentsOf: handshakeURL),
               let handshake = try? JSONDecoder().decode(ControlAPI.Handshake.self, from: data)
         else { throw ClientError.appNotRunning }
 

@@ -23,8 +23,9 @@ struct MCPServer: Sendable {
     static let protocolVersion = "2025-06-18"
 
     /// Tool calls running at once. One more is refused with an error rather than queued: a
-    /// queue would only hide that the client is waiting on work that has not started.
-    static let maximumConcurrentCalls = 8
+    /// queue would only hide that the client is waiting on work that has not started. As many
+    /// as `ControlClient` keeps connections for, so every running call has its request open.
+    static let maximumConcurrentCalls = ControlClient.maximumConnections
 
     /// How long the calls of a client that hung up get to close their requests before the
     /// bridge exits anyway.
