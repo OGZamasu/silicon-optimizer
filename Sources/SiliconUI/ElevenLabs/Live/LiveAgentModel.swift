@@ -249,6 +249,9 @@ final class LiveAgentModel: ElevenLabsLiveWork {
             outcome = .notStarted("The agent's settings could not be read, so nothing was started: \(ElevenLabsRunnerFailure(error).message)")
             return
         }
+        // Cancelled (and perhaps started again) while the agent was read: this read's answer
+        // belongs to nobody now, refusal included.
+        guard preparing == token, phase == .preparing else { return }
         if textOnly, !preflight.textOnlyByDefault, !preflight.textOnlyOverrideAllowed {
             phase = .ended
             outcome = .notStarted("“\(agentName)” does not allow text-only conversations. Turn on the “Text only” override in its security settings, or talk by voice.")
