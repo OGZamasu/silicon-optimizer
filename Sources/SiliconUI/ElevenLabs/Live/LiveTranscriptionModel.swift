@@ -9,7 +9,7 @@ import SiliconElevenLabs
 /// The microphone is off until Start; a red indicator shows while it is on. One session per
 /// screen: Start while one is open is refused, the settings are captured when it opens and the
 /// controls are locked meanwhile. Mute keeps the socket fed with silence (ElevenLabs closes a
-/// socket that hears nothing) while nothing said leaves the Mac.
+/// socket that hears nothing) while nothing said leaves the Mac — and the silence is billed.
 @MainActor
 @Observable
 final class LiveTranscriptionModel: ElevenLabsLiveWork {

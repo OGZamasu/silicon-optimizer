@@ -116,4 +116,11 @@ struct LiveFollowUpTests {
         #expect(screen.conversationID == nil)
         #expect(rig.connector.requests.count == 1)
     }
+
+    /// Mute says what it costs: the silence it sends is billed like speech.
+    @Test func muteSaysTheMutedTimeIsStillBilled() {
+        #expect(LiveMicrophoneIndicator.label(muted: true).contains("still billed"))
+        #expect(LiveMicrophoneIndicator.label(muted: false) == "Microphone on")
+        #expect(LiveMicrophoneIndicator.muteHelp.contains("still billed"))
+    }
 }

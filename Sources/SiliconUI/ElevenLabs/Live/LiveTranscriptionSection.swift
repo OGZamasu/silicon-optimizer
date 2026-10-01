@@ -112,6 +112,7 @@ struct LiveTranscriptionScreen: View {
                     if screen.source == .microphone, screen.phase == .live {
                         Toggle("Mute", isOn: $screen.muted)
                             .toggleStyle(.button)
+                            .help(LiveMicrophoneIndicator.muteHelp)
                         LiveLevelMeter(level: screen.level)
                     }
                     LiveMicrophoneIndicator(on: screen.microphoneOn, muted: screen.muted)

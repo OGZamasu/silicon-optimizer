@@ -610,7 +610,9 @@ opens it with that agent chosen). On all three:
   session (it only sends a typed message in a conversation already open); the settings — voice,
   model, agent — are the ones captured when it opened, and are locked while it is open;
 - the microphone is off until Start, and a red indicator shows while it is on; Mute keeps sending
-  silence (ElevenLabs closes a socket that hears nothing) so nothing said leaves the Mac;
+  silence (ElevenLabs closes a socket that hears nothing) so nothing said leaves the Mac — but the
+  muted time is still billed (transcription by the audio's length, agents by the minute), and the
+  indicator and the button's help say so;
 - a session that drops, or is cancelled while it starts, says it may have been billed, and is
   not reconnected; leaving the screen ends it; a new key, another region or Disconnect ends it at
   once (the pane's reset, and the screen's own check of the client), and while a session is open

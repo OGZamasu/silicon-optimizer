@@ -130,6 +130,7 @@ struct LiveAgentScreen: View {
                     case .live:
                         if !screen.sessionTextOnly {
                             Toggle("Mute", isOn: $screen.muted).toggleStyle(.button)
+                                .help(LiveMicrophoneIndicator.muteHelp)
                             Button("Stop talking") { screen.interrupt() }
                                 .help("Stops the agent's voice here; speaking over it does the same")
                         }

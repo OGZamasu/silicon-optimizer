@@ -39,13 +39,23 @@ struct LiveMicrophoneIndicator: View {
     let on: Bool
     let muted: Bool
 
+    /// Muting sends silence, and ElevenLabs bills silence like speech: transcription by the
+    /// audio's length, a conversation by the minute.
+    static func label(muted: Bool) -> String {
+        muted ? "Microphone on, muted — silence is sent, and still billed" : "Microphone on"
+    }
+
+    static let muteHelp = "Sends silence instead of your voice; nothing you say leaves the Mac. The session stays "
+        + "open and the muted time is still billed (transcription by the audio's length, agents by the minute) — "
+        + "Stop or End to stop the bill."
+
     var body: some View {
         if on {
             HStack(spacing: 6) {
                 Circle()
                     .fill(muted ? Color.orange : Color.red)
                     .frame(width: 9, height: 9)
-                Text(muted ? "Microphone on, muted — silence is sent" : "Microphone on")
+                Text(Self.label(muted: muted))
                     .font(.callout.weight(.medium))
                     .foregroundStyle(muted ? .orange : .red)
             }
