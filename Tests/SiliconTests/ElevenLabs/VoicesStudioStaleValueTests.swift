@@ -1183,4 +1183,74 @@ struct VoicesStudioStaleValueTests {
         #expect(fixture.sent("update_workspace_member").count == 3)
         #expect(fixture.sent("get_workspace_members").count == 2, "a refused change was read again as if it may have landed")
     }
+
+    /// A rule added to dictionary A reaches ElevenLabs, but the answer is a 500. The rules on
+    /// screen are those from before the add, so "Edit all" waits while the dictionary is read
+    /// again; once that lands it copies the rules with the added one, and a Replace keeps it.
+    /// (Before: nothing was read, "Edit all" copied the rules from before the add, and Replace
+    /// took the added rule back.)
+    @Test func aRuleAddedWithItsAnswerLostIsReadAgainBeforeEditAllCopiesTheRules() async throws {
+        final class Rules: @unchecked Sendable {
+            let lock = NSLock()
+            var rules: [JSONValue]
+            var answersToLose = 1
+            init(_ rules: [JSONValue]) { self.rules = rules }
+            func dictionary() -> JSONValue {
+                lock.withLock {
+                    ["id": "d-a", "name": "Dict A", "latest_version_id": "ver2",
+                     "latest_version_rules_num": .number(Double(rules.count)), "rules": .array(rules)]
+                }
+            }
+            var strings: [String] { lock.withLock { rules.compactMap { $0["string_to_replace"].stringValue }.sorted() } }
+        }
+        let signals = Signals()
+        let server = Rules([["string_to_replace": "Nguyen", "type": "alias", "alias": "Win"]])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "add_rules":
+                let added = Self.body(request)["rules"].arrayValue ?? []
+                let lose = server.lock.withLock {
+                    server.rules += added
+                    defer { server.answersToLose = max(0, server.answersToLose - 1) }
+                    return server.answersToLose > 0
+                }
+                if lose { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }   // carried out; answer lost
+                return .json(["id": "d-a", "version_id": "ver2"])
+            case "set_rules":
+                let rules = Self.body(request)["rules"].arrayValue ?? []
+                server.lock.withLock { server.rules = rules }
+                return .json(["id": "d-a", "version_id": "ver3"])
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 { try await signals.wait(for: "looked") }
+                return .json(server.dictionary())
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a], selected: a)
+        var rule = PronunciationRule()
+        rule.stringToReplace = "Siobhan"
+        rule.alias = "Shivawn"
+        model.rules = [rule]
+        let adding = Task { try await answering(model.actions) { await model.addRules() } }
+        // Should no read be made (a regression), the add ends at once, and so does this wait.
+        let releasing = Task { _ = try? await adding.value; signals.note("looked") }
+        try await voicesStudioWait {
+            fixture.sent("get_pronunciation_dictionary_metadata").count == 1 || signals.has("looked")
+        }
+        #expect(server.strings == ["Nguyen", "Siobhan"])
+        #expect(fixture.sent("get_pronunciation_dictionary_metadata").count == 1, "the dictionary was not read again after a lost answer")
+        #expect(!model.rulesAreIn, "\"Edit all\" would copy the rules from before the add")
+        signals.note("looked")
+        try await adding.value
+        await releasing.value
+        #expect(model.rulesAreIn)
+        model.editCurrentRules()
+        #expect(model.rules.map(\.stringToReplace).sorted() == ["Nguyen", "Siobhan"], "\(model.rules.map(\.stringToReplace))")
+        try await answering(model.actions) { await model.replaceRules() }
+        #expect(server.strings == ["Nguyen", "Siobhan"], "Replace took back the rule whose answer was lost: \(server.strings)")
+    }
 }

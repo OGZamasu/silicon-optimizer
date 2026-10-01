@@ -282,6 +282,16 @@ final class PronunciationSectionModel {
         await fetch(id, slot: VoicesStudioActions.afterChange(of: id))
     }
 
+    /// After a change to dictionary `id` that gave no answer: when it may still have been
+    /// carried out (a 5xx, a lost answer, a cancel after sending), the same as after one that
+    /// answered — the rules on screen may be older than ElevenLabs', and "Edit all" would copy
+    /// them for a Replace that undoes the change — so "Edit all" waits and it is read again.
+    /// Nothing is claimed: what was sent is not put on screen.
+    private func refetchIfUnknown(_ operationID: String, _ id: String) async {
+        guard actions.outcomeWasUnknown(operationID) else { return }
+        await refetch(id)
+    }
+
     /// Whether dictionary `id` is still the one open — the only one whose rule editor and marks a
     /// finished change may clear.
     private func isOpen(_ id: String) -> Bool { wantedDictionary == id }
@@ -344,11 +354,11 @@ final class PronunciationSectionModel {
         guard let dictionary = selected else { return }
         let (values, problems) = ruleArguments()
         self.problems = problems
-        guard problems.isEmpty,
-              await actions.perform(
-                "add_rules", ["pronunciation_dictionary_id": .string(dictionary.id), "rules": .array(values)],
-                title: "Rules for \(dictionary.name)"
-              ) != nil else { return }
+        guard problems.isEmpty else { return }
+        guard await actions.perform(
+            "add_rules", ["pronunciation_dictionary_id": .string(dictionary.id), "rules": .array(values)],
+            title: "Rules for \(dictionary.name)"
+        ) != nil else { return await refetchIfUnknown("add_rules", dictionary.id) }
         if isOpen(dictionary.id) { rules = [PronunciationRule()] }
         await refetch(dictionary.id)
     }
@@ -359,14 +369,14 @@ final class PronunciationSectionModel {
         guard let dictionary = selected else { return }
         let (values, problems) = ruleArguments()
         self.problems = problems
-        guard problems.isEmpty,
-              await actions.perform(
-                "set_rules", ["pronunciation_dictionary_id": .string(dictionary.id), "rules": .array(values)],
-                subject: "the rules of “\(dictionary.name)”",
-                consequence: "A new version holds only the \(values.count) rules in the editor; the "
-                    + "\(dictionary.ruleCount) it has now are left in the previous version.",
-                title: "Replace rules of \(dictionary.name)"
-              ) != nil else { return }
+        guard problems.isEmpty else { return }
+        guard await actions.perform(
+            "set_rules", ["pronunciation_dictionary_id": .string(dictionary.id), "rules": .array(values)],
+            subject: "the rules of “\(dictionary.name)”",
+            consequence: "A new version holds only the \(values.count) rules in the editor; the "
+                + "\(dictionary.ruleCount) it has now are left in the previous version.",
+            title: "Replace rules of \(dictionary.name)"
+        ) != nil else { return await refetchIfUnknown("set_rules", dictionary.id) }
         if isOpen(dictionary.id) { rules = [PronunciationRule()] }
         await refetch(dictionary.id)
     }
@@ -384,7 +394,7 @@ final class PronunciationSectionModel {
             "remove_rules",
             ["pronunciation_dictionary_id": .string(dictionary.id), "rule_strings": .array(marked.sorted().map(JSONValue.string))],
             title: "Remove rules from \(dictionary.name)"
-        ) != nil else { return }
+        ) != nil else { return await refetchIfUnknown("remove_rules", dictionary.id) }
         if isOpen(dictionary.id) { marked = [] }
         await refetch(dictionary.id)
     }
@@ -394,7 +404,7 @@ final class PronunciationSectionModel {
         guard await actions.perform(
             "patch_pronunciation_dictionary",
             ["pronunciation_dictionary_id": .string(dictionary.id), "name": .string(rename)], title: "Rename dictionary"
-        ) != nil else { return }
+        ) != nil else { return await refetchIfUnknown("patch_pronunciation_dictionary", dictionary.id) }
         await refetch(dictionary.id)
     }
 
@@ -404,7 +414,7 @@ final class PronunciationSectionModel {
             "patch_pronunciation_dictionary",
             ["pronunciation_dictionary_id": .string(dictionary.id), "archived": .bool(archived)],
             title: archived ? "Archive \(dictionary.name)" : "Restore \(dictionary.name)"
-        ) != nil else { return }
+        ) != nil else { return await refetchIfUnknown("patch_pronunciation_dictionary", dictionary.id) }
         await refetch(dictionary.id)
     }
 
