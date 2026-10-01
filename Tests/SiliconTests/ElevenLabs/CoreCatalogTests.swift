@@ -40,6 +40,21 @@ struct CoreCatalogTests {
         #expect(result.status == 0, "\(result.output)")
     }
 
+    /// Generating into a folder outside the repository (to compare with the committed catalog)
+    /// writes the file and ends cleanly; the summary used to crash after writing it.
+    @Test func theScriptWritesACatalogOutsideTheRepositoryAndSaysWhere() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("elevenlabs-catalog-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { TemporaryFileSink.removeScratch(folder) }
+        let out = folder.appendingPathComponent("catalog.swift")
+        let result = try Self.run(["python3", "Scripts/elevenlabs-catalog.py", "--out", out.path])
+        #expect(result.status == 0, "\(result.output)")
+        #expect(result.output.contains("403 operations") && result.output.contains(out.lastPathComponent))
+        let committed = Self.repository.appendingPathComponent("Sources/SiliconElevenLabs/Generated/ElevenLabsCatalogData.swift")
+        #expect(try Data(contentsOf: out) == Data(contentsOf: committed), "the same catalog as the committed one")
+    }
+
     @Test func theKeyHeaderIsNeverAParameterTheClientAddsIt() {
         for operation in ElevenLabsCatalog.all {
             #expect(!operation.parameters.contains { $0.name.lowercased() == "xi-api-key" })
