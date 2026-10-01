@@ -89,6 +89,8 @@ public struct ElevenLabsControlRequest: Sendable, Equatable {
         case operation(id: String)
         /// `POST /elevenlabs/call`, its body exactly as it arrived.
         case call(body: Data)
+        /// `POST /elevenlabs/agents/converse` (`ElevenLabsRealtimeAPI.swift`), its body as it arrived.
+        case agentConverse(body: Data)
     }
 
     public var route: Route
@@ -372,6 +374,6 @@ extension ControlServer {
             return .operation(id: id)
         }
         if method == "POST", segments == ["elevenlabs", "call"] { return .call(body: body) }
-        return nil
+        return elevenLabsRealtimeRoute(method: method, segments: segments, body: body)
     }
 }

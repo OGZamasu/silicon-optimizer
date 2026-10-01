@@ -575,3 +575,216 @@ all hermetic (the in-memory transport, a fake credential with a planted key, tem
 - end to end — MCP tool, HTTP, the real server and policy, the handler, the real client, the
   in-memory transport — for **every one of the 403 operations** through `elevenlabs_call`, and
   `elevenlabs_describe_operation` returning the body schema of every operation that has one.
+
+## Realtime: live speech, live transcription and talking to agents
+
+ElevenLabs' WebSocket APIs are not in the OpenAPI spec. They are built from the AsyncAPI documents
+ElevenLabs publishes on its API-reference pages (pinned under `Scripts/elevenlabs/asyncapi/`) and
+checked against the official SDKs. The protocol layer is `Sources/SiliconElevenLabs/Realtime/`
+(Foundation only); the three live screens are `Sources/SiliconUI/ElevenLabs/Live/`.
+
+### The four sockets
+
+| Socket | Address | Auth | What it does |
+|---|---|---|---|
+| Speech, one context | `wss://<region>/v1/text-to-speech/{voice_id}/stream-input` | `xi-api-key` on the upgrade request | Text in (pieces ending in a space, `flush`, end with `""`), audio and character timings out |
+| Speech, several contexts | `…/multi-stream-input` | the same | Up to five contexts on one socket, each named by `context_id` |
+| Realtime transcription | `wss://<region>/v1/speech-to-text/realtime` | the same | Mono PCM (8–48 kHz) or 8 kHz μ-law in; partial and committed text, timings, entities, edits out |
+| An agent conversation | `wss://<region>/v1/convai/conversation` | **never the key**: `?agent_id=` for a public agent, otherwise a signed URL minted with `get_conversation_signed_link` and used once | Initiation data, then audio and text both ways, tools, approvals |
+
+`ElevenLabsRealtime(client:connector:)` opens each on the client's own region and credential
+source. The production connector (`URLSessionWebSocketConnector`) opens only `wss` to the five
+region hosts, puts headers on the upgrade request (the key never goes in a URL or a message),
+raises `maximumMessageSize` to 16 MiB before the task starts, refuses a redirected upgrade, and
+reads close codes by number (4300, the agent call-queue timeout, has no Foundation name). A signed
+URL is opaque: it is checked (wss, a region host, the conversation path) and connected to as given;
+it is never logged, shown, stored or returned over MCP. Request descriptions mask every query
+value that is not a known setting. Tests use `FakeElevenLabsSocketConnector`, or for wire-level
+checks a loopback WebSocket server behind a debug-only allowance.
+
+Decoding is tolerant: both spellings of every key the sources disagree on (`isFinal`/`is_final`,
+`contextId`/`context_id`, both alignment styles, `event_id` as a number or a string, `error` and
+`client_error`), and anything unknown is surfaced as data, never fatal.
+
+### Session policy
+
+- One socket per session, and **nothing reconnects on its own**: a second connection is a second
+  billed session and would replay audio. A socket that ends ends the session, with its code and
+  reason; a new one is the owner's (or the caller's) choice.
+- Every session keeps a usage record — characters sent, audio sent and received, messages,
+  commits, duration — which the screens show as they go.
+- An agent's `ping` is answered at once, ahead of queued audio. Audio of an interrupted answer is
+  dropped (`event_id` at or below the interrupted one, as the Python and Node clients do; if `≤` is
+  wrong, an interrupted agent's whole next answer is silent — see the live check, step 5). An MCP
+  tool approval is answered at most once, only while ElevenLabs still waits, only an explicit
+  approval approves, and ending the conversation sends a decline for every approval still waiting.
+  A client tool call is answered at most once.
+
+### The live screens
+
+Three sections in the pane: **Live speech** (after Speech), **Live transcription** (after
+Transcription) and **Talk to an agent** (after Agents; the Agents editor's "Talk to it live…"
+opens it with that agent chosen). On all three:
+
+- one session per screen: Start, Speak or Return pressed twice opens one; Return never starts a
+  session (it only sends a typed message in a conversation already open); the settings — voice,
+  model, agent — are the ones captured when it opened, and are locked while it is open;
+- the microphone is off until Start, and a red indicator shows while it is on; Mute keeps sending
+  silence (ElevenLabs closes a socket that hears nothing) so nothing said leaves the Mac — but the
+  muted time is still billed (transcription by the audio's length, agents by the minute), and the
+  indicator and the button's help say so;
+- a session that drops, or is cancelled while it starts, says it may have been billed, and is
+  not reconnected; leaving the screen ends it; a new key, another region or Disconnect ends it at
+  once (the pane's reset, and the screen's own check of the client), and while a session is open
+  Settings refuses a new key or region, as it does for a billable run;
+- the three screens share one set of devices, and each session lets go of them only under its own
+  claim: a stream's last audio playing out, a transcription waiting for its last text or a
+  conversation waiting on its socket cannot stop the microphone, voice processing or the engine of a
+  session started since on another screen; leaving Live speech while its last audio plays silences
+  the rest and lets go then;
+- every line shown is redacted of anything key-shaped.
+
+Talk to an agent asks before starting an agent that can act on ElevenLabs' side — webhooks (named
+with their host), transfers, keypad tones, MCP servers, workspace tools — naming each, because those
+run without asking per call. Every MCP tool approval is a card naming the tool, its server and host,
+and its parameters; it is answered for the conversation and tool call it was asked with, and
+declined — the decline is sent — when it times out, when the conversation ends, or when the account
+changes. The app runs no client tools: a client tool call is answered that nothing ran. Images and
+PDFs can go with a typed message (uploaded to the conversation with `upload_file_route`; removing one
+uses `cancel_file_upload_route`, which asks first). When the conversation ends its transcript is
+saved to the output folder; ElevenLabs keeps it too (Conversations).
+
+Live transcription's Stop commits what is left and waits for **the text of that commit** — the
+last stretch was sent and billed, so it must reach the screen and the export. Committing by hand
+(always for a file), every commit is answered by one committed transcript, in order, so Stop waits
+for the answer to its own commit, the last one — not the first text after it, which can be the
+late answer to an earlier commit (a file commits every 20 s of audio, and so does the microphone
+when committing by hand, so ElevenLabs never commits on its own after its ~36 s). Committing at
+pauses, ElevenLabs' own commits cannot be counted: Stop waits for the first text after its commit
+and then for 0.75 s of quiet, so an automatic commit's text landing just before Stop's does not end
+the wait. Either way the wait is 4 s at most; if it runs out with text still owed, the outcome says
+"The last words may be missing — they were sent and billed".
+
+### Audio
+
+Microphone buffers (any rate, one or two channels) are converted to the socket's format —
+16-bit little-endian mono PCM at its rate, or 8 kHz μ-law — in 100 ms chunks. The agent's audio
+format is the one its `conversation_initiation_metadata` names. Playback decodes PCM, μ-law, A-law
+and MP3, holds 150 ms in a jitter buffer, and an interruption silences it at once. **Echo:** the
+WebSocket path has none of the acoustic echo cancellation a browser or WebRTC gives, so the agent
+screen runs capture and playback on one `AVAudioEngine` with macOS voice processing on the input
+(`setVoiceProcessingEnabled(true)`), the agent's voice being its echo reference. Without it, an agent
+on the speakers hears itself and interrupts itself.
+
+**Device changes:** plugging in headphones or switching the default microphone stops the engine
+(`AVAudioEngineConfigurationChange`). A session holding the microphone (live transcription, a voice
+conversation) is then **ended with a message**, not restarted: the new device needs its format and,
+for an agent, voice processing set up again, and a session that silently switched microphones while
+billing is worse than one more Start. Live speech only plays, and the next audio starts the engine
+again on the new output.
+
+**Bounds:** a session's events wait in a queue of at most 2,048; a reader that falls behind (or a
+server that floods) ends the session with 1011 "This app fell behind reading the session". Microphone
+audio waiting for a socket that has stopped taking it is capped at thirty seconds; then the session
+ends — audio is never dropped from the middle, which would leave a hole in a transcript.
+
+### Over MCP: `elevenlabs_agent_converse`
+
+MCP is request/response, so the realtime APIs reach a model as one tool: a short **text-only**
+conversation with one of the owner's agents.
+
+| Tool | Route | Cost |
+|---|---|---|
+| `elevenlabs_agent_converse` | `POST /elevenlabs/agents/converse` `{agent_id, messages: [...], overrides?, dynamic_variables?, max_turns?, confirm}` | credits: ElevenLabs bills agent conversations by length and LLM use |
+
+- It is **real-world**: an agent can run its server tools during the conversation. It needs
+  `confirm: true` and the owner's switch ("Let agents run destructive and real-world ElevenLabs
+  actions"); otherwise 403, and nothing is read or opened. Only this Mac's control token reaches it.
+- The agent must allow text-only (or be text-only); otherwise 409 before anything opens.
+- The app sends the messages one by one, waiting for each answer. MCP tool approvals are declined
+  (the owner approves those in the app) and client tool calls are told nothing ran.
+- **Limits, because the conversation bills by length:** at most 20 messages; 90 s for each answer;
+  **300 s for the whole conversation**, after which the app ends it and the answer says
+  `"ended": "time limit"`; and **one conversation at a time** — a second call while one runs is
+  refused (409) before anything is read or opened. Only what the agent says or does keeps a turn
+  open; pings, VAD scores and context-usage events do not. **A caller that hangs up ends the
+  conversation:** the control server keeps a read pending on the request's connection (as for
+  `/video/generate`), and its closing cancels the route, which ends the conversation at once. A
+  caller that keeps its connection open and stops reading is bounded by the 300 s cap, and holds
+  the one-at-a-time lane until then — do not retry into it. (The MCP bridge does not yet act on an
+  MCP-level cancel; the cap bounds that too.)
+- The answer: the transcript, the tools used (server tools marked "ran on ElevenLabs' side"; client
+  and MCP tools with their parameters, masked), errors, how it ended, the duration and a cost note —
+  never a signed URL, a token or anything key-shaped. The bridge prints the agent's words inside a
+  fence with a random boundary, quoted as data.
+- Streaming speech and live transcription are not MCP tools: the REST operations already serve them
+  (`elevenlabs_speak`, `elevenlabs_transcribe`, and `text_to_speech_stream` through `elevenlabs_call`).
+
+### Spec snapshots and drift
+
+`Scripts/elevenlabs/asyncapi/{tts-stream-input,tts-multi-stream-input,stt-realtime,agents-conversation}.yaml`
+are the AsyncAPI blocks of the four reference pages. `Scripts/check-elevenlabs-spec.sh` compares them
+with the live pages on a live run (`--only-asyncapi` for just these, `--asyncapi-against DIR` for local
+files); `Scripts/elevenlabs-asyncapi.py` extracts, outlines and diffs them without a YAML library.
+Tests hold the sessions to the pins: every query parameter sent is one the spec names for its socket,
+the transcription formats are the spec's list, and every message type the specs name is decoded or
+sent.
+
+### Tests
+
+All hermetic: `Realtime*` (sessions on the fake socket; the production socket against a loopback
+server — the key in the upgrade header only, a 3 MiB message, close codes 1000/1008/1011/4300,
+refused and redirected upgrades, cancellation; the drift diff on local files; the converse route and
+its gate), `Live*` (the audio pipeline on synthetic buffers; the three screens' models on the fake
+socket, transport and devices; opt-in drawings), and the MCP tool. No test opens a socket to
+ElevenLabs, touches the microphone or speakers, or reads the Keychain.
+
+### The owner's live check (once, with the real key)
+
+What only a real account can settle, cheapest first. Note the credit balance (Settings → ElevenLabs,
+or the ElevenLabs dashboard) before step 1 and after the last step you run.
+
+1. **Live speech** — *costs about 30 characters of text-to-speech.* Choose a voice, type "Hello from
+   the live stream." and press Speak. It should play within a second or two, show the words with
+   timings, and end cleanly (Finish). *Settles:* the header auth and spellings on the speech socket,
+   the PCM format, and whether ElevenLabs closes an idle socket with 1000.
+2. **Live transcription** — *costs about 10 seconds of realtime speech-to-text.* Start listening, say
+   a sentence for about ten seconds, press Stop. Partial text should turn into a committed line; with
+   Word timings on, times appear. *Settles:* the transcription socket's header auth, chunking, commit
+   and the `warning`/error shapes. **Watch for:** the menu-bar microphone indicator (the orange dot)
+   goes out within a second of Stop; the last words you said are on screen; and Stop pressed after a
+   pause (nothing left to commit) does not say "The last words may be missing" — if it does,
+   ElevenLabs sends nothing for an empty commit, and the app should not wait for one.
+3. **Talk to an agent, text only** — *costs about a minute of agent time plus the agent's LLM use.*
+   With a public test agent that allows text-only (or is text-only), start a text conversation, send
+   one message, read the answer, End. *Settles:* bare `agent_id` for a public agent, the initiation and
+   metadata, `error` vs `client_error`, the ping cadence. **Watch for:** the agent's Conversations
+   (Agents → the agent → Conversations, or the ElevenLabs dashboard) shows **exactly one** new
+   conversation, ended. Note how it records the End — "ended" or "disconnected"/"failed": the app
+   always asks to close with 1000, but under load macOS can drop the connection without sending
+   that close frame, and ElevenLabs then sees a disconnect (the conversation still ends and stops
+   billing). Then start one more and press Cancel while it says Connecting: Conversations should
+   still show only that one more at most, ended — never one left running.
+4. **The MCP tool** — *costs about the same as step 3: a minute of agent time plus LLM.* With the
+   switch on, call `elevenlabs_agent_converse` with that agent, one message and `confirm: true`. The
+   answer should carry the transcript, `"ended"` and a `duration_seconds` of a few seconds; Conversations
+   should show exactly one more. *Settles:* the same socket from the control route.
+5. Optional, **voice** — *costs a few minutes of a voice agent plus LLM.* Talk to the agent through
+   the speakers, and talk over it once while it answers. *Settles:* echo cancellation, a signed URL for
+   an agent with authentication on, and **the interruption rule**. ElevenLabs gives every audio chunk
+   of one answer the same `event_id`, and the app drops audio at or below the interrupted `event_id`
+   (`ElevenLabsAgentConversation.dropsAudioAtTheInterruptedEvent = true`, as the Python and Node
+   clients do; the browser client drops only below it). If that is wrong for this API, the symptom is
+   unmistakable: after you talk over the agent, **its whole next answer is silent — its text appears
+   but no voice plays**, not merely a clipped first word. To flip it, set
+   `dropsAudioAtTheInterruptedEvent` to `false` in
+   `Sources/SiliconElevenLabs/Realtime/ElevenLabsAgentConversation.swift` and turn round the
+   expectations of `RealtimeSessionTests.audioOfAnInterruptedResponseIsDropped` (with `<`, the
+   interrupted chunk is dropped only below its id). **Watch for:** the conversation must **not end
+   within a second of Start with "The audio device changed"** — that would be voice processing's
+   own reconfiguration taken for a device change (plugging headphones in mid-conversation should
+   end it with that message; nothing else should). After End, the microphone indicator goes out and
+   music in other apps is no longer quieter (voice processing is off). Then play a long Live speech
+   text, press Finish and, while it is still playing, go to Live transcription and Start: leaving
+   Live speech silences the rest of its audio, and the transcription keeps the microphone (the
+   indicator stays on) and keeps transcribing.

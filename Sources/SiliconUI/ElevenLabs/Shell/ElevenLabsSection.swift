@@ -29,12 +29,14 @@ enum ElevenLabsSectionCategory: String, CaseIterable, Identifiable, Hashable {
 enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     // Create
     case speech
+    case liveSpeech
     case dialogue
     case voiceChanger
     case soundEffects
     case music
     case isolation
     case transcription
+    case liveTranscription
     case alignment
     case history
     case models
@@ -51,6 +53,7 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     case audioNative
     // Agents
     case agents
+    case liveAgent
     case agentConversations
     case agentKnowledge
     case agentTools
@@ -73,12 +76,14 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .speech: "Speech"
+        case .liveSpeech: "Live speech"
         case .dialogue: "Dialogue"
         case .voiceChanger: "Voice changer"
         case .soundEffects: "Sound effects"
         case .music: "Music"
         case .isolation: "Voice isolation"
         case .transcription: "Transcription"
+        case .liveTranscription: "Live transcription"
         case .alignment: "Forced alignment"
         case .history: "History"
         case .models: "Models"
@@ -92,6 +97,7 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
         case .pronunciation: "Pronunciation"
         case .audioNative: "Audio Native"
         case .agents: "Agents"
+        case .liveAgent: "Talk to an agent"
         case .agentConversations: "Conversations"
         case .agentKnowledge: "Knowledge base"
         case .agentTools: "Tools"
@@ -113,12 +119,14 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     var subtitle: String {
         switch self {
         case .speech: "Text to speech with a voice, model and settings, streamed or whole."
+        case .liveSpeech: "Speech that plays as you send text, over the realtime connection."
         case .dialogue: "Several voices in one conversation, from a script."
         case .voiceChanger: "Speech to speech: say it in another voice."
         case .soundEffects: "Sound effects from a description."
         case .music: "Songs from a prompt or a plan, stems, fine-tunes and music for video."
         case .isolation: "Voice isolation: speech lifted out of background noise."
         case .transcription: "Speech to text with speakers, key terms and entities."
+        case .liveTranscription: "Your microphone, or a file, transcribed as it is heard."
         case .alignment: "Word and character timings for audio and its transcript."
         case .history: "Everything generated with this account, to play or download."
         case .models: "The models this account can use and what each supports."
@@ -132,6 +140,7 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
         case .pronunciation: "Pronunciation dictionaries and their rules."
         case .audioNative: "The embeddable Audio Native player for your pages."
         case .agents: "Voice agents: prompt, voice, model, tools, branches and versions."
+        case .liveAgent: "A live conversation with one of your agents, by voice or by text."
         case .agentConversations: "Agent conversations with transcripts, audio and feedback."
         case .agentKnowledge: "Documents agents answer from, and their RAG index."
         case .agentTools: "Tools agents can call."
@@ -153,12 +162,14 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     var systemImage: String {
         switch self {
         case .speech: "text.bubble"
+        case .liveSpeech: "dot.radiowaves.left.and.right"
         case .dialogue: "bubble.left.and.bubble.right"
         case .voiceChanger: "person.wave.2"
         case .soundEffects: "speaker.wave.3"
         case .music: "music.note"
         case .isolation: "waveform.badge.minus"
         case .transcription: "text.quote"
+        case .liveTranscription: "waveform.badge.mic"
         case .alignment: "text.alignleft"
         case .history: "clock.arrow.circlepath"
         case .models: "cpu"
@@ -172,6 +183,7 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
         case .pronunciation: "character.book.closed"
         case .audioNative: "play.rectangle"
         case .agents: "person.2.wave.2"
+        case .liveAgent: "bubble.left.and.text.bubble.right"
         case .agentConversations: "phone.bubble"
         case .agentKnowledge: "doc.text.magnifyingglass"
         case .agentTools: "wrench.and.screwdriver"
@@ -191,14 +203,14 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
 
     var category: ElevenLabsSectionCategory {
         switch self {
-        case .speech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation,
-             .transcription, .alignment, .history, .models:
+        case .speech, .liveSpeech, .dialogue, .voiceChanger, .soundEffects, .music, .isolation,
+             .transcription, .liveTranscription, .alignment, .history, .models:
             .create
         case .voices, .voiceDesign, .voiceLibrary:
             .voices
         case .dubbing, .studio, .productions, .flows, .pronunciation, .audioNative:
             .studio
-        case .agents, .agentConversations, .agentKnowledge, .agentTools, .agentPhoneNumbers,
+        case .agents, .liveAgent, .agentConversations, .agentKnowledge, .agentTools, .agentPhoneNumbers,
              .agentBatchCalls, .agentMCPServers, .agentSecrets, .agentTesting, .agentAnalytics:
             .agents
         case .workspace, .usage, .serviceAccounts, .webhooks:
@@ -214,6 +226,8 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
     var pathPrefixes: [String] {
         switch self {
         case .speech: ["/v1/text-to-speech"]
+        // The live sections run on the WebSocket APIs, which the REST catalog does not hold.
+        case .liveSpeech, .liveTranscription, .liveAgent: []
         case .dialogue: ["/v1/text-to-dialogue"]
         case .voiceChanger: ["/v1/speech-to-speech"]
         case .soundEffects: ["/v1/sound-generation"]
@@ -261,6 +275,9 @@ enum ElevenLabsSection: String, CaseIterable, Identifiable, Hashable {
         case .explorer: []
         }
     }
+
+    /// A live section (`ElevenLabs/Live/`): built on a WebSocket, not on catalog operations.
+    var isLive: Bool { self == .liveSpeech || self == .liveTranscription || self == .liveAgent }
 
     /// The operations this section is built on, in catalog order. The Explorer's are all of
     /// them.

@@ -14,7 +14,9 @@ extension AppModel {
     /// token on loopback. What the handler needs is read here, on the main actor; everything
     /// after that — reading uploads, waiting on ElevenLabs — runs off it.
     public func elevenLabs(_ request: ElevenLabsControlRequest) async -> ElevenLabsControlResponse {
-        await elevenLabsControlHandler().handle(request)
+        // A conversation with an agent runs on the realtime socket (`LiveAgentConverse.swift`).
+        if case .agentConverse(let body) = request.route { return await elevenLabsAgentConverse(body) }
+        return await elevenLabsControlHandler().handle(request)
     }
 
     func elevenLabsControlHandler() -> ElevenLabsControlHandler {
@@ -78,6 +80,8 @@ struct ElevenLabsControlHandler: Sendable {
         case .operations(let query): operations(query)
         case .operation(let id): operation(id)
         case .call(let body): await call(body)
+        // Answered by `AppModel.elevenLabsAgentConverse`, which has the realtime client.
+        case .agentConverse: .error(501, ElevenLabsControl.notOnThisHost)
         }
     }
 

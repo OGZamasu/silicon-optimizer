@@ -98,7 +98,8 @@ Type a line and hear it: LuxTTS, Kokoro 82M and Sesame CSM 1B all run locally. T
 music model and a sound-effect model beside them, and Whisper large-v3 turbo and Parakeet
 turn speech back into text — from a file or live from the microphone. Link an ElevenLabs API
 key in Settings and the whole ElevenLabs API — voices, speech, music, dubbing, agents and the
-rest — is there too, in its own pane and over MCP ([how it works](docs/ELEVENLABS.md)).
+rest, and live speech, live transcription and voice conversations with your agents — is there
+too, in its own pane and over MCP ([how it works](docs/ELEVENLABS.md)).
 
 ### Makes video, and characters that perform
 

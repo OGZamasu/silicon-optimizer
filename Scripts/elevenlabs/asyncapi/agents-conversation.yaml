@@ -1,0 +1,1722 @@
+asyncapi: 2.6.0
+info:
+  title: V 1 Convai Conversation
+  version: subpackage_v1ConvaiConversation.v1ConvaiConversation
+  description: >-
+    Establish a WebSocket connection for real-time conversations with an AI
+    agent.
+channels:
+  /v1/convai/conversation:
+    description: >-
+      Establish a WebSocket connection for real-time conversations with an AI
+      agent.
+    bindings:
+      ws:
+        query:
+          type: object
+          properties:
+            agent_id:
+              type: string
+    publish:
+      operationId: subpackage_v1ConvaiConversation.v1ConvaiConversation-publish
+      summary: subscribe
+      description: >-
+        Defines the message types that can be received by the client from the
+        server
+      message:
+        name: subscribe
+        title: subscribe
+        description: >-
+          Defines the message types that can be received by the client from the
+          server
+        payload:
+          $ref: '#/components/schemas/V1ConvaiConversationSubscribe'
+    subscribe:
+      operationId: subpackage_v1ConvaiConversation.v1ConvaiConversation-subscribe
+      summary: publish
+      description: Defines the message types that can be sent from client to server
+      message:
+        name: publish
+        title: publish
+        description: Defines the message types that can be sent from client to server
+        payload:
+          $ref: '#/components/schemas/V1ConvaiConversationPublish'
+servers:
+  Production:
+    url: wss://api.elevenlabs.io/
+    protocol: wss
+    x-default: true
+  Production-US:
+    url: wss://api.us.elevenlabs.io/
+    protocol: wss
+  Production-EU:
+    url: wss://api.eu.residency.elevenlabs.io/
+    protocol: wss
+  Production-India:
+    url: wss://api.in.residency.elevenlabs.io/
+    protocol: wss
+  Production-Singapore:
+    url: wss://api.sg.residency.elevenlabs.io/
+    protocol: wss
+components:
+  schemas:
+    ConversationInitiationMetadataConversationInitiationMetadataEventAgentOutputAudioFormat:
+      type: string
+      enum:
+        - pcm_8000
+        - pcm_16000
+        - pcm_22050
+        - pcm_24000
+        - pcm_44100
+        - pcm_48000
+        - ulaw_8000
+      description: Audio format specification for agent's speech output.
+      title: >-
+        ConversationInitiationMetadataConversationInitiationMetadataEventAgentOutputAudioFormat
+    ConversationInitiationMetadataConversationInitiationMetadataEventUserInputAudioFormat:
+      type: string
+      enum:
+        - pcm_8000
+        - pcm_16000
+        - pcm_22050
+        - pcm_24000
+        - pcm_44100
+        - pcm_48000
+        - ulaw_8000
+      description: Audio format specification for user's speech input.
+      title: >-
+        ConversationInitiationMetadataConversationInitiationMetadataEventUserInputAudioFormat
+    ConversationInitiationMetadataConversationInitiationMetadataEvent:
+      type: object
+      properties:
+        conversation_id:
+          type: string
+        agent_output_audio_format:
+          $ref: >-
+            #/components/schemas/ConversationInitiationMetadataConversationInitiationMetadataEventAgentOutputAudioFormat
+          description: Audio format specification for agent's speech output.
+        user_input_audio_format:
+          $ref: >-
+            #/components/schemas/ConversationInitiationMetadataConversationInitiationMetadataEventUserInputAudioFormat
+          description: Audio format specification for user's speech input.
+      required:
+        - conversation_id
+        - agent_output_audio_format
+        - user_input_audio_format
+      title: ConversationInitiationMetadataConversationInitiationMetadataEvent
+    ConversationInitiationMetadata:
+      type: object
+      properties:
+        conversation_initiation_metadata_event:
+          $ref: >-
+            #/components/schemas/ConversationInitiationMetadataConversationInitiationMetadataEvent
+        type:
+          type: string
+          enum:
+            - conversation_initiation_metadata
+      required:
+        - conversation_initiation_metadata_event
+      title: ConversationInitiationMetadata
+    AgentResponseCompleteAgentResponseCompleteEvent:
+      type: object
+      properties:
+        event_id:
+          type: integer
+      required:
+        - event_id
+      title: AgentResponseCompleteAgentResponseCompleteEvent
+    AgentResponseComplete:
+      type: object
+      properties:
+        agent_response_complete_event:
+          $ref: '#/components/schemas/AgentResponseCompleteAgentResponseCompleteEvent'
+        type:
+          type: string
+          enum:
+            - agent_response_complete
+      required:
+        - agent_response_complete_event
+      title: AgentResponseComplete
+    ContextUsageContextUsageEvent:
+      type: object
+      properties:
+        event_id:
+          type: integer
+        model:
+          type: string
+          description: Identifier of the LLM whose context window is reported.
+        context_tokens:
+          type: integer
+          description: >-
+            Prompt size of the turn's last LLM generation in provider tokens
+            (uncached input plus cache reads and writes).
+        context_limit_tokens:
+          type: integer
+          description: The model's maximum context window size in tokens.
+      required:
+        - event_id
+        - model
+        - context_tokens
+        - context_limit_tokens
+      title: ContextUsageContextUsageEvent
+    ContextUsage:
+      type: object
+      properties:
+        context_usage_event:
+          $ref: '#/components/schemas/ContextUsageContextUsageEvent'
+        type:
+          type: string
+          enum:
+            - context_usage
+      required:
+        - context_usage_event
+      title: ContextUsage
+    McpToolCallMcpToolCall0:
+      type: object
+      properties:
+        service_id:
+          type: string
+        tool_call_id:
+          type: string
+        tool_name:
+          type: string
+        tool_description:
+          type:
+            - string
+            - 'null'
+          default: null
+        parameters:
+          type: object
+          additionalProperties:
+            description: Any type
+        timestamp:
+          type: string
+        state:
+          type: string
+          enum:
+            - loading
+      required:
+        - service_id
+        - tool_call_id
+        - tool_name
+        - parameters
+        - state
+      title: McpToolCallMcpToolCall0
+    McpToolCallMcpToolCall1:
+      type: object
+      properties:
+        service_id:
+          type: string
+        tool_call_id:
+          type: string
+        tool_name:
+          type: string
+        tool_description:
+          type:
+            - string
+            - 'null'
+          default: null
+        parameters:
+          type: object
+          additionalProperties:
+            description: Any type
+        timestamp:
+          type: string
+        state:
+          type: string
+          enum:
+            - awaiting_approval
+        approval_timeout_secs:
+          type: integer
+          default: 300
+          description: Timeout in seconds for user approval
+      required:
+        - service_id
+        - tool_call_id
+        - tool_name
+        - parameters
+        - state
+      title: McpToolCallMcpToolCall1
+    McpToolCallMcpToolCall2:
+      type: object
+      properties:
+        service_id:
+          type: string
+        tool_call_id:
+          type: string
+        tool_name:
+          type: string
+        tool_description:
+          type:
+            - string
+            - 'null'
+          default: null
+        parameters:
+          type: object
+          additionalProperties:
+            description: Any type
+        timestamp:
+          type: string
+        state:
+          type: string
+          enum:
+            - success
+        result:
+          type: array
+          items:
+            type: object
+            additionalProperties:
+              description: Any type
+      required:
+        - service_id
+        - tool_call_id
+        - tool_name
+        - parameters
+        - state
+        - result
+      title: McpToolCallMcpToolCall2
+    McpToolCallMcpToolCall3:
+      type: object
+      properties:
+        service_id:
+          type: string
+        tool_call_id:
+          type: string
+        tool_name:
+          type: string
+        tool_description:
+          type:
+            - string
+            - 'null'
+          default: null
+        parameters:
+          type: object
+          additionalProperties:
+            description: Any type
+        timestamp:
+          type: string
+        state:
+          type: string
+          enum:
+            - failure
+        error_message:
+          type: string
+      required:
+        - service_id
+        - tool_call_id
+        - tool_name
+        - parameters
+        - state
+        - error_message
+      title: McpToolCallMcpToolCall3
+    McpToolCallMcpToolCall:
+      oneOf:
+        - $ref: '#/components/schemas/McpToolCallMcpToolCall0'
+        - $ref: '#/components/schemas/McpToolCallMcpToolCall1'
+        - $ref: '#/components/schemas/McpToolCallMcpToolCall2'
+        - $ref: '#/components/schemas/McpToolCallMcpToolCall3'
+      title: McpToolCallMcpToolCall
+    McpToolCall:
+      type: object
+      properties:
+        mcp_tool_call:
+          $ref: '#/components/schemas/McpToolCallMcpToolCall'
+        type:
+          type: string
+          enum:
+            - mcp_tool_call
+      required:
+        - mcp_tool_call
+      title: McpToolCall
+    ClientErrorErrorEvent:
+      type: object
+      properties:
+        code:
+          type: integer
+        error_name:
+          type: string
+        message:
+          type: string
+      required:
+        - code
+        - error_name
+      title: ClientErrorErrorEvent
+    ClientError:
+      type: object
+      properties:
+        error_event:
+          $ref: '#/components/schemas/ClientErrorErrorEvent'
+        type:
+          type: string
+          enum:
+            - client_error
+      required:
+        - error_event
+      title: ClientError
+    GuardrailTriggeredGuardrailTriggeredEvent:
+      type: object
+      properties:
+        guardrail_name:
+          type: string
+      required:
+        - guardrail_name
+      title: GuardrailTriggeredGuardrailTriggeredEvent
+    GuardrailTriggered:
+      type: object
+      properties:
+        guardrail_triggered_event:
+          $ref: '#/components/schemas/GuardrailTriggeredGuardrailTriggeredEvent'
+        type:
+          type: string
+          enum:
+            - guardrail_triggered
+      required:
+        - guardrail_triggered_event
+      title: GuardrailTriggered
+    UserTranscriptUserTranscriptionEvent:
+      type: object
+      properties:
+        user_transcript:
+          type: string
+        event_id:
+          type: integer
+      required:
+        - user_transcript
+        - event_id
+      title: UserTranscriptUserTranscriptionEvent
+    UserTranscript:
+      type: object
+      properties:
+        user_transcription_event:
+          $ref: '#/components/schemas/UserTranscriptUserTranscriptionEvent'
+        type:
+          type: string
+          enum:
+            - user_transcript
+      required:
+        - user_transcription_event
+      title: UserTranscript
+    AgentResponseAgentResponseEventResponseType:
+      type: string
+      enum:
+        - text
+        - voice
+      default: text
+      title: AgentResponseAgentResponseEventResponseType
+    AgentResponseAgentResponseEventAttachmentsItems:
+      type: object
+      properties:
+        url:
+          type: string
+        name:
+          type: string
+        mime_type:
+          type: string
+      required:
+        - url
+        - name
+      title: AgentResponseAgentResponseEventAttachmentsItems
+    AgentResponseAgentResponseEvent:
+      type: object
+      properties:
+        agent_response:
+          type: string
+        event_id:
+          type: integer
+        response_id:
+          type: string
+        in_response_to_ids:
+          type: array
+          items:
+            type: string
+        response_type:
+          $ref: '#/components/schemas/AgentResponseAgentResponseEventResponseType'
+          default: text
+        attachments:
+          type: array
+          items:
+            $ref: >-
+              #/components/schemas/AgentResponseAgentResponseEventAttachmentsItems
+      required:
+        - agent_response
+        - event_id
+        - response_id
+      title: AgentResponseAgentResponseEvent
+    AgentResponse:
+      type: object
+      properties:
+        agent_response_event:
+          $ref: '#/components/schemas/AgentResponseAgentResponseEvent'
+        type:
+          type: string
+          enum:
+            - agent_response
+      required:
+        - agent_response_event
+      title: AgentResponse
+    QueueStatusQueueStatusEventStatus:
+      type: string
+      enum:
+        - waiting
+        - admitted
+        - timed_out
+      title: QueueStatusQueueStatusEventStatus
+    QueueStatusQueueStatusEvent:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/QueueStatusQueueStatusEventStatus'
+      required:
+        - status
+      description: Data for concurrency wait-queue status events.
+      title: QueueStatusQueueStatusEvent
+    QueueStatus:
+      type: object
+      properties:
+        queue_status_event:
+          $ref: '#/components/schemas/QueueStatusQueueStatusEvent'
+          description: Data for concurrency wait-queue status events.
+        type:
+          type: string
+          enum:
+            - queue_status
+      required:
+        - queue_status_event
+      description: >-
+        Status of a caller held in the concurrency wait queue. Sent once when
+        the wait
+
+        starts (`waiting`) and once when it ends: `admitted` when the caller is
+        connected
+
+        to the agent, or `timed_out` right before the connection is closed with
+        code 4300.
+
+        Hold audio arrives as regular `audio` events while the caller waits.
+      title: QueueStatus
+    AgentResponseCorrectionAgentResponseCorrectionEvent:
+      type: object
+      properties:
+        original_agent_response:
+          type: string
+        corrected_agent_response:
+          type: string
+        event_id:
+          type: integer
+        response_id:
+          type: string
+      required:
+        - original_agent_response
+        - corrected_agent_response
+        - event_id
+        - response_id
+      title: AgentResponseCorrectionAgentResponseCorrectionEvent
+    AgentResponseCorrection:
+      type: object
+      properties:
+        agent_response_correction_event:
+          $ref: >-
+            #/components/schemas/AgentResponseCorrectionAgentResponseCorrectionEvent
+        type:
+          type: string
+          enum:
+            - agent_response_correction
+      required:
+        - agent_response_correction_event
+      title: AgentResponseCorrection
+    AgentResponseMetadataAgentResponseMetadataEvent:
+      type: object
+      properties:
+        metadata:
+          type: object
+          additionalProperties:
+            description: Any type
+        event_id:
+          type: integer
+      required:
+        - metadata
+        - event_id
+      title: AgentResponseMetadataAgentResponseMetadataEvent
+    AgentResponseMetadata:
+      type: object
+      properties:
+        agent_response_metadata_event:
+          $ref: '#/components/schemas/AgentResponseMetadataAgentResponseMetadataEvent'
+        type:
+          type: string
+          enum:
+            - agent_response_metadata
+      required:
+        - agent_response_metadata_event
+      title: AgentResponseMetadata
+    AudioResponseAudioEventAlignment:
+      type: object
+      properties:
+        chars:
+          type: array
+          items:
+            type: string
+        char_start_times_ms:
+          type: array
+          items:
+            type: integer
+        char_durations_ms:
+          type: array
+          items:
+            type: integer
+      required:
+        - chars
+        - char_start_times_ms
+        - char_durations_ms
+      description: >-
+        Character-level timing data for the audio chunk, useful for synchronized
+        text display or lip-syncing.
+      title: AudioResponseAudioEventAlignment
+    AudioResponseAudioEvent:
+      type: object
+      properties:
+        audio_base_64:
+          type: string
+        event_id:
+          type: integer
+        alignment:
+          $ref: '#/components/schemas/AudioResponseAudioEventAlignment'
+          description: >-
+            Character-level timing data for the audio chunk, useful for
+            synchronized text display or lip-syncing.
+        is_final:
+          type: boolean
+          default: false
+          description: Whether this is the last audio chunk of the current agent response.
+      required:
+        - audio_base_64
+        - event_id
+      title: AudioResponseAudioEvent
+    AudioResponse:
+      type: object
+      properties:
+        audio_event:
+          $ref: '#/components/schemas/AudioResponseAudioEvent'
+        type:
+          type: string
+          enum:
+            - audio
+      required:
+        - audio_event
+      title: AudioResponse
+    InterruptionInterruptionEvent:
+      type: object
+      properties:
+        event_id:
+          type: integer
+      required:
+        - event_id
+      title: InterruptionInterruptionEvent
+    Interruption:
+      type: object
+      properties:
+        interruption_event:
+          $ref: '#/components/schemas/InterruptionInterruptionEvent'
+        type:
+          type: string
+          enum:
+            - interruption
+      required:
+        - interruption_event
+      title: Interruption
+    VadScoreVadScoreEvent:
+      type: object
+      properties:
+        vad_score:
+          type: number
+          format: double
+      required:
+        - vad_score
+      title: VadScoreVadScoreEvent
+    VadScore:
+      type: object
+      properties:
+        vad_score_event:
+          $ref: '#/components/schemas/VadScoreVadScoreEvent'
+        type:
+          type: string
+          enum:
+            - vad_score
+      required:
+        - vad_score_event
+      title: VadScore
+    AgentChatResponsePartTextResponsePartType:
+      type: string
+      enum:
+        - start
+        - delta
+        - stop
+      title: AgentChatResponsePartTextResponsePartType
+    AgentChatResponsePartTextResponsePart:
+      type: object
+      properties:
+        text:
+          type: string
+        type:
+          $ref: '#/components/schemas/AgentChatResponsePartTextResponsePartType'
+        event_id:
+          type: integer
+        response_id:
+          type: string
+      required:
+        - text
+        - type
+        - event_id
+        - response_id
+      title: AgentChatResponsePartTextResponsePart
+    AgentChatResponsePart:
+      type: object
+      properties:
+        text_response_part:
+          $ref: '#/components/schemas/AgentChatResponsePartTextResponsePart'
+        type:
+          type: string
+          enum:
+            - agent_chat_response_part
+      required:
+        - text_response_part
+      title: AgentChatResponsePart
+    ClientToolCallClientToolCall:
+      type: object
+      properties:
+        tool_name:
+          type: string
+        tool_call_id:
+          type: string
+        parameters:
+          type: object
+          additionalProperties:
+            description: Any type
+        event_id:
+          type: integer
+        expects_response:
+          type: boolean
+          description: Whether the server expects a ClientToolResult response.
+      required:
+        - tool_name
+        - tool_call_id
+        - parameters
+        - event_id
+        - expects_response
+      title: ClientToolCallClientToolCall
+    ClientToolCall:
+      type: object
+      properties:
+        client_tool_call:
+          $ref: '#/components/schemas/ClientToolCallClientToolCall'
+        type:
+          type: string
+          enum:
+            - client_tool_call
+      required:
+        - client_tool_call
+      title: ClientToolCall
+    AgentToolResponseAgentToolResponseStatus:
+      type: string
+      enum:
+        - success
+        - error
+        - blocked
+        - skipped
+      description: Tool call status derived from execution flags.
+      title: AgentToolResponseAgentToolResponseStatus
+    AgentToolResponseAgentToolResponse:
+      type: object
+      properties:
+        tool_name:
+          type: string
+        tool_call_id:
+          type: string
+        tool_type:
+          type: string
+        is_error:
+          type: boolean
+        is_blocked:
+          type: boolean
+          default: false
+        event_id:
+          type: integer
+        is_called:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/AgentToolResponseAgentToolResponseStatus'
+          description: Tool call status derived from execution flags.
+      required:
+        - tool_name
+        - tool_call_id
+        - tool_type
+        - is_error
+        - event_id
+        - is_called
+        - status
+      title: AgentToolResponseAgentToolResponse
+    AgentToolResponse:
+      type: object
+      properties:
+        agent_tool_response:
+          $ref: '#/components/schemas/AgentToolResponseAgentToolResponse'
+        type:
+          type: string
+          enum:
+            - agent_tool_response
+      required:
+        - agent_tool_response
+      title: AgentToolResponse
+    AgentToolResponseFullPayloadAgentToolResponseFullPayloadStatus:
+      type: string
+      enum:
+        - success
+        - error
+        - blocked
+        - skipped
+      description: Tool call status derived from execution flags.
+      title: AgentToolResponseFullPayloadAgentToolResponseFullPayloadStatus
+    AgentToolResponseFullPayloadAgentToolResponseFullPayload:
+      type: object
+      properties:
+        tool_name:
+          type: string
+        tool_call_id:
+          type: string
+        tool_type:
+          type: string
+        is_error:
+          type: boolean
+        is_blocked:
+          type: boolean
+          default: false
+        event_id:
+          type: integer
+        is_called:
+          type: boolean
+        full_tool_result:
+          type: string
+        truncated:
+          type: boolean
+          default: false
+        status:
+          $ref: >-
+            #/components/schemas/AgentToolResponseFullPayloadAgentToolResponseFullPayloadStatus
+          description: Tool call status derived from execution flags.
+      required:
+        - tool_name
+        - tool_call_id
+        - tool_type
+        - is_error
+        - event_id
+        - is_called
+        - full_tool_result
+        - status
+      title: AgentToolResponseFullPayloadAgentToolResponseFullPayload
+    AgentToolResponseFullPayload:
+      type: object
+      properties:
+        agent_tool_response_full_payload:
+          $ref: >-
+            #/components/schemas/AgentToolResponseFullPayloadAgentToolResponseFullPayload
+        type:
+          type: string
+          enum:
+            - agent_tool_response_full_payload
+      required:
+        - agent_tool_response_full_payload
+      title: AgentToolResponseFullPayload
+    AgentToolRequestAgentToolRequest:
+      type: object
+      properties:
+        tool_name:
+          type: string
+        tool_call_id:
+          type: string
+        tool_type:
+          type: string
+        event_id:
+          type: integer
+        expects_response:
+          type: boolean
+        disable_interruptions:
+          type: boolean
+        response_timeout_secs:
+          type: integer
+        execution_mode:
+          type: string
+      required:
+        - tool_name
+        - tool_call_id
+        - tool_type
+        - event_id
+        - expects_response
+        - disable_interruptions
+        - response_timeout_secs
+        - execution_mode
+      title: AgentToolRequestAgentToolRequest
+    AgentToolRequest:
+      type: object
+      properties:
+        agent_tool_request:
+          $ref: '#/components/schemas/AgentToolRequestAgentToolRequest'
+        type:
+          type: string
+          enum:
+            - agent_tool_request
+      required:
+        - agent_tool_request
+      title: AgentToolRequest
+    PingPingEvent:
+      type: object
+      properties:
+        event_id:
+          type: integer
+        ping_ms:
+          type: integer
+      required:
+        - event_id
+      title: PingPingEvent
+    Ping:
+      type: object
+      properties:
+        ping_event:
+          $ref: '#/components/schemas/PingPingEvent'
+        type:
+          type: string
+          enum:
+            - ping
+      required:
+        - ping_event
+      title: Ping
+    McpConnectionStatusMcpConnectionStatusIntegrationsItemsIntegrationType:
+      type: string
+      enum:
+        - mcp_server
+        - mcp_integration
+      title: McpConnectionStatusMcpConnectionStatusIntegrationsItemsIntegrationType
+    McpConnectionStatusMcpConnectionStatusIntegrationsItems:
+      type: object
+      properties:
+        integration_id:
+          type: string
+        integration_type:
+          $ref: >-
+            #/components/schemas/McpConnectionStatusMcpConnectionStatusIntegrationsItemsIntegrationType
+        is_connected:
+          type: boolean
+        tool_count:
+          type: integer
+          default: 0
+      required:
+        - integration_id
+        - integration_type
+        - is_connected
+      description: Status of a single MCP integration/server.
+      title: McpConnectionStatusMcpConnectionStatusIntegrationsItems
+    McpConnectionStatusMcpConnectionStatus:
+      type: object
+      properties:
+        integrations:
+          type: array
+          items:
+            $ref: >-
+              #/components/schemas/McpConnectionStatusMcpConnectionStatusIntegrationsItems
+      description: MCP connection status with array of integration statuses.
+      title: McpConnectionStatusMcpConnectionStatus
+    McpConnectionStatus:
+      type: object
+      properties:
+        mcp_connection_status:
+          $ref: '#/components/schemas/McpConnectionStatusMcpConnectionStatus'
+          description: MCP connection status with array of integration statuses.
+        type:
+          type: string
+          enum:
+            - mcp_connection_status
+      required:
+        - mcp_connection_status
+      title: McpConnectionStatus
+    V1ConvaiConversationSubscribe:
+      oneOf:
+        - $ref: '#/components/schemas/ConversationInitiationMetadata'
+        - $ref: '#/components/schemas/AgentResponseComplete'
+        - $ref: '#/components/schemas/ContextUsage'
+        - $ref: '#/components/schemas/McpToolCall'
+        - $ref: '#/components/schemas/ClientError'
+        - $ref: '#/components/schemas/GuardrailTriggered'
+        - $ref: '#/components/schemas/UserTranscript'
+        - $ref: '#/components/schemas/AgentResponse'
+        - $ref: '#/components/schemas/QueueStatus'
+        - $ref: '#/components/schemas/AgentResponseCorrection'
+        - $ref: '#/components/schemas/AgentResponseMetadata'
+        - $ref: '#/components/schemas/AudioResponse'
+        - $ref: '#/components/schemas/Interruption'
+        - $ref: '#/components/schemas/VadScore'
+        - $ref: '#/components/schemas/AgentChatResponsePart'
+        - $ref: '#/components/schemas/ClientToolCall'
+        - $ref: '#/components/schemas/AgentToolResponse'
+        - $ref: '#/components/schemas/AgentToolResponseFullPayload'
+        - $ref: '#/components/schemas/AgentToolRequest'
+        - $ref: '#/components/schemas/Ping'
+        - $ref: '#/components/schemas/McpConnectionStatus'
+      title: V1ConvaiConversationSubscribe
+    UserAudioChunk:
+      type: object
+      properties:
+        user_audio_chunk:
+          type: string
+          description: Base64-encoded audio data from the user's microphone.
+      required:
+        - user_audio_chunk
+      title: UserAudioChunk
+    FeedbackScore:
+      type: string
+      enum:
+        - like
+        - dislike
+      description: >-
+        Feedback score for the referenced agent response. Null clears any
+        previously submitted feedback for the event.
+      title: FeedbackScore
+    Feedback:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - feedback
+        event_id:
+          type: integer
+          description: ID of the agent response event being rated.
+        score:
+          $ref: '#/components/schemas/FeedbackScore'
+          description: >-
+            Feedback score for the referenced agent response. Null clears any
+            previously submitted feedback for the event.
+      required:
+        - event_id
+      title: Feedback
+    UserMessageSourceMedium:
+      type: string
+      enum:
+        - audio
+        - dtmf
+        - text
+        - image
+        - file
+      title: UserMessageSourceMedium
+    UserMessage:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum:
+            - user_message
+        text:
+          type: string
+        user_identifier:
+          type: string
+        source_medium:
+          $ref: '#/components/schemas/UserMessageSourceMedium'
+      title: UserMessage
+    UserActivity:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - user_activity
+      title: UserActivity
+    MultimodalMessageTextSourceMedium:
+      type: string
+      enum:
+        - audio
+        - dtmf
+        - text
+        - image
+        - file
+      title: MultimodalMessageTextSourceMedium
+    MultimodalMessageText:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum:
+            - user_message
+          default: user_message
+        text:
+          type: string
+        user_identifier:
+          type: string
+        source_medium:
+          $ref: '#/components/schemas/MultimodalMessageTextSourceMedium'
+      title: MultimodalMessageText
+    MultimodalMessageFile:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - file_input
+          default: file_input
+        file_id:
+          type: string
+      required:
+        - file_id
+      description: >-
+        Deprecated: single attachment, kept for clients that predate `files`.
+        Ignored when `files` is set.
+      title: MultimodalMessageFile
+    MultimodalMessageFilesItems:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - file_input
+          default: file_input
+        file_id:
+          type: string
+      required:
+        - file_id
+      title: MultimodalMessageFilesItems
+    MultimodalMessage:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - multimodal_message
+        text:
+          $ref: '#/components/schemas/MultimodalMessageText'
+        file:
+          $ref: '#/components/schemas/MultimodalMessageFile'
+          description: >-
+            Deprecated: single attachment, kept for clients that predate
+            `files`. Ignored when `files` is set.
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultimodalMessageFilesItems'
+          description: >-
+            Files attached to this message, at most 5. Each file must already
+            have been uploaded via the conversation file upload endpoint.
+      title: MultimodalMessage
+    Pong:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - pong
+        event_id:
+          type: integer
+          description: ID of the ping event this pong responds to.
+      required:
+        - event_id
+      title: Pong
+    ClientToolResultErrorType:
+      type: string
+      enum:
+        - user_rejected
+        - external_server
+        - external_client
+        - customer_auth
+        - client_timeout
+        - unknown
+      description: >-
+        Optional category for the failure reason. When set, `is_error` is
+        treated as true. `user_rejected` is special-cased to mark the tool as
+        not having been called.
+      title: ClientToolResultErrorType
+    ClientToolResult:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - client_tool_result
+        tool_call_id:
+          type: string
+          description: ID of the tool call this result corresponds to.
+        result:
+          type: string
+        is_error:
+          type: boolean
+        error_type:
+          $ref: '#/components/schemas/ClientToolResultErrorType'
+          description: >-
+            Optional category for the failure reason. When set, `is_error` is
+            treated as true. `user_rejected` is special-cased to mark the tool
+            as not having been called.
+      required:
+        - tool_call_id
+        - result
+        - is_error
+      title: ClientToolResult
+    McpToolApprovalResult:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - mcp_tool_approval_result
+        tool_call_id:
+          type: string
+          description: The ID of the tool call this approval responds to.
+        is_approved:
+          type: boolean
+          description: Whether the user approved the tool call.
+      required:
+        - tool_call_id
+        - is_approved
+      title: McpToolApprovalResult
+    ContextualUpdate:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - contextual_update
+        text:
+          type: string
+          description: Context text to inject into the conversation without interrupting.
+        context_id:
+          type: string
+          description: >-
+            Optional client-supplied identifier. When a newer update with the
+            same context_id arrives, the older one supersedes it: the older
+            update is dropped from the LLM view and visually marked as
+            superseded in the rendered transcript.
+      required:
+        - text
+      title: ContextualUpdate
+    ConversationInitiationClientDataConversationConfigOverrideAsr:
+      type: object
+      properties:
+        keywords:
+          type: array
+          items:
+            type: string
+          description: Keywords to boost prediction probability for
+      description: Configuration for conversational transcription
+      title: ConversationInitiationClientDataConversationConfigOverrideAsr
+    ConversationInitiationClientDataConversationConfigOverrideTurnSoftTimeoutConfig:
+      type: object
+      properties:
+        message:
+          type: string
+          description: >-
+            Message to show when the first soft timeout is reached while waiting
+            for LLM response. Supports dynamic variables (e.g.,
+            {{system__time}}, {{custom_variable}}).
+        additional_soft_timeout_messages:
+          type: array
+          items:
+            type: string
+          description: >-
+            Extra static filler messages for subsequent soft timeouts in the
+            same LLM generation. The first timeout uses `message`. If fewer
+            messages are configured than `max_soft_timeouts_per_generation`, the
+            last configured message is repeated; otherwise a built-in filler is
+            used.
+      description: >-
+        Configuration for soft timeout functionality. Provides immediate
+        feedback during longer LLM responses.
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideTurnSoftTimeoutConfig
+    ConversationInitiationClientDataConversationConfigOverrideTurn:
+      type: object
+      properties:
+        soft_timeout_config:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTurnSoftTimeoutConfig
+          description: >-
+            Configuration for soft timeout functionality. Provides immediate
+            feedback during longer LLM responses.
+      description: Configuration for turn detection
+      title: ConversationInitiationClientDataConversationConfigOverrideTurn
+    ConversationInitiationClientDataConversationConfigOverrideTtsModelId:
+      type: string
+      enum:
+        - eleven_turbo_v2
+        - eleven_turbo_v2_5
+        - eleven_flash_v2
+        - eleven_flash_v2_5
+        - eleven_multilingual_v2
+        - eleven_v3_conversational
+      description: The model to use for TTS
+      title: ConversationInitiationClientDataConversationConfigOverrideTtsModelId
+    ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItemsModelFamily:
+      type: string
+      enum:
+        - turbo
+        - flash
+        - multilingual
+        - v3_conversational
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItemsModelFamily
+    ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItemsOptimizeStreamingLatency:
+      type: string
+      enum:
+        - '0'
+        - '1'
+        - '2'
+        - '3'
+        - '4'
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItemsOptimizeStreamingLatency
+    ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItems:
+      type: object
+      properties:
+        label:
+          type: string
+          minLength: 1
+        voice_id:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        language:
+          type: string
+        model_family:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItemsModelFamily
+        optimize_streaming_latency:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItemsOptimizeStreamingLatency
+        stability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        speed:
+          type: number
+          format: double
+          minimum: 0.7
+          maximum: 1.2
+        similarity_boost:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+      required:
+        - label
+        - voice_id
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItems
+    ConversationInitiationClientDataConversationConfigOverrideTtsPronunciationDictionaryLocatorsItems:
+      type: object
+      properties:
+        pronunciation_dictionary_id:
+          type: string
+          description: The ID of the pronunciation dictionary
+        version_id:
+          type: string
+          description: The ID of the version of the pronunciation dictionary
+      required:
+        - pronunciation_dictionary_id
+        - version_id
+      description: >-
+        A locator for other documents to be able to reference a specific
+        dictionary and it's version.
+
+        This is a pydantic version of
+        PronunciationDictionaryVersionLocatorDBModel.
+
+        Required to ensure compat with the rest of the agent data models.
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideTtsPronunciationDictionaryLocatorsItems
+    ConversationInitiationClientDataConversationConfigOverrideTts:
+      type: object
+      properties:
+        model_id:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTtsModelId
+          description: The model to use for TTS
+        voice_id:
+          type: string
+          description: The voice ID to use for TTS
+        supported_voices:
+          type: array
+          items:
+            $ref: >-
+              #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTtsSupportedVoicesItems
+          description: Additional supported voices for the agent
+        stability:
+          type: number
+          format: double
+          description: The stability of generated speech
+        speed:
+          type: number
+          format: double
+          description: The speed of generated speech
+        similarity_boost:
+          type: number
+          format: double
+          description: The similarity boost for generated speech
+        pronunciation_dictionary_locators:
+          type: array
+          items:
+            $ref: >-
+              #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTtsPronunciationDictionaryLocatorsItems
+          description: The pronunciation dictionary locators
+      description: Configuration for conversational text to speech
+      title: ConversationInitiationClientDataConversationConfigOverrideTts
+    ConversationInitiationClientDataConversationConfigOverrideConversation:
+      type: object
+      properties:
+        text_only:
+          type: boolean
+          description: >-
+            If enabled audio will not be processed and only text will be used,
+            use to avoid audio pricing.
+        max_duration_seconds:
+          type: integer
+          description: The maximum duration of a conversation in seconds
+      description: Configuration for conversational events
+      title: ConversationInitiationClientDataConversationConfigOverrideConversation
+    ConversationInitiationClientDataConversationConfigOverrideAgentPromptLlm:
+      type: string
+      enum:
+        - gpt-4o-mini
+        - gpt-4o
+        - gpt-4
+        - gpt-4-turbo
+        - gpt-4.1
+        - gpt-4.1-mini
+        - gpt-4.1-nano
+        - gpt-5
+        - gpt-5.1
+        - gpt-5.2
+        - gpt-5.2-chat-latest
+        - gpt-5.4
+        - gpt-5.4-mini
+        - gpt-5.4-nano
+        - gpt-5.5
+        - gpt-5.6-sol
+        - gpt-5.6-terra
+        - gpt-5.6-luna
+        - gpt-6-astra
+        - gpt-6-sol
+        - gpt-6-luna
+        - gpt-5-mini
+        - gpt-5-nano
+        - gpt-3.5-turbo
+        - gemini-1.5-pro
+        - gemini-1.5-flash
+        - gemini-2.0-flash
+        - gemini-2.0-flash-lite
+        - gemini-2.5-flash-lite
+        - gemini-2.5-flash
+        - gemini-3-pro-preview
+        - gemini-3-flash-preview
+        - gemini-3.1-pro-preview
+        - gemini-3.1-flash-lite-preview
+        - gemini-3.1-flash-lite
+        - gemini-3.5-flash
+        - gemini-3.5-flash-lite
+        - gemini-3.6-flash
+        - gemini-3.7-flash
+        - gemini-3.8-flash
+        - claude-sonnet-4-5
+        - claude-opus-4-7
+        - claude-opus-4-8
+        - claude-opus-5
+        - claude-opus-5-5
+        - claude-sonnet-4-6
+        - claude-sonnet-5
+        - claude-sonnet-4
+        - claude-haiku-4-5
+        - claude-3-7-sonnet
+        - claude-3-5-sonnet
+        - claude-3-5-sonnet-v1
+        - claude-3-haiku
+        - grok-beta
+        - custom-llm
+        - qwen3-4b
+        - qwen3-30b-a3b
+        - qwen36-35b-a3b
+        - qwen35-397b-a17b
+        - gpt-oss-20b
+        - gpt-oss-120b
+        - glm-45-air-fp8
+        - glm-52
+        - deepseek-v41-flash
+        - gemini-2.5-flash-preview-09-2025
+        - gemini-2.5-flash-lite-preview-09-2025
+        - gemini-2.5-flash-preview-05-20
+        - gemini-2.5-flash-preview-04-17
+        - gemini-2.5-flash-lite-preview-06-17
+        - gemini-2.0-flash-lite-001
+        - gemini-2.0-flash-001
+        - gemini-1.5-flash-002
+        - gemini-1.5-flash-001
+        - gemini-1.5-pro-002
+        - gemini-1.5-pro-001
+        - claude-sonnet-4@20250514
+        - claude-sonnet-4-5@20250929
+        - claude-haiku-4-5@20251001
+        - claude-3-7-sonnet@20250219
+        - claude-3-5-sonnet@20240620
+        - claude-3-5-sonnet-v2@20241022
+        - claude-3-haiku@20240307
+        - gpt-5-2025-08-07
+        - gpt-5.1-2025-11-13
+        - gpt-5.2-2025-12-11
+        - gpt-5.4-2026-03-05
+        - gpt-5.4-mini-2026-03-17
+        - gpt-5.4-nano-2026-03-17
+        - gpt-5.5-2026-04-23
+        - gpt-5-mini-2025-08-07
+        - gpt-5-nano-2025-08-07
+        - gpt-4.1-2025-04-14
+        - gpt-4.1-mini-2025-04-14
+        - gpt-4.1-nano-2025-04-14
+        - gpt-4o-mini-2024-07-18
+        - gpt-4o-2024-11-20
+        - gpt-4o-2024-08-06
+        - gpt-4o-2024-05-13
+        - gpt-4-0613
+        - gpt-4-0314
+        - gpt-4-turbo-2024-04-09
+        - gpt-3.5-turbo-0125
+        - gpt-3.5-turbo-1106
+        - watt-tool-8b
+        - watt-tool-70b
+      description: >-
+        The LLM to query with the prompt and the chat history. If using data
+        residency, the LLM must be supported in the data residency environment
+      title: ConversationInitiationClientDataConversationConfigOverrideAgentPromptLlm
+    ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItemsType:
+      type: string
+      enum:
+        - file
+        - url
+        - text
+        - folder
+      description: The type of the knowledge base
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItemsType
+    ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItemsUsageMode:
+      type: string
+      enum:
+        - prompt
+        - auto
+      default: auto
+      description: The usage mode of the knowledge base
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItemsUsageMode
+    ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItems:
+      type: object
+      properties:
+        type:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItemsType
+          description: The type of the knowledge base
+        name:
+          type: string
+          description: The name of the knowledge base
+        id:
+          type: string
+          description: The ID of the knowledge base
+        usage_mode:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItemsUsageMode
+          default: auto
+          description: The usage mode of the knowledge base
+      required:
+        - type
+        - name
+        - id
+      title: >-
+        ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItems
+    ConversationInitiationClientDataConversationConfigOverrideAgentPrompt:
+      type: object
+      properties:
+        prompt:
+          type: string
+          description: The prompt for the agent
+        llm:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAgentPromptLlm
+          description: >-
+            The LLM to query with the prompt and the chat history. If using data
+            residency, the LLM must be supported in the data residency
+            environment
+        tool_ids:
+          type: array
+          items:
+            type: string
+          description: A list of IDs of tools used by the agent
+        native_mcp_server_ids:
+          type: array
+          items:
+            type: string
+          description: A list of Native MCP server ids to be used by the agent
+        knowledge_base:
+          type: array
+          items:
+            $ref: >-
+              #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAgentPromptKnowledgeBaseItems
+          description: A list of knowledge bases to be used by the agent
+      description: The prompt for the agent
+      title: ConversationInitiationClientDataConversationConfigOverrideAgentPrompt
+    ConversationInitiationClientDataConversationConfigOverrideAgent:
+      type: object
+      properties:
+        first_message:
+          type: string
+          description: >-
+            If non-empty, the first message the agent will say. If empty, the
+            agent waits for the user to start the discussion.
+        language:
+          type: string
+          description: Language of the agent - used for ASR and TTS
+        max_conversation_duration_message:
+          type: string
+          description: >-
+            If non-empty, the message the agent will send when max conversation
+            duration is reached.
+        prompt:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAgentPrompt
+          description: The prompt for the agent
+      description: Agent specific configuration
+      title: ConversationInitiationClientDataConversationConfigOverrideAgent
+    ConversationInitiationClientDataConversationConfigOverride:
+      type: object
+      properties:
+        asr:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAsr
+          description: Configuration for conversational transcription
+        turn:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTurn
+          description: Configuration for turn detection
+        tts:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideTts
+          description: Configuration for conversational text to speech
+        conversation:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideConversation
+          description: Configuration for conversational events
+        agent:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverrideAgent
+          description: Agent specific configuration
+      title: ConversationInitiationClientDataConversationConfigOverride
+    ConversationInitiationClientDataSourceInfoSource:
+      type: string
+      enum:
+        - unknown
+        - android_sdk
+        - node_js_sdk
+        - react_native_sdk
+        - react_sdk
+        - js_sdk
+        - python_sdk
+        - widget
+        - sip_trunk
+        - twilio
+        - exotel
+        - genesys
+        - avaya
+        - audiocodes
+        - swift_sdk
+        - whatsapp
+        - twilio_sms
+        - flutter_sdk
+        - zendesk_integration
+        - slack_integration
+        - telegram_integration
+        - intercom_integration
+        - freshdesk_integration
+        - salesforce_integration
+        - template_preview
+        - genesys_bot_connector
+        - subagent_tool
+      description: Source of the conversation initiation
+      title: ConversationInitiationClientDataSourceInfoSource
+    ConversationInitiationClientDataSourceInfo:
+      type: object
+      properties:
+        source:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataSourceInfoSource
+          description: Source of the conversation initiation
+        version:
+          type: string
+          maxLength: 50
+          description: The SDK version number
+      description: Information about the source of conversation initiation
+      title: ConversationInitiationClientDataSourceInfo
+    ConversationInitiationClientData:
+      type: object
+      properties:
+        conversation_config_override:
+          $ref: >-
+            #/components/schemas/ConversationInitiationClientDataConversationConfigOverride
+        custom_llm_extra_body:
+          type: object
+          additionalProperties:
+            description: Any type
+        user_id:
+          type: string
+          description: >-
+            ID of the end user participating in this conversation (for agent
+            owner's user identification)
+        source_info:
+          $ref: '#/components/schemas/ConversationInitiationClientDataSourceInfo'
+          description: Information about the source of conversation initiation
+        branch_id:
+          type: string
+          description: ID of the agent branch to use for this conversation
+        environment:
+          type: string
+          description: Environment to use for resolving environment variables
+        starting_workflow_node_id:
+          type: string
+          description: >-
+            If set, start the workflow at this node id instead of the default
+            entry
+        procedure_ids:
+          type: array
+          items:
+            type: string
+          description: >-
+            If set, only these procedures are available to the starting agent.
+            Each ID must be attached to that agent; unknown IDs fail
+            conversation start. An empty list disables all of that agent's
+            procedures. Not applied after an agent transfer. Requires
+            enable_procedure_ids_from_client.
+        dynamic_variables:
+          type: object
+          additionalProperties:
+            description: Any type
+        type:
+          type: string
+          enum:
+            - conversation_initiation_client_data
+      title: ConversationInitiationClientData
+    V1ConvaiConversationPublish:
+      oneOf:
+        - $ref: '#/components/schemas/UserAudioChunk'
+        - $ref: '#/components/schemas/Feedback'
+        - $ref: '#/components/schemas/UserMessage'
+        - $ref: '#/components/schemas/UserActivity'
+        - $ref: '#/components/schemas/MultimodalMessage'
+        - $ref: '#/components/schemas/Pong'
+        - $ref: '#/components/schemas/ClientToolResult'
+        - $ref: '#/components/schemas/McpToolApprovalResult'
+        - $ref: '#/components/schemas/ContextualUpdate'
+        - $ref: '#/components/schemas/ConversationInitiationClientData'
+      title: V1ConvaiConversationPublish
+

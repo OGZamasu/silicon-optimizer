@@ -116,7 +116,7 @@ struct ElevenLabsControlRoutesTests {
         }
     }
 
-    @Test func theRouteTableIsTheseFourAndNothingElse() {
+    @Test func theRouteTableIsTheseFiveAndNothingElse() {
         func route(_ method: String, _ path: String, _ query: [String: String] = [:])
             -> ElevenLabsControlRequest.Route? {
             ControlServer.elevenLabsRoute(
@@ -129,6 +129,7 @@ struct ElevenLabsControlRoutesTests {
             == .operations(.init(text: "dub", limit: "3")))
         #expect(route("GET", "/elevenlabs/operations/get_voices") == .operation(id: "get_voices"))
         #expect(route("POST", "/elevenlabs/call") == .call(body: Data("{}".utf8)))
+        #expect(route("POST", "/elevenlabs/agents/converse") == .agentConverse(body: Data("{}".utf8)))
         #expect(route("POST", "/elevenlabs/operations") == nil)
         // A trailing slash is the same route, as everywhere on this server.
         #expect(route("GET", "/elevenlabs/operations/") == .operations(.init()))
@@ -217,6 +218,17 @@ extension BuddyTestHost {
                 return .error(asked, "fixture refusal \(asked)")
             }
             return .encode(["route": "call"])
+        case .agentConverse(let body):
+            // `{"fixtureHold":true}` waits (up to 15 s) for the request to be cancelled.
+            if String(decoding: body, as: UTF8.self).contains("fixtureHold") {
+                await ConverseHangUpProbe.shared.held(ObjectIdentifier(self))
+                let deadline = ContinuousClock.now + .seconds(15)
+                while !Task.isCancelled, ContinuousClock.now < deadline {
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                if Task.isCancelled { await ConverseHangUpProbe.shared.cancelled(ObjectIdentifier(self)) }
+            }
+            return .encode(["route": "agentConverse"])
         }
     }
 }
