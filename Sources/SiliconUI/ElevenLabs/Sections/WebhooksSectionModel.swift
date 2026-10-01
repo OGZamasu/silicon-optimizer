@@ -153,8 +153,10 @@ final class WebhooksSectionModel {
     /// drawn earlier may be older than ElevenLabs (turned off on the website since, say).
     func startEditing(_ webhook: WorkspaceWebhook) async {
         wantedEdit = webhook.id
+        // On a runner of its own: a list refresh (after a save, say) must not abandon this read
+        // and leave the editor unopened. A newer Edit replaces it (and `wantedEdit` drops it).
         let json = await actions.perform(
-            "get_workspace_webhooks_route", ["include_usages": true], quietly: true
+            "get_workspace_webhooks_route", ["include_usages": true], quietly: true, slot: "edit"
         )?.voicesStudioJSON
         guard wantedEdit == webhook.id else { return }
         if let json {

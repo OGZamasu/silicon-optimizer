@@ -101,18 +101,27 @@ struct VoicesStudioLateAnswerTests {
 
     // MARK: Webhooks
 
-    static func webhook(_ id: String) -> JSONValue {
+    nonisolated static func webhook(_ id: String) -> JSONValue {
         ["name": .string("Hook \(id)"), "webhook_id": .string(id), "webhook_url": "https://example.com/hook",
          "is_disabled": false, "is_auto_disabled": false, "created_at_unix": 1, "auth_type": "hmac", "events": ["flows"]]
     }
 
     /// A save that finishes after another webhook's editor was opened leaves that editor open.
+    /// The save's answer is held until the other editor is open — on a signal, not a delay.
     @Test func aSaveFinishingAfterAnotherEditorOpenedLeavesThatEditorOpen() async throws {
+        let signals = VoicesStudioFollowupTests.Signals()
         let list: JSONValue = ["webhooks": [Self.webhook("w-slow"), Self.webhook("w2")]]
-        let fixture = VoicesStudioFixture([
-            "edit_workspace_webhook_route": [.json(["status": "ok"])],
-            "get_workspace_webhooks_route": [.json(list), .json(list)],
-        ], late: ["w-slow": Self.late])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_workspace_webhook_route":
+                await signals.wait(for: "other editor open")
+                return .json(["status": "ok"])
+            case "get_workspace_webhooks_route":
+                return .json(list)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
         defer { fixture.clean() }
         let model = WebhooksSectionModel(environment: fixture.environment)
         let slow = try #require(WorkspaceWebhook(json: Self.webhook("w-slow")))
@@ -123,9 +132,50 @@ struct VoicesStudioLateAnswerTests {
         let task = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
         await model.startEditing(other)
         #expect(model.editing?.id == "w2")
+        signals.note("other editor open")
         await task.value
         #expect(model.editing?.id == "w2", "saving one webhook closed another's editor")
         #expect(model.draft.name == "Hook w2")
+    }
+
+    /// The other way round: Edit pressed on another webhook while a save is on its way, and the
+    /// save (with the list it fetches again) answers while Edit's own read is still coming. The
+    /// list's read must not abandon Edit's: the other editor opens. (The fake holds Edit's read
+    /// until the save's list has been answered.)
+    @Test func aListReadAfterASaveDoesNotAbandonAnEditBeingOpened() async throws {
+        let signals = VoicesStudioFollowupTests.Signals()
+        let list: JSONValue = ["webhooks": [Self.webhook("w-slow"), Self.webhook("w2")]]
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_workspace_webhook_route":
+                await signals.wait(for: "edit asked")
+                return .json(["status": "ok"])
+            case "get_workspace_webhooks_route":
+                if signals.note("list") == 1 {
+                    signals.note("edit asked")
+                    await signals.wait(for: "listed after the save")
+                } else {
+                    signals.note("listed after the save")
+                }
+                return .json(list)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = WebhooksSectionModel(environment: fixture.environment)
+        let slow = try #require(WorkspaceWebhook(json: Self.webhook("w-slow")))
+        let other = try #require(WorkspaceWebhook(json: Self.webhook("w2")))
+        model.load(webhooks: [slow, other])
+        model.edit(slow, eventsKnown: true)
+        model.draft.name = "Renamed"
+        let saving = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
+        await model.startEditing(other)
+        await saving.value
+        #expect(fixture.sent("get_workspace_webhooks_route").count == 2)
+        #expect(model.editing?.id == "w2", "the other webhook's editor did not open")
+        #expect(model.draft.name == "Hook w2")
+        #expect(model.problems.isEmpty, "\(model.problems)")
     }
 
     // MARK: Studio
