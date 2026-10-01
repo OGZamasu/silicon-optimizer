@@ -391,6 +391,26 @@ struct ElevenLabsControlHandlerTests {
         #expect(json["redacted"] == true)
     }
 
+    /// The switch spares the credential the operation returns — a string. A field of that name
+    /// holding an object is not spared whole: a `password` or `client_secret` inside it stays
+    /// masked, and only what no field name calls a secret shows.
+    @Test func theSwitchSparesANamedFieldOnlyWhenItIsAString() async throws {
+        let answer: JSON = [
+            "agent_id": "k1",
+            "token": ["password": "pw-inside", "client_secret": "cs-inside", "scope": "conversation"],
+            "links": [["token": "link-token-string"]],
+        ]
+        let json = try ELFixture.json(await ELFixture.handler(
+            backend: RecordingBackend(result: .json(answer, .init(status: 200))), allowRisky: true
+        ).call(ELFixture.body("agent_link")))["json"]
+        let hidden = JSON.string(ElevenLabsRedaction.placeholder)
+        #expect(json["token"]["password"] == hidden)
+        #expect(json["token"]["client_secret"] == hidden)
+        #expect(json["token"]["scope"] == "conversation")
+        #expect(json["links"][0]["token"] == "link-token-string", "a string the switch reveals still shows")
+        #expect(json["agent_id"] == "k1")
+    }
+
     @Test func theKeyPreviewIsMaskedEvenWithTheSwitchOn() async throws {
         let answer: JSON = ["user_id": "u", "xi_api_key_preview": "sk_1234…"]
         let json = try ELFixture.json(await ELFixture.handler(

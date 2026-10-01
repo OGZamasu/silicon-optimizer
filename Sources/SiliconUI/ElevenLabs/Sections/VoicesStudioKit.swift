@@ -141,6 +141,11 @@ final class VoicesStudioActions {
     /// the read of an item the owner opened meanwhile, nor is abandoned by it.
     static let afterChange = "after-change"
 
+    /// `afterChange` for one item: a runner per item, so two changes to two items that finish
+    /// close together each fetch their own item again — the second never abandons the first's
+    /// read. A newer refetch of the same item still replaces an older one.
+    static func afterChange(of id: String) -> String { "\(afterChange)/\(id)" }
+
     private static func key(_ operationID: String, _ slot: String?) -> String {
         slot.map { "\(operationID)#\($0)" } ?? operationID
     }
@@ -249,24 +254,19 @@ final class VoicesStudioActions {
     }
 
     /// Whether a failed or stopped run may still have been carried out: cancelled after it
-    /// started, or lost on the way back (no connection, a timeout, a server error). A refusal
-    /// ElevenLabs gave (4xx) or arguments refused before sending are known outcomes.
+    /// started, or lost on the way back (no connection, a timeout, a 408, a server error). A
+    /// refusal ElevenLabs gave (another 4xx, a 429 included) or arguments refused before sending
+    /// are known outcomes — read off the failure's HTTP status (`provesNothingWasDone`), not its
+    /// words.
     static func outcomeIsUnknown(_ runner: ElevenLabsRunner) -> Bool {
         switch runner.phase {
         case .cancelled:
             return true
         case .failed:
-            switch runner.failure {
-            case .offline?:
-                return true
-            case .other(let message)?:
-                // The runner reports no HTTP status, only its words: a refusal ElevenLabs gave
-                // reads "answered 4xx"; a question confirmed after the account changed sent nothing.
-                if message == ElevenLabsRunner.accountChangedMessage { return false }
-                return message.range(of: #"answered 4\d\d"#, options: .regularExpression) == nil
-            default:
-                return false
-            }
+            guard let failure = runner.failure else { return false }
+            // A question confirmed after the account changed sent nothing.
+            if failure == .other(ElevenLabsRunner.accountChangedMessage) { return false }
+            return !failure.provesNothingWasDone
         default:
             return false
         }

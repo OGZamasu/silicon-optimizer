@@ -1137,12 +1137,14 @@ struct AgentsTicket: Identifiable, Hashable, Sendable {
     var comment: String
     var conversationIDs: [String]
     var assigneeID: String?
+    /// How urgent it is (`low` … `urgent`), when someone said.
+    var priority: String?
     var createdAt: Date?
     var comments: [(comment: String, at: Date?)]
     var turnComments: [(turn: Int, comment: String)]
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.id == rhs.id && lhs.status == rhs.status && lhs.assigneeID == rhs.assigneeID
+        lhs.id == rhs.id && lhs.status == rhs.status && lhs.assigneeID == rhs.assigneeID && lhs.priority == rhs.priority
             && lhs.comments.count == rhs.comments.count && lhs.turnComments.count == rhs.turnComments.count
     }
 
@@ -1158,6 +1160,7 @@ struct AgentsTicket: Identifiable, Hashable, Sendable {
         comment = json["qa_comment"].stringValue ?? ""
         conversationIDs = AgentsJSON.strings(json["conversation_ids"])
         assigneeID = json["assignee_user_id"].stringValue
+        priority = json["priority"].stringValue
         createdAt = AgentsJSON.date(json["created_at_unix_secs"])
         comments = (json["ticket_comments"].arrayValue ?? []).map {
             ($0["comment"].stringValue ?? "", AgentsJSON.date($0["created_at_unix_secs"]))

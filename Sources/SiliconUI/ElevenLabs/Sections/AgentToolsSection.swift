@@ -274,7 +274,7 @@ final class AgentToolsModel {
         guard let json = await calls.json(AgentsOp.updateTool, ["tool_id": .string(id), "tool_config": config],
                                           slot: id, title: "Saved tool “\(config["name"].stringValue ?? "")”",
                                           subject: wording.subject, consequence: wording.consequence,
-                                          confirmLabel: "Save tool"),
+                                          question: "Save the tool \(wording.subject)?", confirmLabel: "Save tool"),
               let saved = AgentsTool(json: json) else { return }
         list.upsert(saved)
         store.directory.tools.upsert(saved)
@@ -291,7 +291,7 @@ final class AgentToolsModel {
         let wording = Self.describe(config)
         guard let json = await calls.json(AgentsOp.createTool, ["tool_config": config], title: "New tool “\(newTool.name)”",
                                           subject: wording.subject, consequence: wording.consequence,
-                                          confirmLabel: "Create tool"),
+                                          question: "Create the tool \(wording.subject)?", confirmLabel: "Create tool"),
               let tool = AgentsTool(json: json) else { return }
         list.upsert(tool)
         store.directory.tools.upsert(tool)

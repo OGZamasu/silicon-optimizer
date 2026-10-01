@@ -289,6 +289,7 @@ final class AgentSecretsModel {
             consequence: "Tools, MCP servers and agents that refer to {{\(label)}} use these values in "
                 + ListFormatter.localizedString(byJoining: newVariableValues.map(\.environment).filter { !$0.isEmpty })
                 + " from their next conversation. The values themselves are not shown here again.",
+            question: "Create the variable “\(label)” (\(AgentsFormat.words(newVariableType).lowercased()))?",
             confirmLabel: "Create variable"
         ) else { return }
         newVariableLabel = ""
@@ -317,6 +318,7 @@ final class AgentSecretsModel {
            subject: "“\(variable.label)”",
            consequence: "What refers to {{\(variable.label)}} uses the new values from its next conversation."
             + (removed.isEmpty ? "" : " Removed: " + ListFormatter.localizedString(byJoining: removed) + "."),
+           question: "Save the values of “\(variable.label)”?",
            confirmLabel: "Save values"
         ) != nil else { return }
         if selectedVariableID == variable.id { await selectVariable(variable.id) }

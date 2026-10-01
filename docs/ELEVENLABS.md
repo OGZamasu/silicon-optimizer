@@ -23,7 +23,7 @@ raw JSON between HTTP and the app, so the MCP process never holds the key.
 ### The catalog
 
 The catalog comes from a pinned copy of ElevenLabs' OpenAPI spec, `Scripts/elevenlabs/openapi.json`
-(SHA-256 `b3fe16f8d37a3b735df8514737e045b8d190f8618eb5c93f7caa7523feed80a0`). It holds 403
+(SHA-256 `0b2f5145d7e6d04db439123076de5780da7402bc7e763ba49783c918323f942b`). It holds 403
 operations: 159 GET, 168 POST, 32 PATCH, 43 DELETE and 1 PUT. The running app never fetches
 the spec.
 
@@ -115,7 +115,9 @@ the spec, and a test walks those schemas again:
 removes the key preview in `GET /v1/user`, and any `sk_…` string. Signed download URLs for the
 owner's own files (Studio assets, knowledge-base sources, Productions deliverables) are not
 credentials to the account, so they are not listed. JSON answers keep 64-hex strings, because
-ElevenLabs' public user and owner ids look like that. Error text loses those as well.
+ElevenLabs' public user and owner ids look like that. Text answers in the app keep them too
+(`redactAnswerText`): they lose `sk_…` keys and a lone run of exactly 32 hex digits, the legacy key's
+shape. Error text loses any run of 32 or more.
 
 ### The client
 
@@ -141,11 +143,21 @@ It reports every problem at once, as `ElevenLabsError.invalidArguments`. An inva
 nothing and does not read the key. `validate` returns the same list without calling. `describe`
 returns what would be sent, for Show API call, with the key shown as `‹redacted›`, and with the
 secrets the owner typed masked too: a secret's value, provider tokens (Twilio, Exotel), SIP
-passwords, and plain-string header values such as a literal `Authorization` (references to
-secrets stay). Which request fields are masked is checked against every request schema in the
-pinned spec, so a spec refresh that adds a secret-looking field fails a test until it is
-classified. Answers get the same header rule: a tool, MCP server or webhook whose header holds a
-literal token comes back with the token masked.
+passwords, plain-string header values such as a literal `Authorization` (references to secrets
+stay), and a phone transfer's post-dial digits and SIP UUI payload (a dynamic post-dial value
+names a variable and stays). Which request fields are masked is checked against every request
+schema in the pinned spec, so a spec refresh that adds a secret-looking field fails a test until
+it is classified.
+
+The URL is masked as well: the values of the credential query parameters (`token`,
+`conversation_signature`, however the name is cased or percent-encoded), any `sk_…` key typed into
+another value or a path, and any fragment. A URL that cannot be taken apart is shown without
+anything after its path. The request itself keeps the real URL.
+
+Answers get a header rule too: a tool, MCP server or webhook whose header holds a literal token
+comes back with the token masked by default. That follows the owner's switch over MCP and the
+control API (see below), and the app's own results keep header values real, because the owner's
+editor writes them back. An `sk_…` key is masked everywhere, whatever the switch says.
 
 How a call goes out:
 
@@ -364,6 +376,12 @@ shown-once card lists only the credential fields the risk table names for that o
   - A cancelled or replaced run never touches the next run's state, even when its request
     completes late. Each run and each Cancel takes a generation number, and only the current
     one may change what the runner shows.
+  - **A failed run keeps ElevenLabs' HTTP status** (`ElevenLabsRunnerFailure.api(status:message:)`),
+    and `provesNothingWasDone` says whether the failure proves nothing happened: never sent, or
+    refused with a 401, 403, 429 or another 4xx. A 408, a 5xx, a lost answer and a cancel after
+    sending do not, so a section that spends or reaches the outside world (voices & studio's
+    spending holds, the agents' real-world send guard) asks the owner to check before the next
+    try.
 - **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
   `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
   `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.
@@ -473,7 +491,8 @@ and any string under a field whose name says it is a secret (`api_key`, `*token*
 `signature`, `password`, `signed_url` — but not a pagination cursor like `next_page_token` or an
 identifier like `secret_id`) are masked. Turning the switch on reveals exactly what it is for:
 that one operation's named credential fields, and header values (so an agent allowed to edit a
-tool can send its config back). A `password` or `client_secret` anywhere else stays masked. A
+tool can send its config back), where they are strings. A `password` or `client_secret` anywhere
+else stays masked, including inside a named field that holds an object rather than a string. A
 masked answer says so in `redacted` and `redactionNote`; the saved `fullResult` is the masked
 answer too. The app's own pane shows everything.
 

@@ -2127,7 +2127,7 @@ final class AgentsWorkspaceSettingsModel {
             AgentsOp.updateSettings, body, subject: "the workspace's agent settings",
             consequence: "This changes \(ListFormatter.localizedString(byJoining: changed)) for every agent in the "
                 + "workspace. Post-call webhooks send conversation data to the webhook's address.",
-            confirmLabel: "Save settings"
+            question: "Save the workspace's agent settings?", confirmLabel: "Save settings"
         ) else { return }
         if json["can_use_mcp_servers"] != .null { settings = json } else { await load() }
     }

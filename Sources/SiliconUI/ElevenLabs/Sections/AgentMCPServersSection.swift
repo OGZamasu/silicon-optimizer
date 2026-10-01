@@ -209,7 +209,11 @@ final class AgentMCPServersModel {
             AgentsOp.updateMCPServer, arguments, slot: server.id,
             subject: settings.approvalPolicy != originalSettings.approvalPolicy
                 ? "“\(server.name)” — tools \(Self.policyWords(settings.approvalPolicy))" : "“\(server.name)”",
-            consequence: consequence, confirmLabel: "Save settings"
+            consequence: consequence,
+            question: settings.approvalPolicy != originalSettings.approvalPolicy
+                ? Self.approvalQuestion(to: settings.approvalPolicy, server: server)
+                : "Save the settings of “\(server.name)”?",
+            confirmLabel: "Save settings"
         ) else { return }
         if let updated = AgentsMCPServer(json: json) {
             show(updated)
@@ -228,6 +232,15 @@ final class AgentMCPServersModel {
             "Every tool on “\(server.name)” will ask the caller before it runs."
         default:
             "Tools on “\(server.name)” run as each one is set: those allowed run without asking, the rest ask first."
+        }
+    }
+
+    /// The question's title for a change of the server's approval policy.
+    static func approvalQuestion(to policy: String, server: AgentsMCPServer) -> String {
+        switch policy {
+        case "auto_approve_all": "Let every tool on “\(server.name)” run without asking?"
+        case "require_approval_all": "Make every tool on “\(server.name)” ask first?"
+        default: "Set the tools on “\(server.name)” to ask or not one by one?"
         }
     }
 
@@ -252,6 +265,7 @@ final class AgentMCPServersModel {
            consequence: autoApproved
             ? "Agents may call “\(tool.name)” on \(server.url) without asking the caller first."
             : "Agents must get the caller's approval before calling “\(tool.name)”.",
+           question: autoApproved ? "Let “\(tool.name)” run without asking?" : "Make “\(tool.name)” ask first?",
            confirmLabel: autoApproved ? "Run without asking" : "Ask first"
         ) != nil else { return }
         await loadTools()
@@ -288,6 +302,7 @@ final class AgentMCPServersModel {
         guard await calls.json(
             operation, arguments, slot: "\(server.id)/\(tool.name)", subject: "“\(tool.name)” on “\(server.name)”",
             consequence: "Agents calling “\(tool.name)” on “\(server.name)” use these settings instead of the server's.",
+            question: "Save the override for “\(tool.name)” on “\(server.name)”?",
             confirmLabel: "Save override"
         ) != nil else { return }
         await loadOverride(tool)

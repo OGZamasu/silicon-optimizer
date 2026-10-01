@@ -1274,10 +1274,12 @@ struct AgentsRunButton: View {
                     ElevenLabsRiskBadge(risk: runner.operation.risk)
                 }
                 if disabled, let disabledReason, !disabledReason.isEmpty {
+                    // Wrapped, never cut: beside a risk badge, with another button in the row, two
+                    // lines are not always enough for the reason.
                     Label(disabledReason, systemImage: "exclamationmark.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if let note = ElevenLabsCostNote.text(for: runner.operation) {
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }
@@ -1399,8 +1401,12 @@ final class AgentsSendGuard {
         if Self.provesNothingWasSent(runner) {
             state = .ready
         } else {
+            let why = switch runner.failure {
+            case .api?: "ElevenLabs answered with an error that does not say whether it went out"
+            default: "the request reached ElevenLabs and no answer came back"
+            }
             state = .uncertain(
-                "\(what) may already have been placed: the request reached ElevenLabs and no answer came back"
+                "\(what) may already have been placed: \(why)"
                     + (runner.failure.map { " (\($0.message.trimmingCharacters(in: CharacterSet(charactersIn: ". "))))" } ?? "")
                     + ". Check \(check) before trying again."
             )
@@ -1413,19 +1419,15 @@ final class AgentsSendGuard {
         if case .uncertain = state { state = .ready }
     }
 
-    /// Declined, refused before sending, or refused by ElevenLabs with a reason that means it
-    /// did not act: nothing went out.
+    /// Declined, refused before sending, or refused by ElevenLabs with a 4xx that means it did
+    /// not act (a 422 for a bad number, a 429): nothing went out. A 408, a 5xx, a lost answer or
+    /// a cancel leave it unknown — the runner's `provesNothingWasDone`.
     static func provesNothingWasSent(_ runner: ElevenLabsRunner) -> Bool {
         switch runner.phase {
         case .idle:
             return true
         case .failed:
-            switch runner.failure {
-            case .notLinked, .invalidArguments, .credentialUnavailable, .keyRejected, .forbidden, .rateLimited:
-                return true
-            case .offline, .other, .none:
-                return false
-            }
+            return runner.failure?.provesNothingWasDone ?? false
         case .cancelled, .running, .awaitingConfirmation, .succeeded:
             return false
         }

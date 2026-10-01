@@ -451,7 +451,7 @@ final class FlowsSectionModel {
         guard let templateID = templateID ?? template?.id,
               let json = await actions.perform(
                 "list_public_template_runs", ["template_id": .string(templateID), "page_size": 30], quietly: true,
-                slot: templateID == template?.id ? nil : VoicesStudioActions.afterChange
+                slot: templateID == template?.id ? nil : VoicesStudioActions.afterChange(of: templateID)
               )?.voicesStudioJSON else { return }
         runsByTemplate[templateID] = (json["runs"].arrayValue ?? []).compactMap(FlowsRun.init(json:))
     }

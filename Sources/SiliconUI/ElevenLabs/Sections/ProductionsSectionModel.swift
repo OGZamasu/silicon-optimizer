@@ -269,7 +269,7 @@ final class ProductionsSectionModel {
     /// After a change to `orderID`: fetch it again on a runner of its own, so the read of an
     /// order opened meanwhile is not abandoned; the screen takes it only while it is open.
     private func refetch(_ orderID: String) async {
-        await fetch(orderID, slot: VoicesStudioActions.afterChange)
+        await fetch(orderID, slot: VoicesStudioActions.afterChange(of: orderID))
     }
 
     /// Fetches one order into the list, and onto the screen only while it is still the chosen

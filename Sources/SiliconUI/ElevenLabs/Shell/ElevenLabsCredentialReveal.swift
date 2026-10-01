@@ -41,13 +41,17 @@ struct ElevenLabsRevealedCredential: Identifiable, Equatable, Sendable {
     /// `result` as the app keeps and shows it, for **every** operation: a credential
     /// operation's named fields masked, and in any answer the account's key preview and any
     /// `sk_…` key — header values left real. A credential operation's text answer is the
-    /// secret itself and is masked whole.
+    /// secret itself and is masked whole; any other text answer loses keys, legacy ones
+    /// included, but keeps its ids (`redactAnswerText`).
     static func masked(_ result: ElevenLabsResult, for operation: ElevenLabsOperation) -> ElevenLabsResult {
         switch result {
         case .json(let value, let meta):
             return .json(redacted(value, for: operation), meta)
         case .text(let text, let meta):
-            return .text(operation.returnsCredential ? ElevenLabsRedaction.placeholder : ElevenLabsRedaction.redact(text), meta)
+            return .text(
+                operation.returnsCredential ? ElevenLabsRedaction.placeholder : ElevenLabsRedaction.redactAnswerText(text),
+                meta
+            )
         case .events(let events, let meta):
             return .events(events.map { redacted($0, for: operation) }, meta)
         case .parts(let parts, let meta):
