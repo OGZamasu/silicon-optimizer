@@ -677,10 +677,12 @@ conversation with one of the owner's agents.
   **300 s for the whole conversation**, after which the app ends it and the answer says
   `"ended": "time limit"`; and **one conversation at a time** — a second call while one runs is
   refused (409) before anything is read or opened. Only what the agent says or does keeps a turn
-  open; pings, VAD scores and context-usage events do not. The control server does not cancel a
-  handler when its caller hangs up, so a caller that gives up does not end the conversation — the
-  300 s cap does, and the lane stays taken until then (do not retry into it). A handler task that
-  is cancelled ends the conversation at once.
+  open; pings, VAD scores and context-usage events do not. **A caller that hangs up ends the
+  conversation:** the control server keeps a read pending on the request's connection (as for
+  `/video/generate`), and its closing cancels the route, which ends the conversation at once. A
+  caller that keeps its connection open and stops reading is bounded by the 300 s cap, and holds
+  the one-at-a-time lane until then — do not retry into it. (The MCP bridge does not yet act on an
+  MCP-level cancel; the cap bounds that too.)
 - The answer: the transcript, the tools used (server tools marked "ran on ElevenLabs' side"; client
   and MCP tools with their parameters, masked), errors, how it ended, the duration and a cost note —
   never a signed URL, a token or anything key-shaped. The bridge prints the agent's words inside a

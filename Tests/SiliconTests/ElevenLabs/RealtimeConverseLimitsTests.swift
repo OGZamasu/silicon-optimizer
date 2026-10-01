@@ -167,15 +167,17 @@ struct RealtimeConverseLimitsTests {
 @Suite("ElevenLabs realtime over control: a caller that hangs up")
 struct RealtimeConverseHangUpTests {
 
+    /// The path as the router reads it: a trailing slash is the same route, and is cancelled too.
     @MainActor
-    @Test func hangingUpCancelsTheConversationRoute() async throws {
+    @Test(arguments: [ElevenLabsControl.agentConversePath, ElevenLabsControl.agentConversePath + "/"])
+    func hangingUpCancelsTheConversationRoute(path: String) async throws {
         let host = BuddyTestHost(tokens: ["ok"], pace: .milliseconds(1), failing: false)
         let id = ObjectIdentifier(host)
         await ConverseHangUpProbe.shared.clear(id)
         try await withServer(host: host) { (fixture: AgentFixture) async throws in
             let call = Task {
                 try await fixture.local.call(
-                    "POST", ElevenLabsControl.agentConversePath, token: fixture.local.token, body: #"{"fixtureHold":true}"#
+                    "POST", path, token: fixture.local.token, body: #"{"fixtureHold":true}"#
                 )
             }
             let deadline = ContinuousClock.now + .seconds(10)
@@ -188,8 +190,19 @@ struct RealtimeConverseHangUpTests {
             while await ConverseHangUpProbe.shared.count(id).cancelled == 0, ContinuousClock.now < cancelDeadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
-            #expect(await ConverseHangUpProbe.shared.count(id).cancelled == 1, "the conversation kept running after its caller hung up")
+            #expect(await ConverseHangUpProbe.shared.count(id).cancelled == 1, "\(path): the conversation kept running after its caller hung up")
             _ = try? await call.value
+        }
+    }
+}
+
+extension RealtimeConverseHangUpTests {
+    @Test func theConversationPathIsReadAsTheRouterReadsIt() {
+        for path in ["/elevenlabs/agents/converse", "/elevenlabs/agents/converse/", "//elevenlabs/agents//converse"] {
+            #expect(ElevenLabsControl.isAgentConversePath(path), "\(path)")
+        }
+        for path in ["/elevenlabs/agents/converse/x", "/elevenlabs/agents", "/video/generate", "/elevenlabs/call"] {
+            #expect(!ElevenLabsControl.isAgentConversePath(path), "\(path)")
         }
     }
 }

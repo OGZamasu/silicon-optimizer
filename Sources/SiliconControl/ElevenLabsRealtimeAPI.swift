@@ -18,6 +18,12 @@ import Foundation
 extension ElevenLabsControl {
     public static let agentConversePath = "/elevenlabs/agents/converse"
 
+    /// Whether `path` is the conversation route, as the router reads it (empty segments, such as
+    /// a trailing slash, ignored).
+    public static func isAgentConversePath(_ path: String) -> Bool {
+        path.split(separator: "/") == ["elevenlabs", "agents", "converse"]
+    }
+
     /// The fields of a converse body. Anything else is refused by name.
     public static let converseFields: Set<String> = [
         "agent_id", "messages", "overrides", "dynamic_variables", "max_turns", "confirm",
@@ -31,8 +37,8 @@ extension ElevenLabsControl {
     public static let converseTurnSeconds = 90
 
     /// The longest one conversation may run, from the moment it opened; it is ended then, with a
-    /// note. (The control server does not cancel a handler when its caller hangs up, so this cap,
-    /// not the caller, is what bounds the billed time.)
+    /// note. A caller that hangs up ends it sooner (the control server cancels the route); this
+    /// cap bounds a caller that keeps its connection open and stops reading.
     public static let converseTotalSeconds = 300
 
     /// What a second conversation is told while one is running.

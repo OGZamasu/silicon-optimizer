@@ -799,7 +799,7 @@ public actor ControlServer {
         let source = Self.remoteAddress(of: connection)
         let response: HTTPResponse
         if request.method == "POST",
-           request.path == "/video/generate" || request.path == ElevenLabsControl.agentConversePath {
+           request.path == "/video/generate" || ElevenLabsControl.isAgentConversePath(request.path) {
             // One request per connection: after its body, EOF/error means
             // this client no longer wants the synchronous response. Keep a
             // receive outstanding so Network.framework notices a FIN/RST
