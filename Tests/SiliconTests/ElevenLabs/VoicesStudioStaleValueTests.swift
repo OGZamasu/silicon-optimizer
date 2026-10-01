@@ -592,21 +592,23 @@ struct VoicesStudioStaleValueTests {
             switch request.operationID {
             case "public_update_order":
                 try await signals.wait(for: "reopened")
+                signals.note("renamed")
                 return .json(["order_id": "o-a"])
             case "public_get_order" where path.hasSuffix("/o-b"):
                 return .json(["order_id": "o-b", "name": "B", "state": "open", "sandbox": false, "items": []])
             case "public_get_order":
-                switch signals.note("get a") {
-                case 1:
+                // Told apart by when they come, not by their order: a read of A before the rename
+                // answered is A opened again; the first one after, the fetch after the rename.
+                if !signals.has("renamed") {
                     signals.note("reopened")
                     try await signals.wait(for: "refetched")
                     return .json(order("Old name"))
-                case 2:
+                }
+                if signals.note("after the rename") == 1 {
                     signals.note("refetched")
                     return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
-                default:
-                    return .json(order("New name"))
                 }
+                return .json(order("New name"))
             case "public_get_available_languages":
                 return .json(["languages": []])
             default:
@@ -621,9 +623,15 @@ struct VoicesStudioStaleValueTests {
         model.rename = "New name"
         let renaming = Task { try await answering(model.actions) { await model.saveName() } }
         try await voicesStudioWait { fixture.sent("public_update_order").count == 1 }
+        // Should either awaited read never be sent (a regression), the request held for it is let
+        // go once the task that would have sent it has finished, so the test fails at once rather
+        // than at the fake's backstop. In the working code both signals have come by then.
+        let releasing = Task { _ = try? await renaming.value; signals.note("refetched") }
         await model.select("o-b")
         await model.select("o-a")
+        signals.note("reopened")
         try await renaming.value
+        await releasing.value
         #expect(model.selected == nil, "A's older read was dropped")
         #expect(model.orderProblem != nil, "nothing is loading: the card must say why")
         await model.select("o-a")                         // Try again

@@ -153,9 +153,12 @@ struct VoicesStudioLateAnswerTests {
             switch request.operationID {
             case "edit_workspace_webhook_route":
                 try await signals.wait(for: "edit asked")
+                signals.note("saved")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
-                if signals.note("list") == 1 {
+                // Told apart by when they come, not by their order: a list read before the save
+                // answered is Edit's; one after, the save's (so a missing one stalls nothing).
+                if !signals.has("saved") {
                     signals.note("edit asked")
                     try await signals.wait(for: "listed after the save")
                 } else {
@@ -174,8 +177,14 @@ struct VoicesStudioLateAnswerTests {
         model.edit(slow, eventsKnown: true)
         model.draft.name = "Renamed"
         let saving = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
+        // Should either awaited read never be sent (a regression), the request held for it is let
+        // go once the task that would have sent it has finished, so the test fails at once rather
+        // than at the fake's backstop. In the working code both signals have come by then.
+        let releasing = Task { await saving.value; signals.note("listed after the save") }
         await model.startEditing(other)
+        signals.note("edit asked")
         await saving.value
+        await releasing.value
         #expect(fixture.sent("get_workspace_webhooks_route").count == 2)
         #expect(model.editing?.id == "w2", "the other webhook's editor did not open")
         #expect(model.draft.name == "Hook w2")
@@ -197,9 +206,10 @@ struct VoicesStudioLateAnswerTests {
             switch request.operationID {
             case "edit_workspace_webhook_route":
                 try await signals.wait(for: "edit asked")
+                signals.note("saved")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
-                if signals.note("list") == 1 {                     // Edit on w2
+                if !signals.has("saved") {                          // Edit on w2
                     signals.note("edit asked")
                     try await signals.wait(for: "refreshed")
                     return .json(old)
@@ -218,8 +228,12 @@ struct VoicesStudioLateAnswerTests {
         model.edit(a, eventsKnown: true)
         model.draft.name = "A renamed"
         let saving = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
+        // As above: a read that is never sent lets the request held for it go at once.
+        let releasing = Task { await saving.value; signals.note("refreshed") }
         await model.startEditing(other)
+        signals.note("edit asked")
         await saving.value
+        await releasing.value
         #expect(model.editing?.id == "w2")
         #expect(model.webhooks.first { $0.id == "w-a" }?.name == "A renamed", "the older list put A's old name back")
     }
