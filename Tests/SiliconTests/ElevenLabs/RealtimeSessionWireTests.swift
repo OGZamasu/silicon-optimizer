@@ -90,7 +90,15 @@ struct RealtimeSessionWireTests {
         let upgrade = try #require(server.receivedUpgrades.first)
         #expect(upgrade.headers["xi-api-key"] == nil)
         #expect(upgrade.headers["authorization"] == nil)
-        let close = await connection.waitForClose()
-        #expect(close?.code == 1000)
+        // The close frame itself is `RealtimeWireTests.closingSendsTheCodeAndReason`'s, which
+        // tries several sockets: in a busy run URLSession now and then ends the connection with
+        // a FIN and no close frame. Here: a frame that is read is a normal one, and the
+        // connection has ended either way.
+        if let close = await connection.waitForClose() {
+            #expect(close.code == 1000)
+            #expect(close.reason == "User ended conversation")
+        } else {
+            #expect(connection.isEnded)
+        }
     }
 }
