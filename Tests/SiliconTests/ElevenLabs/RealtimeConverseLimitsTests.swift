@@ -52,12 +52,14 @@ struct RealtimeConverseLimitsTests {
     /// The critic's probe: pings every 100 ms stretched each turn's wait for quiet to the turn's
     /// cap, so the same two answers ran (and billed) 3 s a turn instead of a fraction of one.
     @Test func pingsAndScoresDoNotHoldATurnOpen() async throws {
-        let timing = ElevenLabsConverseHandler.Timing(greeting: .milliseconds(300), settle: .milliseconds(150), turn: .seconds(3))
+        // Each turn's cap is ten seconds: pings that held turns open would take twenty; the margin
+        // below is for a busy run.
+        let timing = ElevenLabsConverseHandler.Timing(greeting: .milliseconds(300), settle: .milliseconds(150), turn: .seconds(10))
         let quiet = await run(Self.agent(noisy: false), timing: timing)
         let noisy = await run(Self.agent(noisy: true), timing: timing)
         #expect(quiet.status == 200 && noisy.status == 200)
         #expect(noisy.answer["messages_sent"] == 2)
-        #expect(noisy.seconds < quiet.seconds + .seconds(1), "pings turned \(quiet.seconds) into \(noisy.seconds)")
+        #expect(noisy.seconds < quiet.seconds + .seconds(4), "pings turned \(quiet.seconds) into \(noisy.seconds)")
         #expect(noisy.answer["ended"] == "by this app, after the last message")
     }
 
@@ -83,7 +85,8 @@ struct RealtimeConverseLimitsTests {
         )
         let result = await run(chatter, timing: timing, messages: ["One", "Two", "Three"])
         #expect(result.status == 200)
-        #expect(result.seconds < .seconds(4), "ran \(result.seconds) against a 1.5 s cap")
+        // Three ten-second turns without the cap; the margin is for a busy run.
+        #expect(result.seconds < .seconds(8), "ran \(result.seconds) against a 1.5 s cap")
         #expect(result.answer["ended"] == "time limit")
         #expect((result.answer["note"].stringValue ?? "").contains("Ended: time limit"))
         #expect((result.answer["note"].stringValue ?? "").contains("1.5 seconds"))
@@ -103,7 +106,7 @@ struct RealtimeConverseLimitsTests {
             greeting: .milliseconds(200), settle: .milliseconds(150), turn: .seconds(10), total: .milliseconds(800)
         )
         let result = await run(silent, timing: timing)
-        #expect(result.seconds < .seconds(3))
+        #expect(result.seconds < .seconds(7), "a ten-second turn ran \(result.seconds) against a 0.8 s cap")
         #expect(result.answer["ended"] == "time limit")
         #expect(!(result.answer["note"].stringValue ?? "").contains("did not answer"))
     }
@@ -115,7 +118,7 @@ struct RealtimeConverseLimitsTests {
             guard await socket.nextSent() != nil else { return }
             socket.push(ConverseRig.metadata)
             while await socket.nextSent(ofType: "user_message", timeout: .seconds(30)) != nil {
-                try? await Task.sleep(for: .milliseconds(800))
+                try? await Task.sleep(for: .seconds(2))
                 socket.push(ConverseRig.response("Done.", 1))
             }
         }

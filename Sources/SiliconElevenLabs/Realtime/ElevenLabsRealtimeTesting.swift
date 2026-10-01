@@ -78,6 +78,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     private var _pings = 0
     private var stalled = false
     private var sendDelay: Duration?
+    private var _sendsInProgress = 0
     private var dropAtSend: Int?
 
     init(request: ElevenLabsSocketRequest) {
@@ -160,6 +161,9 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
         lock.withLock { stalled = true }
     }
 
+    /// Sends the client has started that have not completed yet (slow or stalled ones).
+    public var sendsInProgress: Int { lock.withLock { _sendsInProgress } }
+
     /// From now on each of the client's sends takes `delay` to complete — a slow connection.
     public func delaySends(by delay: Duration) {
         lock.withLock { sendDelay = delay }
@@ -190,6 +194,8 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     // MARK: ElevenLabsSocket
 
     public func send(_ message: ElevenLabsSocketMessage) async throws {
+        lock.withLock { _sendsInProgress += 1 }
+        defer { lock.withLock { _sendsInProgress -= 1 } }
         while lock.withLock({ stalled && ended == nil }) {
             try? await Task.sleep(for: .milliseconds(5))
         }

@@ -88,29 +88,28 @@ struct LiveFollowUpTests {
     }
 
     /// Cancel while connecting stops the connect itself: the socket is closed at once, not
-    /// held open until the agent's metadata arrives (seconds later) and ended then.
+    /// held open until the agent answers (here: never, with a minute-long start timeout) and
+    /// ended then. Nothing here is timed tighter than `until`'s fifteen seconds, which a busy run
+    /// stays far inside, and far below the minute the old behaviour took.
     @Test func cancellingWhileConnectingClosesTheSocketAtOnce() async throws {
         let rig = LiveRig(replies: LiveScreenTests.agentReplies(), server: { socket in
             guard await socket.nextSent() != nil else { return }
-            // A slow agent: the metadata comes two seconds after the initiation.
-            try? await Task.sleep(for: .seconds(2))
-            socket.push(["type": "conversation_initiation_metadata", "conversation_initiation_metadata_event": [
-                "conversation_id": "conv_late", "agent_output_audio_format": "pcm_16000", "user_input_audio_format": "pcm_16000",
-            ]])
+            // An agent that never answers the initiation.
+            _ = await socket.waitUntilEnded(timeout: .seconds(120))
         })
         defer { rig.clean() }
-        let screen = LiveAgentModel(context: rig.context)
+        var context = rig.context
+        context.limits.agentStartTimeout = 60
+        let screen = LiveAgentModel(context: context)
         await screen.loadAgents()
         screen.textOnly = true
         let starting = Task { await screen.requestStart() }
         await rig.until { rig.connector.sockets.first?.sentJSON.isEmpty == false }
         let socket = try #require(rig.connector.sockets.first)
         #expect(screen.phase == .connecting)
-        let cancelled = ContinuousClock.now
         screen.cancelStart()
         await rig.until { socket.closedByClient != nil }
-        #expect(socket.closedByClient != nil)
-        #expect(ContinuousClock.now - cancelled < .seconds(1), "the socket stayed open until the agent answered")
+        #expect(socket.closedByClient != nil, "the socket stayed open, waiting for the agent")
         await starting.value
         #expect(screen.phase == .ended)
         #expect(screen.conversationID == nil)

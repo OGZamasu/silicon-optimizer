@@ -54,10 +54,13 @@ struct RealtimeFollowUpTests {
         let conversation = try await rig.realtime.agentConversation(.init(agentID: "agent_1", auth: .publicAgent, textOnly: true))
         let socket = try #require(rig.connector.sockets.first)
         socket.delaySends(by: .milliseconds(150))
-        async let sending: Void = conversation.sendUserMessage("last words")
-        try await Task.sleep(for: .milliseconds(20))
+        let sending = Task { try await conversation.sendUserMessage("last words") }
+        // The message is on its way — taken by the writer, not yet through the slow socket.
+        let deadline = ContinuousClock.now + .seconds(10)
+        while socket.sendsInProgress == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+        try #require(socket.sendsInProgress == 1)
         await conversation.end()
-        try? await sending
+        try? await sending.value
         #expect(socket.sentJSON.last == ["type": "user_message", "text": "last words"])
         #expect(socket.closedByClient?.code == 1000)
     }
@@ -66,7 +69,7 @@ struct RealtimeFollowUpTests {
     /// the socket closed — instead of waiting out the start timeout.
     @Test func aCancelledStartDoesNotWaitForTheAgent() async throws {
         var rig = RealtimeRig(server: { socket in _ = await socket.nextSent() })
-        rig.realtime.limits.agentStartTimeout = 10
+        rig.realtime.limits.agentStartTimeout = 60
         defer { rig.clean() }
         let realtime = rig.realtime
         let start = Task { try await realtime.agentConversation(.init(agentID: "agent_1", auth: .publicAgent)) }
@@ -78,7 +81,8 @@ struct RealtimeFollowUpTests {
         let cancelled = ContinuousClock.now
         start.cancel()
         let result = await start.result
-        #expect(ContinuousClock.now - cancelled < .seconds(2))
+        // Far below the minute it would wait for an agent that never answers; loose enough for a busy run.
+        #expect(ContinuousClock.now - cancelled < .seconds(15))
         guard case .failure(let error) = result else {
             Issue.record("a cancelled start came back with a conversation")
             return
