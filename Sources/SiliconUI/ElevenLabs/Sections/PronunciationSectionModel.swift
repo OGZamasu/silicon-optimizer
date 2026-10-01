@@ -225,6 +225,7 @@ final class PronunciationSectionModel {
             // The rename field is this dictionary's from now on: it held the previous one's name,
             // which "Rename" would have sent to this one.
             rename = selected?.name ?? ""
+            rulesIn = nil
             marked = []
             download = nil
         }
@@ -249,12 +250,23 @@ final class PronunciationSectionModel {
         guard wantedDictionary == id else { return }
         selected = dictionary
         rename = dictionary.name
+        rulesIn = id
     }
+
+    /// The dictionary whose rules on screen are what ElevenLabs holds: read since its last
+    /// change answered. Between a change answering and the fetch after it, the rules shown are
+    /// the ones from before, and "Edit all in the editor" would copy them for a Replace that
+    /// undoes the change.
+    private(set) var rulesIn: String?
+
+    /// Whether the open dictionary's rules may be copied into the editor.
+    var rulesAreIn: Bool { selected != nil && rulesIn == selected?.id }
 
     /// After a change to dictionary `id`: fetch it again on a runner of its own (the read of a
     /// dictionary opened meanwhile is not abandoned); the screen takes it only while it is open.
     private func refetch(_ id: String) async {
         landed[id, default: 0] += 1
+        if rulesIn == id { rulesIn = nil }
         await fetch(id, slot: VoicesStudioActions.afterChange(of: id))
     }
 
@@ -347,9 +359,10 @@ final class PronunciationSectionModel {
         await refetch(dictionary.id)
     }
 
-    /// Puts the dictionary's current rules in the editor, to change and replace them.
+    /// Puts the dictionary's current rules in the editor, to change and replace them — only once
+    /// they are ElevenLabs' current ones (`rulesAreIn`).
     func editCurrentRules() {
-        guard let dictionary = selected, !dictionary.rules.isEmpty else { return }
+        guard rulesAreIn, let dictionary = selected, !dictionary.rules.isEmpty else { return }
         rules = dictionary.rules
     }
 
@@ -400,6 +413,7 @@ final class PronunciationSectionModel {
         self.selected = selected
         wantedDictionary = selected?.id
         rename = selected?.name ?? ""
+        rulesIn = selected?.id
         loadedOnce = true
     }
 }

@@ -453,4 +453,48 @@ struct VoicesStudioStaleValueTests {
         #expect(second.contains("d-new") && second.contains("d-kept") && second.contains("d-two"),
                 "the second switch dropped the dictionary the first one attached: \(second)")
     }
+
+    /// Rules added to dictionary A; while the fetch after the add is on its way, "Edit all in the
+    /// editor" would copy the rules from before the add — and Replace would then remove the rule
+    /// just added. It waits for the fetch; then it copies the rules as they are now.
+    @Test func theRulesAreNotCopiedForAReplaceBeforeTheFetchAfterAChangeLands() async throws {
+        let signals = Signals()
+        var after = VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")
+        if case .object(var fields) = after {
+            fields["rules"] = [["string_to_replace": "Nguyen", "type": "alias", "alias": "Win"],
+                               ["string_to_replace": "Siobhan", "type": "alias", "alias": "Shivawn"]]
+            after = .object(fields)
+        }
+        let added = after
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "add_rules":
+                return .json(["id": "d-a", "version_id": "ver2"])
+            case "get_pronunciation_dictionary_metadata":
+                await signals.wait(for: "tried to copy")
+                return .json(added)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a], selected: a)
+        #expect(model.rulesAreIn)
+        var rule = PronunciationRule()
+        rule.stringToReplace = "Siobhan"
+        rule.alias = "Shivawn"
+        model.rules = [rule]
+        let adding = Task { await model.addRules() }
+        try await voicesStudioWait { fixture.sent("get_pronunciation_dictionary_metadata").count == 1 }
+        #expect(!model.rulesAreIn, "the rules on screen are from before the add")
+        model.editCurrentRules()
+        #expect(!model.rules.contains { $0.stringToReplace == "Nguyen" }, "the rules from before the add were copied")
+        signals.note("tried to copy")
+        await adding.value
+        #expect(model.rulesAreIn)
+        model.editCurrentRules()
+        #expect(model.rules.map(\.stringToReplace) == ["Nguyen", "Siobhan"], "the rules as they are now")
+    }
 }
