@@ -76,6 +76,7 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     private var ended: ElevenLabsSocketClose?
     private var _closedByClient: ElevenLabsSocketClose?
     private var _pings = 0
+    private var stalled = false
 
     init(request: ElevenLabsSocketRequest) {
         self.request = request
@@ -151,6 +152,12 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
         finish(ElevenLabsSocketClose(code: code, reason: reason))
     }
 
+    /// From now on the client's sends never complete — a stalled connection — until the socket
+    /// ends.
+    public func stallSends() {
+        lock.withLock { stalled = true }
+    }
+
     /// The connection drops, with no close code.
     public func drop() {
         finish(ElevenLabsSocketClose(code: 0, reason: "the connection was lost"))
@@ -170,6 +177,9 @@ public final class FakeElevenLabsSocket: ElevenLabsSocket, @unchecked Sendable {
     // MARK: ElevenLabsSocket
 
     public func send(_ message: ElevenLabsSocketMessage) async throws {
+        while lock.withLock({ stalled && ended == nil }) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
         let refused: ElevenLabsSocketClose? = lock.withLock {
             if let ended { return ended }
             _sent.append(message)

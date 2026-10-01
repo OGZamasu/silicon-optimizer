@@ -486,10 +486,17 @@ final class LiveAgentModel: ElevenLabsLiveWork {
         switch phase {
         case .live:
             let closing = conversation
+            let token = guardian.token
             phase = .ending
             stopMicrophone()
             await closing?.end()
-            // The socket's end arrives through `consume`, which finishes the session.
+            // The socket's end arrives through `consume`, which finishes the session; if it has
+            // not within three seconds, it is finished here.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard let self, self.guardian.isCurrent(token), self.phase == .ending else { return }
+                self.end(.ended("You ended the conversation. " + self.summary()), closing: false)
+            }
         case .connecting, .preparing, .asking:
             cancelStart()
         default:

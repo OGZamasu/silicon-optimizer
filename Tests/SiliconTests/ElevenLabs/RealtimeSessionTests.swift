@@ -667,6 +667,25 @@ struct RealtimeSessionTests {
         #expect(await conversation.answerApproval("call_a", approved: true) == false)
     }
 
+    /// A stalled connection cannot keep the conversation from ending: the close waits two
+    /// seconds at most for what is queued.
+    @Test func endingAStalledConversationStillCloses() async throws {
+        let rig = RealtimeRig(server: RealtimeRig.agentServer { socket in
+            socket.push(Self.mcpCall("call_s", state: "awaiting_approval"))
+            socket.stallSends()
+        })
+        defer { rig.clean() }
+        let conversation = try await rig.realtime.agentConversation(.init(agentID: "agent_1", auth: .publicAgent))
+        for await event in conversation.events {
+            if case .mcpToolCall = event { break }
+        }
+        let started = ContinuousClock.now
+        await conversation.end()
+        #expect(ContinuousClock.now - started < .seconds(4))
+        let socket = try #require(rig.connector.sockets.first)
+        #expect(socket.closedByClient == .init(code: 1000, reason: "User ended conversation"))
+    }
+
     @Test func aClientToolCallIsAnsweredOnce() async throws {
         let rig = RealtimeRig(server: RealtimeRig.agentServer { socket in
             socket.push(["type": "client_tool_call", "client_tool_call": [

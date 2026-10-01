@@ -649,10 +649,11 @@ public final class ElevenLabsAgentConversation: @unchecked Sendable {
             awaitingApproval = []
             return waiting
         }
+        // Queued ahead of the close, which sends what is queued first (two seconds at most).
         for id in waiting where !channel.hasEnded {
-            try? await channel.send(json: [
+            channel.post(.text(JSONValue.object([
                 "type": "mcp_tool_approval_result", "tool_call_id": .string(id), "is_approved": false,
-            ])
+            ]).jsonString()))
         }
         await channel.close(reason: "User ended conversation")
     }

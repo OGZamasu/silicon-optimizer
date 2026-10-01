@@ -136,9 +136,11 @@ final class ElevenLabsRealtimeChannel: @unchecked Sendable {
         }
     }
 
-    /// Waits until everything queued has been handed to the socket.
+    /// Waits until everything queued has been handed to the socket — two seconds at most: a
+    /// socket that has stalled must not keep a close waiting for ever.
     private func drain() async {
-        while true {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
             let empty = lock.withLock { urgent.isEmpty && normal.isEmpty }
             if empty || hasEnded { return }
             try? await Task.sleep(for: .milliseconds(5))
