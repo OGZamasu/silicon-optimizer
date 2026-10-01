@@ -556,3 +556,145 @@ all hermetic (the in-memory transport, a fake credential with a planted key, tem
 - end to end — MCP tool, HTTP, the real server and policy, the handler, the real client, the
   in-memory transport — for **every one of the 403 operations** through `elevenlabs_call`, and
   `elevenlabs_describe_operation` returning the body schema of every operation that has one.
+
+## Realtime: live speech, live transcription and talking to agents
+
+ElevenLabs' WebSocket APIs are not in the OpenAPI spec. They are built from the AsyncAPI documents
+ElevenLabs publishes on its API-reference pages (pinned under `Scripts/elevenlabs/asyncapi/`) and
+checked against the official SDKs. The protocol layer is `Sources/SiliconElevenLabs/Realtime/`
+(Foundation only); the three live screens are `Sources/SiliconUI/ElevenLabs/Live/`.
+
+### The four sockets
+
+| Socket | Address | Auth | What it does |
+|---|---|---|---|
+| Speech, one context | `wss://<region>/v1/text-to-speech/{voice_id}/stream-input` | `xi-api-key` on the upgrade request | Text in (pieces ending in a space, `flush`, end with `""`), audio and character timings out |
+| Speech, several contexts | `…/multi-stream-input` | the same | Up to five contexts on one socket, each named by `context_id` |
+| Realtime transcription | `wss://<region>/v1/speech-to-text/realtime` | the same | Mono PCM (8–48 kHz) or 8 kHz μ-law in; partial and committed text, timings, entities, edits out |
+| An agent conversation | `wss://<region>/v1/convai/conversation` | **never the key**: `?agent_id=` for a public agent, otherwise a signed URL minted with `get_conversation_signed_link` and used once | Initiation data, then audio and text both ways, tools, approvals |
+
+`ElevenLabsRealtime(client:connector:)` opens each on the client's own region and credential
+source. The production connector (`URLSessionWebSocketConnector`) opens only `wss` to the five
+region hosts, puts headers on the upgrade request (the key never goes in a URL or a message),
+raises `maximumMessageSize` to 16 MiB before the task starts, refuses a redirected upgrade, and
+reads close codes by number (4300, the agent call-queue timeout, has no Foundation name). A signed
+URL is opaque: it is checked (wss, a region host, the conversation path) and connected to as given;
+it is never logged, shown, stored or returned over MCP. Request descriptions mask every query
+value that is not a known setting. Tests use `FakeElevenLabsSocketConnector`, or for wire-level
+checks a loopback WebSocket server behind a debug-only allowance.
+
+Decoding is tolerant: both spellings of every key the sources disagree on (`isFinal`/`is_final`,
+`contextId`/`context_id`, both alignment styles, `event_id` as a number or a string, `error` and
+`client_error`), and anything unknown is surfaced as data, never fatal.
+
+### Session policy
+
+- One socket per session, and **nothing reconnects on its own**: a second connection is a second
+  billed session and would replay audio. A socket that ends ends the session, with its code and
+  reason; a new one is the owner's (or the caller's) choice.
+- Every session keeps a usage record — characters sent, audio sent and received, messages,
+  commits, duration — which the screens show as they go.
+- An agent's `ping` is answered at once, ahead of queued audio. Audio of an interrupted answer is
+  dropped (`event_id` at or below the interrupted one, as the Python and Node clients do). An MCP
+  tool approval is answered at most once, only while ElevenLabs still waits, only an explicit
+  approval approves, and ending the conversation sends a decline for every approval still waiting.
+  A client tool call is answered at most once.
+
+### The live screens
+
+Three sections in the pane: **Live speech** (after Speech), **Live transcription** (after
+Transcription) and **Talk to an agent** (after Agents; the Agents editor's "Talk to it live…"
+opens it with that agent chosen). On all three:
+
+- one session per screen: Start, Speak or Return pressed twice opens one; Return never starts a
+  session (it only sends a typed message in a conversation already open); the settings — voice,
+  model, agent — are the ones captured when it opened, and are locked while it is open;
+- the microphone is off until Start, and a red indicator shows while it is on; Mute keeps sending
+  silence (ElevenLabs closes a socket that hears nothing) so nothing said leaves the Mac;
+- a session that drops, or is cancelled while it starts, says it may have been billed, and is
+  not reconnected; leaving the screen ends it; a new key, another region or Disconnect ends it at
+  once (the pane's reset, and the screen's own check of the client), and while a session is open
+  Settings refuses a new key or region, as it does for a billable run;
+- every line shown is redacted of anything key-shaped.
+
+Talk to an agent asks before starting an agent that can act on ElevenLabs' side — webhooks (named
+with their host), transfers, keypad tones, MCP servers, workspace tools — naming each, because those
+run without asking per call. Every MCP tool approval is a card naming the tool, its server and host,
+and its parameters; it is answered for the conversation and tool call it was asked with, and
+declined — the decline is sent — when it times out, when the conversation ends, or when the account
+changes. The app runs no client tools: a client tool call is answered that nothing ran. Images and
+PDFs can go with a typed message (uploaded to the conversation with `upload_file_route`; removing one
+uses `cancel_file_upload_route`, which asks first). When the conversation ends its transcript is
+saved to the output folder; ElevenLabs keeps it too (Conversations).
+
+### Audio
+
+Microphone buffers (any rate, one or two channels) are converted to the socket's format —
+16-bit little-endian mono PCM at its rate, or 8 kHz μ-law — in 100 ms chunks. The agent's audio
+format is the one its `conversation_initiation_metadata` names. Playback decodes PCM, μ-law, A-law
+and MP3, holds 150 ms in a jitter buffer, and an interruption silences it at once. **Echo:** the
+WebSocket path has none of the acoustic echo cancellation a browser or WebRTC gives, so the agent
+screen runs capture and playback on one `AVAudioEngine` with macOS voice processing on the input
+(`setVoiceProcessingEnabled(true)`), the agent's voice being its echo reference. Without it, an agent
+on the speakers hears itself and interrupts itself.
+
+### Over MCP: `elevenlabs_agent_converse`
+
+MCP is request/response, so the realtime APIs reach a model as one tool: a short **text-only**
+conversation with one of the owner's agents.
+
+| Tool | Route | Cost |
+|---|---|---|
+| `elevenlabs_agent_converse` | `POST /elevenlabs/agents/converse` `{agent_id, messages: [...], overrides?, dynamic_variables?, max_turns?, confirm}` | credits: ElevenLabs bills agent conversations by length and LLM use |
+
+- It is **real-world**: an agent can run its server tools during the conversation. It needs
+  `confirm: true` and the owner's switch ("Let agents run destructive and real-world ElevenLabs
+  actions"); otherwise 403, and nothing is read or opened. Only this Mac's control token reaches it.
+- The agent must allow text-only (or be text-only); otherwise 409 before anything opens.
+- The app sends the messages one by one, waiting for each answer (90 s at most). MCP tool approvals
+  are declined (the owner approves those in the app) and client tool calls are told nothing ran.
+- The answer: the transcript, the tools used (server tools marked "ran on ElevenLabs' side"; client
+  and MCP tools with their parameters, masked), errors, how it ended, the duration and a cost note —
+  never a signed URL, a token or anything key-shaped. The bridge prints the agent's words inside a
+  fence with a random boundary, quoted as data.
+- Streaming speech and live transcription are not MCP tools: the REST operations already serve them
+  (`elevenlabs_speak`, `elevenlabs_transcribe`, and `text_to_speech_stream` through `elevenlabs_call`).
+
+### Spec snapshots and drift
+
+`Scripts/elevenlabs/asyncapi/{tts-stream-input,tts-multi-stream-input,stt-realtime,agents-conversation}.yaml`
+are the AsyncAPI blocks of the four reference pages. `Scripts/check-elevenlabs-spec.sh` compares them
+with the live pages on a live run (`--only-asyncapi` for just these, `--asyncapi-against DIR` for local
+files); `Scripts/elevenlabs-asyncapi.py` extracts, outlines and diffs them without a YAML library.
+Tests hold the sessions to the pins: every query parameter sent is one the spec names for its socket,
+the transcription formats are the spec's list, and every message type the specs name is decoded or
+sent.
+
+### Tests
+
+All hermetic: `Realtime*` (sessions on the fake socket; the production socket against a loopback
+server — the key in the upgrade header only, a 3 MiB message, close codes 1000/1008/1011/4300,
+refused and redirected upgrades, cancellation; the drift diff on local files; the converse route and
+its gate), `Live*` (the audio pipeline on synthetic buffers; the three screens' models on the fake
+socket, transport and devices; opt-in drawings), and the MCP tool. No test opens a socket to
+ElevenLabs, touches the microphone or speakers, or reads the Keychain.
+
+### The owner's live check (once, with the real key)
+
+What only a real account can settle, in about two minutes and a few credits:
+
+1. **Live speech:** choose a voice, type "Hello from the live stream." and press Speak. It should
+   play within a second or two, show the words with timings, and end cleanly (Finish). *Settles:* the
+   header auth and spellings on the speech socket, the PCM format, and whether ElevenLabs closes an
+   idle socket with 1000.
+2. **Live transcription:** Start listening, say a sentence for about ten seconds, press Stop. Partial
+   text should turn into a committed line; with Word timings on, times appear. *Settles:* the
+   transcription socket's header auth, chunking, commit and the `warning`/error shapes.
+3. **Talk to an agent, text only:** with a public test agent that allows text-only (or is
+   text-only), start a text conversation, send one message, read the answer, End. Then try the MCP
+   tool once: `elevenlabs_agent_converse` with that agent, one message and `confirm: true` (the switch
+   on). *Settles:* bare `agent_id` for a public agent, the initiation and metadata, `error` vs
+   `client_error`, the ping cadence.
+4. Optional, voice: talk to the agent through speakers. *Settles:* echo cancellation, the
+   interruption rule (does audio at the interrupted `event_id` itself belong to the old answer?), and
+   a signed URL for an agent with authentication on.
