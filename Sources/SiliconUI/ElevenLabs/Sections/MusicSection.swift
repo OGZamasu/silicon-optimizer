@@ -789,6 +789,12 @@ final class MusicScreenModel: CreativeScreenModel {
         if let max = CreativeSpec.maxItems(Self.updateFinetune, "tags"), editTags.count > max {
             problems.append("At most \(max) tags.")
         }
+        // A fine-tune is made with a primary genre (create refuses one without); an edit that
+        // would empty it is refused the same way. One that never had a genre sends none.
+        if let current = selectedFinetune, editGenre != (current.primaryGenre ?? ""),
+           editGenre.trimmingCharacters(in: .whitespaces).isEmpty {
+            problems.append("Name the primary genre.")
+        }
         if updateArguments().count <= 1 { problems.append("Nothing has changed.") }
         return problems
     }
