@@ -690,6 +690,10 @@ final class StudioSectionModel {
         guard let arguments = attachArguments(locators), let projectID = arguments["project_id"]?.stringValue,
               await actions.perform("update_pronunciation_dictionaries", arguments,
                                     title: "Dictionaries of \(selected?.name ?? "")") != nil else { return }
+        // ElevenLabs now holds exactly the list just sent. Until the fetch below lands, the list on
+        // screen would be the one before this change — and the next switch, which sends the whole
+        // list, would undo it — so the project takes the list sent at once.
+        if isOpen(projectID) { selected?.dictionaries = locators }
         await refetch(projectID)
     }
 

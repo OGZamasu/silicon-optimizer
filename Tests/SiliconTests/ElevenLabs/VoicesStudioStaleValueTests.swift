@@ -26,10 +26,15 @@ struct VoicesStudioStaleValueTests {
     /// Runs `action`, declining any question it puts up, so a regression that asks fails the
     /// test instead of waiting for an answer for ever.
     func declining(_ actions: VoicesStudioActions, _ action: @escaping @MainActor () async -> Void) async throws {
+        try await answering(actions, yes: false, action)
+    }
+
+    /// Runs `action`, answering any question it puts up with `yes`, until it returns.
+    func answering(_ actions: VoicesStudioActions, yes: Bool = true, _ action: @escaping @MainActor () async -> Void) async throws {
         let done = Done()
         let task = Task { await action(); done.value = true }
         try await voicesStudioWait {
-            if actions.presentedQuestion != nil { actions.answer(false) }
+            if actions.presentedQuestion != nil { actions.answer(yes) }
             return done.value
         }
         await task.value
@@ -398,5 +403,54 @@ struct VoicesStudioStaleValueTests {
         #expect(model.problems.first?.contains("could not be read again") == true)
         try await declining(model.actions) { await model.save() }
         #expect(fixture.sent("edit_workspace_webhook_route").isEmpty)
+    }
+
+    // MARK: - Round 3: the window between a change answering and its fetch
+
+    static func project(_ id: String, dictionaries: [String]) -> JSONValue {
+        var project = VoicesStudioStudioTests.project(id, name: "First")
+        if case .object(var fields) = project {
+            fields["pronunciation_dictionary_locators"] = .array(dictionaries.map {
+                ["pronunciation_dictionary_id": .string($0), "version_id": "v1"]
+            })
+            project = .object(fields)
+        }
+        return project
+    }
+
+    /// d-new is switched on and the call answers; while the fetch after it is still on its way,
+    /// d-two is switched on. That call sends the whole list again: it must keep d-new, which
+    /// ElevenLabs now holds, rather than the list from before the first switch.
+    @Test func aSecondDictionarySwitchBeforeTheFirstsFetchLandsKeepsTheFirst() async throws {
+        let signals = Signals()
+        let before = Self.project("p-a", dictionaries: ["d-kept"])
+        let after = Self.project("p-a", dictionaries: ["d-kept", "d-new", "d-two"])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_pronunciation_dictionaries":
+                return .json(["status": "ok"])
+            case "get_project_by_id":
+                if signals.note("get") == 1 { await signals.wait(for: "second sent") }
+                return .json(after)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = StudioSectionModel(environment: fixture.environment)
+        let project = try #require(StudioProject(json: before))
+        let new = StudioDictionary(id: "d-new", name: "New", latestVersionID: "v1")
+        let two = StudioDictionary(id: "d-two", name: "Two", latestVersionID: "v1")
+        model.load(projects: [project], selected: project, dictionaries: [new, two])
+        let first = Task { try await answering(model.actions) { await model.setDictionary(new, attached: true) } }
+        try await voicesStudioWait { fixture.sent("get_project_by_id").count == 1 }
+        #expect(model.selected?.dictionaries.map(\.id) == ["d-kept", "d-new"], "the switch shows what ElevenLabs holds now")
+        try await answering(model.actions) { await model.setDictionary(two, attached: true) }
+        signals.note("second sent")
+        try await first.value
+        #expect(fixture.sent("update_pronunciation_dictionaries").count == 2)
+        let second = body(fixture, "update_pronunciation_dictionaries")
+        #expect(second.contains("d-new") && second.contains("d-kept") && second.contains("d-two"),
+                "the second switch dropped the dictionary the first one attached: \(second)")
     }
 }
