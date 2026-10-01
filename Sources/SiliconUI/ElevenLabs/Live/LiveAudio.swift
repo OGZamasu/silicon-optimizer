@@ -174,6 +174,30 @@ final class LiveCaptureConverter: @unchecked Sendable {
 }
 
 /// An audio file on disk, read for a socket.
+extension ElevenLabsAudioEncoding {
+    /// 16-bit little-endian PCM, whose level can be read sample by sample.
+    var isPCM: Bool {
+        if case .pcm = self { true } else { false }
+    }
+}
+
+/// How loud audio on its way to the socket is.
+enum LiveAudioLevel {
+    /// The RMS level (0…1) of the last `bytes` of 16-bit little-endian PCM.
+    static func tailRMS(ofPCM16 data: Data, bytes: Int) -> Float {
+        let count = min(data.count, max(2, bytes)) & ~1
+        guard count >= 2 else { return 0 }
+        var sum = 0.0
+        var index = data.endIndex - count
+        while index + 1 < data.endIndex {
+            let sample = Double(Int16(bitPattern: UInt16(data[index]) | UInt16(data[index + 1]) << 8)) / 32_768
+            sum += sample * sample
+            index += 2
+        }
+        return Float((sum / Double(count / 2)).squareRoot())
+    }
+}
+
 /// Microphone chunks on their way to the socket, bounded.
 ///
 /// Audio is never dropped from the middle — a transcript with a hole in it, or an agent that
