@@ -91,10 +91,13 @@ enum ElevenLabsTools {
         /// Arguments of which exactly one must be given (`file` or `source_url`).
         var oneOf: [String]? = nil
         var render: @Sendable (JSONValue) -> String = { ElevenLabsTools.describeResult($0) }
+        /// Spends nothing, so a cancel costs nothing either.
+        var free = false
 
         var tool: Tools.Tool {
             Tools.Tool(
-                name: name, description: description,
+                name: name,
+                description: free ? description : description + " " + ElevenLabsTools.cancelDoesNotStop,
                 properties: Dictionary(uniqueKeysWithValues: arguments.map { ($0.name, $0.schema) }),
                 required: arguments.filter(\.required).map(\.name)
             )
@@ -120,6 +123,11 @@ enum ElevenLabsTools {
 
     // MARK: - The tools
 
+    /// `POST /elevenlabs/call` runs to its end in the app whether or not its caller is still
+    /// there, so a cancel in the MCP client only drops the answer.
+    static let cancelDoesNotStop =
+        "Cancelling the call does not stop ElevenLabs from doing and billing it."
+
     static let curated: [Curated] = [
         Curated(
             name: "elevenlabs_list_voices", operation: "get_user_voices_v2",
@@ -138,7 +146,8 @@ enum ElevenLabsTools {
                 .init(name: "sort", kind: .string, description: "created_at_unix or name."),
                 .init(name: "sort_direction", kind: .string, choices: ["asc", "desc"], description: "Sort order."),
             ],
-            render: { describeVoices($0) }
+            render: { describeVoices($0) },
+            free: true
         ),
         Curated(
             name: "elevenlabs_speak", operation: "text_to_speech_full",
@@ -355,7 +364,7 @@ enum ElevenLabsTools {
             (deleting, phone calls, invitations, API keys, webhooks, secrets) run only with \
             confirm: true after the user has agreed, and only if the owner allows agents to in \
             Settings → ElevenLabs. A newly created API key is never shown over MCP; make it in \
-            the app.
+            the app. \(cancelDoesNotStop)
             """,
         properties: [
             "operation": Tools.property("string", "The operation id, from elevenlabs_search_operations."),

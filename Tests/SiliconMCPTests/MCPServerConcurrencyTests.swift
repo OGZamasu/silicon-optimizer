@@ -300,6 +300,25 @@ struct MCPServerConcurrencyTests {
         try await bridge.end()
     }
 
+    /// A cancel ends only `generate_video`'s wait and the agent conversation; every
+    /// `POST /elevenlabs/call` runs to its end in the app. A model that cancels a paid call and
+    /// asks again pays twice, so each paid ElevenLabs tool says so where the model reads it.
+    @Test func paidElevenLabsToolsSayACancelDoesNotStopThem() throws {
+        let tools = Tools.all.filter { $0.name.hasPrefix("elevenlabs_") }
+        let paid = tools.filter { tool in
+            ["Spends credits", "spend credits", "voice slot"].contains { tool.description.contains($0) }
+        }
+        #expect(paid.count >= 10)
+        for tool in paid where tool.name != ElevenLabsRealtimeTools.converse.name {
+            #expect(tool.description.hasSuffix(ElevenLabsTools.cancelDoesNotStop), "\(tool.name)")
+        }
+        let converse = try #require(tools.first { $0.name == ElevenLabsRealtimeTools.converse.name })
+        #expect(converse.description.contains("Cancelling the call ends the conversation."))
+        #expect(!converse.description.contains(ElevenLabsTools.cancelDoesNotStop))
+        let free = try #require(tools.first { $0.name == "elevenlabs_list_voices" })
+        #expect(!free.description.contains("Cancelling"))
+    }
+
     // MARK: Helpers
 
     private func running(_ bridge: Bridge, _ tags: String...) async throws {
