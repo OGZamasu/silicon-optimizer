@@ -143,8 +143,12 @@ struct VoicesStudioFollowupTests {
         await model.select("v-a")
         model.editDraft.name = "Voice A renamed"
         let saving = Task { await model.saveEdit() }
+        // Should A's save end without fetching A again (a regression), B's delete — held until
+        // that fetch arrives — is let go at once, so the test fails now rather than at the backstop.
+        let releasing = Task { await saving.value; signals.note("refetch v-a") }
         await deleting.value
         await saving.value
+        await releasing.value
         #expect(fixture.sent("get_voice_by_id").count == 3)
         #expect(model.rows.first { $0.id == "v-a" }?.name == "Voice A renamed",
                 "A's fetch after its own edit was abandoned: the row still reads “\(model.rows.first { $0.id == "v-a" }?.name ?? "")”")
@@ -194,8 +198,11 @@ struct VoicesStudioFollowupTests {
         await model.select("d-a")
         model.rename = "Dict A renamed"
         let renaming = Task { await model.saveName() }
+        // As above: a rename that ends without fetching A again lets B's add go at once.
+        let releasing = Task { await renaming.value; signals.note("refetch d-a") }
         await adding.value
         await renaming.value
+        await releasing.value
         #expect(fixture.sent("get_pronunciation_dictionary_metadata").count == 3)
         #expect(model.dictionaries.first { $0.id == "d-a" }?.name == "Dict A renamed",
                 "A's fetch after its rename was abandoned")
