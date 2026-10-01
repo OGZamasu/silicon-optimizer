@@ -115,6 +115,28 @@ struct ShellFollowupTests {
         #expect(ElevenLabsRunnerFailure(ElevenLabsError.notLinked).provesNothingWasDone)
     }
 
+    // MARK: - Text answers
+
+    /// A text answer (an export, a transcript) loses every key — `sk_…` and the legacy 32-hex
+    /// shape — but keeps the ids an owner reads in it: a UUID with its dashes and a 64-hex
+    /// public owner id.
+    @Test func aTextAnswerLosesKeysButKeepsItsIds() throws {
+        let operation = try #require(ElevenLabsCatalog.operation("get_models"))
+        let sk = "sk_" + String(repeating: "0a", count: 16)
+        let legacy = String(repeating: "3f", count: 16)            // 32 hex: a legacy key's shape
+        let uuid = "123e4567-e89b-12d3-a456-426614174000"
+        let owner = String(repeating: "a1b2c3d4", count: 8)         // 64 hex: a public owner id
+        let answer = "key \(sk), old key \(legacy), project \(uuid), owner \(owner)."
+        guard case .text(let text, _) = ElevenLabsRevealedCredential.masked(.text(answer, ElevenLabsMeta(status: 200)), for: operation) else {
+            Issue.record("expected text")
+            return
+        }
+        #expect(!text.contains(sk) && !text.contains(legacy), "keys must go: \(text)")
+        #expect(text.contains(uuid), "a UUID is an id, not a key: \(text)")
+        #expect(text.contains(owner), "a 64-hex owner id is an id, not a key: \(text)")
+        #expect(text == "key ‹redacted›, old key ‹redacted›, project \(uuid), owner \(owner).")
+    }
+
     // MARK: - Connect
 
     /// Return in the key field while a key is being checked: the second Connect is refused with

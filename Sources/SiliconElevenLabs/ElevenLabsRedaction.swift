@@ -250,6 +250,22 @@ public enum ElevenLabsRedaction {
         }
     }
 
+    /// A text answer as the app shows it: every `sk_…` key and every legacy key — exactly 32 hex
+    /// digits standing alone — replaced. Unlike `redact`, which is for error text, a longer hex
+    /// run stays: ElevenLabs' public user and owner ids are 64 hex digits, and an export that
+    /// lost them would be useless. A UUID's groups are shorter and stay too; a UUID written
+    /// without its dashes is 32 hex digits, the legacy key's shape, and is masked.
+    public static func redactAnswerText(_ text: String) -> String {
+        let keysOut = redactKeys(text)
+        return legacyKeyPattern.stringByReplacingMatches(
+            in: keysOut, range: NSRange(keysOut.startIndex..., in: keysOut), withTemplate: placeholder
+        )
+    }
+
+    private static let legacyKeyPattern = try! NSRegularExpression(
+        pattern: #"(?<![A-Za-z0-9])[0-9a-fA-F]{32}(?![A-Za-z0-9])"#
+    )
+
     /// Only `sk_…` keys: what a JSON answer is scrubbed of.
     static func redactKeys(_ text: String) -> String {
         guard text.contains("sk_") else { return text }
