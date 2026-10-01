@@ -441,7 +441,7 @@ extension ElevenLabsAgentEvent {
             let message = body.first("message", "reason", "debug_message").stringValue ?? ""
             return .error(ElevenLabsAgentError(
                 code: body["code"].looseInt, name: body.first("error_name", "error_type").stringValue,
-                message: ElevenLabsRedaction.redact(message)
+                message: ElevenLabsRealtimeRedaction.scrub(message)
             ))
         case "guardrail_triggered":
             return .guardrailTriggered(payload(frame, "guardrail_triggered_event")["guardrail_name"].stringValue)

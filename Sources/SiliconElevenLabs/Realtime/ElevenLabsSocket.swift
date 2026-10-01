@@ -37,7 +37,7 @@ public struct ElevenLabsSocketClose: Sendable, Equatable, CustomStringConvertibl
 
     public init(code: Int, reason: String) {
         self.code = code
-        let cleaned = ElevenLabsRedaction.redact(reason)
+        let cleaned = ElevenLabsRealtimeRedaction.scrub(reason)
         self.reason = cleaned.count > 300 ? String(cleaned.prefix(300)) + "…" : cleaned
     }
 
@@ -169,6 +169,10 @@ public enum ElevenLabsRealtimeError: Error, Sendable, Equatable, LocalizedError,
     case cancelled
 
     public var description: String {
+        ElevenLabsRealtimeRedaction.scrub(sentence)
+    }
+
+    private var sentence: String {
         switch self {
         case .notLinked:
             ElevenLabsError.notLinked.description
@@ -204,7 +208,7 @@ public enum ElevenLabsRealtimeError: Error, Sendable, Equatable, LocalizedError,
 
     /// Any error as a realtime error, redacted, with the key (when known) taken out too.
     public init(wrapping error: any Error, redactingKey key: String? = nil) {
-        func scrub(_ text: String) -> String { ElevenLabsRedaction.redact(text, knownKey: key) }
+        func scrub(_ text: String) -> String { ElevenLabsRealtimeRedaction.scrub(text, knownKey: key) }
         switch error {
         case let error as ElevenLabsRealtimeError:
             switch error {
@@ -237,7 +241,10 @@ public enum ElevenLabsRealtimeError: Error, Sendable, Equatable, LocalizedError,
         case let error as URLError:
             self = .network(scrub(error.localizedDescription))
         default:
-            self = .network(scrub("\(error)"))
+            // Never `"\(error)"`: an NSError prints its whole userInfo, and URLSession's carry the
+            // failing URL — for an agent, a signed one. The words and the domain/code only.
+            let error = error as NSError
+            self = .network(scrub("\(error.localizedDescription) (\(error.domain) \(error.code))"))
         }
     }
 }
@@ -258,6 +265,37 @@ public enum ElevenLabsRealtimeRedaction {
         "include_timestamps", "include_language_detection", "no_verbatim",
         "filter_background_audio", "environment", "branch_id",
     ]
+
+    /// `text` with every URL in it described as `describe` would (its query masked by the
+    /// allowlist), every `signature`/`token`-like parameter masked wherever it stands, and anything
+    /// key-shaped redacted — what every realtime error, close reason and outcome goes through.
+    public static func scrub(_ text: String, knownKey: String? = nil) -> String {
+        var result = text
+        let range = NSRange(result.startIndex..., in: result)
+        let urls = urlPattern.matches(in: result, range: range).reversed()
+        for match in urls {
+            guard let swiftRange = Range(match.range, in: result) else { continue }
+            let found = String(result[swiftRange])
+            let shown: String
+            if let url = URL(string: found), url.scheme != nil {
+                shown = describe(url)
+            } else if let mark = found.firstIndex(of: "?") {
+                shown = String(found[..<mark]) + "?" + ElevenLabsRedaction.placeholder
+            } else {
+                shown = found
+            }
+            result.replaceSubrange(swiftRange, with: shown)
+        }
+        result = secretParameterPattern.stringByReplacingMatches(
+            in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1=" + ElevenLabsRedaction.placeholder
+        )
+        return ElevenLabsRedaction.redact(result, knownKey: knownKey)
+    }
+
+    private static let urlPattern = try! NSRegularExpression(pattern: #"(?i)\b(?:wss?|https?)://[^\s"'<>,)]+"#)
+    private static let secretParameterPattern = try! NSRegularExpression(
+        pattern: #"(?i)\b(conversation_signature|single_use_token|signature|token|xi-api-key|xi_api_key|authorization)=(?!‹)[^&\s"'<>,)]+"#
+    )
 
     /// `url` as text: scheme, host, path, and the query with every value not on the allowlist
     /// replaced by the placeholder. Any key-shaped text left is redacted too.

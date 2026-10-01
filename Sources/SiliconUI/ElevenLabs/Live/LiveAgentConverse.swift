@@ -222,7 +222,7 @@ struct ElevenLabsConverseHandler: Sendable {
         if !log.errors.isEmpty { object["errors"] = .array(log.errors) }
         if let endedByAgent {
             object["ended"] = .string(endedByAgent.kind == .normal
-                ? "by the agent" : "by ElevenLabs: \(endedByAgent.description)")
+                ? "by the agent" : ElevenLabsRealtimeRedaction.scrub("by ElevenLabs: \(endedByAgent.description)"))
         } else {
             object["ended"] = .string("by this app, after the last message")
         }
@@ -234,7 +234,7 @@ struct ElevenLabsConverseHandler: Sendable {
         if endedByAgent != nil, sent < request.turns {
             notes.append("It ended after \(sent) of \(request.turns) messages.")
         }
-        if !notes.isEmpty { object["note"] = .string(notes.joined(separator: " ")) }
+        if !notes.isEmpty { object["note"] = .string(ElevenLabsRealtimeRedaction.scrub(notes.joined(separator: " "))) }
         return .object(object)
     }
 
@@ -245,7 +245,7 @@ struct ElevenLabsConverseHandler: Sendable {
             // The agent could not be read (REST): nothing was opened.
             let failure = ElevenLabsControlHandler.status(forUpstreamError: error)
             return .refusal(failure.status, .init(
-                error: "The conversation was not started: " + ElevenLabsRedaction.redact(error.description),
+                error: "The conversation was not started: " + ElevenLabsRealtimeRedaction.scrub(error.description),
                 operation: operationName, upstreamStatus: failure.upstream
             ))
         }
@@ -468,7 +468,7 @@ final class ConverseLog: @unchecked Sendable {
     }
 
     func error(_ error: ElevenLabsAgentError) {
-        var object: [String: JSONValue] = ["message": .string(ElevenLabsRedaction.redact(error.message))]
+        var object: [String: JSONValue] = ["message": .string(ElevenLabsRealtimeRedaction.scrub(error.message))]
         if let code = error.code { object["code"] = .number(Double(code)) }
         if let name = error.name { object["name"] = .string(name) }
         lock.withLock {

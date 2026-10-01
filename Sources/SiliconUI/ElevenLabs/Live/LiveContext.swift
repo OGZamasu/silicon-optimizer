@@ -97,9 +97,10 @@ enum LiveOutcome: Equatable, Sendable {
     /// starting, a server error — say so, and do not reconnect.
     case mayHaveBeenBilled(String)
 
+    /// Shown on screen: every URL's query and every signature or token masked, whatever made it.
     var message: String {
         switch self {
-        case .notStarted(let text), .ended(let text), .mayHaveBeenBilled(let text): text
+        case .notStarted(let text), .ended(let text), .mayHaveBeenBilled(let text): ElevenLabsRealtimeRedaction.scrub(text)
         }
     }
 

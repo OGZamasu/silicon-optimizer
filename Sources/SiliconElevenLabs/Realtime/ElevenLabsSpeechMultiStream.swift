@@ -187,7 +187,7 @@ public final class ElevenLabsSpeechMultiStream: @unchecked Sendable {
         }
         guard !yielded else { return }
         if let message = frame.first("message", "error", "detail").stringValue {
-            continuation.yield(.message(ElevenLabsRedaction.redact(message)))
+            continuation.yield(.message(ElevenLabsRealtimeRedaction.scrub(message)))
         } else if frame.objectValue?.keys.contains("audio") != true {
             continuation.yield(.unknown(frame.objectValue?.keys.sorted() ?? []))
         }

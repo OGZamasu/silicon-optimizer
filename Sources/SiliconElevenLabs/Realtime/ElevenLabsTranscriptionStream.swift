@@ -227,18 +227,18 @@ extension ElevenLabsTranscriptionStreamEvent {
         case "edited_transcript":
             return .edited(text: text, editedText: frame["edited_text"].stringValue ?? "")
         case "warning":
-            return .warning(ElevenLabsRedaction.redact(frame.first("warning", "message").stringValue ?? "A warning without words."))
+            return .warning(ElevenLabsRealtimeRedaction.scrub(frame.first("warning", "message").stringValue ?? "A warning without words."))
         case "final_transcript", "final_transcript_with_timestamps":
             return .finalTranscript(text)
         case let error where errorTypes.contains(error):
             return .error(
                 type: error,
-                message: ElevenLabsRedaction.redact(frame.first("error", "message").stringValue ?? "")
+                message: ElevenLabsRealtimeRedaction.scrub(frame.first("error", "message").stringValue ?? "")
             )
         default:
             if frame["error"].stringValue != nil {
                 return .error(type: type.isEmpty ? "error" : type,
-                              message: ElevenLabsRedaction.redact(frame["error"].stringValue ?? ""))
+                              message: ElevenLabsRealtimeRedaction.scrub(frame["error"].stringValue ?? ""))
             }
             return .unknown(type)
         }

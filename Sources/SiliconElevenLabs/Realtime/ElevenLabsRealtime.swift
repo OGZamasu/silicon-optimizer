@@ -197,7 +197,7 @@ public struct ElevenLabsRealtime: Sendable {
         } catch let error as ElevenLabsError {
             throw ElevenLabsRealtimeError(wrapping: error)
         } catch {
-            throw ElevenLabsRealtimeError.credentialUnavailable(ElevenLabsRedaction.redact("\(error)"))
+            throw ElevenLabsRealtimeError.credentialUnavailable(ElevenLabsRealtimeRedaction.scrub((error as NSError).localizedDescription))
         }
         guard let key = key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             throw ElevenLabsRealtimeError.notLinked

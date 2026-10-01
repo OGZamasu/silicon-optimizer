@@ -278,7 +278,7 @@ extension ElevenLabsSpeechStreamEvent {
         if frame.first("isFinal", "is_final").looseBool == true { events.append(.final) }
         if events.isEmpty {
             if let message = frame.first("message", "error", "detail").stringValue {
-                events.append(.message(ElevenLabsRedaction.redact(message)))
+                events.append(.message(ElevenLabsRealtimeRedaction.scrub(message)))
             } else if frame["audio"] == .null, frame.objectValue?.keys.contains("audio") == true
                         || frame.objectValue?.keys.contains(where: { $0 == "isFinal" || $0 == "is_final" }) == true {
                 // `{"audio": null, "isFinal": false}`: nothing to do.
