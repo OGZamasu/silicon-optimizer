@@ -274,10 +274,17 @@ public enum ElevenLabsRealtimeRedaction {
     ]
 
     /// `text` with every URL in it described as `describe` would (its query masked by the
-    /// allowlist), every `signature`/`token`-like parameter masked wherever it stands, and anything
-    /// key-shaped redacted — what every realtime error, close reason and outcome goes through.
+    /// allowlist), every `signature`/`token`-like parameter masked wherever it stands — `name=`,
+    /// a JSON field `"name":"…"`, `name: …` — and anything key-shaped redacted: what every realtime
+    /// error, close reason and outcome goes through. Percent-encoded text is decoded first, so an
+    /// encoded URL or parameter is found too.
     public static func scrub(_ text: String, knownKey: String? = nil) -> String {
         var result = text
+        // Up to three rounds of percent-decoding (a URL inside a URL is encoded twice).
+        for _ in 0..<3 {
+            guard result.contains("%"), let decoded = result.removingPercentEncoding, decoded != result else { break }
+            result = decoded
+        }
         let range = NSRange(result.startIndex..., in: result)
         let urls = urlPattern.matches(in: result, range: range).reversed()
         for match in urls {
@@ -294,14 +301,19 @@ public enum ElevenLabsRealtimeRedaction {
             result.replaceSubrange(swiftRange, with: shown)
         }
         result = secretParameterPattern.stringByReplacingMatches(
-            in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1=" + ElevenLabsRedaction.placeholder
+            in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1$2" + ElevenLabsRedaction.placeholder
         )
         return ElevenLabsRedaction.redact(result, knownKey: knownKey)
     }
 
-    private static let urlPattern = try! NSRegularExpression(pattern: #"(?i)\b(?:wss?|https?)://[^\s"'<>,)]+"#)
+    /// A URL; its query runs on past commas (a value can hold one) up to whitespace, a quote, an
+    /// angle bracket or a closing parenthesis.
+    private static let urlPattern = try! NSRegularExpression(
+        pattern: #"(?i)\b(?:wss?|https?)://[^\s"'<>,)?]+(?:\?[^\s"'<>)]*)?"#
+    )
+    /// A secret-named parameter: `name=value`, `"name":"value"`, `name: value`.
     private static let secretParameterPattern = try! NSRegularExpression(
-        pattern: #"(?i)\b(conversation_signature|single_use_token|signature|token|xi-api-key|xi_api_key|authorization)=(?!‹)[^&\s"'<>,)]+"#
+        pattern: #"(?i)\b(conversation_signature|single_use_token|signature|token|xi-api-key|xi_api_key|authorization)("?\s*[=:]\s*"?)(?!‹)[^&\s"'<>)]+"#
     )
 
     /// `url` as text: scheme, host, path, and the query with every value not on the allowlist

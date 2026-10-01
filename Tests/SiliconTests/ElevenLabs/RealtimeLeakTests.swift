@@ -44,6 +44,36 @@ struct RealtimeLeakTests {
         #expect(!ElevenLabsRealtimeError.network("at \(Self.signed)").description.contains(Self.signature))
     }
 
+    /// The critic's shapes (round 2): a signature written every way text could carry it —
+    /// percent-encoded, as a JSON field, as `name: value`, after a comma inside the value — as
+    /// well as the shapes that were already masked.
+    @Test(arguments: [
+        ("json-escaped", #"failed: wss:\/\/api.elevenlabs.io\/v1\/convai\/conversation?agent_id=a&conversation_signature=SIGleakSECRETzz"#),
+        ("parenthesised", "failed (wss://api.elevenlabs.io/v1/convai/conversation?agent_id=a&conversation_signature=SIGleakSECRETzz)"),
+        ("comma-inside", "failed: wss://api.elevenlabs.io/v1/convai/conversation?agent_id=a&conversation_signature=ab,SIGleakSECRETzz"),
+        ("percent-encoded", "failed: wss%3A%2F%2Fapi.elevenlabs.io%2Fv1%2Fconvai%2Fconversation%3Fagent_id%3Da%26conversation_signature%3DSIGleakSECRETzz"),
+        ("double-encoded", "failed: conversation_signature%253DSIGleakSECRETzz"),
+        ("unknown-name", "failed: wss://api.elevenlabs.io/v1/convai/conversation?agent_id=a&cvsig=SIGleakSECRETzz"),
+        ("json-field", #"{"conversation_signature":"SIGleakSECRETzz"}"#),
+        ("json-field-spaced", #"{"token" : "SIGleakSECRETzz", "other": 1}"#),
+        ("key-colon", "conversation_signature: SIGleakSECRETzz"),
+        ("loose-comma", "conversation_signature=ab,SIGleakSECRETzz"),
+        ("upper", "TOKEN=SIGleakSECRETzz"),
+        ("no-scheme", "api.elevenlabs.io/v1/convai/conversation?agent_id=a&conversation_signature=SIGleakSECRETzz"),
+    ])
+    func aSignatureIsMaskedInEveryShape(name: String, text: String) {
+        let scrubbed = ElevenLabsRealtimeRedaction.scrub(text)
+        #expect(!scrubbed.contains("SIGleakSECRETzz"), "\(name): \(scrubbed)")
+        #expect(!scrubbed.contains("SIGleak"), "\(name): \(scrubbed)")
+    }
+
+    /// Ordinary text is left as it is: a percent sign, a colon, a word that only contains "token".
+    @Test func ordinaryTextIsLeftAlone() {
+        for text in ["50% done", "next_page_token=keep", "status: ok", "agent_id=agent_1", "tokens used: 12"] {
+            #expect(ElevenLabsRealtimeRedaction.scrub(text) == text, "\(text)")
+        }
+    }
+
     @MainActor
     @Test func theAgentScreensOutcomeCarriesNoSignature() async throws {
         let rig = LiveRig(replies: LiveScreenTests.agentReplies(), server: LiveScreenTests.agent { socket in
