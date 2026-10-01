@@ -841,6 +841,13 @@ final class VoicesSectionModel {
         await refetch(voice.id)
     }
 
+    /// What holds "Copy voice" after its answer was lost: the copy is in a workspace this screen
+    /// cannot list, so a second attempt would make a second copy unseen.
+    nonisolated static func lostCopyMessage(_ name: String, workspace: String) -> String {
+        "The answer to copying “\(name)” to the workspace \(workspace) was lost, so it may have been copied. Check "
+            + "that workspace's voices before copying it again."
+    }
+
     func replicate() async {
         guard let voice = selected else { return }
         let target = replicateWorkspaceID.trimmingCharacters(in: .whitespaces)
@@ -853,7 +860,8 @@ final class VoicesSectionModel {
                 "Copy “\(voice.name)” to the workspace \(target)?", button: "Copy voice",
                 consequence: "A copy of “\(voice.name)” is made in another, isolated workspace, where "
                     + "that workspace's members can use it."
-            )
+            ),
+            holdIfUnknown: Self.lostCopyMessage(voice.name, workspace: target)
         )
     }
 

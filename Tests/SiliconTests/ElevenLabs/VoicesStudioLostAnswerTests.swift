@@ -277,6 +277,37 @@ struct VoicesStudioLostAnswerTests {
         #expect(made.count("create_auth_connection") == 2)
     }
 
+    // MARK: - Voices: a copy to another workspace whose answer was lost
+
+    /// A voice copied to another workspace, carried out, its answer lost: the copy is where this
+    /// screen cannot list it, so a second "Copy voice" would make a second copy unseen. It is
+    /// held until the owner has checked that workspace.
+    @Test func aVoiceCopiedWithItsAnswerLostIsHeldUntilTheOwnerHasChecked() async throws {
+        let made = Made()
+        made.lose("replicate_voice_to_isolated_environment")
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "replicate_voice_to_isolated_environment":
+                return made.answer(request.operationID, .json(["voice_id": "v-copy"]))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let voice = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
+        model.load(rows: [voice], selected: voice)
+        model.replicateWorkspaceID = "ws-isolated"
+        try await answering(model.actions) { await model.replicate() }
+        #expect(model.actions.heldCreate("replicate_voice_to_isolated_environment")
+                == VoicesSectionModel.lostCopyMessage("Voice A", workspace: "ws-isolated"))
+        try await answering(model.actions) { await model.replicate() }
+        #expect(made.count("replicate_voice_to_isolated_environment") == 1, "a second copy was sent")
+        model.actions.acknowledgeHeldCreate("replicate_voice_to_isolated_environment")
+        try await answering(model.actions) { await model.replicate() }
+        #expect(made.count("replicate_voice_to_isolated_environment") == 2)
+    }
+
     // MARK: - Dubbing: a segment whose answer was lost
 
     /// "Add segment", carried out, its answer lost: a second Add would add it twice. The
