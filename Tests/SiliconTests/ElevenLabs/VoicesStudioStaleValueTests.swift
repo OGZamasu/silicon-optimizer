@@ -53,7 +53,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["status": "ok"])
             case "get_voice_by_id":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(VoicesStudioFakes.voice("v-a", "Voice A"))            // as before the save
                 }
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A renamed"))       // after it
@@ -92,7 +92,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["status": "ok"])
             case "get_voice_by_id":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings))
                 }
                 return .json(VoicesStudioFakes.voice("v-a", "Voice A", settings: saved))
@@ -127,7 +127,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["project": renamed])
             case "get_project_by_id":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(first)
                 }
                 return .json(renamed)
@@ -161,7 +161,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["order_id": "o-a"])
             case "public_get_order":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(order("Old name"))
                 }
                 return .json(order("New name"))
@@ -198,7 +198,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["id": "d-a"])
             case "get_pronunciation_dictionary_metadata":
                 if signals.note("get") == 1 {
-                    await signals.wait(for: "saved")
+                    try await signals.wait(for: "saved")
                     return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Old name"))
                 }
                 return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "New name"))
@@ -239,7 +239,7 @@ struct VoicesStudioStaleValueTests {
             case "edit_voice", "edit_voice_settings":
                 return .json(["status": "ok"])
             case "get_voice_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                if signals.note("get") == 1 { try await signals.wait(for: "tried") }
                 return .json(fresh)
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -279,7 +279,7 @@ struct VoicesStudioStaleValueTests {
             case "edit_pvc_voice":
                 return .json(["voice_id": "v-p"])
             case "get_voice_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                if signals.note("get") == 1 { try await signals.wait(for: "tried") }
                 return .json(VoicesStudioFakes.voice("v-p", "Pro", category: "professional", labels: ["accent": "irish"]))
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -319,7 +319,7 @@ struct VoicesStudioStaleValueTests {
             case "update_pronunciation_dictionaries":
                 return .json(["status": "ok"])
             case "get_project_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "tried") }
+                if signals.note("get") == 1 { try await signals.wait(for: "tried") }
                 return .json(fresh)
             case "get_project_snapshots":
                 return .json(["snapshots": []])
@@ -363,7 +363,7 @@ struct VoicesStudioStaleValueTests {
                 return .json(["id": "d-b"])
             case "get_pronunciation_dictionary_metadata":
                 // Only B's opening read is held; the fetch after a rename answers at once.
-                if signals.note("get") == 1 { await signals.wait(for: "checked") }
+                if signals.note("get") == 1 { try await signals.wait(for: "checked") }
                 return .json(VoicesStudioFollowupTests.dictionary("d-b", name: "Dict B"))
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -430,7 +430,7 @@ struct VoicesStudioStaleValueTests {
             case "update_pronunciation_dictionaries":
                 return .json(["status": "ok"])
             case "get_project_by_id":
-                if signals.note("get") == 1 { await signals.wait(for: "second sent") }
+                if signals.note("get") == 1 { try await signals.wait(for: "second sent") }
                 return .json(after)
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -471,7 +471,7 @@ struct VoicesStudioStaleValueTests {
             case "add_rules":
                 return .json(["id": "d-a", "version_id": "ver2"])
             case "get_pronunciation_dictionary_metadata":
-                await signals.wait(for: "tried to copy")
+                try await signals.wait(for: "tried to copy")
                 return .json(added)
             default:
                 return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
@@ -554,7 +554,7 @@ struct VoicesStudioStaleValueTests {
             case "get_voice_by_id":
                 switch signals.note("get") {
                 case 1:
-                    await signals.wait(for: "refetch failed")
+                    try await signals.wait(for: "refetch failed")
                     return .json(VoicesStudioFakes.voice("v-a", "Voice A"))
                 case 2:
                     return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
@@ -591,22 +591,24 @@ struct VoicesStudioStaleValueTests {
             let path = request.url.path
             switch request.operationID {
             case "public_update_order":
-                await signals.wait(for: "reopened")
+                try await signals.wait(for: "reopened")
+                signals.note("renamed")
                 return .json(["order_id": "o-a"])
             case "public_get_order" where path.hasSuffix("/o-b"):
                 return .json(["order_id": "o-b", "name": "B", "state": "open", "sandbox": false, "items": []])
             case "public_get_order":
-                switch signals.note("get a") {
-                case 1:
+                // Told apart by when they come, not by their order: a read of A before the rename
+                // answered is A opened again; the first one after, the fetch after the rename.
+                if !signals.has("renamed") {
                     signals.note("reopened")
-                    await signals.wait(for: "refetched")
+                    try await signals.wait(for: "refetched")
                     return .json(order("Old name"))
-                case 2:
+                }
+                if signals.note("after the rename") == 1 {
                     signals.note("refetched")
                     return .jsonText(#"{"detail":"Internal error"}"#, status: 500)
-                default:
-                    return .json(order("New name"))
                 }
+                return .json(order("New name"))
             case "public_get_available_languages":
                 return .json(["languages": []])
             default:
@@ -621,9 +623,15 @@ struct VoicesStudioStaleValueTests {
         model.rename = "New name"
         let renaming = Task { try await answering(model.actions) { await model.saveName() } }
         try await voicesStudioWait { fixture.sent("public_update_order").count == 1 }
+        // Should either awaited read never be sent (a regression), the request held for it is let
+        // go once the task that would have sent it has finished, so the test fails at once rather
+        // than at the fake's backstop. In the working code both signals have come by then.
+        let releasing = Task { _ = try? await renaming.value; signals.note("refetched") }
         await model.select("o-b")
         await model.select("o-a")
+        signals.note("reopened")
         try await renaming.value
+        await releasing.value
         #expect(model.selected == nil, "A's older read was dropped")
         #expect(model.orderProblem != nil, "nothing is loading: the card must say why")
         await model.select("o-a")                         // Try again
@@ -659,5 +667,321 @@ struct VoicesStudioStaleValueTests {
         try await answering(model.actions) { await model.saveChapter() }
         #expect(fixture.sent("edit_chapter").count == 1)
         #expect(body(fixture, "edit_chapter").contains("One, renamed"))
+    }
+
+    // MARK: - Round 4: a service-account key edited again before its keys are read again
+
+    nonisolated static func key(_ id: String, of account: String, permissions: [String]) -> JSONValue {
+        ["name": .string("Key \(id)"), "hint": "a1b2", "key_id": .string(id), "service_account_user_id": .string(account),
+         "is_disabled": false, "permissions": .array(permissions.map(JSONValue.string)), "character_count": 0,
+         "hashed_xi_api_key": "h"]
+    }
+
+    func permissionsSent(_ fixture: VoicesStudioFixture) -> [[String]] {
+        fixture.sent("edit_service_account_api_key").map {
+            ((try? JSONValue(data: $0.body))?["permissions"].arrayValue ?? []).compactMap(\.stringValue)
+        }
+    }
+
+    /// A permission granted to key k1; while the account's keys are read again, the row shows
+    /// what the save sent (not the permissions from before), and Edit waits for that read — the
+    /// editor must not start from a row the save has just made stale, or the next save would
+    /// take back the permission just granted. Once the read lands, Edit works and the next
+    /// save keeps it.
+    @Test func aKeyChangedAMomentAgoIsEditedFromItsNextRead() async throws {
+        let signals = Signals()
+        let model0 = ServiceAccountsSectionModel(environment: VoicesStudioFixture().environment)
+        let choices = model0.permissionChoices.filter { $0 != "text_to_speech" }
+        let first = try #require(choices.first), second = try #require(choices.dropFirst().first)
+        let afterFirst = Self.key("k1", of: "sa-a", permissions: [first, "text_to_speech"].sorted())
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                return .json(["status": "ok"])
+            case "get_service_account_api_keys_route":
+                if signals.note("keys") == 1 { try await signals.wait(for: "tried to edit") }
+                return .json(["api-keys": [afterFirst]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let key = try #require(account.keys.first)
+        model.edit(key)
+        model.keyDraft.allPermissions = false
+        model.keyDraft.permissions.insert(first)
+        let saving = Task { try await answering(model.actions) { await model.saveKey() } }
+        try await voicesStudioWait { fixture.sent("get_service_account_api_keys_route").count == 1 }
+        let row = try #require(model.selected?.keys.first)
+        #expect(row.permissions.contains(first), "the row still shows the permissions from before the save: \(row.permissions)")
+        #expect(model.accounts.first?.keys.first?.permissions.contains(first) == true)
+        model.edit(row)
+        #expect(model.editingKey == nil, "the editor opened on a key whose read is still on its way")
+        #expect(model.editBlockReason(row) == "Waiting for its keys to be read again after the last change.")
+        #expect(model.problems == ["Waiting for its keys to be read again after the last change."])
+        signals.note("tried to edit")
+        try await saving.value
+        let fresh = try #require(model.selected?.keys.first)
+        #expect(model.editBlockReason(fresh) == nil)
+        model.edit(fresh)
+        #expect(model.keyDraft.permissions.contains(first))
+        model.keyDraft.permissions.insert(second)
+        try await answering(model.actions) { await model.saveKey() }
+        let sent = permissionsSent(fixture)
+        #expect(sent.count == 2)
+        #expect(sent.last?.contains(first) == true && sent.last?.contains(second) == true,
+                "the second save took back the permission the first one granted: \(sent)")
+    }
+
+    /// A key change ElevenLabs refuses claims nothing: the row keeps what it had, and Edit is
+    /// not held.
+    @Test func aRefusedKeyChangeClaimsNothing() async throws {
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                return .jsonText(#"{"detail":{"status":"invalid","message":"Not allowed"}}"#, status: 422)
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let key = try #require(account.keys.first)
+        model.edit(key)
+        model.keyDraft.allPermissions = true
+        try await answering(model.actions) { await model.saveKey() }
+        #expect(fixture.sent("edit_service_account_api_key").count == 1)
+        #expect(model.selected?.keys.first?.permissions == ["text_to_speech"], "a refused change was claimed")
+        #expect(model.editBlockReason(key) == nil)
+    }
+
+    /// The accounts list, asked for before a key change answered and answering after it, does
+    /// not put the key's old permissions back.
+    @Test func anAccountsListOlderThanAKeyChangeDoesNotPutTheOldKeyBack() async throws {
+        let signals = Signals()
+        let model0 = ServiceAccountsSectionModel(environment: VoicesStudioFixture().environment)
+        let first = try #require(model0.permissionChoices.first { $0 != "text_to_speech" })
+        let oldList: JSONValue = ["service-accounts": [VoicesStudioLateAnswerTests.account("sa-a", key: "k1")]]
+        let changed = Self.key("k1", of: "sa-a", permissions: [first])
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_workspace_service_accounts":
+                try await signals.wait(for: "saved")
+                return .json(oldList)
+            case "edit_service_account_api_key":
+                return .json(["status": "ok"])
+            case "get_service_account_api_keys_route":
+                return .json(["api-keys": [changed]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let account = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "k1")))
+        model.load(accounts: [account], selected: account)
+        let listing = Task { await model.refresh() }
+        try await voicesStudioWait { fixture.sent("get_workspace_service_accounts").count == 1 }
+        model.edit(try #require(account.keys.first))
+        model.keyDraft.allPermissions = false
+        model.keyDraft.permissions = [first]
+        try await answering(model.actions) { await model.saveKey() }
+        signals.note("saved")
+        await listing.value
+        #expect(model.selected?.keys.first?.permissions == [first], "the older list put the old permissions back")
+        #expect(model.accounts.first?.keys.first?.permissions == [first])
+    }
+
+    /// A change to a key of account A, then one to a key of account B while A's keys are being
+    /// read again: B's read does not abandon A's, so A's key can be edited once its read lands.
+    @Test func readingOneAccountsKeysDoesNotAbandonAnothersRead() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            let account = request.url.path.contains("sa-a") ? "sa-a" : "sa-b"
+            switch request.operationID {
+            case "edit_service_account_api_key":
+                return .json(["status": "ok"])
+            case "get_service_account_api_keys_route" where account == "sa-a":
+                try await signals.wait(for: "b changed")
+                return .json(["api-keys": [Self.key("ka", of: "sa-a", permissions: ["all"])]])
+            case "get_service_account_api_keys_route":
+                return .json(["api-keys": [Self.key("kb", of: "sa-b", permissions: ["text_to_speech"])]])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = ServiceAccountsSectionModel(environment: fixture.environment)
+        let a = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-a", key: "ka")))
+        let b = try #require(ServiceAccount(json: VoicesStudioLateAnswerTests.account("sa-b", key: "kb")))
+        model.load(accounts: [a, b], selected: a)
+        model.edit(try #require(a.keys.first))
+        model.keyDraft.allPermissions = true
+        let savingA = Task { try await answering(model.actions) { await model.saveKey() } }
+        try await voicesStudioWait { fixture.sent("get_service_account_api_keys_route").count == 1 }
+        let keyB = try #require(b.keys.first)
+        try await answering(model.actions) { await model.setEnabled(keyB, false) }
+        signals.note("b changed")
+        try await savingA.value
+        let keyA = try #require(model.accounts.first { $0.id == "sa-a" }?.keys.first)
+        #expect(model.editBlockReason(keyA) == nil, "A's read was abandoned by B's: A's key stays locked")
+        #expect(keyA.permissions == ["all"])
+    }
+
+    // MARK: - Round 4 sweep: a workspace member's seat and lock, while the members are read again
+
+    /// A seat change answers; while the members are read again, the row shows the seat sent —
+    /// so going back to the previous seat is a change the picker offers, not one it hides — and
+    /// a lock shows as locked (its button offers Unlock).
+    @Test func aMembersSeatAndLockShowWhatWasSentWhileTheMembersAreReadAgain() async throws {
+        let signals = Signals()
+        let member = VoicesStudioWorkspaceTests.member
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "update_workspace_member":
+                return .json(["status": "ok"])
+            case "get_workspace_members":
+                try await signals.wait(for: "checked")
+                return .json([member])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = WorkspaceSectionModel(environment: fixture.environment)
+        let row = try #require(WorkspaceMember(json: member))
+        model.load(members: [row])
+        model.seatEdits[row.id] = "workspace_admin"
+        let changing = Task { try await answering(model.actions) { await model.changeSeat(row) } }
+        try await voicesStudioWait { fixture.sent("get_workspace_members").count == 1 }
+        #expect(model.members.first?.seatType == "workspace_admin", "the row still shows the seat from before")
+        let current = try #require(model.members.first)
+        let locking = Task { try await answering(model.actions) { await model.setLocked(current, true) } }
+        // The lock has answered once the members are being read again after it.
+        try await voicesStudioWait { fixture.sent("get_workspace_members").count == 2 }
+        #expect(model.members.first?.isLocked == true, "the row still shows the member unlocked")
+        signals.note("checked")
+        try await changing.value
+        try await locking.value
+    }
+
+    // MARK: - Round 4: held requests let go when abandoned
+
+    /// Polls `condition` for up to `limit`; true as soon as it holds.
+    func within(_ limit: Duration, _ condition: @MainActor () -> Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now + limit
+        while ContinuousClock.now < deadline {
+            if condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    /// Two reads held by the fake are abandoned in turn ("Try again" pressed three times): each
+    /// abandoned read lets go of its connection, as URLSession does, so the third read is sent
+    /// at once. (The client allows two at a time; held reads that ignored cancellation kept
+    /// both, and the third waited for the fake's backstop.)
+    @Test func abandonedHeldReadsLetGoOfTheirConnections() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_voice_by_id":
+                if signals.note("get") <= 2 { try await signals.wait(for: "never") }
+                return .json(VoicesStudioFakes.voice("v-a", "Voice A"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = VoicesSectionModel(environment: fixture.environment)
+        let a = try #require(VoicesVoice(json: VoicesStudioFakes.voice("v-a", "Voice A", settings: VoicesStudioFakes.settings)))
+        model.load(rows: [a], selected: a)
+        let first = Task { await model.reloadSelected() }
+        try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 1 }
+        let second = Task { await model.reloadSelected() }
+        try await voicesStudioWait { fixture.sent("get_voice_by_id").count == 2 }
+        let third = Task { await model.reloadSelected() }
+        let sent = try await within(.seconds(15)) { fixture.sent("get_voice_by_id").count == 3 }
+        signals.note("never")
+        await first.value
+        await second.value
+        await third.value
+        #expect(sent, "the third read waited for connections held by abandoned reads")
+    }
+
+    // MARK: - Round 4: Pronunciation "Edit all" after a failed fetch
+
+    /// Rules added, and the fetch after it fails. Nothing is reading the rules any more, so
+    /// "Edit all" says they could not be read, with Try again, instead of "Waiting…". While Try
+    /// again's read is on its way it is waiting again; once it answers, Edit all works.
+    @Test func editAllAfterAFailedFetchSaysSoAndTryAgainReadsTheRules() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "add_rules":
+                return .json(["id": "d-a", "version_id": "ver2"])
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                try await signals.wait(for: "seen waiting")
+                return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a], selected: a)
+        var rule = PronunciationRule()
+        rule.stringToReplace = "Siobhan"
+        rule.alias = "Shivawn"
+        model.rules = [rule]
+        try await answering(model.actions) { await model.addRules() }
+        #expect(fixture.sent("get_pronunciation_dictionary_metadata").count == 1)
+        #expect(!model.rulesAreIn)
+        #expect(model.rulesProblem != nil, "a fetch that failed is shown as \"Waiting…\"")
+        let retrying = Task { await model.select("d-a") }           // Try again
+        // A read never sent (a regression) lets the wait below end once Try again has finished.
+        let releasing = Task { await retrying.value; signals.note("seen waiting") }
+        try await voicesStudioWait {
+            fixture.sent("get_pronunciation_dictionary_metadata").count == 2 || signals.has("seen waiting")
+        }
+        #expect(model.rulesProblem == nil, "the old failure is shown while the rules are read again")
+        signals.note("seen waiting")
+        await retrying.value
+        await releasing.value
+        #expect(model.rulesAreIn)
+        #expect(model.rulesProblem == nil)
+    }
+
+    /// The same when the read that opens the dictionary fails: its rules shown are the list's,
+    /// and "Edit all" says they could not be read rather than waiting.
+    @Test func editAllAfterAFailedOpeningReadSaysSo() async throws {
+        let signals = Signals()
+        let fixture = VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "get_pronunciation_dictionary_metadata":
+                if signals.note("get") == 1 { return .jsonText(#"{"detail":"Internal error"}"#, status: 500) }
+                return .json(VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A"))
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+        defer { fixture.clean() }
+        let model = PronunciationSectionModel(environment: fixture.environment)
+        let a = try #require(PronunciationDictionary(json: VoicesStudioFollowupTests.dictionary("d-a", name: "Dict A")))
+        model.load(dictionaries: [a])
+        await model.select("d-a")
+        #expect(model.selected?.id == "d-a")
+        #expect(!model.rulesAreIn)
+        #expect(model.rulesProblem != nil, "a read that failed is shown as \"Waiting…\"")
+        await model.select("d-a")                                  // Try again
+        #expect(model.rulesAreIn)
+        #expect(model.rulesProblem == nil)
     }
 }

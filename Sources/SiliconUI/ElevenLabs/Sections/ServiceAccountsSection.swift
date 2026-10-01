@@ -121,7 +121,13 @@ struct ServiceAccountKeysCard: View {
                     if key.isDisabled {
                         Badge(text: key.disableReason.map { "Off: \(VoicesStudioFormat.words($0))" } ?? "Off", tint: .red)
                     }
-                    Button("Edit") { model.edit(key) }.controlSize(.small)
+                    if model.keysReadFailed(for: key) {
+                        Button("Read again") { Task { await model.refreshKeys(account.id) } }.controlSize(.small)
+                    }
+                    Button("Edit") { model.edit(key) }
+                        .controlSize(.small)
+                        .disabled(model.editBlockReason(key) != nil)
+                        .help(model.editBlockReason(key) ?? "Change this key's name, permissions and limits")
                     Button(key.isDisabled ? "Turn on…" : "Turn off…") { Task { await model.setEnabled(key, key.isDisabled) } }
                         .controlSize(.small)
                     Button(role: .destructive) { Task { await model.delete(key) } } label: { Image(systemName: "trash") }

@@ -46,7 +46,9 @@ struct VoicesStudioLateAnswerTests {
         let slow = try #require(ServiceAccount(json: Self.account("sa-slow", key: "k1")))
         let other = try #require(ServiceAccount(json: Self.account("sa2", key: "k2")))
         model.load(accounts: [slow, other], selected: slow)
-        let task = try await sending(model.actions, "get_service_account_api_keys_route") { await model.refreshKeys() }
+        // Each account's keys are read on a runner of their own: wait for the request itself.
+        let task = Task { await model.refreshKeys() }
+        try await voicesStudioWait { fixture.sent("get_service_account_api_keys_route").count == 1 }
         model.select("sa2")
         fixture.release()
         await task.value
@@ -116,7 +118,7 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_workspace_webhook_route":
-                await signals.wait(for: "other editor open")
+                try await signals.wait(for: "other editor open")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
                 return .json(list)
@@ -150,12 +152,15 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_workspace_webhook_route":
-                await signals.wait(for: "edit asked")
+                try await signals.wait(for: "edit asked")
+                signals.note("saved")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
-                if signals.note("list") == 1 {
+                // Told apart by when they come, not by their order: a list read before the save
+                // answered is Edit's; one after, the save's (so a missing one stalls nothing).
+                if !signals.has("saved") {
                     signals.note("edit asked")
-                    await signals.wait(for: "listed after the save")
+                    try await signals.wait(for: "listed after the save")
                 } else {
                     signals.note("listed after the save")
                 }
@@ -172,8 +177,14 @@ struct VoicesStudioLateAnswerTests {
         model.edit(slow, eventsKnown: true)
         model.draft.name = "Renamed"
         let saving = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
+        // Should either awaited read never be sent (a regression), the request held for it is let
+        // go once the task that would have sent it has finished, so the test fails at once rather
+        // than at the fake's backstop. In the working code both signals have come by then.
+        let releasing = Task { await saving.value; signals.note("listed after the save") }
         await model.startEditing(other)
+        signals.note("edit asked")
         await saving.value
+        await releasing.value
         #expect(fixture.sent("get_workspace_webhooks_route").count == 2)
         #expect(model.editing?.id == "w2", "the other webhook's editor did not open")
         #expect(model.draft.name == "Hook w2")
@@ -194,12 +205,13 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "edit_workspace_webhook_route":
-                await signals.wait(for: "edit asked")
+                try await signals.wait(for: "edit asked")
+                signals.note("saved")
                 return .json(["status": "ok"])
             case "get_workspace_webhooks_route":
-                if signals.note("list") == 1 {                     // Edit on w2
+                if !signals.has("saved") {                          // Edit on w2
                     signals.note("edit asked")
-                    await signals.wait(for: "refreshed")
+                    try await signals.wait(for: "refreshed")
                     return .json(old)
                 }
                 signals.note("refreshed")                           // the save's refresh
@@ -216,8 +228,12 @@ struct VoicesStudioLateAnswerTests {
         model.edit(a, eventsKnown: true)
         model.draft.name = "A renamed"
         let saving = try await sending(model.actions, "edit_workspace_webhook_route") { await model.save() }
+        // As above: a read that is never sent lets the request held for it go at once.
+        let releasing = Task { await saving.value; signals.note("refreshed") }
         await model.startEditing(other)
+        signals.note("edit asked")
         await saving.value
+        await releasing.value
         #expect(model.editing?.id == "w2")
         #expect(model.webhooks.first { $0.id == "w-a" }?.name == "A renamed", "the older list put A's old name back")
     }
@@ -405,7 +421,7 @@ struct VoicesStudioLateAnswerTests {
         let fixture = VoicesStudioFixture(handler: { request in
             switch request.operationID {
             case "create_public_template_run":
-                await signals.wait(for: "other template open")
+                try await signals.wait(for: "other template open")
                 return .json(["id": "run-of-slow", "status": "pending", "version_id": "v1"])
             case "get_public_template":
                 return .json(template(signals.note("get") == 1 ? "tmpl-two" : "tmpl-slow"))

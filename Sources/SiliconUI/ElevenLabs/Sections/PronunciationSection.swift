@@ -147,7 +147,19 @@ struct PronunciationDictionaryCard: View {
                     .controlSize(.small)
                     .disabled(dictionary.rules.isEmpty || !model.rulesAreIn)
                     .help(model.rulesAreIn ? "Copy every rule into the editor, to change and replace them"
+                          : model.rulesProblem != nil ? "This dictionary's rules as they are now could not be read — try again"
                           : "Waiting for this dictionary's rules as they are now")
+            }
+            if let problem = model.rulesProblem {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label("Its rules as they are now could not be read: \(problem)", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Try again") { Task { await model.select(dictionary.id) } }.controlSize(.small)
+                }
             }
             ForEach(dictionary.rules) { rule in
                 Toggle(isOn: Binding(
