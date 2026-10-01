@@ -356,6 +356,16 @@ Path fields take an id, not a path. A "/", "\", "." or ".." there, or a value th
 In the app's own results, header values stay real (the owner's editor writes them back). The
 shown-once card lists only the credential fields the risk table names for that operation.
 
+**After a lost answer the Explorer holds what it cannot safely run twice.** This covers a real-world
+operation, which includes every one that mints a key, signing secret or token, and an operation
+that changes something and answers with a secret.
+- Run is off until the owner presses *I have checked*.
+- Above Run the Explorer says: "It may already have been done — its secret cannot be shown again.
+  Check the list on elevenlabs.io (or in this account's list) before running it again." The
+  secret clause is dropped where nothing is minted.
+- The hold belongs to the account it was run for.
+- Reads that answer with an existing token or a short-lived signed link are not held.
+
 ### What every section builds with
 
 - **`ElevenLabsRunner`** runs one operation. It checks the arguments and asks for confirmation
@@ -382,6 +392,29 @@ shown-once card lists only the credential fields the risk table names for that o
     sending do not, so a section that spends or reaches the outside world (voices & studio's
     spending holds, the agents' real-world send guard) asks the owner to check before the next
     try.
+- **A change whose answer was lost** (an *unknown outcome*: a 408, a 5xx, a lost answer or a cancel
+  after sending) is treated as one that may have landed, without claiming what it sent. The item
+  is read again, and an editor that would start from it waits for that read. A refusal is a known
+  outcome: nothing is read, and the editor keeps its draft.
+- **A create whose answer was lost** is held if it mints a credential or sends something real. That
+  covers a service-account key, a service account, a webhook, an invitation, a sign-in connection,
+  a voice copied to another workspace, and in Agents an agent, tool, secret, environment variable,
+  MCP server or imported phone number.
+  - Its list is read at once, the form keeps what was typed, and that create, and only that one,
+    is refused until the owner says they have checked.
+  - The hold belongs to the account or voice it was for, where there is one (one account's held
+    "Make key" neither holds nor can be cleared from another).
+  - **The hold's box says only what is true.** "The list has been read again: check it", with
+    *I have checked*, appears only after a read made since the lost answer succeeded. If that read
+    failed, the box says so and offers *Read again* and *I checked on elevenlabs.io*. For what the
+    screen cannot list (an invitation, a voice copied elsewhere), it offers only *I checked on
+    elevenlabs.io*. Agents' notice offers *Read again* beside its *I have checked*.
+  - Not held: spending creates, which voices & studio's spending hold already holds, and config
+    objects that show in their own list (voice clones, projects, chapters, dictionaries, orders,
+    agent copies, branches, documents, tests, tags, tickets).
+  - **Agents' billable LLM runs are not held either.** These are test runs, resubmitted tests,
+    conversation simulations, conversation analysis and evaluations. A second press after a lost
+    answer runs them again: credits only, with no credential and nothing sent outside.
 - **Views:** `ElevenLabsRunButton`, `ElevenLabsRunnerOutput`, `ElevenLabsResultView`,
   `ElevenLabsVoicePicker` (one voices list shared by every picker), `ElevenLabsCreditsHeader`,
   `ElevenLabsOperationForm` and `ElevenLabsSectionPage`.
@@ -801,3 +834,11 @@ or the ElevenLabs dashboard) before step 1 and after the last step you run.
    text, press Finish and, while it is still playing, go to Live transcription and Start: leaving
    Live speech silences the rest of its audio, and the transcription keeps the microphone (the
    indicator stays on) and keeps transcribing.
+
+**If the app restarted after a lost answer.** The holds that keep a create from running twice after
+its answer was lost live in memory only. They are forgotten when the app quits and when the pane
+reconnects (Connect, another key or region). If either happened after a create whose answer was
+lost, check its list, or elevenlabs.io, before creating it again: a service-account key, a
+webhook, a service account, an invitation, a sign-in connection, a voice copied to another
+workspace, an agent, tool, secret, variable, MCP server or imported number, or anything run from
+the Explorer that mints a secret. The app does not keep these holds on disk.

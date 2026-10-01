@@ -119,6 +119,11 @@ final class AgentMCPServersModel {
     private(set) var toolsError: String?
     var settings = AgentsMCPSettings()
     private(set) var originalSettings = AgentsMCPSettings()
+    /// Said after a settings save whose answer was lost, about the server on screen.
+    private(set) var lostSaveNote: String?
+    /// Whether the server could not be read again after that: the form's base may be older than
+    /// ElevenLabs ("Read again").
+    private(set) var lostSaveUnread = false
     /// A tool's override being edited, by tool name.
     private(set) var overrides: [String: JSONValue] = [:]
     var overrideTimeout: [String: Int] = [:]
@@ -150,6 +155,8 @@ final class AgentMCPServersModel {
 
     func select(_ id: String) async {
         selectedID = id
+        lostSaveNote = nil
+        lostSaveUnread = false
         tools = []
         toolsError = nil
         overrides = [:]
@@ -196,6 +203,8 @@ final class AgentMCPServersModel {
 
     func saveSettings() async {
         guard let server else { return }
+        lostSaveNote = nil
+        lostSaveUnread = false
         let changes = settings.changes(from: originalSettings)
         guard !changes.isEmpty else { return }
         var arguments = changes
@@ -230,12 +239,31 @@ final class AgentMCPServersModel {
     /// form's base, the owner's edits kept. Saved changes then show as saved; and setting one back
     /// is a change again (against the stale base it looked like none, so it was never sent).
     private func rebaseAfterLostSave(_ id: String) async {
-        guard let json = await calls.json(AgentsOp.getMCPServer, ["mcp_server_id": .string(id)], slot: id, quiet: true),
-              selectedID == id, let fresh = AgentsMCPServer(json: json) else { return }
+        let json = await calls.json(AgentsOp.getMCPServer, ["mcp_server_id": .string(id)], slot: id, quiet: true)
+        guard selectedID == id else { return }
+        guard let json, let fresh = AgentsMCPServer(json: json) else {
+            lostSaveUnread = true
+            lostSaveNote = Self.lostSaveUnreadMessage
+            return
+        }
         let edits = settings
         show(fresh)
         settings = edits
         list.upsert(fresh)
+        lostSaveUnread = false
+        lostSaveNote = Self.lostSaveMessage
+    }
+
+    static let lostSaveMessage = "The answer to saving the settings was lost, so they may have been saved. The server "
+        + "has been read again: what still differs from it shows as unsaved."
+    static let lostSaveUnreadMessage = "The answer to saving the settings was lost, and the server could not be read "
+        + "again: the form starts from what it held before, which may be older than ElevenLabs. Read it again — or "
+        + "check it on elevenlabs.io — before changing a setting."
+
+    /// "Read again" after a lost save whose read failed.
+    func readAgainAfterLostSave() async {
+        guard let id = selectedID else { return }
+        await rebaseAfterLostSave(id)
     }
 
     /// What a change of the server's approval policy means, in words.
@@ -383,7 +411,10 @@ final class AgentMCPServersModel {
             question: "Connect agents to “\(newName)” at \(url)?", confirmLabel: "Connect",
             holdIfUnknown: AgentsCreateHolds.lost("the MCP server “\(newName)”", check: "the MCP servers list")
         ) else {
-            if calls.outcomeWasUnknown(AgentsOp.createMCPServer) { await list.refresh() }
+            if calls.outcomeWasUnknown(AgentsOp.createMCPServer) {
+                calls.holds.onReadAgain(AgentsOp.createMCPServer) { [weak self] in await self?.list.refresh() }
+                await list.refresh()
+            }
             return
         }
         guard let server = AgentsMCPServer(json: json) else { return }
@@ -539,6 +570,15 @@ private struct AgentMCPServerDetail: View {
                 AgentsRunButton(runner: calls.runner(AgentsOp.updateMCPServer, slot: server.id), title: "Save…",
                                     disabled: model.settings == model.originalSettings) {
                     Task { await model.saveSettings() }
+                }
+                if let note = model.lostSaveNote {
+                    Label(note, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if model.lostSaveUnread {
+                        Button("Read again") { Task { await model.readAgainAfterLostSave() } }
+                    }
                 }
                 AgentsRunnerOutput(runner: calls.runner(AgentsOp.updateMCPServer, slot: server.id))
             }

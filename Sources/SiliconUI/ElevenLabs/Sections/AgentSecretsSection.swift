@@ -168,7 +168,10 @@ final class AgentSecretsModel {
             question: "Store the secret “\(name)” in your workspace?", confirmLabel: "Store secret",
             holdIfUnknown: AgentsCreateHolds.lost("the secret “\(name)”", check: "the secrets list")
         ) else {
-            if calls.outcomeWasUnknown(AgentsOp.createSecret) { await list.refresh() }
+            if calls.outcomeWasUnknown(AgentsOp.createSecret) {
+                calls.holds.onReadAgain(AgentsOp.createSecret) { [weak self] in await self?.list.refresh() }
+                await list.refresh()
+            }
             return
         }
         newValue = ""
@@ -297,7 +300,10 @@ final class AgentSecretsModel {
             confirmLabel: "Create variable",
             holdIfUnknown: AgentsCreateHolds.lost("the variable “\(label)”", check: "the variables list")
         ) else {
-            if calls.outcomeWasUnknown(AgentsOp.createEnvironmentVariable) { await variables.refresh() }
+            if calls.outcomeWasUnknown(AgentsOp.createEnvironmentVariable) {
+                calls.holds.onReadAgain(AgentsOp.createEnvironmentVariable) { [weak self] in await self?.variables.refresh() }
+                await variables.refresh()
+            }
             return
         }
         newVariableLabel = ""

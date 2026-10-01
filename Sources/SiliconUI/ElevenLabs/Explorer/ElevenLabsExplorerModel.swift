@@ -108,13 +108,60 @@ final class ElevenLabsExplorerModel {
 
     /// Checks the form and runs the operation; the form shows every problem either finds.
     func run(_ session: Session) {
+        Task { await runNow(session) }
+    }
+
+    /// `run`, awaited.
+    func runNow(_ session: Session) async {
         let built = session.form.arguments()
         session.form.setProblems(built.problems)
-        guard built.problems.isEmpty else { return }
-        Task {
-            await session.runner.perform(arguments: built.arguments, files: built.files)
-            session.form.setProblems(session.runner.problems)
+        guard built.problems.isEmpty, hold(for: session.operation.id) == nil else { return }
+        let result = await session.runner.perform(arguments: built.arguments, files: built.files)
+        session.form.setProblems(session.runner.problems)
+        if result == nil, Self.holdsAfterUnknown(session.operation), VoicesStudioActions.outcomeIsUnknown(session.runner) {
+            held[session.operation.id] = Held(message: Self.heldMessage(session.operation), epoch: context.pane?.epoch)
         }
+    }
+
+    // MARK: Held after a lost answer
+
+    /// An operation whose last run here gave no answer though it may have been carried out.
+    struct Held: Equatable {
+        var message: String
+        /// The account (the pane's session) it was run for.
+        var epoch: Int?
+    }
+
+    /// Operations that return a secret or act in the real world whose last run here was
+    /// cancelled after it was sent, or lost its answer (a 5xx, a timeout, no connection). The next
+    /// run of that operation waits for the owner's "I have checked": run again, it would mint a
+    /// second key — the first one's secret never shown — or act twice.
+    private(set) var held: [String: Held] = [:]
+
+    /// Whether `operation` is held after an unknown outcome: it acts in the real world (which
+    /// includes every operation that mints a key, a signing secret or a single-use token), or it
+    /// changes something and answers with a secret. Reads that answer with one — an existing
+    /// token, or a short-lived signed link — are not: running them again mints nothing lasting.
+    static func holdsAfterUnknown(_ operation: ElevenLabsOperation) -> Bool {
+        operation.risk == .realWorld || (operation.returnsCredential && operation.risk != .read)
+    }
+
+    static func heldMessage(_ operation: ElevenLabsOperation) -> String {
+        operation.returnsCredential && operation.risk == .realWorld
+            ? "It may already have been done — its secret cannot be shown again. Check the list on elevenlabs.io (or "
+                + "in this account's list) before running it again."
+            : "It may already have been done. Check on elevenlabs.io (or in this account's list) before running it again."
+    }
+
+    /// What holds `operationID`, for the account on screen now.
+    func hold(for operationID: String) -> String? {
+        guard let held = held[operationID], held.epoch == context.pane?.epoch else { return nil }
+        return held.message
+    }
+
+    /// The owner has checked: `operationID` may run again.
+    func acknowledgeHold(_ operationID: String) {
+        held[operationID] = nil
     }
 
     /// What Run would send, as a curl command with the key left to the reader — or the
