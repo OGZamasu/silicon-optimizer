@@ -79,15 +79,12 @@ public struct ElevenLabsRealtime: Sendable {
 
     /// What starting a conversation needs to know about an agent, read with the free
     /// `get_agent_route`: whether it needs a signed URL, and whether it can be text-only.
+    /// Throws the client's `ElevenLabsError` when the read fails.
     public func agentPreflight(agentID: String) async throws -> ElevenLabsAgentPreflight {
         let problems = ElevenLabsAgentConversationConfig.idProblems(agentID)
         guard problems.isEmpty else { throw ElevenLabsRealtimeError.invalidConfiguration(problems) }
-        let answer: ElevenLabsResult
-        do {
-            answer = try await client.call("get_agent_route", arguments: ["agent_id": .string(agentID)])
-        } catch {
-            throw ElevenLabsRealtimeError(wrapping: error)
-        }
+        // A REST read: its failure is the client's own error (a 404 stays a 404), already redacted.
+        let answer = try await client.call("get_agent_route", arguments: ["agent_id": .string(agentID)])
         guard case .json(let agent, _) = answer else {
             throw ElevenLabsRealtimeError.network("the agent's settings did not come back as JSON")
         }

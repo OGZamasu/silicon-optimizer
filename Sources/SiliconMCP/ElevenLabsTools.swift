@@ -383,7 +383,7 @@ enum ElevenLabsTools {
     )
 
     static let all: [Tools.Tool] =
-        [account] + curated.map(\.tool) + [search, describe, call]
+        [account] + curated.map(\.tool) + [search, describe, call] + ElevenLabsRealtimeTools.all
 
     static let names = Set(all.map(\.name))
 
@@ -405,6 +405,8 @@ enum ElevenLabsTools {
         case call.name:
             let body = try callBody(arguments)
             return describeResult(try await channel.elevenLabsPost("/elevenlabs/call", body))
+        case _ where ElevenLabsRealtimeTools.names.contains(name):
+            return try await ElevenLabsRealtimeTools.invoke(name, arguments: arguments, channel: channel)
         default:
             guard let tool = curated.first(where: { $0.name == name }) else {
                 throw Tools.ToolError.unknown(name)

@@ -13,7 +13,7 @@ struct ElevenLabsToolsTests {
         "elevenlabs_sound_effect", "elevenlabs_music", "elevenlabs_transcribe",
         "elevenlabs_isolate_audio", "elevenlabs_change_voice", "elevenlabs_dub",
         "elevenlabs_clone_voice", "elevenlabs_design_voice", "elevenlabs_search_operations",
-        "elevenlabs_describe_operation", "elevenlabs_call",
+        "elevenlabs_describe_operation", "elevenlabs_call", "elevenlabs_agent_converse",
     ]
 
     // MARK: Schemas
