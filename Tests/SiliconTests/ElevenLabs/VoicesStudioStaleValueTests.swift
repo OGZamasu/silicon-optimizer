@@ -1253,4 +1253,111 @@ struct VoicesStudioStaleValueTests {
         try await answering(model.actions) { await model.replaceRules() }
         #expect(server.strings == ["Nguyen", "Siobhan"], "Replace took back the rule whose answer was lost: \(server.strings)")
     }
+
+    /// A pretend ElevenLabs holding order o-a with one dub item, whose upserts it carries out —
+    /// losing the answer to as many as asked.
+    final class OrderServer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var item: JSONValue = [
+            "item_id": "i1", "quote": ["amount_usd": 240],
+            "item": ["kind": "dub", "media_id": "m1", "source_language": "en", "destination_languages": ["es-ES"],
+                     "instructions": "Warm", "include_captions": false, "include_source_captions": false],
+        ]
+        private var answersToLose: Int
+        init(losing: Int = 0) { answersToLose = losing }
+
+        /// Carries out the upsert; false when its answer is to be lost.
+        func upsert(_ body: JSONValue) -> Bool {
+            lock.withLock {
+                let request = body["item"] != .null ? body : body["request"]
+                item = ["item_id": request["item_id"] != .null ? request["item_id"] : "i1",
+                        "quote": ["amount_usd": 240], "item": request["item"]]
+                guard answersToLose > 0 else { return true }
+                answersToLose -= 1
+                return false
+            }
+        }
+
+        func order() -> JSONValue {
+            lock.withLock {
+                ["order_id": "o-a", "name": "Launch", "state": "open", "sandbox": false, "items": [item],
+                 "total_amount_usd": 240]
+            }
+        }
+
+        var instructions: String? { lock.withLock { item["item"]["instructions"].stringValue } }
+    }
+
+    func productionsFixture(_ server: OrderServer, signals: Signals) -> VoicesStudioFixture {
+        VoicesStudioFixture(handler: { request in
+            switch request.operationID {
+            case "public_upsert_order_item":
+                if server.upsert(Self.body(request)) { return .json(["item_id": "i1"]) }
+                return .jsonText(#"{"detail":"Internal error"}"#, status: 500)        // carried out; answer lost
+            case "public_get_order":
+                if signals.note("get") == 1 { try await signals.wait(for: "looked") }
+                return .json(server.order())
+            case "public_get_available_languages":
+                return .json(["languages": []])
+            default:
+                return .jsonText(#"{"detail":"not scripted"}"#, status: 418)
+            }
+        })
+    }
+
+    /// An item's instructions changed and saved; while the order is read again, its row still
+    /// holds the instructions from before. Edit waits for that read — the form would start from
+    /// the old instructions, and the next save, which sends the whole item, would put them back.
+    /// Once the read lands, Edit starts from the instructions saved.
+    @Test func anItemChangedAMomentAgoIsEditedFromTheOrdersNextRead() async throws {
+        let signals = Signals()
+        let server = OrderServer()
+        let fixture = productionsFixture(server, signals: signals)
+        defer { fixture.clean() }
+        let model = ProductionsSectionModel(environment: fixture.environment)
+        let order = try #require(ProductionsOrder(json: server.order()))
+        model.load(orders: [order], selected: order)
+        model.edit(try #require(model.selected?.items.first))
+        model.item.instructions = "Bright"
+        let saving = Task { try await answering(model.actions) { await model.saveItem() } }
+        let releasing = Task { _ = try? await saving.value; signals.note("looked") }
+        try await voicesStudioWait { fixture.sent("public_get_order").count == 1 || signals.has("looked") }
+        #expect(server.instructions == "Bright")
+        let stale = try #require(model.selected?.items.first)
+        #expect(model.itemEditBlockReason != nil, "Edit did not wait for the order to be read again")
+        model.edit(stale)
+        #expect(model.item.itemID == nil && model.item.instructions != "Warm", "the form was filled from the row before the save")
+        signals.note("looked")
+        try await saving.value
+        await releasing.value
+        #expect(model.itemsAreIn)
+        model.edit(try #require(model.selected?.items.first))
+        #expect(model.item.itemID == "i1" && model.item.instructions == "Bright")
+    }
+
+    /// The same item change carried out with its answer lost (a 500): the order is read again,
+    /// and Edit waits for that read and then starts from what ElevenLabs holds. (Before: nothing
+    /// was read, and Edit filled the form with the instructions from before.)
+    @Test func anItemChangeWhoseAnswerWasLostIsReadAgainBeforeItIsEdited() async throws {
+        let signals = Signals()
+        let server = OrderServer(losing: 1)
+        let fixture = productionsFixture(server, signals: signals)
+        defer { fixture.clean() }
+        let model = ProductionsSectionModel(environment: fixture.environment)
+        let order = try #require(ProductionsOrder(json: server.order()))
+        model.load(orders: [order], selected: order)
+        model.edit(try #require(model.selected?.items.first))
+        model.item.instructions = "Bright"
+        let saving = Task { try await answering(model.actions) { await model.saveItem() } }
+        let releasing = Task { _ = try? await saving.value; signals.note("looked") }
+        try await voicesStudioWait { fixture.sent("public_get_order").count == 1 || signals.has("looked") }
+        #expect(server.instructions == "Bright")
+        #expect(fixture.sent("public_get_order").count == 1, "the order was not read again after a lost answer")
+        #expect(model.itemEditBlockReason != nil, "Edit did not wait for the order to be read again")
+        signals.note("looked")
+        try await saving.value
+        await releasing.value
+        model.edit(try #require(model.selected?.items.first))
+        #expect(model.item.instructions == "Bright", "Edit started from the instructions before the change")
+    }
 }
