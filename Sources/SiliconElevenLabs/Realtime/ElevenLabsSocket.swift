@@ -53,13 +53,20 @@ public struct ElevenLabsSocketClose: Sendable, Equatable, CustomStringConvertibl
         }
     }
 
+    /// A whole clause, subject included, to follow "ended early: " or to start a sentence.
     public var description: String {
         let reason = reason.isEmpty ? "" : ": \(reason)"
         switch kind {
-        case .normal: return "closed normally (\(code))\(reason)"
+        case .normal: return "the connection closed normally (\(code))\(reason)"
         case .queueTimedOut: return "the call queue timed out (\(code))\(reason)"
-        case .error: return code == 0 ? "the connection dropped\(reason)" : "closed with code \(code)\(reason)"
+        case .error: return code == 0 ? "the connection dropped\(reason)" : "the connection closed with code \(code)\(reason)"
         }
+    }
+
+    /// `description` as a sentence of its own.
+    public var sentence: String {
+        let clause = description
+        return clause.prefix(1).uppercased() + clause.dropFirst() + "."
     }
 }
 
@@ -186,7 +193,7 @@ public enum ElevenLabsRealtimeError: Error, Sendable, Equatable, LocalizedError,
             "ElevenLabs refused the connection" + (status.map { " (\($0))" } ?? "")
                 + (message.isEmpty ? "." : ": \(message)")
         case .closed(let close):
-            "The connection \(close)."
+            close.sentence
         case .network(let why):
             "Could not reach ElevenLabs: \(why)"
         case .timedOut(let what):
