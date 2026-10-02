@@ -36,6 +36,7 @@ struct VideoView: View {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(spacing: 16) {
                             composerCard
+                            ElevenLabsVideoTabCard()
                             PersonaCards()
                         }
                         .frame(width: 400)
@@ -49,6 +50,7 @@ struct VideoView: View {
                 } else {
                     VStack(spacing: 16) {
                         composerCard
+                        ElevenLabsVideoTabCard()
                         VideoQueueView()
                         PersonaCards()
                         resultCard
