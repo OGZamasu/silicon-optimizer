@@ -76,22 +76,27 @@ struct FlowsCreateCard: View {
 
     var body: some View {
         Card(title: "New \(kind == .speech ? "speech" : kind == .image ? "image" : "video")", systemImage: "sparkles") {
-            let variants = model.variants(kind)
-            Picker("Model", selection: Binding(get: { model.model(kind) }, set: { model.choose($0, for: kind) })) {
-                ForEach(variants) { Text($0.name).tag($0.modelID) }
-            }
-            Text(model.model(kind)).font(.caption.monospaced()).foregroundStyle(.secondary)
-            if kind == .speech {
-                ElevenLabsVoicePicker(selection: $model.speechVoiceID, title: "Voice", directory: model.directory)
-            }
-            if let form = model.form(kind) {
-                ElevenLabsOperationForm(form: form, showsHeadings: false)
-                    .id("\(kind.rawValue)/\(model.model(kind))")
-            }
-            if let runner = model.actions.runner(kind.createID) {
-                VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Generate", estimatedCharacters: model.estimatedCharacters(kind)) {
-                    Task { await model.create(kind) }
-                }
+            fields
+        }
+    }
+
+    @ViewBuilder
+    var fields: some View {
+        let variants = model.variants(kind)
+        Picker("Model", selection: Binding(get: { model.model(kind) }, set: { model.choose($0, for: kind) })) {
+            ForEach(variants) { Text($0.name).tag($0.modelID) }
+        }
+        Text(model.model(kind)).font(.caption.monospaced()).foregroundStyle(.secondary)
+        if kind == .speech {
+            ElevenLabsVoicePicker(selection: $model.speechVoiceID, title: "Voice", directory: model.directory)
+        }
+        if let form = model.form(kind) {
+            ElevenLabsOperationForm(form: form, showsHeadings: false)
+                .id("\(kind.rawValue)/\(model.model(kind))")
+        }
+        if let runner = model.actions.runner(kind.createID) {
+            VoicesStudioRunButton(actions: model.actions, runner: runner, title: "Generate", estimatedCharacters: model.estimatedCharacters(kind)) {
+                Task { await model.create(kind) }
             }
         }
     }
@@ -103,40 +108,45 @@ struct FlowsGenerationsCard: View {
 
     var body: some View {
         Card(title: "Generations", systemImage: "square.stack") {
-            Picker("Status", selection: Binding(
-                get: { model.statusFilter[kind] ?? "" },
-                set: { model.statusFilter[kind] = $0; Task { await model.refresh(kind) } }
-            )) {
-                Text("Any status").tag("")
-                ForEach(model.statuses(kind), id: \.self) { Text(VoicesStudioFormat.words($0)).tag($0) }
-            }
-            .labelsHidden()
-            .fixedSize()
-            let rows = model.generations[kind] ?? []
-            VoicesStudioListState(loading: model.actions.isRunning(kind.listID), problem: model.actions.problem(kind.listID),
-                                  isEmpty: rows.isEmpty, emptyText: "Nothing generated yet.")
-            ForEach(rows) { generation in
-                HStack(spacing: 8) {
-                    Text(generation.id).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
-                    VoicesStudioStatusBadge(status: generation.status)
-                    if let failure = generation.failure {
-                        Text(failure).font(.caption).foregroundStyle(.red).lineLimit(2)
-                    }
-                    Spacer()
-                    if let url = generation.contentURL {
-                        Text(generation.contentType ?? "").font(.caption).foregroundStyle(.secondary)
-                        Button("Open") { NSWorkspace.shared.open(url) }
-                            .controlSize(.small)
-                            .help("Opens the result's download link in your browser")
-                    }
-                    if generation.status == "pending" || generation.status == "generating" {
-                        Button("Check") { Task { await model.check(generation, kind: kind) } }.controlSize(.small)
-                    }
+            content
+        }
+    }
+
+    @ViewBuilder
+    var content: some View {
+        Picker("Status", selection: Binding(
+            get: { model.statusFilter[kind] ?? "" },
+            set: { model.statusFilter[kind] = $0; Task { await model.refresh(kind) } }
+        )) {
+            Text("Any status").tag("")
+            ForEach(model.statuses(kind), id: \.self) { Text(VoicesStudioFormat.words($0)).tag($0) }
+        }
+        .labelsHidden()
+        .fixedSize()
+        let rows = model.generations[kind] ?? []
+        VoicesStudioListState(loading: model.actions.isRunning(kind.listID), problem: model.actions.problem(kind.listID),
+                              isEmpty: rows.isEmpty, emptyText: "Nothing generated yet.")
+        ForEach(rows) { generation in
+            HStack(spacing: 8) {
+                Text(generation.id).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                VoicesStudioStatusBadge(status: generation.status)
+                if let failure = generation.failure {
+                    Text(failure).font(.caption).foregroundStyle(.red).lineLimit(2)
+                }
+                Spacer()
+                if let url = generation.contentURL {
+                    Text(generation.contentType ?? "").font(.caption).foregroundStyle(.secondary)
+                    Button("Open") { NSWorkspace.shared.open(url) }
+                        .controlSize(.small)
+                        .help("Opens the result's download link in your browser")
+                }
+                if generation.status == "pending" || generation.status == "generating" {
+                    Button("Check") { Task { await model.check(generation, kind: kind) } }.controlSize(.small)
                 }
             }
-            VoicesStudioMoreButton(hasMore: model.cursors[kind] != nil, loading: model.actions.isRunning(kind.listID)) {
-                Task { await model.loadMore(kind) }
-            }
+        }
+        VoicesStudioMoreButton(hasMore: model.cursors[kind] != nil, loading: model.actions.isRunning(kind.listID)) {
+            Task { await model.loadMore(kind) }
         }
     }
 }

@@ -63,6 +63,22 @@ struct VoicesStudioFlowsTests {
         #expect(fixture.client.validate("create_image_generation", arguments: built.arguments).isEmpty)
     }
 
+    @Test func everyVideoModelHasItsOwnConfigurationForm() throws {
+        let fixture = VoicesStudioFixture()
+        defer { fixture.clean() }
+        let model = FlowsSectionModel(environment: fixture.environment)
+        let variants = model.variants(.video)
+        #expect(!variants.isEmpty)
+
+        for variant in variants {
+            model.choose(variant.modelID, for: .video)
+            let form = try #require(model.form(.video))
+            let supported = Set(variant.schema["properties"].objectValue?.keys.map { $0 } ?? [])
+                .subtracting(["model_id"])
+            #expect(Set(form.fields.map(\.name)) == supported, "\(variant.modelID) must show its API-supported controls")
+        }
+    }
+
     @Test func theListFiltersByStatusPagesByCursorAndChecksOne() async throws {
         let fixture = VoicesStudioFixture([
             "list_video_generations": [
