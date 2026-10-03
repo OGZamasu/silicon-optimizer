@@ -26,7 +26,8 @@ struct VideoView: View {
     }
     private var recentsInput: RecentsInput {
         .init(directory: model.settings.resolvedVideoOutputDirectory,
-              files: model.videoBatchQueue.items.compactMap(\.file))
+              files: model.videoBatchQueue.items.compactMap(\.file)
+                + model.freeVideoStudio.history.map(\.file))
     }
 
     var body: some View {
@@ -35,6 +36,7 @@ struct VideoView: View {
                 if proxy.size.width >= 900 {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(spacing: 16) {
+                            FreeVideoVideoTabCard()
                             composerCard
                             ElevenLabsVideoTabCard()
                             PersonaCards()
@@ -49,6 +51,7 @@ struct VideoView: View {
                     .padding(20)
                 } else {
                     VStack(spacing: 16) {
+                        FreeVideoVideoTabCard()
                         composerCard
                         ElevenLabsVideoTabCard()
                         VideoQueueView()
@@ -467,10 +470,11 @@ struct VideoView: View {
 /// wrapper, and it brings real transport controls with it.
 struct ClipPlayer: NSViewRepresentable {
     var url: URL
+    var controlsStyle: AVPlayerViewControlsStyle = .inline
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
-        view.controlsStyle = .inline
+        view.controlsStyle = controlsStyle
         view.videoGravity = .resizeAspect
         view.player = AVPlayer(url: url)
         context.coordinator.url = url
