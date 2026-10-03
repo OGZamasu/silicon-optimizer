@@ -117,6 +117,12 @@ an agent describe successive actions. On a swarm node, Wan 2.2 and LTX-2 distill
 delivers, which each model's picker and `list_video_models` publish. Model availability is
 checked against the selected node before a job starts.
 
+The Video tab also connects directly to [FreeVideo](https://github.com/FlashML-org/FreeVideo)
+in ComfyUI on a Windows/Linux NVIDIA computer. Its native panel offers video with audio,
+first/last frames, canvas and sampling settings, progress, job-specific cancellation and
+saved MP4 playback. It uses your hardware without a cloud API key; the CUDA engine and
+model setup remain on that computer. See the [FreeVideo connection guide](docs/FREEVIDEO.md).
+
 The optional OpenMontage, LivePortrait and Deep-Live-Cam setups install a reviewed upstream
 commit, fetched by id and checked before anything in it runs, and only the hash-locked Python
 packages in [`Resources/pinned-installs`](Resources/pinned-installs); LivePortrait's and

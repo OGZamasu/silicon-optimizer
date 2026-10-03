@@ -336,6 +336,12 @@ public final class AppModel {
         client: { [weak self] in self?.elevenLabsClient }
     )
 
+    /// FreeVideo receipts and connection settings belong to this app instance. Injected
+    /// settings keep tests independent of the user's saved files and running engine.
+    @ObservationIgnored lazy var freeVideoStudio = FreeVideoStudio(
+        storageURL: readsCredentialsFromKeychain ? FreeVideoStudioStore.applicationURL : nil
+    )
+
     // MARK: - UI state
 
     /// The tab on screen, restored from last launch so reopening the window lands
